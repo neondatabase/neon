@@ -161,6 +161,7 @@ enum TenantOperations {
     DropDetached,
     DownloadHeatmapLayers,
     TimelineLsnLease,
+    TimelineSafekeeperMigrate,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -476,7 +477,7 @@ pub struct Config {
     /// PostHog integration config
     pub posthog_config: Option<PostHogConfig>,
 
-    #[cfg(feature = "testing")]
+    /// When set, actively checks and initiates heatmap downloads/uploads.
     pub kick_secondary_downloads: bool,
 }
 
@@ -491,6 +492,7 @@ impl From<DatabaseError> for ApiError {
             DatabaseError::Logical(reason) | DatabaseError::Migration(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
+            DatabaseError::Cas(reason) => ApiError::Conflict(reason),
         }
     }
 }
@@ -878,18 +880,18 @@ impl Service {
         // Emit compute hook notifications for all tenants which are already stably attached.  Other tenants
         // will emit compute hook notifications when they reconcile.
         //
-        // Ordering: our calls to notify_background synchronously establish a relative order for these notifications vs. any later
+        // Ordering: our calls to notify_attach_background synchronously establish a relative order for these notifications vs. any later
         // calls into the ComputeHook for the same tenant: we can leave these to run to completion in the background and any later
         // calls will be correctly ordered wrt these.
         //
-        // Concurrency: we call notify_background for all tenants, which will create O(N) tokio tasks, but almost all of them
+        // Concurrency: we call notify_attach_background for all tenants, which will create O(N) tokio tasks, but almost all of them
         // will just wait on the ComputeHook::API_CONCURRENCY semaphore immediately, so very cheap until they get that semaphore
         // unit and start doing I/O.
         tracing::info!(
             "Sending {} compute notifications",
             compute_notifications.len()
         );
-        self.compute_hook.notify_background(
+        self.compute_hook.notify_attach_background(
             compute_notifications,
             bg_compute_notify_result_tx.clone(),
             &self.cancel,
@@ -2585,7 +2587,7 @@ impl Service {
                 .do_initial_shard_scheduling(
                     tenant_shard_id,
                     initial_generation,
-                    &create_req.shard_parameters,
+                    create_req.shard_parameters,
                     create_req.config.clone(),
                     placement_policy.clone(),
                     preferred_az_id.as_ref(),
@@ -2642,7 +2644,7 @@ impl Service {
         &self,
         tenant_shard_id: TenantShardId,
         initial_generation: Option<Generation>,
-        shard_params: &ShardParameters,
+        shard_params: ShardParameters,
         config: TenantConfig,
         placement_policy: PlacementPolicy,
         preferred_az_id: Option<&AvailabilityZone>,
@@ -6282,7 +6284,7 @@ impl Service {
         for (child_id, child_ps, stripe_size) in child_locations {
             if let Err(e) = self
                 .compute_hook
-                .notify(
+                .notify_attach(
                     compute_hook::ShardUpdate {
                         tenant_shard_id: child_id,
                         node_id: child_ps,
@@ -8668,7 +8670,6 @@ impl Service {
                             "Skipping migration of {tenant_shard_id} to {node} because secondary isn't ready: {progress:?}"
                         );
 
-                        #[cfg(feature = "testing")]
                         if progress.heatmap_mtime.is_none() {
                             // No heatmap might mean the attached location has never uploaded one, or that
                             // the secondary download hasn't happened yet.  This is relatively unusual in the field,
@@ -8693,7 +8694,6 @@ impl Service {
     /// happens on multi-minute timescales in the field, which is fine because optimisation is meant
     /// to be a lazy background thing. However, when testing, it is not practical to wait around, so
     /// we have this helper to move things along faster.
-    #[cfg(feature = "testing")]
     async fn kick_secondary_download(&self, tenant_shard_id: TenantShardId) {
         if !self.config.kick_secondary_downloads {
             // No-op if kick_secondary_downloads functionaliuty is not configured

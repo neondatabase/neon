@@ -1893,8 +1893,12 @@ async fn update_tenant_config_handler(
     let location_conf = LocationConf::attached_single(
         new_tenant_conf.clone(),
         tenant.get_generation(),
-        &ShardParameters::default(),
+        ShardParameters::from(tenant.get_shard_identity()),
     );
+
+    tenant
+        .get_shard_identity()
+        .assert_equal(location_conf.shard); // not strictly necessary since we construct it above
 
     crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
@@ -1937,8 +1941,12 @@ async fn patch_tenant_config_handler(
     let location_conf = LocationConf::attached_single(
         updated,
         tenant.get_generation(),
-        &ShardParameters::default(),
+        ShardParameters::from(tenant.get_shard_identity()),
     );
+
+    tenant
+        .get_shard_identity()
+        .assert_equal(location_conf.shard); // not strictly necessary since we construct it above
 
     crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await

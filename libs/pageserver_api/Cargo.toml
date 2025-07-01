@@ -30,12 +30,13 @@ humantime-serde.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 itertools.workspace = true
 storage_broker.workspace = true
-camino = {workspace = true, features = ["serde1"]}
+camino = { workspace = true, features = ["serde1"] }
 remote_storage.workspace = true
 postgres_backend.workspace = true
-nix = {workspace = true, optional = true}
+nix = { workspace = true, optional = true }
 reqwest.workspace = true
 rand.workspace = true
+tracing.workspace = true
 tracing-utils.workspace = true
 once_cell.workspace = true
 

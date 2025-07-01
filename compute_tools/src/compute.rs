@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
@@ -6,7 +6,7 @@ use compute_api::responses::{
     LfcPrewarmState, TlsConfig,
 };
 use compute_api::spec::{
-    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverProtocol, PgIdent,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -25,7 +25,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
@@ -70,6 +70,7 @@ pub static BUILD_TAG: Lazy<String> = Lazy::new(|| {
         .unwrap_or(BUILD_TAG_DEFAULT)
         .to_string()
 });
+const DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL: u64 = 3600;
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
@@ -103,7 +104,7 @@ pub struct ComputeNodeParams {
     pub remote_ext_base_url: Option<Url>,
 
     /// Interval for installed extensions collection
-    pub installed_extensions_collection_interval: u64,
+    pub installed_extensions_collection_interval: Arc<AtomicU64>,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -126,6 +127,9 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub compute_ctl_config: ComputeCtlConfig,
+
+    /// Handle to the extension stats collection task
+    extension_stats_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 // store some metrics about download size that might impact startup time
@@ -428,6 +432,7 @@ impl ComputeNode {
             state_changed: Condvar::new(),
             ext_download_progress: RwLock::new(HashMap::new()),
             compute_ctl_config: config.compute_ctl_config,
+            extension_stats_task: Mutex::new(None),
         })
     }
 
@@ -514,6 +519,9 @@ impl ComputeNode {
         } else {
             None
         };
+
+        // Terminate the extension stats collection task
+        this.terminate_extension_stats_task();
 
         // Terminate the vm_monitor so it releases the file watcher on
         // /sys/fs/cgroup/neon-postgres.
@@ -1003,19 +1011,12 @@ impl ComputeNode {
     fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
 
-        // Detect the protocol scheme. If the URL doesn't have a scheme, assume libpq.
         let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
-        let scheme = match Url::parse(shard0_connstr) {
-            Ok(url) => url.scheme().to_lowercase().to_string(),
-            Err(url::ParseError::RelativeUrlWithoutBase) => "postgresql".to_string(),
-            Err(err) => return Err(anyhow!("invalid connstring URL: {err}")),
-        };
-
         let started = Instant::now();
-        let (connected, size) = match scheme.as_str() {
-            "postgresql" | "postgres" => self.try_get_basebackup_libpq(spec, lsn)?,
-            "grpc" => self.try_get_basebackup_grpc(spec, lsn)?,
-            scheme => return Err(anyhow!("unknown URL scheme {scheme}")),
+
+        let (connected, size) = match PageserverProtocol::from_connstring(shard0_connstr)? {
+            PageserverProtocol::Libpq => self.try_get_basebackup_libpq(spec, lsn)?,
+            PageserverProtocol::Grpc => self.try_get_basebackup_grpc(spec, lsn)?,
         };
 
         let mut state = self.state.lock().unwrap();
@@ -1678,6 +1679,8 @@ impl ComputeNode {
             tls_config = self.compute_ctl_config.tls.clone();
         }
 
+        self.update_installed_extensions_collection_interval(&spec);
+
         let max_concurrent_connections = self.max_service_connections(compute_state, &spec);
 
         // Merge-apply spec & changes to PostgreSQL state.
@@ -1741,6 +1744,8 @@ impl ComputeNode {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
         let tls_config = self.tls_config(&spec);
+
+        self.update_installed_extensions_collection_interval(&spec);
 
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
@@ -2346,10 +2351,20 @@ LIMIT 100",
     }
 
     pub fn spawn_extension_stats_task(&self) {
+        // Cancel any existing task
+        if let Some(handle) = self.extension_stats_task.lock().unwrap().take() {
+            handle.abort();
+        }
+
         let conf = self.tokio_conn_conf.clone();
-        let installed_extensions_collection_interval =
-            self.params.installed_extensions_collection_interval;
-        tokio::spawn(async move {
+        let atomic_interval = self.params.installed_extensions_collection_interval.clone();
+        let mut installed_extensions_collection_interval =
+            2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst);
+        info!(
+            "[NEON_EXT_SPAWN] Spawning background installed extensions worker with Timeout: {}",
+            installed_extensions_collection_interval
+        );
+        let handle = tokio::spawn(async move {
             // An initial sleep is added to ensure that two collections don't happen at the same time.
             // The first collection happens during compute startup.
             tokio::time::sleep(tokio::time::Duration::from_secs(
@@ -2362,8 +2377,48 @@ LIMIT 100",
             loop {
                 interval.tick().await;
                 let _ = installed_extensions(conf.clone()).await;
+                // Acquire a read lock on the compute spec and then update the interval if necessary
+                interval = tokio::time::interval(tokio::time::Duration::from_secs(std::cmp::max(
+                    installed_extensions_collection_interval,
+                    2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst),
+                )));
+                installed_extensions_collection_interval = interval.period().as_secs();
             }
         });
+
+        // Store the new task handle
+        *self.extension_stats_task.lock().unwrap() = Some(handle);
+    }
+
+    fn terminate_extension_stats_task(&self) {
+        if let Some(handle) = self.extension_stats_task.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+
+    fn update_installed_extensions_collection_interval(&self, spec: &ComputeSpec) {
+        // Update the interval for collecting installed extensions statistics
+        // If the value is -1, we never suspend so set the value to default collection.
+        // If the value is 0, it means default, we will just continue to use the default.
+        if spec.suspend_timeout_seconds == -1 || spec.suspend_timeout_seconds == 0 {
+            info!(
+                "[NEON_EXT_INT_UPD] Spec Timeout: {}, New Timeout: {}",
+                spec.suspend_timeout_seconds, DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL
+            );
+            self.params.installed_extensions_collection_interval.store(
+                DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        } else {
+            info!(
+                "[NEON_EXT_INT_UPD] Spec Timeout: {}",
+                spec.suspend_timeout_seconds
+            );
+            self.params.installed_extensions_collection_interval.store(
+                spec.suspend_timeout_seconds as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
     }
 }
 

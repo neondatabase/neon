@@ -21,7 +21,9 @@ use utils::{completion, serde_system_time};
 
 use crate::config::Ratio;
 use crate::key::{CompactKey, Key};
-use crate::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
+use crate::shard::{
+    DEFAULT_STRIPE_SIZE, ShardCount, ShardIdentity, ShardStripeSize, TenantShardId,
+};
 
 /// The state of a tenant in this pageserver.
 ///
@@ -475,7 +477,7 @@ pub struct TenantShardSplitResponse {
 }
 
 /// Parameters that apply to all shards in a tenant.  Used during tenant creation.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ShardParameters {
     pub count: ShardCount,
@@ -493,6 +495,15 @@ impl Default for ShardParameters {
         Self {
             count: ShardCount::new(0),
             stripe_size: DEFAULT_STRIPE_SIZE,
+        }
+    }
+}
+
+impl From<ShardIdentity> for ShardParameters {
+    fn from(identity: ShardIdentity) -> Self {
+        Self {
+            count: identity.count,
+            stripe_size: identity.stripe_size,
         }
     }
 }
