@@ -52,7 +52,7 @@ pub trait ResponseErrorMessageExt: Sized {
 impl ResponseErrorMessageExt for reqwest::Response {
     async fn error_from_body(self) -> Result<Self> {
         let status = self.status();
-        if !(status.is_client_error() || status.is_server_error()) {
+        if status.is_success() {
             return Ok(self);
         }
 
