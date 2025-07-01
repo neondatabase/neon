@@ -107,7 +107,7 @@ We will use PostHog _only_ as an UI to configure the feature flags. Whether a fe
 * Storcon needs to pull some information from cplane database.
 * To know if a feature is currently enabled or not, we need to call the storcon/pageserver API; and we won't be able to know if a feature has been enabled on a tenant before easily: we need to look at the Grafana logs.
 
-We only need to pay for the 86400Y local evaluation requests (that would be $864/month, and even less if we proxy it through storcon).
+We only need to pay for the 86400Y local evaluation requests (that would be setting Y=0 in solution 2 => $864/month, and even less if we proxy it through storcon).
 
 ## Implementation
 
