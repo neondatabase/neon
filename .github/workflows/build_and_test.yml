@@ -313,7 +313,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       # for changed limits, see comments on `options:` earlier in this file
-      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --security-opt seccomp=unconfined
     strategy:
       fail-fast: false
       matrix:
