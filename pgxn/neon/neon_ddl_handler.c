@@ -104,6 +104,7 @@ typedef struct DdlHashTable
 
 static DdlHashTable RootTable;
 static DdlHashTable *CurrentDdlTable = &RootTable;
+static int SubtransDdlLevel; /* number of subtransactions since last DDL or top transaction */
 
 static void
 PushKeyValue(JsonbParseState **state, char *key, char *value)
@@ -333,8 +334,24 @@ SendDeltasToControlPlane()
 }
 
 static void
+InitCurrentDdlTableIfNeeded()
+{
+	/* Lazy construction of DllHashTable chain */
+	while (SubtransDdlLevel != 0)
+	{
+		DdlHashTable *new_table = MemoryContextAlloc(TopTransactionContext, sizeof(DdlHashTable));
+		new_table->prev_table = CurrentDdlTable;
+		new_table->role_table = NULL;
+		new_table->db_table = NULL;
+		CurrentDdlTable = new_table;
+		SubtransDdlLevel -= 1;
+	}
+}
+
+static void
 InitDbTableIfNeeded()
 {
+	InitCurrentDdlTableIfNeeded();
 	if (!CurrentDdlTable->db_table)
 	{
 		HASHCTL		db_ctl = {};
@@ -353,6 +370,7 @@ InitDbTableIfNeeded()
 static void
 InitRoleTableIfNeeded()
 {
+	InitCurrentDdlTableIfNeeded();
 	if (!CurrentDdlTable->role_table)
 	{
 		HASHCTL		role_ctl = {};
@@ -371,19 +389,21 @@ InitRoleTableIfNeeded()
 static void
 PushTable()
 {
-	DdlHashTable *new_table = MemoryContextAlloc(TopTransactionContext, sizeof(DdlHashTable));
-
-	new_table->prev_table = CurrentDdlTable;
-	new_table->role_table = NULL;
-	new_table->db_table = NULL;
-	CurrentDdlTable = new_table;
+	SubtransDdlLevel += 1;
 }
 
 static void
 MergeTable()
 {
-	DdlHashTable *old_table = CurrentDdlTable;
+	DdlHashTable *old_table;
 
+	if (SubtransDdlLevel != 0)
+	{
+		SubtransDdlLevel -= 1;
+		return;
+	}
+
+	old_table = CurrentDdlTable;
 	CurrentDdlTable = old_table->prev_table;
 
 	if (old_table->db_table)
@@ -477,9 +497,16 @@ MergeTable()
 static void
 PopTable()
 {
-	DdlHashTable *old_table = CurrentDdlTable;
-	CurrentDdlTable = CurrentDdlTable->prev_table;
-	pfree(old_table);
+	if (SubtransDdlLevel != 0)
+	{
+		SubtransDdlLevel -= 1;
+	}
+	else
+	{
+		DdlHashTable *old_table = CurrentDdlTable;
+		CurrentDdlTable = CurrentDdlTable->prev_table;
+		pfree(old_table);
+	}
 }
 
 static void
