@@ -54,30 +54,37 @@ jobs:
         PROXY_BENCH_PATH=$(realpath ./proxy-bench)
         {
           echo "PROXY_BENCH_PATH=$PROXY_BENCH_PATH"
-          echo "NEON_DIR=${RUNNER_TEMP}/neon"
+          echo "NEON_DIR=$(pwd)"
           echo "TEST_OUTPUT=${PROXY_BENCH_PATH}/test_output"
+          echo "DOCKER_COMPOSE_FILE=${PROXY_BENCH_PATH}/docker-compose.yml"
           echo ""
         } >> "$GITHUB_ENV"
 
     - name: Run proxy-bench
-      run: ${PROXY_BENCH_PATH}/run.sh
+      env:
+        DOCKER_COMPOSE_FILE: ${{ env.DOCKER_COMPOSE_FILE }}
+      working-directory: ${{ env.PROXY_BENCH_PATH }}
+      run: ./run.sh
 
     - name: Ingest Bench Results # neon repo script
       if: always()
+      working-directory: ${{ env.NEON_DIR }}
       run: |
         mkdir -p $TEST_OUTPUT
-        python $NEON_DIR/scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
+        ./scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
 
     - name: Push Metrics to Proxy perf database
       if: always()
       env:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PROXY_TEST_RESULT_CONNSTR }}"
         REPORT_FROM: $TEST_OUTPUT
-      run: $NEON_DIR/scripts/generate_and_push_perf_report.sh
+      working-directory: ${{ env.NEON_DIR }}
+      run: |
+        ./scripts/generate_and_push_perf_report.sh
 
     - name: Docker cleanup
       if: always()
-      run: docker compose down
+      run: docker compose -f "$DOCKER_COMPOSE_FILE" down
 
     - name: Notify Failure
       if: failure()
