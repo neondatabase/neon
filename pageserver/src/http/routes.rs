@@ -3697,23 +3697,25 @@ async fn tenant_evaluate_feature_flag(
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
-        let properties = tenant.feature_resolver.collect_properties(tenant_shard_id.tenant_id);
+        // TODO: the properties we get here might be stale right after it is collected. But such races are rare (updated every 10s) 
+        // and we don't need to worry about it for now.
+        let properties = tenant.feature_resolver.collect_properties();
         if as_type.as_deref() == Some("boolean") {
-            let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+            let result = tenant.feature_resolver.evaluate_boolean(&flag);
             let result = result.map(|_| true).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else if as_type.as_deref() == Some("multivariate") {
-            let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+            let result = tenant.feature_resolver.evaluate_multivariate(&flag).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else {
             // Auto infer the type of the feature flag.
             let is_boolean = tenant.feature_resolver.is_feature_flag_boolean(&flag).map_err(|e| ApiError::InternalServerError(anyhow::anyhow!("{e}")))?;
             if is_boolean {
-                let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+                let result = tenant.feature_resolver.evaluate_boolean(&flag);
                 let result = result.map(|_| true).map_err(|e| e.to_string());
                 json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             } else {
-                let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+                let result = tenant.feature_resolver.evaluate_multivariate(&flag).map_err(|e| e.to_string());
                 json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             }
         }
