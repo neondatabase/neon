@@ -20,8 +20,11 @@ pub struct PprofData(pub(crate) Vec<u8>);
 impl PprofData {
     /// Dumps the pprof data to a file.
     pub fn write_to_file(&self, path: &PathBuf) -> anyhow::Result<()> {
-        let mut file = std::fs::File::create(path)?;
-        file.write_all(&self.0)?;
+        let mut file = std::fs::File::create(path).context(format!(
+            "couldn't create a file for dumping pprof data at path: {path:?}"
+        ))?;
+        file.write_all(&self.0)
+            .context("couldn't write pprof raw data to the file at path: {path:?}")?;
         Ok(())
     }
 }
@@ -42,9 +45,10 @@ impl DerefMut for PprofData {
 
 /// Returns a list of child processes for a given parent process ID.
 fn list_children_processes(parent_pid: Pid) -> anyhow::Result<Vec<Pid>> {
-    Ok(procfs::process::all_processes()?
+    Ok(procfs::process::all_processes()
+        .context("couldn't list the processes running in the system")?
         .filter_map(|proc| {
-            if let Ok(stat) = proc.ok()?.stat() {
+            if let Ok(stat) = proc.and_then(|p| p.stat()) {
                 if stat.ppid == parent_pid.as_raw() {
                     return Some(Pid::from_raw(stat.pid));
                 }
@@ -71,7 +75,9 @@ fn check_binary_runs(command: &[&str]) -> anyhow::Result<()> {
         output.arg(arg);
     }
 
-    let output = output.output()?;
+    let output = output
+        .output()
+        .context("failed to run the command to check if it can be run")?;
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -156,9 +162,10 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
     check_perf_runs(
         perf_binary_path
             .to_str()
-            .context("Couldn't reconstruct perf binary path as string.")?,
+            .context("couldn't reconstruct perf binary path as string.")?,
         options.run_with_sudo,
-    )?;
+    )
+    .context("couldn't check that perf is available and can be run")?;
 
     let pids = list_children_processes(options.process_pid)
         .unwrap_or_default()
@@ -169,7 +176,7 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .join(",");
 
     let temp_file = tempfile::NamedTempFile::new()
-        .context("Failed to create temporary file for perf output")?;
+        .context("failed to create temporary file for perf output")?;
     let temp_file_path = temp_file.path();
 
     // Step 1: Run perf to collect stack traces
@@ -205,7 +212,9 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .stderr(std::process::Stdio::null());
 
     tracing::debug!("Running perf record command: {perf_record_command:?}");
-    let mut perf_record_command = perf_record_command.spawn()?;
+    let mut perf_record_command = perf_record_command
+        .spawn()
+        .context("failed to spawn a process for perf record")?;
 
     if let Some(mut rx) = options.should_stop {
         tokio::select! {
@@ -223,7 +232,7 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
 
     let perf_record_pid = perf_record_command
         .id()
-        .ok_or_else(|| anyhow!("Failed to get perf record process ID"))?;
+        .ok_or_else(|| anyhow!("failed to get perf record process ID"))?;
 
     let _ = nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(perf_record_pid as i32),
@@ -238,7 +247,8 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
-        .await?;
+        .await
+        .context(format!("couldn't run perf script -i {temp_file_path:?}"))?;
 
     if !perf_script_output.status.success() {
         return Err(anyhow!(
@@ -249,7 +259,8 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
     }
 
     let perf_script_stdout = perf_script_output.stdout;
-    let perf_output_str = String::from_utf8(perf_script_stdout)?;
+    let perf_output_str =
+        String::from_utf8(perf_script_stdout).context("expected utf-8 output from perf script")?;
     if perf_output_str.is_empty() {
         return Err(anyhow!(format!("Perf script output is empty.\n")));
     }
@@ -269,7 +280,7 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
 
     folder
         .collapse(perf_output_str.as_bytes(), &mut collapsed)
-        .map_err(|e| Box::new(std::io::Error::other(e)))?;
+        .context("couldn't collapse the output of perf script into the folded format")?;
 
     if collapsed.is_empty() {
         return Err(anyhow!("collapsed stack trace is empty"));
@@ -282,8 +293,12 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
 fn archive_bytes<W: Write>(bytes: &[u8], output: &mut W) -> anyhow::Result<()> {
     let mut encoder = GzEncoder::new(output, Compression::default());
 
-    encoder.write_all(bytes)?;
-    encoder.finish()?;
+    encoder
+        .write_all(bytes)
+        .context("couldn't write the bytes into the gz encoder")?;
+    encoder
+        .finish()
+        .context("couldn't finish the gz encoder session")?;
 
     Ok(())
 }
@@ -329,11 +344,14 @@ pub fn generate_pprof_from_collapsed<S: AsRef<str>>(
     let reader = BufReader::new(Cursor::new(collapsed_bytes));
 
     for line in reader.lines() {
-        let line = line?;
+        let line = line.context("invalid line found")?;
         let Some((stack_str, count_str)) = line.rsplit_once(' ') else {
             continue;
         };
-        let count: i64 = count_str.trim().parse()?;
+        let count: i64 = count_str
+            .trim()
+            .parse()
+            .context("failed to parse the counter")?;
 
         let mut parts = stack_str.trim().split(';');
 
@@ -416,11 +434,14 @@ pub fn generate_pprof_from_collapsed<S: AsRef<str>>(
     }
 
     let mut protobuf_encoded = Vec::new();
-    profile.write_to_vec(&mut protobuf_encoded)?;
+    profile
+        .write_to_vec(&mut protobuf_encoded)
+        .context("failed to write the encoded pprof-protobuf message into a vec")?;
 
     Ok(PprofData(if archive {
         let mut archived = Vec::new();
-        archive_bytes(&protobuf_encoded, &mut archived)?;
+        archive_bytes(&protobuf_encoded, &mut archived)
+            .context("couldn't archive the pprof-protobuf message data")?;
         archived
     } else {
         protobuf_encoded
