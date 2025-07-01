@@ -1,0 +1,9 @@
+create table spgist_point_tbl(id int4, p point);
+create index spgist_point_idx on spgist_point_tbl using spgist(p) with (fillfactor = 25);
+insert into spgist_point_tbl (id, p)        select g,      point(g*10, g*10) from generate_series(1, 10000) g;
+insert into spgist_point_tbl (id, p)        select g,      point(g*10, g*10) from generate_series(1, 10000) g;
+insert into spgist_point_tbl (id, p)        select g+100000, point(g*10+1, g*10+1) from generate_series(1, 10000) g;
+
+vacuum spgist_point_tbl;
+insert into spgist_point_tbl (id, p)        select g+100000, point(g*10+1, g*10+1) from generate_series(1, 10000) g;
+checkpoint;
