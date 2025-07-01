@@ -1001,7 +1001,7 @@ def test_storage_controller_compute_hook_keep_failing(
     neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
     # Set up CP handler for compute notifications
-    status_by_tenant = {}
+    status_by_tenant: dict[TenantId, int] = {}
 
     def handler(request: Request):
         notify_request = request.json
