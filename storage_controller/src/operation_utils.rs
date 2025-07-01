@@ -8,6 +8,7 @@ use utils::shard::TenantShardId;
 use crate::background_node_operations::OperationError;
 use crate::node::Node;
 use crate::scheduler::Scheduler;
+use crate::service::Service;
 use crate::tenant_shard::TenantShard;
 
 pub(crate) struct TenantShardIterator<F> {

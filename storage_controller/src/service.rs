@@ -7091,29 +7091,26 @@ impl Service {
     pub(crate) async fn delete_node(
         self: &Arc<Self>,
         node_id: NodeId,
-        last_policy: NodeSchedulingPolicy,
+        policy_on_start: NodeSchedulingPolicy,
         cancel: CancellationToken,
     ) -> Result<(), OperationError> {
-        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
-        const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-        let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal)
-            .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
-            .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
-            .build();
+        let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal).build();
 
         let mut waiters: Vec<ReconcilerWaiter> = Vec::new();
-
         let mut tid_iter = self.create_tenant_shard_iterator().await;
 
         while !tid_iter.finished() {
             if cancel.is_cancelled() {
-                match self.node_configure(node_id, None, Some(last_policy)).await {
+                match self
+                    .node_configure(node_id, None, Some(policy_on_start))
+                    .await
+                {
                     Ok(()) => return Err(OperationError::Cancelled),
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
                                 "Failed to finalise delete cancel of {} by setting scheduling policy to {}: {}",
-                                node_id, String::from(last_policy), err
+                                node_id, String::from(policy_on_start), err
                             )
                             .into(),
                         ));
@@ -7141,26 +7138,31 @@ impl Service {
                 let tenant_shard = match tenants.get_mut(&tid) {
                     Some(tenant_shard) => tenant_shard,
                     None => {
-                        tracing::warn!("Skip tenant shard {} during delete", tid);
+                        // Tenant shard was deleted by another operation. Skip it.
                         continue;
                     }
                 };
 
                 match tenant_shard.get_scheduling_policy() {
                     ShardSchedulingPolicy::Active | ShardSchedulingPolicy::Essential => {
-                        // A migration during drain is classed as 'essential' because it is required to
+                        // A migration during delete is classed as 'essential' because it is required to
                         // uphold our availability goals for the tenant: this shard is elegible for migration.
                     }
                     ShardSchedulingPolicy::Pause | ShardSchedulingPolicy::Stop => {
-                        // If we have been asked to avoid rescheduling this shard, then do not migrate it during a drain
+                        // If we have been asked to avoid rescheduling this shard, then do not migrate it during a deletion
+                        tracing::warn!(
+                            tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                            "Skip migration during deletion because shard scheduling policy {:?} disallows it",
+                            tenant_shard.get_scheduling_policy(),
+                        );
                         continue;
                     }
                 }
 
-                let mut schedule_context = ScheduleContext::new(ScheduleMode::Normal);
-                schedule_context.avoid(&tenant_shard.intent.all_pageservers());
-
                 if tenant_shard.deref_node(node_id) {
+                    // TODO(ephemeralsad): we should process all shards in a tenant at once, so
+                    // we can avoid settling the tenant unevenly.
+                    let mut schedule_context = ScheduleContext::new(ScheduleMode::Normal);
                     if let Err(e) = tenant_shard.schedule(scheduler, &mut schedule_context) {
                         tracing::error!(
                             "Refusing to delete node, shard {} can't be rescheduled: {e}",
@@ -7183,10 +7185,6 @@ impl Service {
                         waiters.push(some);
                     }
                 }
-
-                // For review purposes: discuss if we want for this line to remain or not.
-                //
-                // tenant_shard.observed.locations.remove(&node_id);
             }
 
             waiters = self
@@ -7198,13 +7196,16 @@ impl Service {
 
         while !waiters.is_empty() {
             if cancel.is_cancelled() {
-                match self.node_configure(node_id, None, Some(last_policy)).await {
+                match self
+                    .node_configure(node_id, None, Some(policy_on_start))
+                    .await
+                {
                     Ok(()) => return Err(OperationError::Cancelled),
                     Err(err) => {
                         return Err(OperationError::FinalizeError(
                             format!(
                                 "Failed to finalise drain cancel of {} by setting scheduling policy to {}: {}",
-                                node_id, String::from(last_policy), err
+                                node_id, String::from(policy_on_start), err
                             )
                             .into(),
                         ));
@@ -7218,6 +7219,11 @@ impl Service {
                 .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
                 .await;
         }
+
+        self.persistence
+            .set_tombstone(node_id)
+            .await
+            .map_err(|e| OperationError::FinalizeError(e.to_string().into()))?;
 
         {
             let mut locked = self.inner.write().unwrap();
@@ -7243,11 +7249,6 @@ impl Service {
                 .storage_controller_https_pageserver_nodes
                 .set(nodes.values().filter(|n| n.has_https_port()).count() as i64);
         }
-
-        self.persistence
-            .set_tombstone(node_id)
-            .await
-            .map_err(|e| OperationError::FinalizeError(e.to_string().into()))?;
 
         Ok(())
     }
@@ -7843,19 +7844,19 @@ impl Service {
         }
 
         if schedulable_nodes_count == 0 {
-            tracing::warn!("No other schedulable nodes to move shards");
+            return Err(ApiError::PreconditionFailed(
+                "No other schedulable nodes to move shards".into(),
+            ));
         }
 
         match node_policy {
-            NodeSchedulingPolicy::Active
-            | NodeSchedulingPolicy::Pause
-            | NodeSchedulingPolicy::PauseForRestart => {
+            NodeSchedulingPolicy::Active | NodeSchedulingPolicy::Pause => {
                 self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Deleting))
                     .await?;
 
                 let cancel = self.cancel.child_token();
                 let gate_guard = self.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
-                let last_policy = node_policy;
+                let policy_on_start = node_policy;
 
                 self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
                     operation: Operation::Delete(Delete { node_id }),
@@ -7883,7 +7884,7 @@ impl Service {
 
                             tracing::info!("Delete background operation starting");
                             let res = service
-                                .delete_node(node_id, last_policy, cancel)
+                                .delete_node(node_id, policy_on_start, cancel)
                                 .await;
                             match res {
                                 Ok(()) => {
