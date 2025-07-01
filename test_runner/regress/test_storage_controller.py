@@ -9,8 +9,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from _pytest.stash import T
-
 import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
@@ -1033,7 +1031,7 @@ def test_storage_controller_compute_hook_keep_failing(
     # Find the pageserver of the banned tenant
     banned_tenant_ps = env.get_tenant_pageserver(banned_tenant)
     assert banned_tenant_ps is not None
-    alive_pageservers = [p for p in env.pageservers if p.id != banned_tenant_ps.id]  
+    alive_pageservers = [p for p in env.pageservers if p.id != banned_tenant_ps.id]
 
     # Stop pageserver and ban tenant to trigger failed reconciliation
     status_by_tenant[banned_tenant] = 423
