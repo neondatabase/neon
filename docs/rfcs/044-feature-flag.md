@@ -79,7 +79,7 @@ Note that the API only contains information like "under what condition => rollou
 
 To use the local evaluation mode, the system needs:
 
-* Assume each pageserver will poll PostHog for the local evaluation JSON every 5 minutes. That's 8640Y per month, Y is the number of pageservers. Local evaluation requests cost 10x more than the normal decide request, so that's 86400Y request units to bill.
+* Assume each pageserver will poll PostHog for the local evaluation JSON every 5 minutes (instead of the 30s default as it's too frequent). That's 8640Y per month, Y is the number of pageservers. Local evaluation requests cost 10x more than the normal decide request, so that's 86400Y request units to bill.
 * Storcon needs to store the plan type in the database and pass that information to the pageserver when attaching the tenant.
 * Storcon also needs to update PostHog with the active tenants, for example, when the tenant gets detached/attached. Assume each active tenant gets detached/attached every week, that would be 4X requests per month.
 * We do not need to update bill type or resident size to PostHog as all these are evaluated locally.
