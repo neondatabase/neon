@@ -993,7 +993,7 @@ def test_storage_controller_compute_hook_retry(
 def test_storage_controller_compute_hook_keep_failing(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
-    httpserver_listen_address: ListenAddress
+    httpserver_listen_address: ListenAddress,
 ):
     neon_env_builder.num_pageservers = 4
     neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
