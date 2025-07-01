@@ -33,6 +33,7 @@ workspace-members = [
     "compute_api",
     "consumption_metrics",
     "desim",
+    "json",
     "metrics",
     "pageserver_api",
     "postgres_backend",
