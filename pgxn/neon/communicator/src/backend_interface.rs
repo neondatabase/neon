@@ -6,7 +6,7 @@ use std::os::fd::OwnedFd;
 use crate::backend_comms::NeonIOHandle;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{BackendCacheReadOp, IntegratedCacheReadAccess};
-use crate::neon_request::CCachedGetPageVResult;
+use crate::neon_request::{CCachedGetPageVResult, COid};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
 
 pub struct CommunicatorBackendStruct<'t> {
@@ -157,6 +157,29 @@ pub extern "C" fn bcomm_finish_cache_read(bs: &mut CommunicatorBackendStruct) ->
         panic!("bcomm_finish_cache_read() called with no cached read pending");
     }
 }
+
+
+/// Check if the local file cache contians the given block
+#[unsafe(no_mangle)]
+pub extern "C" fn bcomm_cache_contains(
+    bs: &mut CommunicatorBackendStruct,
+    spc_oid: COid,
+    db_oid: COid,
+    rel_number: u32,
+    fork_number: u8,
+    block_number: u32,
+) -> bool {
+    bs.integrated_cache.cache_contains_page(
+        &pageserver_page_api::RelTag {
+            spcnode: spc_oid,
+            dbnode: db_oid,
+            relnode: rel_number,
+            forknum: fork_number,
+        },
+        block_number
+    )
+}
+
 
 impl<'t> CommunicatorBackendStruct<'t> {
     /// Send a wakeup to the communicator process

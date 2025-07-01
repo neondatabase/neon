@@ -453,6 +453,25 @@ communicator_new_prefetch_register_bufferv(NRelFileInfo rinfo, ForkNumber forkNu
 	elog(LOG, "sent prefetch request with idx %d", request_idx);
 }
 
+/*
+ * Does the LFC contains the given buffer?
+ *
+ * This is used in WAL replay in read replica, to skip updating pages that are
+ * not in cache.
+ */
+bool
+communicator_new_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
+								BlockNumber blockno)
+{
+	return bcomm_cache_contains(my_bs,
+								NInfoGetSpcOid(rinfo),
+								NInfoGetDbOid(rinfo),
+								NInfoGetRelNumber(rinfo),
+								forkNum,
+								blockno);
+}
+
+
 static void
 process_inflight_requests(void)
 {

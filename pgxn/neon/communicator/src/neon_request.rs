@@ -1,5 +1,5 @@
-type CLsn = u64;
-type COid = u32;
+pub type CLsn = u64;
+pub type COid = u32;
 
 // This conveniently matches PG_IOV_MAX
 pub const MAX_GETPAGEV_PAGES: usize = 32;

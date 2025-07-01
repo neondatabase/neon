@@ -2570,7 +2570,10 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 		 * We should perform this check after assigning LwLSN to prevent
 		 * prefetching of some older version of the page by some other backend.
 		 */
-		no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);
+		if (neon_enable_new_communicator)
+			no_redo_needed = communicator_new_cache_contains(rinfo, forknum, blkno);
+		else
+			no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);
 	}
 
 	LWLockRelease(partitionLock);
