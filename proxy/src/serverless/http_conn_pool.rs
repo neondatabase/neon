@@ -20,9 +20,12 @@ use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::types::EndpointCacheKey;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
 
-pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
-pub(crate) type Connect = http2::Connection<TokioIo<AsyncRW>, hyper::body::Incoming, TokioExecutor>;
+pub(crate) type Send = http2::SendRequest<BoxBody<Bytes, hyper::Error>>;
+pub(crate) type Connect =
+    http2::Connection<TokioIo<AsyncRW>, BoxBody<Bytes, hyper::Error>, TokioExecutor>;
 
 #[derive(Clone)]
 pub(crate) struct ClientDataHttp();

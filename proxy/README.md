@@ -138,3 +138,41 @@ Now from client you can start a new session:
 ```sh
 PGSSLROOTCERT=./server.crt psql  "postgresql://proxy:password@endpoint.local.neon.build:4432/postgres?sslmode=verify-full"
 ```
+
+## auth broker setup:
+
+```sh
+docker run \
+  --detach \
+  --name proxy-postgres \
+  --env POSTGRES_HOST_AUTH_METHOD=trust \
+  --env POSTGRES_USER=authenticated \
+  --env POSTGRES_DB=database \
+  --publish 5432:5432 \
+  postgres:17-bookworm
+```
+
+```sh
+cargo run --bin local_proxy -- \
+  --disable_pg_session_jwt true \
+  --http 0.0.0.0:7432
+```
+
+```sh
+LOGFMT=text OTEL_SDK_DISABLED=true cargo run --bin proxy --features testing -- \
+  -c server.crt -k server.key \
+  --is-auth-broker true \
+  --wss 0.0.0.0:8080 \
+  --http 0.0.0.0:7002 \
+  --auth-backend local
+```
+
+
+
+```sh
+export NEON_JWT="..."
+curl -k "http://127.0.0.1:8080/sql" \
+  -H "Authorization: Bearer $NEON_JWT" \
+  -H "neon-connection-string: postgresql://authenticator@foo.local.neon.build/database" \
+  -d '{"query":"select 1","params":[]}'
+```
