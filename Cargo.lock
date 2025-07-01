@@ -4615,6 +4615,7 @@ dependencies = [
  "pageserver_page_api",
  "priority-queue",
  "rand 0.8.5",
+ "scopeguard",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",

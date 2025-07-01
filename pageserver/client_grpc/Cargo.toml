@@ -20,6 +20,7 @@ hyper-util = "0.1.9"
 hyper = "1.6.0"
 metrics.workspace = true
 priority-queue = "2.3.1"
+scopeguard.workspace = true
 async-trait = { version = "0.1" }
 tokio-stream = "0.1"
 dashmap = "5"
