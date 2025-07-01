@@ -152,6 +152,7 @@ pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointe
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13.5"
+prost-types = "0.13.5"
 rand = "0.8"
 redis = { version = "0.29.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"

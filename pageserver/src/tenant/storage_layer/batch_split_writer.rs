@@ -55,11 +55,11 @@ pub struct BatchLayerWriter {
 }
 
 impl BatchLayerWriter {
-    pub async fn new(conf: &'static PageServerConf) -> anyhow::Result<Self> {
-        Ok(Self {
+    pub fn new(conf: &'static PageServerConf) -> Self {
+        Self {
             generated_layer_writers: Vec::new(),
             conf,
-        })
+        }
     }
 
     pub fn add_unfinished_image_writer(
@@ -209,6 +209,7 @@ impl<'a> SplitImageLayerWriter<'a> {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             target_layer_size,
+            // XXX make this lazy like in SplitDeltaLayerWriter?
             inner: ImageLayerWriter::new(
                 conf,
                 timeline_id,
@@ -223,7 +224,7 @@ impl<'a> SplitImageLayerWriter<'a> {
             conf,
             timeline_id,
             tenant_shard_id,
-            batches: BatchLayerWriter::new(conf).await?,
+            batches: BatchLayerWriter::new(conf),
             lsn,
             start_key,
             gate,
@@ -319,7 +320,7 @@ pub struct SplitDeltaLayerWriter<'a> {
 }
 
 impl<'a> SplitDeltaLayerWriter<'a> {
-    pub async fn new(
+    pub fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
@@ -327,8 +328,8 @@ impl<'a> SplitDeltaLayerWriter<'a> {
         target_layer_size: u64,
         gate: &'a utils::sync::gate::Gate,
         cancel: CancellationToken,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             target_layer_size,
             inner: None,
             conf,
@@ -336,10 +337,10 @@ impl<'a> SplitDeltaLayerWriter<'a> {
             tenant_shard_id,
             lsn_range,
             last_key_written: Key::MIN,
-            batches: BatchLayerWriter::new(conf).await?,
+            batches: BatchLayerWriter::new(conf),
             gate,
             cancel,
-        })
+        }
     }
 
     pub async fn put_value(
@@ -510,9 +511,7 @@ mod tests {
             4 * 1024 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-        )
-        .await
-        .unwrap();
+        );
 
         image_writer
             .put_image(get_key(0), get_img(0), &ctx)
@@ -590,9 +589,7 @@ mod tests {
             4 * 1024 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-        )
-        .await
-        .unwrap();
+        );
         const N: usize = 2000;
         for i in 0..N {
             let i = i as u32;
@@ -692,9 +689,7 @@ mod tests {
             4 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-        )
-        .await
-        .unwrap();
+        );
 
         image_writer
             .put_image(get_key(0), get_img(0), &ctx)
@@ -770,9 +765,7 @@ mod tests {
             4 * 1024 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-        )
-        .await
-        .unwrap();
+        );
 
         for i in 0..N {
             let i = i as u32;
