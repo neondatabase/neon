@@ -1234,8 +1234,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 static bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
-	BufferTag	tag;
-
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:					/* probably shouldn't happen, but ignore it */
@@ -1250,21 +1248,25 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
-		return false;
-
-	tag.forkNum = forknum;
-	tag.blockNum = blocknum;
-
-	CopyNRelFileInfoToBufTag(tag, InfoFromSMgrRel(reln));
-
 	if (neon_enable_new_communicator)
+	{
 		communicator_new_prefetch_register_bufferv(InfoFromSMgrRel(reln), forknum, blocknum, 1);
+	}
 	else
+	{
+		BufferTag	tag;
+
+		if (lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
+			return false;
+
+		tag.forkNum = forknum;
+		tag.blockNum = blocknum;
+
+		CopyNRelFileInfoToBufTag(tag, InfoFromSMgrRel(reln));
 		communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
 
-	if (!neon_enable_new_communicator)
 		communicator_prefetch_pump_state();
+	}
 
 	return false;
 }
