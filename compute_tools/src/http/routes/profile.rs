@@ -119,23 +119,16 @@ pub(in crate::http) async fn profile_start(
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
-    match CANCEL_CHANNEL.try_lock() {
-        Ok(mut cancel_channel) => {
-            if cancel_channel.is_some() {
-                return JsonResponse::create_response(
-                    StatusCode::CONFLICT,
-                    "Profiling is already in progress.",
-                );
-            } else {
-                *cancel_channel = Some(tx);
-            }
-        }
-        Err(_) => {
+    {
+        let mut cancel_channel = CANCEL_CHANNEL.lock().await;
+
+        if cancel_channel.is_some() {
             return JsonResponse::create_response(
                 StatusCode::CONFLICT,
-                "Another request is being processed.",
+                "Profiling is already in progress.",
             );
         }
+        *cancel_channel = Some(tx);
     }
 
     tracing::info!("Profiling will start with parameters: {request:?}");
