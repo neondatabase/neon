@@ -238,7 +238,7 @@ mod tests {
 
         let tenant_shards = Arc::new(tenant_shards);
 
-        let mut tid_iter = TenantShardSharedIterator::new({
+        let tid_iter = TenantShardSharedIterator::new({
             let tenants = tenant_shards.clone();
             move |last_inspected_shard: Option<TenantShardId>| {
                 let entry = match last_inspected_shard {
@@ -254,7 +254,7 @@ mod tests {
         });
 
         let mut iterated_over = Vec::default();
-        while let Some(tid) = tid_iter.next() {
+        for tid in tid_iter {
             iterated_over.push((tid, ()));
         }
 
