@@ -32,9 +32,9 @@ medium workloads, we still have to do some additional work to avoid performance 
 
 ## Impacted components
 
-Postgres, compute_ctl, Control plane, Object storage proxy for unlogged storage of compute files.
+Postgres, compute_ctl, Control plane, Endpoint storage for unlogged storage of compute files.
 For the latter, we will need to implement a uniform abstraction layer on top of S3, ABS, etc., but
-S3 is used in text interchangeably with 'object storage' for simplicity.
+S3 is used in text interchangeably with 'endpoint storage' for simplicity.
 
 ## Proposed implementation
 
@@ -212,8 +212,8 @@ the rolling restart via warm replica, but without much of low-level implementati
   end
 
   box Endpoint unlogged storage
-    participant s3proxy as Object storage proxy
-    participant s3 as S3/ABS/etc
+    participant s3proxy as Endpoint storage service
+    participant s3 as S3/ABS/etc.
   end
 
 
@@ -267,6 +267,26 @@ the rolling restart via warm replica, but without much of low-level implementati
   deactivate cplane
 ```
 
+### Network bandwidth and prewarm speed
+
+It's currently known that pageserver can sustain about 3000 RPS per shard for a few running computes.
+Large tenants are usually split into 8 shards, so the final formula may look like this:
+
+```text
+8 shards * 3000 RPS * 8 KB =~ 190 MB/s
+```
+
+so depending on the LFC size, prewarming will take at least:
+
+- ~5s for 1 GB
+- ~50s for 10 GB
+- ~5m for 100 GB
+- \>1h for 1 TB
+
+In total, one pageserver is normally capped by 30k RPS, so it obviously can't sustain many computes
+doing prewarm at the same time. Later, we may need an additional mechanism for computes to throttle
+the prewarming requests gracefully.
+
 ### Reliability, failure modes and corner cases
 
 We consider following failures while implementing this RFC:
@@ -312,7 +332,7 @@ There are two security implications to consider:
     since LFC state is just a mapping of blocks present in LFC at certain moment in time;
     it still has to be highly restricted, so that i) only computes on the same timeline can
     read S3 state; ii) each compute can only write to the path that contains it's `endpoint_id`.
-    Both of this must be validated by S3 proxy and JWT token used by `compute_ctl`.
+    Both of this must be validated by Endpoint storage service using the JWT token provided by `compute_ctl`.
 
 ### Unresolved questions
 
