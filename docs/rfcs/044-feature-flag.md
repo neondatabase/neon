@@ -29,7 +29,7 @@ Using the HTTP evaluation mode we will issue 754X requests a month.
 
 ### Option 2: Local Evaluation Mode
 
-When using PostHog's HTTP evaluation mode, the client (usually the server in a browser/server architecture) will poll the feature flag configuration every minute from PostHog. Such configuration contains data like:
+When using PostHog's HTTP evaluation mode, the client (usually the server in a browser/server architecture) will poll the feature flag configuration every 30s (default in the Python client) from PostHog. Such configuration contains data like:
 
 <details>
 
@@ -79,7 +79,7 @@ Note that the API only contains information like "under what condition => rollou
 
 To use the local evaluation mode, the system needs:
 
-* Each pageserver will poll PostHog for the local evaluation JSON every 5 minutes. That's 8640Y per month, Y is the number of pageservers. Local evaluation requests cost 10x more than the normal decide request, so that's 86400Y request units to bill.
+* Assume each pageserver will poll PostHog for the local evaluation JSON every 5 minutes. That's 8640Y per month, Y is the number of pageservers. Local evaluation requests cost 10x more than the normal decide request, so that's 86400Y request units to bill.
 * Storcon needs to store the plan type in the database and pass that information to the pageserver when attaching the tenant.
 * Storcon also needs to update PostHog with the active tenants, for example, when the tenant gets detached/attached. Assume each active tenant gets detached/attached every week, that would be 4X requests per month.
 * We do not need to update bill type or resident size to PostHog as all these are evaluated locally.
@@ -99,9 +99,9 @@ Assume X = 1,000,000 and Y = 100,
 
 # Our Solution
 
-We will use PostHog _only_ as an UI to configure the feature flags. Whether a feature is enabled or not can only be queried through storcon. This allows us to ramp up the feature flag functionality fast at first. At the same time, it would also give us the option to migrate to our own solution once we want to have more properties and more complex evaluation rules in our system.
+We will use PostHog _only_ as an UI to configure the feature flags. Whether a feature is enabled or not can only be queried through storcon/pageserver instead of using the PostHog UI. (We could report it back to PostHog via `capture_event` but it costs $$$.) This allows us to ramp up the feature flag functionality fast at first. At the same time, it would also give us the option to migrate to our own solution once we want to have more properties and more complex evaluation rules in our system.
 
-* We will create a single fake user in PostHog that contains all the properties we will use for evaluating a feature flag (i.e., resident size, billing type, pageserver id, etc.)
+* We will create several fake users (tenants) in PostHog that contains all the properties we will use for evaluating a feature flag (i.e., resident size, billing type, pageserver id, etc.)
 * We will use PostHog's local evaluation API to poll the configuration of the feature flags and evaluate them locally on each of the pageserver.
 * The evaluation result will not be reported back to PostHog.
 * Storcon needs to pull some information from cplane database.
@@ -114,6 +114,7 @@ We only need to pay for the 86400Y local evaluation requests (that would be $864
 * Pageserver: implement a PostHog local evaluation client. The client will be shared across all tenants on the pageserver with a single API: `evaluate(tenant_id, feature_flag, properties) -> json`.
 * Storcon: if we need plan type as the evaluation condition, pull it from cplane database.
 * Storcon/Pageserver: implement an HTTP API `:tenant_id/feature/:feature` to retrieve the current feature flag status.
+* Storcon/Pageserver: a loop to update the feature flag spec on both storcon and pageserver. Pageserver loop will only be activated if storcon does not push the specs to the pageserver.
 
 ## Difference from Tenant Config
 
@@ -128,6 +129,7 @@ We only need to pay for the 86400Y local evaluation requests (that would be $864
 * Each pageserver reports 10 fake tenants to PostHog so that we can get all combinations of regions (and other properties) in the PostHog UI.
 * Supported properties: AZ, neon_region, pageserver, tenant_id.
 * You may use "Pageserver Feature Flags" dashboard to see the evaluation status.
+* The feature flag spec is polled on storcon every 30s (in each of the region) and storcon will propagate the spec to the pageservers.
 
 Each tenant has a `feature_resolver` object. After you add a feature flag in the PostHog console, you can retrieve it with:
 
@@ -165,7 +167,7 @@ Users can use the feature flag evaluation API to get the flag evaluation result 
 curl http://localhost:9898/v1/tenant/:tenant_id/feature_flag?flag=:key&as=multivariate/boolean"
 ```
 
-By default, each pageserver refreshes the feature flag spec every 30 seconds, which means that a change in feature flag in the
+By default, the storcon pushes the feature flag specs to the pageservers every 30 seconds, which means that a change in feature flag in the
 PostHog UI will propagate to the pageservers within 30 seconds.
 
 # Future Works
