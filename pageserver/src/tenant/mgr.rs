@@ -2347,6 +2347,17 @@ impl TenantManager {
 
         let _gate_guard = tenant.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
 
+        if cfg!(feature = "testing")
+            && tenant
+                .tenant_conf
+                .load()
+                .is_gc_blocked_by_lsn_lease_deadline()
+        {
+            warn!(
+                "test is requesting immediate GC but lease deadline is still on, test might be impacted"
+            );
+        }
+
         fail::fail_point!("immediate_gc_task_pre");
 
         #[allow(unused_mut)]
