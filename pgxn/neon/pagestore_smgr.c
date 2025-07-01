@@ -824,7 +824,11 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 	if (neon_enable_new_communicator)
 	{
-		communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
+		if (isRedo)
+		{
+			if (!communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum))
+				communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
+		}
 	}
 	else
 	{
@@ -978,7 +982,6 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		neon_wallog_page(reln, forkNum, n_blocks++, buffer, true);
 
 	neon_wallog_page(reln, forkNum, blkno, buffer, false);
-	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1);
 
 	lsn = PageGetLSN((Page) buffer);
 	neon_log(SmgrTrace, "smgrextend called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
@@ -993,6 +996,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	}
 	else
 	{
+		set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1);
 		lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
@@ -2405,8 +2409,16 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 
 	if (neon_enable_new_communicator)
 	{
-		// FIXME: broken, but this is only used in replica
-		elog(ERROR, "not implemented yet");
+		relsize = communicator_new_rel_nblocks(rinfo, forknum);
+
+		if (blkno >= relsize)
+			communicator_new_rel_zeroextend(rinfo, forknum, relsize, (blkno - relsize) + 1, end_recptr);
+
+		/*
+		 * FIXME: does this need to update the last-written LSN too, like the
+		 * old implementation?
+		 */
+		return;
 	}
 
 	/* Extend the relation if we know its size */

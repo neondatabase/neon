@@ -1003,7 +1003,7 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum)
 /*
  * The worker process can read / write shared buffers directly. But if smgrread() or
  * smgrwrite() is called with a private temporary buffer, we need to copy it to the
- * "bounce buffer", to make it available fro the worker process.
+ * "bounce buffer", to make it available for the worker process.
  */
 static bool
 bounce_needed(void *buffer)
