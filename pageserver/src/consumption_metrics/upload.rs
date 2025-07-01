@@ -109,7 +109,7 @@ pub(super) async fn upload_metrics_bucket(
 
     // Serialize and write into compressed buffer
     let started_at = std::time::Instant::now();
-    for res in serialize_in_chunks(CHUNK_SIZE, metrics, idempotency_keys) {
+    for res in serialize_in_chunks_ndjson(CHUNK_SIZE, metrics, idempotency_keys) {
         let (_chunk, body) = res?;
         gzip_writer.write_all(&body).await?;
     }
