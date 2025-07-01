@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from _pytest.stash import T
+
 import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
@@ -995,91 +997,94 @@ def test_storage_controller_compute_hook_keep_failing(
     neon_env_builder: NeonEnvBuilder,
     httpserver_listen_address: ListenAddress
 ):
-    def assign_az(ps_cfg):
-        az = f"az-{ps_cfg['id'] % 2}"
-        log.info("Assigned AZ {az}")
-        ps_cfg["availability_zone"] = az
-    neon_env_builder.pageserver_config_override = assign_az
-
     neon_env_builder.num_pageservers = 4
-    neon_env_builder.num_azs = 2
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
     (host, port) = httpserver_listen_address
     neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
+    # Set up CP handler for compute notifications
     status_by_tenant = {}
-    notifications = []
 
     def handler(request: Request):
-        notifications.append(request.json)
         notify_request = request.json
         assert notify_request is not None
-        status = status_by_tenant.get(TenantId(notify_request["tenant_id"]), 400)
+        status = status_by_tenant[TenantId(notify_request["tenant_id"])]
         log.info(f"Notify request[{status}]: {notify_request}")
         return Response(status=status)
 
     httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
 
-    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
-
     # Run neon environment
     env = neon_env_builder.init_configs()
     env.start()
 
-    def generate_tenant():
-        tid = TenantId.generate()
-        status_by_tenant[tid] = 200
-        notifications.clear()
-        env.create_tenant(tid, placement_policy='{"Attached": 1}')
-        assert len(notifications) == 1
-        return tid
+    # Create two tenants:
+    # - The first tenant is banned by CP and contains only one shard
+    # - The second tenant is allowed by CP and contains four shards
+    banned_tenant = TenantId.generate()
+    status_by_tenant[banned_tenant] = 200  # we will ban this tenant later
+    env.create_tenant(banned_tenant, placement_policy='{"Attached": 1}')
 
-    # Create initial tenants
-    tid_banned = generate_tenant()
-    tid_allowed = generate_tenant()
+    shard_count = 4
+    allowed_tenant = TenantId.generate()
+    status_by_tenant[allowed_tenant] = 200
+    env.create_tenant(allowed_tenant, shard_count=shard_count, placement_policy='{"Attached": 1}')
 
-    tid_banned_ps = env.get_tenant_pageserver(tid_banned)
-    assert tid_banned_ps is not None
+    # Find the pageserver of the banned tenant
+    banned_tenant_ps = env.get_tenant_pageserver(banned_tenant)
+    assert banned_tenant_ps is not None
+    alive_pageservers = [p for p in env.pageservers if p.id != banned_tenant_ps.id]  
 
-    # Block reconciliations
-    status_by_tenant[tid_banned] = 423
-    tid_banned_ps.stop()
+    # Stop pageserver and ban tenant to trigger failed reconciliation
+    status_by_tenant[banned_tenant] = 423
+    banned_tenant_ps.stop()
     env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
     env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
     env.storage_controller.allowed_errors.append(".*Shard reconciliation is keep-failing.*")
-    env.storage_controller.node_configure(tid_banned_ps.id, {"availability": "Offline"})
+    env.storage_controller.node_configure(banned_tenant_ps.id, {"availability": "Offline"})
 
-    # Starting CreateSecondary optimization
-    env.storage_controller.tenant_policy_update(tid_allowed, {"placement": {"Attached": 2}})
-
-    # Check if reconciliations are blocked
-    for _ in range(10):
-        notifications = []
-        try:
-            assert env.storage_controller.reconcile_all() != 0
-        except StorageControllerApiException as e:
-            assert "Control plane tenant busy" in str(e)
-        assert len(notifications) == 1
-        assert (
-            env.storage_controller.tenant_describe(tid_banned)["shards"][0][
-                "is_pending_compute_notification"
-            ]
-            is True
+    # Migrate all allowed tenant shards to the first alive pageserver
+    # to trigger storage controller optimizations due to affinity rules
+    for shard_number in range(shard_count):
+        env.storage_controller.tenant_shard_migrate(
+            TenantShardId(allowed_tenant, shard_number, shard_count),
+            alive_pageservers[0].id,
+            config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
         )
 
-    # Check tid_allowed has two secondaries
-    status_by_tenant[tid_banned] = 200
-    assert len(env.storage_controller.tenant_describe(tid_allowed)["shards"]) == 2
+    # Make some reconcile_all calls to trigger optimizations
+    # RECONCILE_COUNT must be greater than storcon's MAX_CONSECUTIVE_RECONCILIATION_ERRORS
+    RECONCILE_COUNT = 12
+    for i in range(RECONCILE_COUNT):
+        try:
+            n = env.storage_controller.reconcile_all()
+            log.info(f"Reconciliation attempt {i} finished with success: {n}")
+        except StorageControllerApiException as e:
+            assert "Control plane tenant busy" in str(e)
+            log.info(f"Reconciliation attempt {i} finished with failure")
 
-    # Unblock reconciliations
-    notifications = []
-    assert env.storage_controller.reconcile_all() == 1
-    assert len(notifications) == 1
-    assert (
-        env.storage_controller.tenant_describe(tid_banned)["shards"][0][
-            "is_pending_compute_notification"
-        ]
-        is False
-    )
+        banned_descr = env.storage_controller.tenant_describe(banned_tenant)
+        assert banned_descr["shards"][0]["is_pending_compute_notification"] is True
+        time.sleep(2)
+
+    # Check that the allowed tenant shards are optimized due to affinity rules
+    locations = alive_pageservers[0].http_client().tenant_list_locations()["tenant_shards"]
+    not_optimized_shard_count = 0
+    for loc in locations:
+        tsi = TenantShardId.parse(loc[0])
+        if tsi.tenant_id != allowed_tenant:
+            continue
+        if loc[1]["mode"] == "AttachedSingle":
+            not_optimized_shard_count += 1
+        log.info(f"Shard {tsi} seen in mode {loc[1]['mode']}")
+
+    assert not_optimized_shard_count < shard_count, "At least one shard should be optimized"
+
+    # Unban the tenant and run reconciliations
+    status_by_tenant[banned_tenant] = 200
+    env.storage_controller.reconcile_all()
+    banned_descr = env.storage_controller.tenant_describe(banned_tenant)
+    assert banned_descr["shards"][0]["is_pending_compute_notification"] is False
 
 
 @run_only_on_default_postgres("this test doesn't start an endpoint")
