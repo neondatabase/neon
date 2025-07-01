@@ -27,7 +27,7 @@ def _start_profiling_cpu(client: EndpointHttpClient, event: threading.Event | No
     if event is not None:
         event.set()
 
-    status, response = client.start_profiling_cpu(100, 10)
+    status, response = client.start_profiling_cpu(100, 60)
     match status:
         case 200:
             log.debug("CPU profiling finished")
