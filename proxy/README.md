@@ -154,7 +154,6 @@ docker run \
 
 ```sh
 cargo run --bin local_proxy -- \
-  --disable_pg_session_jwt true \
   --http 0.0.0.0:7432
 ```
 
