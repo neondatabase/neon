@@ -232,7 +232,7 @@ impl FeatureResolver {
         &self,
         flag_key: &str,
         tenant_id: TenantId,
-        cached_properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
+        tenant_properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> Result<String, PostHogEvaluationError> {
         let force_overrides = self.force_overrides_for_testing.load();
         if let Some(value) = force_overrides.get(flag_key) {
@@ -243,7 +243,7 @@ impl FeatureResolver {
             let res = inner.feature_store().evaluate_multivariate(
                 flag_key,
                 &tenant_id.to_string(),
-                &self.collect_properties(tenant_id, cached_properties),
+                &self.collect_properties(tenant_id, tenant_properties),
             );
             match &res {
                 Ok(value) => {
