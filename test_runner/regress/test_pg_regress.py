@@ -399,7 +399,7 @@ def test_tx_abort_with_many_relations(
     # How many relations: this number is tuned to be long enough to take tens of seconds
     # if the rollback code path is buggy, tripping the test's timeout.
     n = 5000
-    step = 2500
+    step = 500
 
     def create():
         # Create many relations
