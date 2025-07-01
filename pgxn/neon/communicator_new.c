@@ -527,26 +527,44 @@ static void
 wait_request_completion(int request_idx, struct NeonIOResult *result_p)
 {
 	int32_t		poll_res;
+	TimestampTz start_time;
 
 	/* fixme: check 'request_idx' ? */
 
+	start_time = GetCurrentTimestamp();
 	for (;;)
 	{
+		TimestampTz now;
+
 		ResetLatch(MyIOCompletionLatch);
 
 		poll_res = bcomm_poll_request_completion(my_bs, request_idx, result_p);
 		if (poll_res == -1)
 		{
-			CHECK_FOR_INTERRUPTS();
-
 			/*
-			 * TODO: wake up periodically for CHECK_FOR_INTERRUPTS(). Because
+			 * Wake up periodically for CHECK_FOR_INTERRUPTS(). Because
 			 * we wait on MyIOCompletionLatch rather than MyLatch, we won't be
 			 * woken up for the standard interrupts.
 			 */
+			long		timeout_ms = 1000;
+
+			CHECK_FOR_INTERRUPTS();
+
+			/*
+			 * FIXME: as a temporary hack, panic if we don't get a response promptly.
+			 * Lots of regression tests are getting stuck and failing at the moment,
+			 * this makes them fail a little faster, which it faster to iterate.
+			 * This needs to be removed once more regression tests are passing.
+			 */
+			now = GetCurrentTimestamp();
+			if (now - start_time > 30 * 1000 * 1000)
+			{
+				elog(PANIC, "timed out waiting for response from communicator process");
+			}
+
 			(void) WaitLatch(MyIOCompletionLatch,
-							 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET,
-							 0,
+							 WL_EXIT_ON_PM_DEATH | WL_LATCH_SET | WL_TIMEOUT,
+							 timeout_ms,
 							 WAIT_EVENT_NEON_PS_STARTING);
 			continue;			/* still busy */
 		}
