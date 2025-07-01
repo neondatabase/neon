@@ -159,17 +159,13 @@ static XLogReaderState *reader_state;
  * If the Linux uAPI headers don't define the system call number,
  * fail the build deliberately rather than ifdef'ing it to ENOSYS.
  * We prefer a compile time over a runtime error for walredo.
+ *
+ * If, however, we need to build on old systems for development, e.g. Ubuntu 20.04
+ * with glibc 2.31, provide a NO_CLOSE_RANGE macro for suboptimal implementation
  */
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <errno.h>
-
-static int
-close_range_syscall(unsigned int start_fd, unsigned int count, unsigned int flags)
-{
-    return syscall(__NR_close_range, start_fd, count, flags);
-}
-
 
 static PgSeccompRule allowed_syscalls[] =
 {
@@ -213,10 +209,30 @@ enter_seccomp_mode(void)
 	 * it potentially leaked to us, _before_ we start processing potentially dangerous
 	 * wal records. See the comment in the Rust code that launches this process.
 	 */
-	if (close_range_syscall(3, ~0U, 0) != 0)
+#define START_FD 3
+#define STR(s) #s
+#ifdef __NR_close_range
+	if (syscall(__NR_close_range, START_FD, ~0U, 0) != 0)
 		ereport(FATAL,
 				(errcode(ERRCODE_SYSTEM_ERROR),
-				 errmsg("seccomp: could not close files >= fd 3")));
+				 errmsg("seccomp: could not close files >= " STR(START_FD))));
+#else
+	// close_range can return EINVAL -- not our case as start_fd and end_fd are hardcoded.
+	// It doesn't return any other errors if CLOSE_RANGE_UNSHARE is not set so we don't
+	// report any errors here.
+	#ifdef NO_CLOSE_RANGE
+		#warning
+			"__NR_close_range is not defined which means you're using kernel < 5.9."
+			"Using suboptimal implementation. Do NOT use this in production"
+		int fd;
+		for (fd = START_FD; fd <= INT_MAX; ++fd)
+			close(fd);
+	#else
+		#error
+			"__NR_close_range is not defined which means you're using kernel < 5.9."
+			"Define NO_CLOSE_RANGE for local development"
+	#endif
+#endif
 
 #ifdef MALLOC_NO_MMAP
 	/* Ask glibc not to use mmap() */
