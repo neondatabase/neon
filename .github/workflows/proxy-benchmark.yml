@@ -32,15 +32,23 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
+<<<<<<< HEAD
     runs-on: [ self-hosted, unit-perf-aws-arm ]
+=======
+    runs-on: [ self-hosted, unit-perf ]
+>>>>>>> 8bd54d307 (Run proxy-bench directly on self-hosted runner)
     timeout-minutes: 60  # 1h timeout
-    container:
-      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init
     steps:
+    - name: Checkout only needed scripts
+      uses: actions/checkout@v4
+      with:
+        sparse-checkout: |
+          scripts/proxy_bench_results_ingest.py
+          scripts/ingest_perf_test_result.py
+          scripts/generate_and_push_perf_report.sh
+          scripts/pysync
+        sparse-checkout-cone-mode: false
+
     - name: Checkout proxy-bench Repo
       uses: actions/checkout@v4
       with:
@@ -57,6 +65,7 @@ jobs:
           echo "NEON_DIR=${RUNNER_TEMP}/neon"
           echo "NEON_PROXY_PATH=${RUNNER_TEMP}/neon/bin/proxy"
           echo "TEST_OUTPUT=${PROXY_BENCH_PATH}/test_output"
+          echo "DOCKER_COMPOSE_FILE=${PROXY_BENCH_PATH}/docker-compose.yml"
           echo ""
         } >> "$GITHUB_ENV"
 
@@ -65,6 +74,19 @@ jobs:
       with:
         path: ~/.cache/pypoetry/virtualenvs
         key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
+<<<<<<< HEAD
+=======
+
+    - name: Install Python deps
+      shell: bash -euxo pipefail {0}
+      run: ./scripts/pysync
+
+    - name: Run proxy-bench
+      env:
+        DOCKER_COMPOSE_FILE: ${{ env.DOCKER_COMPOSE_FILE }}
+      working-directory: ${{ env.PROXY_BENCH_PATH }}
+      run: ./run.sh
+>>>>>>> 8bd54d307 (Run proxy-bench directly on self-hosted runner)
 
     - name: Install Python deps
       shell: bash -euxo pipefail {0}
@@ -77,14 +99,14 @@ jobs:
 
     - name: Run proxy-bench
       working-directory: ${{ env.PROXY_BENCH_PATH }}
-      run: ./run.sh --with-grafana --bare-metal
+      run: ./run.sh --bare-metal
 
     - name: Ingest Bench Results
       if: always()
       working-directory: ${{ env.NEON_DIR }}
       run: |
         mkdir -p $TEST_OUTPUT
-        python $NEON_DIR/scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
+        ./scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
 
     - name: Push Metrics to Proxy perf database
       shell: bash -euxo pipefail {0}
@@ -109,4 +131,11 @@ jobs:
         fi
         if [[ -d "${PROXY_BENCH_PATH}/test_output" ]]; then
           rm -rf ${PROXY_BENCH_PATH}/test_output
+<<<<<<< HEAD
         fi
+=======
+        fi
+        if [[ -d "./scripts" ]]; then
+          rm -rf ./scripts
+        fi
+>>>>>>> 8bd54d307 (Run proxy-bench directly on self-hosted runner)
