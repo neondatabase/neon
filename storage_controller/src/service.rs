@@ -1,8 +1,8 @@
 pub mod chaos_injector;
-mod context_iterator;
 pub mod feature_flag;
 pub(crate) mod safekeeper_reconciler;
 mod safekeeper_service;
+mod tenant_shard_iterator;
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -16,7 +16,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
-use context_iterator::TenantShardContextIterator;
 use control_plane::storage_controller::{
     AttachHookRequest, AttachHookResponse, InspectRequest, InspectResponse,
 };
@@ -55,6 +54,7 @@ use pageserver_client::{BlockUnblock, mgmt_api};
 use reqwest::{Certificate, StatusCode};
 use safekeeper_api::models::SafekeeperUtilization;
 use safekeeper_reconciler::SafekeeperReconcilers;
+use tenant_shard_iterator::{TenantShardExclusiveIterator, create_shared_shard_iterator};
 use tokio::sync::TryAcquireError;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
@@ -78,7 +78,7 @@ use crate::id_lock_map::{
 use crate::leadership::Leadership;
 use crate::metrics;
 use crate::node::{AvailabilityTransition, Node};
-use crate::operation_utils::{self, TenantShardDrain, TenantShardIterator};
+use crate::operation_utils::{self, TenantShardDrain};
 use crate::pageserver_client::PageserverClient;
 use crate::peer_client::GlobalObservedState;
 use crate::persistence::split_state::SplitState;
@@ -7021,7 +7021,7 @@ impl Service {
             }
 
             for (_tenant_id, mut schedule_context, shards) in
-                TenantShardContextIterator::new(tenants, ScheduleMode::Normal)
+                TenantShardExclusiveIterator::new(tenants, ScheduleMode::Normal)
             {
                 for shard in shards {
                     if shard.deref_node(node_id) {
@@ -7099,7 +7099,7 @@ impl Service {
         let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal).build();
 
         let mut waiters: Vec<ReconcilerWaiter> = Vec::new();
-        let mut tid_iter = self.create_tenant_shard_iterator().await;
+        let mut tid_iter = create_shared_shard_iterator(self.clone());
 
         while !tid_iter.finished() {
             if cancel.is_cancelled() {
@@ -7643,7 +7643,7 @@ impl Service {
                 let mut tenants_affected: usize = 0;
 
                 for (_tenant_id, mut schedule_context, shards) in
-                    TenantShardContextIterator::new(tenants, ScheduleMode::Normal)
+                    TenantShardExclusiveIterator::new(tenants, ScheduleMode::Normal)
                 {
                     for tenant_shard in shards {
                         let tenant_shard_id = tenant_shard.tenant_shard_id;
@@ -8500,7 +8500,7 @@ impl Service {
         // to ignore the utilisation component of the score.
 
         for (_tenant_id, schedule_context, shards) in
-            TenantShardContextIterator::new(tenants, ScheduleMode::Speculative)
+            TenantShardExclusiveIterator::new(tenants, ScheduleMode::Speculative)
         {
             for shard in shards {
                 if work.len() >= MAX_OPTIMIZATIONS_PLAN_PER_PASS {
@@ -9227,7 +9227,7 @@ impl Service {
 
         let mut waiters = Vec::new();
 
-        let mut tid_iter = self.create_tenant_shard_iterator().await;
+        let mut tid_iter = create_shared_shard_iterator(self.clone());
 
         while !tid_iter.finished() {
             if cancel.is_cancelled() {
@@ -9801,30 +9801,6 @@ impl Service {
         }
 
         global_observed
-    }
-
-    async fn create_tenant_shard_iterator(
-        self: &Arc<Self>,
-    ) -> TenantShardIterator<impl Fn(Option<TenantShardId>) -> Option<TenantShardId>> {
-        let service = self.clone();
-        let tenants_accessor = move |last_inspected_shard: Option<TenantShardId>| {
-            let locked = &service.inner.read().unwrap();
-            let tenants = &locked.tenants;
-            let entry = match last_inspected_shard {
-                Some(skip_past) => {
-                    // Skip to the last seen tenant shard id
-                    let mut cursor = tenants.iter().skip_while(|(tid, _)| **tid != skip_past);
-
-                    // Skip past the last seen
-                    cursor.nth(1)
-                }
-                None => tenants.first_key_value(),
-            };
-
-            entry.map(|(tid, _)| tid).copied()
-        };
-
-        TenantShardIterator::new(tenants_accessor)
     }
 
     pub(crate) async fn update_shards_preferred_azs(

@@ -10,51 +10,6 @@ use crate::node::Node;
 use crate::scheduler::Scheduler;
 use crate::tenant_shard::TenantShard;
 
-pub(crate) struct TenantShardIterator<F> {
-    tenants_accessor: F,
-    inspected_all_shards: bool,
-    last_inspected_shard: Option<TenantShardId>,
-}
-
-/// A simple iterator which can be used in tandem with [`crate::service::Service`]
-/// to iterate over all known tenant shard ids without holding the lock on the
-/// service state at all times.
-impl<F> TenantShardIterator<F>
-where
-    F: Fn(Option<TenantShardId>) -> Option<TenantShardId>,
-{
-    pub(crate) fn new(tenants_accessor: F) -> Self {
-        Self {
-            tenants_accessor,
-            inspected_all_shards: false,
-            last_inspected_shard: None,
-        }
-    }
-
-    /// Returns the next tenant shard id if one exists
-    pub(crate) fn next(&mut self) -> Option<TenantShardId> {
-        if self.inspected_all_shards {
-            return None;
-        }
-
-        match (self.tenants_accessor)(self.last_inspected_shard) {
-            Some(tid) => {
-                self.last_inspected_shard = Some(tid);
-                Some(tid)
-            }
-            None => {
-                self.inspected_all_shards = true;
-                None
-            }
-        }
-    }
-
-    /// Returns true when the end of the iterator is reached and false otherwise
-    pub(crate) fn finished(&self) -> bool {
-        self.inspected_all_shards
-    }
-}
-
 /// Check that the state of the node being drained is as expected:
 /// node is present in memory and scheduling policy is set to expected_policy
 pub(crate) fn validate_node_state(
@@ -181,57 +136,5 @@ impl TenantShardDrain {
                 Ok(Some(tenant_shard))
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use utils::id::TenantId;
-    use utils::shard::{ShardCount, ShardNumber, TenantShardId};
-
-    use super::TenantShardIterator;
-
-    #[test]
-    fn test_tenant_shard_iterator() {
-        let tenant_id = TenantId::generate();
-        let shard_count = ShardCount(8);
-
-        let mut tenant_shards = Vec::default();
-        for i in 0..shard_count.0 {
-            tenant_shards.push((
-                TenantShardId {
-                    tenant_id,
-                    shard_number: ShardNumber(i),
-                    shard_count,
-                },
-                (),
-            ))
-        }
-
-        let tenant_shards = Arc::new(tenant_shards);
-
-        let mut tid_iter = TenantShardIterator::new({
-            let tenants = tenant_shards.clone();
-            move |last_inspected_shard: Option<TenantShardId>| {
-                let entry = match last_inspected_shard {
-                    Some(skip_past) => {
-                        let mut cursor = tenants.iter().skip_while(|(tid, _)| *tid != skip_past);
-                        cursor.nth(1)
-                    }
-                    None => tenants.first(),
-                };
-
-                entry.map(|(tid, _)| tid).copied()
-            }
-        });
-
-        let mut iterated_over = Vec::default();
-        while let Some(tid) = tid_iter.next() {
-            iterated_over.push((tid, ()));
-        }
-
-        assert_eq!(iterated_over, *tenant_shards);
     }
 }
