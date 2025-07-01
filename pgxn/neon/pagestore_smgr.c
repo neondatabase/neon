@@ -748,11 +748,6 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (get_cached_relsize(InfoFromSMgrRel(reln), forkNum, &n_blocks))
-	{
-		return true;
-	}
-
 	/*
 	 * \d+ on a view calls smgrexists with 0/0/0 relfilenode. The page server
 	 * will error out if you check that, because the whole dbdir for
@@ -780,6 +775,11 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		return communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum);
 	else
 	{
+		if (get_cached_relsize(InfoFromSMgrRel(reln), forkNum, &n_blocks))
+		{
+			return true;
+		}
+
 		neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum,
 							  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 
@@ -2216,8 +2216,12 @@ neon_end_unlogged_build(SMgrRelation reln)
 				 RelFileInfoFmt(InfoFromNInfoB(rinfob)),
 				 forknum);
 
-			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
-			lfc_invalidate(InfoFromNInfoB(rinfob), forknum, nblocks);
+			// FIXME: also do this with the new communicator
+			if (!neon_enable_new_communicator)
+			{
+				forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
+				lfc_invalidate(InfoFromNInfoB(rinfob), forknum, nblocks);
+			}
 
 			mdclose(reln, forknum);
 #ifndef DEBUG_COMPARE_LOCAL
