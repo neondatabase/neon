@@ -995,7 +995,14 @@ def test_storage_controller_compute_hook_keep_failing(
     neon_env_builder: NeonEnvBuilder,
     httpserver_listen_address: ListenAddress
 ):
-    neon_env_builder.num_pageservers = 3
+    def assign_az(ps_cfg):
+        az = f"az-{ps_cfg['id'] % 2}"
+        log.info("Assigned AZ {az}")
+        ps_cfg["availability_zone"] = az
+    neon_env_builder.pageserver_config_override = assign_az
+
+    neon_env_builder.num_pageservers = 4
+    neon_env_builder.num_azs = 2
     (host, port) = httpserver_listen_address
     neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
 
@@ -1058,7 +1065,7 @@ def test_storage_controller_compute_hook_keep_failing(
             ]
             is True
         )
-    
+
     # Check tid_allowed has two secondaries
     status_by_tenant[tid_banned] = 200
     assert len(env.storage_controller.tenant_describe(tid_allowed)["shards"]) == 2
