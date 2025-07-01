@@ -6,6 +6,7 @@
 /tmp_check_cli
 __pycache__/
 test_output/
+neon_previous/
 .vscode
 .idea
 *.swp

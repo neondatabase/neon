@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
+#    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
 #
 #    # Build previous version of binaries and store them somewhere:
 #    rm -rf pg_install target
@@ -102,6 +103,7 @@ if TYPE_CHECKING:
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
+#    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
 #    export NEON_BIN=target/${BUILD_TYPE}
 #    export POSTGRES_DISTRIB_DIR=pg_install
 #
