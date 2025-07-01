@@ -41,8 +41,11 @@ def _start_profiling_cpu(client: EndpointHttpClient, event: threading.Event | No
             log.debug("CPU profiling is already in progress, cannot start again")
             raise HTTPError("Failed to finish CPU profiling: profiling is already in progress.")
         case 500:
-            log.debug(f"Failed to finish CPU profiling, was stopped or got an error: {status}")
-            raise HTTPError(f"Failed to finish CPU profiling, {status}")
+            response_str = response.decode("utf-8", errors="replace")
+            log.debug(
+                f"Failed to finish CPU profiling, was stopped or got an error: {status}: {response_str}"
+            )
+            raise HTTPError(f"Failed to finish CPU profiling, {status}: {response_str}")
 
 
 def _stop_profiling_cpu(client: EndpointHttpClient, event: threading.Event | None):
@@ -129,10 +132,9 @@ def test_compute_profiling_cpu_with_timeout(neon_simple_env: NeonEnv):
     pg_cur = pg_conn.cursor()
     pg_cur.execute("create database profiling_test2")
     http_client = endpoint.http_client()
-    event = threading.Event()
 
     def _wait_and_assert_cpu_profiling_local():
-        _wait_and_assert_cpu_profiling(http_client, event)
+        _wait_and_assert_cpu_profiling(http_client, None)
 
     thread = threading.Thread(target=_wait_and_assert_cpu_profiling_local)
     thread.start()
@@ -160,7 +162,7 @@ def test_compute_profiling_cpu_with_timeout(neon_simple_env: NeonEnv):
 
     thread2 = threading.Thread(target=insert_rows)
 
-    event.wait()  # Wait for profiling to be ready to start
+    assert _wait_till_profiling_starts(http_client, None)
     time.sleep(4)  # Give some time for the profiling to start
     thread2.start()
 
