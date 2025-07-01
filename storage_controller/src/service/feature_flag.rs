@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use futures::StreamExt;
 use pageserver_api::config::PostHogConfig;
 use pageserver_client::mgmt_api;
-use posthog_client_lite::{PostHogClient, PostHogClientConfig};
+use posthog_client_lite::PostHogClient;
 use reqwest::StatusCode;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -20,20 +20,14 @@ pub struct FeatureFlagService {
 const DEFAULT_POSTHOG_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 impl FeatureFlagService {
-    pub fn new(service: Arc<Service>, config: PostHogConfig) -> Self {
-        let client = PostHogClient::new(PostHogClientConfig {
-            project_id: config.project_id.clone(),
-            server_api_key: config.server_api_key.clone(),
-            client_api_key: config.client_api_key.clone(),
-            private_api_url: config.private_api_url.clone(),
-            public_api_url: config.public_api_url.clone(),
-        });
-        Self {
+    pub fn new(service: Arc<Service>, config: PostHogConfig) -> Result<Self, &'static str> {
+        let client = PostHogClient::new(config.clone().try_into_posthog_config()?);
+        Ok(Self {
             service,
             config,
             client,
             http_client: reqwest::Client::new(),
-        }
+        })
     }
 
     async fn refresh(self: Arc<Self>, cancel: CancellationToken) -> Result<(), anyhow::Error> {

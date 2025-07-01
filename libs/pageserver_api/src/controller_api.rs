@@ -546,6 +546,11 @@ pub struct TimelineImportRequest {
     pub sk_set: Vec<NodeId>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TimelineSafekeeperMigrateRequest {
+    pub new_sk_set: Vec<NodeId>,
+}
+
 #[cfg(test)]
 mod test {
     use serde_json;

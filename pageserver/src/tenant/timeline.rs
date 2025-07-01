@@ -95,12 +95,12 @@ use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
 use super::upload_queue::NotInitialized;
 use super::{
-    AttachedTenantConf, BasebackupPrepareSender, GcError, HeatMapTimeline, MaybeOffloaded,
+    AttachedTenantConf, GcError, HeatMapTimeline, MaybeOffloaded,
     debug_assert_current_span_has_tenant_and_timeline_id,
 };
 use crate::PERF_TRACE_TARGET;
 use crate::aux_file::AuxFileSizeEstimator;
-use crate::basebackup_cache::BasebackupPrepareRequest;
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
@@ -201,7 +201,7 @@ pub struct TimelineResources {
     pub pagestream_throttle_metrics: Arc<crate::metrics::tenant_throttling::Pagestream>,
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
-    pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub basebackup_cache: Arc<BasebackupCache>,
     pub feature_resolver: FeatureResolver,
 }
 
@@ -448,7 +448,7 @@ pub struct Timeline {
     wait_lsn_log_slow: tokio::sync::Semaphore,
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
-    basebackup_prepare_sender: BasebackupPrepareSender,
+    basebackup_cache: Arc<BasebackupCache>,
 
     feature_resolver: FeatureResolver,
 }
@@ -763,7 +763,7 @@ pub(crate) enum CreateImageLayersError {
     PageReconstructError(#[source] PageReconstructError),
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl From<layer_manager::Shutdown> for CreateImageLayersError {
@@ -2500,6 +2500,37 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.basebackup_cache_enabled)
     }
 
+    /// Try to get a basebackup from the on-disk cache.
+    pub(crate) async fn get_cached_basebackup(&self, lsn: Lsn) -> Option<tokio::fs::File> {
+        self.basebackup_cache
+            .get(self.tenant_shard_id.tenant_id, self.timeline_id, lsn)
+            .await
+    }
+
+    /// Convenience method to attempt fetching a basebackup for the timeline if enabled and safe for
+    /// the given request parameters.
+    ///
+    /// TODO: consider moving this onto GrpcPageServiceHandler once the libpq handler is gone.
+    pub async fn get_cached_basebackup_if_enabled(
+        &self,
+        lsn: Option<Lsn>,
+        prev_lsn: Option<Lsn>,
+        full: bool,
+        replica: bool,
+        gzip: bool,
+    ) -> Option<tokio::fs::File> {
+        if !self.is_basebackup_cache_enabled() || !self.basebackup_cache.is_enabled() {
+            return None;
+        }
+        // We have to know which LSN to fetch the basebackup for.
+        let lsn = lsn?;
+        // We only cache gzipped, non-full basebackups for primary computes with automatic prev_lsn.
+        if prev_lsn.is_some() || full || replica || !gzip {
+            return None;
+        }
+        self.get_cached_basebackup(lsn).await
+    }
+
     /// Prepare basebackup for the given LSN and store it in the basebackup cache.
     /// The method is asynchronous and returns immediately.
     /// The actual basebackup preparation is performed in the background
@@ -2521,17 +2552,8 @@ impl Timeline {
             return;
         }
 
-        let res = self
-            .basebackup_prepare_sender
-            .send(BasebackupPrepareRequest {
-                tenant_shard_id: self.tenant_shard_id,
-                timeline_id: self.timeline_id,
-                lsn,
-            });
-        if let Err(e) = res {
-            // May happen during shutdown, it's not critical.
-            info!("Failed to send shutdown checkpoint: {e:#}");
-        }
+        self.basebackup_cache
+            .send_prepare(self.tenant_shard_id, self.timeline_id, lsn);
     }
 }
 
@@ -3088,7 +3110,7 @@ impl Timeline {
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
 
-                basebackup_prepare_sender: resources.basebackup_prepare_sender,
+                basebackup_cache: resources.basebackup_cache,
 
                 feature_resolver: resources.feature_resolver,
             };
@@ -4658,6 +4680,16 @@ impl Timeline {
         mut layer_flush_start_rx: tokio::sync::watch::Receiver<(u64, Lsn)>,
         ctx: &RequestContext,
     ) {
+        // Always notify waiters about the flush loop exiting since the loop might stop
+        // when the timeline hasn't been cancelled.
+        let scopeguard_rx = layer_flush_start_rx.clone();
+        scopeguard::defer! {
+            let (flush_counter, _) = *scopeguard_rx.borrow();
+            let _ = self
+                .layer_flush_done_tx
+                .send_replace((flush_counter, Err(FlushLayerError::Cancelled)));
+        }
+
         // Subscribe to L0 delta layer updates, for compaction backpressure.
         let mut watch_l0 = match self
             .layers
@@ -4687,9 +4719,6 @@ impl Timeline {
             let result = loop {
                 if self.cancel.is_cancelled() {
                     info!("dropping out of flush loop for timeline shutdown");
-                    // Note: we do not bother transmitting into [`layer_flush_done_tx`], because
-                    // anyone waiting on that will respect self.cancel as well: they will stop
-                    // waiting at the same time we as drop out of this loop.
                     return;
                 }
 
@@ -5561,7 +5590,7 @@ impl Timeline {
                 self.should_check_if_image_layers_required(lsn)
             };
 
-        let mut batch_image_writer = BatchLayerWriter::new(self.conf).await?;
+        let mut batch_image_writer = BatchLayerWriter::new(self.conf);
 
         let mut all_generated = true;
 
@@ -5665,7 +5694,8 @@ impl Timeline {
                 self.cancel.clone(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
             fail_point!("image-layer-writer-fail-before-finish", |_| {
                 Err(CreateImageLayersError::Other(anyhow::anyhow!(
@@ -5760,7 +5790,10 @@ impl Timeline {
             }
         }
 
-        let image_layers = batch_image_writer.finish(self, ctx).await?;
+        let image_layers = batch_image_writer
+            .finish(self, ctx)
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
         let mut guard = self.layers.write(LayerManagerLockHolder::Compaction).await;
 

@@ -24,7 +24,6 @@ pub struct ProxyConfig {
     pub authentication_config: AuthenticationConfig,
     pub rest_config: RestConfig,
     pub proxy_protocol_v2: ProxyProtocolV2,
-    pub region: String,
     pub handshake_timeout: Duration,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,

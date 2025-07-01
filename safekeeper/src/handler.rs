@@ -220,7 +220,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                                     stripe_size: ShardStripeSize(stripe_size),
                                 };
                                 self.shard =
-                                    Some(ShardIdentity::from_params(ShardNumber(number), &params));
+                                    Some(ShardIdentity::from_params(ShardNumber(number), params));
                             }
                             _ => {
                                 return Err(QueryError::Other(anyhow::anyhow!(

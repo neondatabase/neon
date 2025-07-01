@@ -3503,22 +3503,16 @@ impl Timeline {
         // Only create image layers when there is no ancestor branches. TODO: create covering image layer
         // when some condition meet.
         let mut image_layer_writer = if !has_data_below {
-            Some(
-                SplitImageLayerWriter::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_shard_id,
-                    job_desc.compaction_key_range.start,
-                    lowest_retain_lsn,
-                    self.get_compaction_target_size(),
-                    &self.gate,
-                    self.cancel.clone(),
-                    ctx,
-                )
-                .await
-                .context("failed to create image layer writer")
-                .map_err(CompactionError::Other)?,
-            )
+            Some(SplitImageLayerWriter::new(
+                self.conf,
+                self.timeline_id,
+                self.tenant_shard_id,
+                job_desc.compaction_key_range.start,
+                lowest_retain_lsn,
+                self.get_compaction_target_size(),
+                &self.gate,
+                self.cancel.clone(),
+            ))
         } else {
             None
         };
@@ -3531,10 +3525,7 @@ impl Timeline {
             self.get_compaction_target_size(),
             &self.gate,
             self.cancel.clone(),
-        )
-        .await
-        .context("failed to create delta layer writer")
-        .map_err(CompactionError::Other)?;
+        );
 
         #[derive(Default)]
         struct RewritingLayers {
@@ -4330,7 +4321,8 @@ impl TimelineAdaptor {
             self.timeline.cancel.clone(),
             ctx,
         )
-        .await?;
+        .await
+        .map_err(CreateImageLayersError::Other)?;
 
         fail_point!("image-layer-writer-fail-before-finish", |_| {
             Err(CreateImageLayersError::Other(anyhow::anyhow!(
@@ -4339,7 +4331,10 @@ impl TimelineAdaptor {
         });
 
         let keyspace = KeySpace {
-            ranges: self.get_keyspace(key_range, lsn, ctx).await?,
+            ranges: self
+                .get_keyspace(key_range, lsn, ctx)
+                .await
+                .map_err(CreateImageLayersError::Other)?,
         };
         // TODO set proper (stateful) start. The create_image_layer_for_rel_blocks function mostly
         let outcome = self
@@ -4358,9 +4353,13 @@ impl TimelineAdaptor {
             unfinished_image_layer,
         } = outcome
         {
-            let (desc, path) = unfinished_image_layer.finish(ctx).await?;
+            let (desc, path) = unfinished_image_layer
+                .finish(ctx)
+                .await
+                .map_err(CreateImageLayersError::Other)?;
             let image_layer =
-                Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?;
+                Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)
+                    .map_err(CreateImageLayersError::Other)?;
             self.new_images.push(image_layer);
         }
 

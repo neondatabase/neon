@@ -418,12 +418,7 @@ async fn request_handler(
     if config.http_config.accept_websockets
         && framed_websockets::upgrade::is_upgrade_request(&request)
     {
-        let ctx = RequestContext::new(
-            session_id,
-            conn_info,
-            crate::metrics::Protocol::Ws,
-            &config.region,
-        );
+        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Ws);
 
         ctx.set_user_agent(
             request
@@ -463,12 +458,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response.map(|b| b.map_err(|x| match x {}).boxed()))
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
-        let ctx = RequestContext::new(
-            session_id,
-            conn_info,
-            crate::metrics::Protocol::Http,
-            &config.region,
-        );
+        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
         let span = ctx.span();
 
         let testodrome_id = request

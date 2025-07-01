@@ -4168,13 +4168,20 @@ class DeletionSubject(Enum):
     TENANT = "tenant"
 
 
+class EmptyTimeline(Enum):
+    EMPTY = "empty"
+    NONEMPTY = "nonempty"
+
+
 @run_only_on_default_postgres("PG version is not interesting here")
 @pytest.mark.parametrize("restart_storcon", [RestartStorcon.RESTART, RestartStorcon.ONLINE])
 @pytest.mark.parametrize("deletetion_subject", [DeletionSubject.TENANT, DeletionSubject.TIMELINE])
+@pytest.mark.parametrize("empty_timeline", [EmptyTimeline.EMPTY, EmptyTimeline.NONEMPTY])
 def test_storcon_create_delete_sk_down(
     neon_env_builder: NeonEnvBuilder,
     restart_storcon: RestartStorcon,
     deletetion_subject: DeletionSubject,
+    empty_timeline: EmptyTimeline,
 ):
     """
     Test that the storcon can create and delete tenants and timelines with a safekeeper being down.
@@ -4226,10 +4233,11 @@ def test_storcon_create_delete_sk_down(
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
-    with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
-        # endpoint should start.
-        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
-        ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+    if empty_timeline == EmptyTimeline.NONEMPTY:
+        with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
+            # endpoint should start.
+            ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+            ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
     env.storage_controller.assert_log_contains("writing pending op for sk id 1")
     env.safekeepers[0].start()

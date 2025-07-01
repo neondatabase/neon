@@ -3,7 +3,8 @@
 
   "timestamp": "2021-05-23T18:25:43.511Z",
   "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8b",
-
+  "suspend_timeout_seconds": 3600,
+  
   "cluster": {
     "cluster_id": "test-cluster-42",
     "name": "Zenith Test",

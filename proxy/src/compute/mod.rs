@@ -236,7 +236,7 @@ impl AuthInfo {
         &self,
         ctx: &RequestContext,
         compute: &mut ComputeConnection,
-        user_info: ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<PostgresSettings, PostgresError> {
         // client config with stubbed connect info.
         // TODO(conrad): should we rewrite this to bypass tokio-postgres2 entirely,
@@ -272,7 +272,7 @@ impl AuthInfo {
                 secret_key,
             },
             compute.hostname.to_string(),
-            user_info,
+            user_info.clone(),
         );
 
         Ok(PostgresSettings {
