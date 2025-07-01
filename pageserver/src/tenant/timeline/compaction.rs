@@ -3513,11 +3513,7 @@ impl Timeline {
                     self.get_compaction_target_size(),
                     &self.gate,
                     self.cancel.clone(),
-                    ctx,
                 )
-                .await
-                .context("failed to create image layer writer")
-                .map_err(CompactionError::Other)?,
             )
         } else {
             None
