@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
 use std::time::Duration;
 
 use futures::FutureExt;
@@ -33,6 +33,7 @@ pub struct ConnectionWithCredentialsProvider {
     con: Option<MultiplexedConnection>,
     refresh_token_task: Option<JoinHandle<()>>,
     mutex: tokio::sync::Mutex<()>,
+    credentials_refreshed: Arc<AtomicBool>,
 }
 
 impl Clone for ConnectionWithCredentialsProvider {
@@ -42,6 +43,7 @@ impl Clone for ConnectionWithCredentialsProvider {
             con: None,
             refresh_token_task: None,
             mutex: tokio::sync::Mutex::new(()),
+            credentials_refreshed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -65,6 +67,7 @@ impl ConnectionWithCredentialsProvider {
             con: None,
             refresh_token_task: None,
             mutex: tokio::sync::Mutex::new(()),
+            credentials_refreshed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -78,11 +81,16 @@ impl ConnectionWithCredentialsProvider {
             con: None,
             refresh_token_task: None,
             mutex: tokio::sync::Mutex::new(()),
+            credentials_refreshed: Arc::new(AtomicBool::new(true)),
         }
     }
 
     async fn ping(con: &mut MultiplexedConnection) -> RedisResult<()> {
         redis::cmd("PING").query_async(con).await
+    }
+
+    pub(crate) fn is_credentials_refreshed(&self) -> bool {
+        self.credentials_refreshed.load(Ordering::Acquire)
     }
 
     pub(crate) async fn connect(&mut self) -> anyhow::Result<()> {
@@ -112,11 +120,15 @@ impl ConnectionWithCredentialsProvider {
         if let Credentials::Dynamic(credentials_provider, _) = &self.credentials {
             let credentials_provider = credentials_provider.clone();
             let con2 = con.clone();
+            let credentials_refreshed = self.credentials_refreshed.clone();
             let f = tokio::spawn(async move {
-                Self::keep_connection(con2, credentials_provider)
-                    .await
-                    .inspect_err(|e| debug!("keep_connection failed: {e}"))
-                    .ok();
+                let result = Self::keep_connection(con2, credentials_provider).await;
+                if let Err(e) = result {
+                    credentials_refreshed.store(false, Ordering::Release);
+                    debug!("keep_connection failed: {e}");
+                } else {
+                    credentials_refreshed.store(true, Ordering::Release);
+                }
             });
             self.refresh_token_task = Some(f);
         }

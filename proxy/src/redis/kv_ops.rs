@@ -49,7 +49,12 @@ impl RedisKVClient {
             Err(e) => e,
         };
 
-        tracing::error!("failed to run query: {e}");
+        if self.client.is_credentials_refreshed() {
+            tracing::error!("failed to run query: {e}");
+        } else {
+            tracing::debug!("failed to run query: {e}");
+        }
+
         match e.retry_method() {
             redis::RetryMethod::Reconnect => {
                 tracing::info!("Redis client is disconnected. Reconnecting...");
