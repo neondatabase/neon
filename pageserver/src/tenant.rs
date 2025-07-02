@@ -34,7 +34,7 @@ use once_cell::sync::Lazy;
 pub use pageserver_api::models::TenantState;
 use pageserver_api::models::{self, RelSizeMigration};
 use pageserver_api::models::{
-    CompactInfoResponse, LsnLease, TimelineArchivalState, TimelineState, TopTenantShardItem,
+    CompactInfoResponse, TimelineArchivalState, TimelineState, TopTenantShardItem,
     WalRedoManagerStatus,
 };
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize, TenantShardId};
@@ -180,6 +180,7 @@ pub(super) struct AttachedTenantConf {
 
 impl AttachedTenantConf {
     fn new(
+        conf: &'static PageServerConf,
         tenant_conf: pageserver_api::models::TenantConfig,
         location: AttachedLocationConfig,
     ) -> Self {
@@ -191,9 +192,7 @@ impl AttachedTenantConf {
         let lsn_lease_deadline = if location.attach_mode == AttachmentMode::Single {
             Some(
                 tokio::time::Instant::now()
-                    + tenant_conf
-                        .lsn_lease_length
-                        .unwrap_or(LsnLease::DEFAULT_LENGTH),
+                    + TenantShard::get_lsn_lease_length_impl(conf, &tenant_conf),
             )
         } else {
             // We don't use `lsn_lease_deadline` to delay GC in AttachedMulti and AttachedStale
@@ -208,10 +207,13 @@ impl AttachedTenantConf {
         }
     }
 
-    fn try_from(location_conf: LocationConf) -> anyhow::Result<Self> {
+    fn try_from(
+        conf: &'static PageServerConf,
+        location_conf: LocationConf,
+    ) -> anyhow::Result<Self> {
         match &location_conf.mode {
             LocationMode::Attached(attach_conf) => {
-                Ok(Self::new(location_conf.tenant_conf, *attach_conf))
+                Ok(Self::new(conf, location_conf.tenant_conf, *attach_conf))
             }
             LocationMode::Secondary(_) => {
                 anyhow::bail!(
@@ -4234,10 +4236,16 @@ impl TenantShard {
     }
 
     pub fn get_lsn_lease_length(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        Self::get_lsn_lease_length_impl(self.conf, &self.tenant_conf.load().tenant_conf)
+    }
+
+    pub fn get_lsn_lease_length_impl(
+        conf: &'static PageServerConf,
+        tenant_conf: &pageserver_api::models::TenantConfig,
+    ) -> Duration {
         tenant_conf
             .lsn_lease_length
-            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+            .unwrap_or(conf.default_tenant_conf.lsn_lease_length)
     }
 
     pub fn get_timeline_offloading_enabled(&self) -> bool {
