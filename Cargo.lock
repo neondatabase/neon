@@ -4493,6 +4493,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pageserver_client_grpc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "pageserver_page_api",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tracing",
+ "utils",
+]
+
+[[package]]
 name = "pageserver_compaction"
 version = "0.1.0"
 dependencies = [
