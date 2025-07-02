@@ -1145,6 +1145,22 @@ pub(crate) enum LoadConfigError {
     NotFound(Utf8PathBuf),
 }
 
+pub(crate) enum IgnoreLeaseDeadline {
+    Default,
+    No,
+    Yes,
+}
+
+impl From<Option<bool>> for IgnoreLeaseDeadline {
+    fn from(value: Option<bool>) -> Self {
+        match value {
+            None => IgnoreLeaseDeadline::Default,
+            Some(false) => IgnoreLeaseDeadline::No,
+            Some(true) => IgnoreLeaseDeadline::Yes,
+        }
+    }
+}
+
 impl TenantShard {
     /// Yet another helper for timeline initialization.
     ///
@@ -3076,6 +3092,7 @@ impl TenantShard {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
+        ignore_lease_deadline: IgnoreLeaseDeadline,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<GcResult, GcError> {
@@ -3112,7 +3129,11 @@ impl TenantShard {
             // with durable leases, take a shortcut here and skip lease deadline check
             // for all tests.
             // Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
-            let ignore_lease_deadline = cfg!(test) || cfg!(feature = "testing");
+            let ignore_lease_deadline = match ignore_lease_deadline {
+                IgnoreLeaseDeadline::Default => cfg!(test) || cfg!(feature = "testing"),
+                IgnoreLeaseDeadline::No => false,
+                IgnoreLeaseDeadline::Yes => true,
+            };
             if !ignore_lease_deadline && conf.is_gc_blocked_by_lsn_lease_deadline() {
                 info!("Skipping GC because lsn lease deadline is not reached");
                 return Ok(GcResult::default());
@@ -6701,6 +6722,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0x10,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )
@@ -6814,6 +6836,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0x10,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )
@@ -6874,6 +6897,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0x10,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )
@@ -6908,6 +6932,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0x10,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )
@@ -7189,7 +7214,14 @@ mod tests {
             // this doesn't really need to use the timeline_id target, but it is closer to what it
             // originally was.
             let res = tenant
-                .gc_iteration(Some(timeline.timeline_id), 0, Duration::ZERO, &cancel, ctx)
+                .gc_iteration(
+                    Some(timeline.timeline_id),
+                    0,
+                    Duration::ZERO,
+                    IgnoreLeaseDeadline::Default,
+                    &cancel,
+                    ctx,
+                )
                 .await?;
 
             assert_eq!(res.layers_removed, 0, "this never removes anything");
@@ -7807,7 +7839,14 @@ mod tests {
             // Perform a cycle of flush, and GC
             tline.freeze_and_flush().await?;
             tenant
-                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .gc_iteration(
+                    Some(tline.timeline_id),
+                    0,
+                    Duration::ZERO,
+                    IgnoreLeaseDeadline::Default,
+                    &cancel,
+                    &ctx,
+                )
                 .await?;
         }
 
@@ -7898,7 +7937,14 @@ mod tests {
             tline.freeze_and_flush().await?;
             tline.compact(&cancel, EnumSet::default(), &ctx).await?;
             tenant
-                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .gc_iteration(
+                    Some(tline.timeline_id),
+                    0,
+                    Duration::ZERO,
+                    IgnoreLeaseDeadline::Default,
+                    &cancel,
+                    &ctx,
+                )
                 .await?;
         }
 
@@ -8234,7 +8280,14 @@ mod tests {
                     )
                     .await?;
                 tenant
-                    .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                    .gc_iteration(
+                        Some(tline.timeline_id),
+                        0,
+                        Duration::ZERO,
+                        IgnoreLeaseDeadline::Default,
+                        &cancel,
+                        &ctx,
+                    )
                     .await?;
             }
         }
@@ -9455,6 +9508,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )

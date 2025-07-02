@@ -1735,6 +1735,7 @@ pub enum DownloadRemoteLayersTaskState {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TimelineGcRequest {
     pub gc_horizon: Option<u64>,
+    pub ignore_lease_deadline: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

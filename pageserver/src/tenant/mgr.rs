@@ -2365,7 +2365,14 @@ impl TenantManager {
 
         #[allow(unused_mut)]
         let mut result = tenant
-            .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
+            .gc_iteration(
+                Some(timeline_id),
+                gc_horizon,
+                pitr,
+                crate::tenant::IgnoreLeaseDeadline::from(gc_req.ignore_lease_deadline),
+                &cancel,
+                &ctx,
+            )
             .await;
         // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
         // better once the types support it.
