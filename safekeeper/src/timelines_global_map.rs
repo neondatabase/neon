@@ -147,7 +147,7 @@ impl GlobalTimelines {
         };
         let mut tenant_count = 0;
         for tenants_dir_entry in std::fs::read_dir(&tenants_dir)
-            .with_context(|| format!("failed to list tenants dir {}", tenants_dir))?
+            .with_context(|| format!("failed to list tenants dir {tenants_dir}"))?
         {
             match &tenants_dir_entry {
                 Ok(tenants_dir_entry) => {
@@ -188,7 +188,7 @@ impl GlobalTimelines {
 
         let timelines_dir = get_tenant_dir(&conf, &tenant_id);
         for timelines_dir_entry in std::fs::read_dir(&timelines_dir)
-            .with_context(|| format!("failed to list timelines dir {}", timelines_dir))?
+            .with_context(|| format!("failed to list timelines dir {timelines_dir}"))?
         {
             match &timelines_dir_entry {
                 Ok(timeline_dir_entry) => {

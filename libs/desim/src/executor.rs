@@ -71,7 +71,7 @@ impl Runtime {
                     debug!("thread panicked: {:?}", e);
                     let mut result = ctx.result.lock();
                     if result.0 == -1 {
-                        *result = (256, format!("thread panicked: {:?}", e));
+                        *result = (256, format!("thread panicked: {e:?}"));
                     }
                 });
             }
@@ -419,13 +419,13 @@ pub fn now() -> u64 {
     with_thread_context(|ctx| ctx.clock.get().unwrap().now())
 }
 
-pub fn exit(code: i32, msg: String) {
+pub fn exit(code: i32, msg: String) -> ! {
     with_thread_context(|ctx| {
         ctx.allow_panic.store(true, Ordering::SeqCst);
         let mut result = ctx.result.lock();
         *result = (code, msg);
         panic!("exit");
-    });
+    })
 }
 
 pub(crate) fn get_thread_ctx() -> Arc<ThreadContext> {

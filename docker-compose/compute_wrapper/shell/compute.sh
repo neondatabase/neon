@@ -97,3 +97,4 @@ echo "Start compute node"
      -b /usr/local/bin/postgres                              \
      --compute-id "compute-${RANDOM}"                          \
      --config "${CONFIG_FILE}"
+     --dev

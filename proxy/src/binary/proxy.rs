@@ -11,17 +11,20 @@ use anyhow::Context;
 use anyhow::{bail, ensure};
 use arc_swap::ArcSwapOption;
 use futures::future::Either;
+use itertools::{Itertools, Position};
+use rand::{Rng, thread_rng};
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, info, warn};
+use tracing::{Instrument, error, info, warn};
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
 use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
-use crate::cancellation::{CancellationHandler, handle_cancel_messages};
+use crate::batch::BatchQueue;
+use crate::cancellation::{CancellationHandler, CancellationProcessor};
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
     ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
@@ -120,12 +123,6 @@ struct ProxyCliArgs {
     /// timeout for the TLS handshake
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     handshake_timeout: tokio::time::Duration,
-    /// http endpoint to receive periodic metric updates
-    #[clap(long)]
-    metric_collection_endpoint: Option<String>,
-    /// how often metrics should be sent to a collection endpoint
-    #[clap(long)]
-    metric_collection_interval: Option<String>,
     /// cache for `wake_compute` api method (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     wake_compute_cache: String,
@@ -152,40 +149,31 @@ struct ProxyCliArgs {
     /// Wake compute rate limiter max number of requests per second.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_SET)]
     wake_compute_limit: Vec<RateBucketInfo>,
-    /// Redis rate limiter max number of requests per second.
-    #[clap(long, default_values_t = RateBucketInfo::DEFAULT_REDIS_SET)]
-    redis_rps_limit: Vec<RateBucketInfo>,
     /// Cancellation channel size (max queue size for redis kv client)
     #[clap(long, default_value_t = 1024)]
     cancellation_ch_size: usize,
     /// Cancellation ops batch size for redis
     #[clap(long, default_value_t = 8)]
     cancellation_batch_size: usize,
-    /// cache for `allowed_ips` (use `size=0` to disable)
-    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
-    allowed_ips_cache: String,
-    /// cache for `role_secret` (use `size=0` to disable)
-    #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
-    role_secret_cache: String,
-    /// redis url for notifications (if empty, redis_host:port will be used for both notifications and streaming connections)
-    #[clap(long)]
-    redis_notifications: Option<String>,
-    /// what from the available authentications type to use for the regional redis we have. Supported are "irsa" and "plain".
+    /// redis url for plain authentication
+    #[clap(long, alias("redis-notifications"))]
+    redis_plain: Option<String>,
+    /// what from the available authentications type to use for redis. Supported are "irsa" and "plain".
     #[clap(long, default_value = "irsa")]
     redis_auth_type: String,
-    /// redis host for streaming connections (might be different from the notifications host)
+    /// redis host for irsa authentication
     #[clap(long)]
     redis_host: Option<String>,
-    /// redis port for streaming connections (might be different from the notifications host)
+    /// redis port for irsa authentication
     #[clap(long)]
     redis_port: Option<u16>,
-    /// redis cluster name, used in aws elasticache
+    /// redis cluster name for irsa authentication
     #[clap(long)]
     redis_cluster_name: Option<String>,
-    /// redis user_id, used in aws elasticache
+    /// redis user_id for irsa authentication
     #[clap(long)]
     redis_user_id: Option<String>,
-    /// aws region to retrieve credentials
+    /// aws region for irsa authentication
     #[clap(long, default_value_t = String::new())]
     aws_region: String,
     /// cache for `project_info` (use `size=0` to disable)
@@ -197,6 +185,12 @@ struct ProxyCliArgs {
     #[clap(flatten)]
     parquet_upload: ParquetUploadArgs,
 
+    /// http endpoint to receive periodic metric updates
+    #[clap(long)]
+    metric_collection_endpoint: Option<String>,
+    /// how often metrics should be sent to a collection endpoint
+    #[clap(long)]
+    metric_collection_interval: Option<String>,
     /// interval for backup metric collection
     #[clap(long, default_value = "10m", value_parser = humantime::parse_duration)]
     metric_backup_collection_interval: std::time::Duration,
@@ -209,6 +203,7 @@ struct ProxyCliArgs {
     /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
     #[clap(long, default_value = "4194304")]
     metric_backup_collection_chunk_size: usize,
+
     /// Whether to retry the connection to the compute node
     #[clap(long, default_value = config::RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)]
     connect_to_compute_retry: String,
@@ -314,7 +309,7 @@ pub async fn run() -> anyhow::Result<()> {
     let jemalloc = match crate::jemalloc::MetricRecorder::new() {
         Ok(t) => Some(t),
         Err(e) => {
-            tracing::error!(error = ?e, "could not start jemalloc metrics loop");
+            error!(error = ?e, "could not start jemalloc metrics loop");
             None
         }
     };
@@ -328,7 +323,7 @@ pub async fn run() -> anyhow::Result<()> {
         Either::Right(auth_backend) => info!("Authentication backend: {auth_backend:?}"),
     }
     info!("Using region: {}", args.aws_region);
-    let (regional_redis_client, redis_notifications_client) = configure_redis(&args).await?;
+    let redis_client = configure_redis(&args).await?;
 
     // Check that we can bind to address before further initialization
     info!("Starting http on {}", args.http);
@@ -383,20 +378,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let cancellation_token = CancellationToken::new();
 
-    let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
-    RateBucketInfo::validate(redis_rps_limit)?;
-
-    let redis_kv_client = regional_redis_client
-        .as_ref()
-        .map(|redis_publisher| RedisKVClient::new(redis_publisher.clone(), redis_rps_limit));
-
-    // channel size should be higher than redis client limit to avoid blocking
-    let cancel_ch_size = args.cancellation_ch_size;
-    let (tx_cancel, rx_cancel) = tokio::sync::mpsc::channel(cancel_ch_size);
-    let cancellation_handler = Arc::new(CancellationHandler::new(
-        &config.connect_to_compute,
-        Some(tx_cancel),
-    ));
+    let cancellation_handler = Arc::new(CancellationHandler::new(&config.connect_to_compute));
 
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
         RateBucketInfo::to_leaky_bucket(&args.endpoint_rps_limit)
@@ -410,7 +392,7 @@ pub async fn run() -> anyhow::Result<()> {
     match auth_backend {
         Either::Left(auth_backend) => {
             if let Some(proxy_listener) = proxy_listener {
-                client_tasks.spawn(crate::proxy::task_main(
+                client_tasks.spawn(crate::pglb::task_main(
                     config,
                     auth_backend,
                     proxy_listener,
@@ -475,6 +457,7 @@ pub async fn run() -> anyhow::Result<()> {
     client_tasks.spawn(crate::context::parquet::worker(
         cancellation_token.clone(),
         args.parquet_upload,
+        args.region,
     ));
 
     // maintenance tasks. these never return unless there's an error
@@ -498,53 +481,47 @@ pub async fn run() -> anyhow::Result<()> {
     #[cfg_attr(not(any(test, feature = "testing")), expect(irrefutable_let_patterns))]
     if let Either::Left(auth::Backend::ControlPlane(api, ())) = &auth_backend {
         if let crate::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api {
-            match (redis_notifications_client, regional_redis_client.clone()) {
-                (None, None) => {}
-                (client1, client2) => {
-                    let cache = api.caches.project_info.clone();
-                    if let Some(client) = client1 {
-                        maintenance_tasks.spawn(notifications::task_main(
-                            client,
-                            cache.clone(),
-                            args.region.clone(),
-                        ));
+            if let Some(client) = redis_client {
+                // project info cache and invalidation of that cache.
+                let cache = api.caches.project_info.clone();
+                maintenance_tasks.spawn(notifications::task_main(client.clone(), cache.clone()));
+                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+
+                // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
+                // This prevents immediate exit and pod restart,
+                // which can cause hammering of the redis in case of connection issues.
+                // cancellation key management
+                let mut redis_kv_client = RedisKVClient::new(client.clone());
+                for attempt in (0..3).with_position() {
+                    match redis_kv_client.try_connect().await {
+                        Ok(()) => {
+                            info!("Connected to Redis KV client");
+                            cancellation_handler.init_tx(BatchQueue::new(CancellationProcessor {
+                                client: redis_kv_client,
+                                batch_size: args.cancellation_batch_size,
+                            }));
+
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Failed to connect to Redis KV client: {e}");
+                            if matches!(attempt, Position::Last(_)) {
+                                bail!(
+                                    "Failed to connect to Redis KV client after {} attempts",
+                                    attempt.into_inner()
+                                );
+                            }
+                            let jitter = thread_rng().gen_range(0..100);
+                            tokio::time::sleep(Duration::from_millis(1000 + jitter)).await;
+                        }
                     }
-                    if let Some(client) = client2 {
-                        maintenance_tasks.spawn(notifications::task_main(
-                            client,
-                            cache.clone(),
-                            args.region.clone(),
-                        ));
-                    }
-                    maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
                 }
-            }
 
-            if let Some(mut redis_kv_client) = redis_kv_client {
-                maintenance_tasks.spawn(async move {
-                    redis_kv_client.try_connect().await?;
-                    handle_cancel_messages(
-                        &mut redis_kv_client,
-                        rx_cancel,
-                        args.cancellation_batch_size,
-                    )
-                    .await?;
-
-                    drop(redis_kv_client);
-
-                    // `handle_cancel_messages` was terminated due to the tx_cancel
-                    // being dropped. this is not worthy of an error, and this task can only return `Err`,
-                    // so let's wait forever instead.
-                    std::future::pending().await
-                });
-            }
-
-            if let Some(regional_redis_client) = regional_redis_client {
+                // listen for notifications of new projects/endpoints/branches
                 let cache = api.caches.endpoints_cache.clone();
-                let con = regional_redis_client;
                 let span = tracing::info_span!("endpoints_cache");
                 maintenance_tasks.spawn(
-                    async move { cache.do_read(con, cancellation_token.clone()).await }
+                    async move { cache.do_read(client, cancellation_token.clone()).await }
                         .instrument(span),
                 );
             }
@@ -673,7 +650,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         authentication_config,
         proxy_protocol_v2: args.proxy_protocol_v2,
         handshake_timeout: args.handshake_timeout,
-        region: args.region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
@@ -835,21 +811,18 @@ fn build_auth_backend(
 
 async fn configure_redis(
     args: &ProxyCliArgs,
-) -> anyhow::Result<(
-    Option<ConnectionWithCredentialsProvider>,
-    Option<ConnectionWithCredentialsProvider>,
-)> {
+) -> anyhow::Result<Option<ConnectionWithCredentialsProvider>> {
     // TODO: untangle the config args
-    let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
-        ("plain", redis_url) => match redis_url {
+    let redis_client = match &*args.redis_auth_type {
+        "plain" => match &args.redis_plain {
             None => {
-                bail!("plain auth requires redis_notifications to be set");
+                bail!("plain auth requires redis_plain to be set");
             }
             Some(url) => {
                 Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.clone()))
             }
         },
-        ("irsa", _) => match (&args.redis_host, args.redis_port) {
+        "irsa" => match (&args.redis_host, args.redis_port) {
             (Some(host), Some(port)) => Some(
                 ConnectionWithCredentialsProvider::new_with_credentials_provider(
                     host.clone(),
@@ -873,18 +846,12 @@ async fn configure_redis(
                 bail!("redis-host and redis-port must be specified together");
             }
         },
-        _ => {
-            bail!("unknown auth type given");
+        auth_type => {
+            bail!("unknown auth type {auth_type:?} given")
         }
     };
 
-    let redis_notifications_client = if let Some(url) = &args.redis_notifications {
-        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(&**url))
-    } else {
-        regional_redis_client.clone()
-    };
-
-    Ok((regional_redis_client, redis_notifications_client))
+    Ok(redis_client)
 }
 
 #[cfg(test)]

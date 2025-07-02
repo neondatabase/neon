@@ -7,8 +7,9 @@ use std::time::SystemTime;
 
 use anyhow::{Result, bail};
 use postgres_ffi::WAL_SEGMENT_SIZE;
+use postgres_versioninfo::{PgMajorVersion, PgVersionId};
 use safekeeper_api::membership::Configuration;
-use safekeeper_api::models::{TimelineMembershipSwitchResponse, TimelineTermBumpResponse};
+use safekeeper_api::models::TimelineTermBumpResponse;
 use safekeeper_api::{INITIAL_TERM, ServerInfo, Term};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -82,6 +83,11 @@ pub enum EvictionState {
     Offloaded(Lsn),
 }
 
+pub struct MembershipSwitchResult {
+    pub previous_conf: Configuration,
+    pub current_conf: Configuration,
+}
+
 impl TimelinePersistentState {
     /// commit_lsn is the same as start_lsn in the normal creaiton; see
     /// `TimelineCreateRequest` comments.`
@@ -149,8 +155,8 @@ impl TimelinePersistentState {
             &TenantTimelineId::empty(),
             Configuration::empty(),
             ServerInfo {
-                pg_version: 170000, /* Postgres server version (major * 10000) */
-                system_id: 0,       /* Postgres system identifier */
+                pg_version: PgVersionId::from(PgMajorVersion::PG17),
+                system_id: 0, /* Postgres system identifier */
                 wal_seg_size: WAL_SEGMENT_SIZE as u32,
             },
             Lsn::INVALID,
@@ -260,10 +266,7 @@ where
 
     /// Switch into membership configuration `to` if it is higher than the
     /// current one.
-    pub async fn membership_switch(
-        &mut self,
-        to: Configuration,
-    ) -> Result<TimelineMembershipSwitchResponse> {
+    pub async fn membership_switch(&mut self, to: Configuration) -> Result<MembershipSwitchResult> {
         let before = self.mconf.clone();
         // Is switch allowed?
         if to.generation <= self.mconf.generation {
@@ -277,7 +280,7 @@ where
             self.finish_change(&state).await?;
             info!("switched membership conf to {} from {}", to, before);
         }
-        Ok(TimelineMembershipSwitchResponse {
+        Ok(MembershipSwitchResult {
             previous_conf: before,
             current_conf: self.mconf.clone(),
         })

@@ -52,6 +52,8 @@ pub struct NodeRegisterRequest {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
@@ -101,6 +103,8 @@ pub struct TenantLocateResponseShard {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
@@ -152,6 +156,8 @@ pub struct NodeDescribeResponse {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -540,6 +546,11 @@ pub struct TimelineImportRequest {
     pub sk_set: Vec<NodeId>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TimelineSafekeeperMigrateRequest {
+    pub new_sk_set: Vec<NodeId>,
+}
+
 #[cfg(test)]
 mod test {
     use serde_json;
@@ -571,8 +582,7 @@ mod test {
         let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
+            "expect unknown field `unknown_field` error, got: {err}"
         );
     }
 

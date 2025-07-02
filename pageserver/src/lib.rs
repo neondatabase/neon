@@ -38,6 +38,7 @@ pub mod walredo;
 
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
+use postgres_ffi::PgMajorVersion;
 use tenant::mgr::{BackgroundPurges, TenantManager};
 use tenant::secondary;
 use tracing::{info, info_span};
@@ -51,7 +52,7 @@ use tracing::{info, info_span};
 /// backwards-compatible changes to the metadata format.
 pub const STORAGE_FORMAT_VERSION: u16 = 3;
 
-pub const DEFAULT_PG_VERSION: u32 = 17;
+pub const DEFAULT_PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
 
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;

@@ -453,6 +453,7 @@ class NeonEnvBuilder:
         pageserver_get_vectored_concurrent_io: str | None = None,
         pageserver_tracing_config: PageserverTracingConfig | None = None,
         pageserver_import_config: PageserverImportConfig | None = None,
+        storcon_kick_secondary_downloads: bool | None = True,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -489,7 +490,9 @@ class NeonEnvBuilder:
         self.config_init_force: str | None = None
         self.top_output_dir = top_output_dir
         self.control_plane_hooks_api: str | None = None
-        self.storage_controller_config: dict[Any, Any] | None = None
+        self.storage_controller_config: dict[Any, Any] | None = {
+            "timelines_onto_safekeepers": True,
+        }
 
         # Flag to enable https listener in pageserver, generate local ssl certs,
         # and force storage controller to use https for pageserver api.
@@ -511,6 +514,8 @@ class NeonEnvBuilder:
 
         self.pageserver_tracing_config = pageserver_tracing_config
         self.pageserver_import_config = pageserver_import_config
+
+        self.storcon_kick_secondary_downloads = storcon_kick_secondary_downloads
 
         self.pageserver_default_tenant_config_compaction_algorithm: dict[str, Any] | None = (
             pageserver_default_tenant_config_compaction_algorithm
@@ -719,15 +724,21 @@ class NeonEnvBuilder:
 
         shutil.copytree(storcon_db_from_dir, storcon_db_to_dir, ignore=ignore_postgres_log)
         assert not (storcon_db_to_dir / "postgres.log").exists()
+
         # NB: neon_local rewrites postgresql.conf on each start based on neon_local config. No need to patch it.
-        # However, in this new NeonEnv, the pageservers listen on different ports, and the storage controller
-        # will currently reject re-attach requests from them because the NodeMetadata isn't identical.
+        # However, in this new NeonEnv, the pageservers and safekeepers listen on different ports, and the storage
+        # controller will currently reject re-attach requests from them because the NodeMetadata isn't identical.
         # So, from_repo_dir patches up the the storcon database.
         patch_script_path = self.repo_dir / "storage_controller_db.startup.sql"
         assert not patch_script_path.exists()
         patch_script = ""
+
         for ps in self.env.pageservers:
-            patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';"
+            patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';\n"
+
+        for sk in self.env.safekeepers:
+            patch_script += f"UPDATE safekeepers SET http_port={sk.port.http}, port={sk.port.pg} WHERE id = '{sk.id}';\n"
+
         patch_script_path.write_text(patch_script)
 
         # Update the config with info about tenants and timelines
@@ -1210,6 +1221,13 @@ class NeonEnv:
             storage_controller_config = storage_controller_config or {}
             storage_controller_config["use_https_safekeeper_api"] = True
 
+        # TODO(diko): uncomment when timeline_safekeeper_count option is in the release branch,
+        # so the compat tests will not fail bacause of it presence.
+        # if config.num_safekeepers < 3:
+        #     storage_controller_config = storage_controller_config or {}
+        #     if "timeline_safekeeper_count" not in storage_controller_config:
+        #         storage_controller_config["timeline_safekeeper_count"] = config.num_safekeepers
+
         if storage_controller_config is not None:
             cfg["storage_controller"] = storage_controller_config
 
@@ -1218,6 +1236,14 @@ class NeonEnv:
                 cfg["storage_controller"]["use_local_compute_notifications"] = False
             else:
                 cfg["storage_controller"] = {"use_local_compute_notifications": False}
+
+        if config.storcon_kick_secondary_downloads is not None:
+            # Configure whether storage controller should actively kick off secondary downloads
+            if "storage_controller" not in cfg:
+                cfg["storage_controller"] = {}
+            cfg["storage_controller"]["kick_secondary_downloads"] = (
+                config.storcon_kick_secondary_downloads
+            )
 
         # Create config for pageserver
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
@@ -1228,6 +1254,7 @@ class NeonEnv:
         ):
             pageserver_port = PageserverPort(
                 pg=self.port_distributor.get_port(),
+                grpc=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
                 https=self.port_distributor.get_port() if config.use_https_pageserver_api else None,
             )
@@ -1243,13 +1270,14 @@ class NeonEnv:
             ps_cfg: dict[str, Any] = {
                 "id": ps_id,
                 "listen_pg_addr": f"localhost:{pageserver_port.pg}",
+                "listen_grpc_addr": f"localhost:{pageserver_port.grpc}",
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "listen_https_addr": f"localhost:{pageserver_port.https}"
                 if config.use_https_pageserver_api
                 else None,
                 "pg_auth_type": pg_auth_type,
-                "http_auth_type": http_auth_type,
                 "grpc_auth_type": grpc_auth_type,
+                "http_auth_type": http_auth_type,
                 "availability_zone": availability_zone,
                 # Disable pageserver disk syncs in tests: when running tests concurrently, this avoids
                 # the pageserver taking a long time to start up due to syncfs flushing other tests' data
@@ -1762,6 +1790,7 @@ def neon_env_builder(
 @dataclass
 class PageserverPort:
     pg: int
+    grpc: int
     http: int
     https: int | None = None
 
@@ -2210,6 +2239,21 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         log.info(f"timeline_create success: {response.json()}")
 
+    def migrate_safekeepers(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        new_sk_set: list[int],
+    ):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate",
+            json={"new_sk_set": new_sk_set},
+            headers=self.headers(TokenScope.PAGE_SERVER_API),
+        )
+        response.raise_for_status()
+        log.info(f"migrate_safekeepers success: {response.json()}")
+
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
         :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr": str, "listen_http_port": int}
@@ -2222,6 +2266,17 @@ class NeonStorageController(MetricsGetter, LogUtils):
         body = response.json()
         shards: list[dict[str, Any]] = body["shards"]
         return shards
+
+    def timeline_locate(self, tenant_id: TenantId, timeline_id: TimelineId):
+        """
+        :return: dict {"generation": int, "sk_set": [int], "new_sk_set": [int]}
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/debug/v1/tenant/{tenant_id}/timeline/{timeline_id}/locate",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
 
     def tenant_describe(self, tenant_id: TenantId):
         """
@@ -2349,6 +2404,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         delay_max = max_interval
         while n > 0:
             n = self.reconcile_all()
+
             if n == 0:
                 break
             elif time.time() - start_at > timeout_secs:
@@ -4046,6 +4102,16 @@ def static_proxy(
         "CREATE TABLE neon_control_plane.endpoints (endpoint_id VARCHAR(255) PRIMARY KEY, allowed_ips VARCHAR(255))"
     )
 
+    vanilla_pg.stop()
+    vanilla_pg.edit_hba(
+        [
+            "local all all              trust",
+            "host  all all 127.0.0.1/32 scram-sha-256",
+            "host  all all ::1/128      scram-sha-256",
+        ]
+    )
+    vanilla_pg.start()
+
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
@@ -4171,6 +4237,8 @@ class Endpoint(PgProtocol, LogUtils):
         self._running = threading.Semaphore(0)
         self.__jwt: str | None = None
 
+        self.terminate_flush_lsn: Lsn | None = None
+
     def http_client(self, retries: Retry | None = None) -> EndpointHttpClient:
         assert self.__jwt is not None
         return EndpointHttpClient(
@@ -4183,6 +4251,7 @@ class Endpoint(PgProtocol, LogUtils):
         self,
         branch_name: str,
         endpoint_id: str | None = None,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         lsn: Lsn | None = None,
         config_lines: list[str] | None = None,
@@ -4207,6 +4276,7 @@ class Endpoint(PgProtocol, LogUtils):
             endpoint_id=self.endpoint_id,
             tenant_id=self.tenant_id,
             lsn=lsn,
+            grpc=grpc,
             hot_standby=hot_standby,
             pg_port=self.pg_port,
             external_http_port=self.external_http_port,
@@ -4473,9 +4543,10 @@ class Endpoint(PgProtocol, LogUtils):
         running = self._running.acquire(blocking=False)
         if running:
             assert self.endpoint_id is not None
-            self.env.neon_cli.endpoint_stop(
+            lsn, _ = self.env.neon_cli.endpoint_stop(
                 self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
             )
+            self.terminate_flush_lsn = lsn
 
         if sks_wait_walreceiver_gone is not None:
             for sk in sks_wait_walreceiver_gone[0]:
@@ -4493,9 +4564,10 @@ class Endpoint(PgProtocol, LogUtils):
         running = self._running.acquire(blocking=False)
         if running:
             assert self.endpoint_id is not None
-            self.env.neon_cli.endpoint_stop(
+            lsn, _ = self.env.neon_cli.endpoint_stop(
                 self.endpoint_id, True, check_return_code=self.check_stop_result, mode=mode
             )
+            self.terminate_flush_lsn = lsn
             self.endpoint_id = None
 
         return self
@@ -4504,6 +4576,7 @@ class Endpoint(PgProtocol, LogUtils):
         self,
         branch_name: str,
         endpoint_id: str | None = None,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         lsn: Lsn | None = None,
         config_lines: list[str] | None = None,
@@ -4521,6 +4594,7 @@ class Endpoint(PgProtocol, LogUtils):
             branch_name=branch_name,
             endpoint_id=endpoint_id,
             config_lines=config_lines,
+            grpc=grpc,
             hot_standby=hot_standby,
             lsn=lsn,
             pageserver_id=pageserver_id,
@@ -4608,6 +4682,7 @@ class EndpointFactory:
         endpoint_id: str | None = None,
         tenant_id: TenantId | None = None,
         lsn: Lsn | None = None,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
         remote_ext_base_url: str | None = None,
@@ -4627,6 +4702,7 @@ class EndpointFactory:
         return ep.create_start(
             branch_name=branch_name,
             endpoint_id=endpoint_id,
+            grpc=grpc,
             hot_standby=hot_standby,
             config_lines=config_lines,
             lsn=lsn,
@@ -4641,6 +4717,7 @@ class EndpointFactory:
         endpoint_id: str | None = None,
         tenant_id: TenantId | None = None,
         lsn: Lsn | None = None,
+        grpc: bool | None = None,
         hot_standby: bool = False,
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
@@ -4663,6 +4740,7 @@ class EndpointFactory:
             branch_name=branch_name,
             endpoint_id=endpoint_id,
             lsn=lsn,
+            grpc=grpc,
             hot_standby=hot_standby,
             config_lines=config_lines,
             pageserver_id=pageserver_id,
@@ -4687,6 +4765,7 @@ class EndpointFactory:
         self,
         origin: Endpoint,
         endpoint_id: str | None = None,
+        grpc: bool | None = None,
         config_lines: list[str] | None = None,
     ) -> Endpoint:
         branch_name = origin.branch_name
@@ -4698,6 +4777,7 @@ class EndpointFactory:
             endpoint_id=endpoint_id,
             tenant_id=origin.tenant_id,
             lsn=None,
+            grpc=grpc,
             hot_standby=True,
             config_lines=config_lines,
         )
@@ -4706,6 +4786,7 @@ class EndpointFactory:
         self,
         origin: Endpoint,
         endpoint_id: str | None = None,
+        grpc: bool | None = None,
         config_lines: list[str] | None = None,
     ) -> Endpoint:
         branch_name = origin.branch_name
@@ -4717,6 +4798,7 @@ class EndpointFactory:
             endpoint_id=endpoint_id,
             tenant_id=origin.tenant_id,
             lsn=None,
+            grpc=grpc,
             hot_standby=True,
             config_lines=config_lines,
         )
@@ -4867,6 +4949,9 @@ class Safekeeper(LogUtils):
         src_ids = [sk.id for sk in srcs]
         log.info(f"finished pulling timeline from {src_ids} to {self.id}")
         return res
+
+    def safekeeper_id(self) -> SafekeeperId:
+        return SafekeeperId(self.id, "localhost", self.port.pg_tenant_only)
 
     @property
     def data_dir(self) -> Path:

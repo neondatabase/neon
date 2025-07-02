@@ -74,7 +74,7 @@ pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 #[derive(parquet_derive::ParquetRecordWriter)]
 pub(crate) struct RequestData {
-    region: &'static str,
+    region: String,
     protocol: &'static str,
     /// Must be UTC. The derive macro doesn't like the timezones
     timestamp: chrono::NaiveDateTime,
@@ -147,7 +147,7 @@ impl From<&RequestContextInner> for RequestData {
             }),
             jwt_issuer: value.jwt_issuer.clone(),
             protocol: value.protocol.as_str(),
-            region: value.region,
+            region: String::new(),
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
             cold_start_info: value.cold_start_info.as_str(),
@@ -167,6 +167,7 @@ impl From<&RequestContextInner> for RequestData {
 pub async fn worker(
     cancellation_token: CancellationToken,
     config: ParquetUploadArgs,
+    region: String,
 ) -> anyhow::Result<()> {
     let Some(remote_storage_config) = config.parquet_upload_remote_storage else {
         tracing::warn!("parquet request upload: no s3 bucket configured");
@@ -232,12 +233,17 @@ pub async fn worker(
                 .context("remote storage for disconnect events init")?;
         let parquet_config_disconnect = parquet_config.clone();
         tokio::try_join!(
-            worker_inner(storage, rx, parquet_config),
-            worker_inner(storage_disconnect, rx_disconnect, parquet_config_disconnect)
+            worker_inner(storage, rx, parquet_config, &region),
+            worker_inner(
+                storage_disconnect,
+                rx_disconnect,
+                parquet_config_disconnect,
+                &region
+            )
         )
         .map(|_| ())
     } else {
-        worker_inner(storage, rx, parquet_config).await
+        worker_inner(storage, rx, parquet_config, &region).await
     }
 }
 
@@ -257,6 +263,7 @@ async fn worker_inner(
     storage: GenericRemoteStorage,
     rx: impl Stream<Item = RequestData>,
     config: ParquetConfig,
+    region: &str,
 ) -> anyhow::Result<()> {
     #[cfg(any(test, feature = "testing"))]
     let storage = if config.test_remote_failures > 0 {
@@ -277,7 +284,8 @@ async fn worker_inner(
     let mut last_upload = time::Instant::now();
 
     let mut len = 0;
-    while let Some(row) = rx.next().await {
+    while let Some(mut row) = rx.next().await {
+        region.clone_into(&mut row.region);
         rows.push(row);
         let force = last_upload.elapsed() > config.max_duration;
         if rows.len() == config.rows_per_group || force {
@@ -533,7 +541,7 @@ mod tests {
             auth_method: None,
             jwt_issuer: None,
             protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
-            region: "us-east-1",
+            region: String::new(),
             error: None,
             success: rng.r#gen(),
             cold_start_info: "no",
@@ -565,7 +573,9 @@ mod tests {
             .await
             .unwrap();
 
-        worker_inner(storage, rx, config).await.unwrap();
+        worker_inner(storage, rx, config, "us-east-1")
+            .await
+            .unwrap();
 
         let mut files = WalkDir::new(tmpdir.as_std_path())
             .into_iter()

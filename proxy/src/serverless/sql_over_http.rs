@@ -22,7 +22,7 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{Level, debug, error, info};
 use typed_json::json;
 use url::Url;
 use uuid::Uuid;
@@ -41,10 +41,11 @@ use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::{ReadBodyError, read_body_with_limit};
 use crate::metrics::{HttpDirection, Metrics, SniGroup, SniKind};
 use crate::pqproto::StartupMessageParams;
-use crate::proxy::{NeonOptions, run_until_cancelled};
+use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
 use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
+use crate::util::run_until_cancelled;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -389,12 +390,35 @@ pub(crate) async fn handle(
             let line = get(db_error, |db| db.line().map(|l| l.to_string()));
             let routine = get(db_error, |db| db.routine());
 
-            tracing::info!(
-                kind=error_kind.to_metric_label(),
-                error=%e,
-                msg=message,
-                "forwarding error to user"
-            );
+            match &e {
+                SqlOverHttpError::Postgres(e)
+                    if e.as_db_error().is_some() && error_kind == ErrorKind::User =>
+                {
+                    // this error contains too much info, and it's not an error we care about.
+                    if tracing::enabled!(Level::DEBUG) {
+                        tracing::debug!(
+                            kind=error_kind.to_metric_label(),
+                            error=%e,
+                            msg=message,
+                            "forwarding error to user"
+                        );
+                    } else {
+                        tracing::info!(
+                            kind = error_kind.to_metric_label(),
+                            error = "bad query",
+                            "forwarding error to user"
+                        );
+                    }
+                }
+                _ => {
+                    tracing::info!(
+                        kind=error_kind.to_metric_label(),
+                        error=%e,
+                        msg=message,
+                        "forwarding error to user"
+                    );
+                }
+            }
 
             json_response(
                 e.get_http_status_code(),
@@ -459,7 +483,15 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
             SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
-            SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            // customer initiated SQL errors.
+            SqlOverHttpError::Postgres(p) => {
+                if p.as_db_error().is_some() {
+                    ErrorKind::User
+                } else {
+                    ErrorKind::Compute
+                }
+            }
+            // proxy initiated SQL errors.
             SqlOverHttpError::InternalPostgres(p) => {
                 if p.as_db_error().is_some() {
                     ErrorKind::Service
@@ -467,6 +499,7 @@ impl ReportableError for SqlOverHttpError {
                     ErrorKind::Compute
                 }
             }
+            // postgres returned a bad row format that we couldn't parse.
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
             SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
         }

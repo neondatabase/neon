@@ -29,6 +29,7 @@ use pageserver_api::shard::{
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring;
+use safekeeper_api::membership::SafekeeperGeneration;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
@@ -94,6 +95,8 @@ pub(crate) enum DatabaseError {
     Logical(String),
     #[error("Migration error: {0}")]
     Migration(String),
+    #[error("CAS error: {0}")]
+    Cas(String),
 }
 
 #[derive(measured::FixedCardinalityLabel, Copy, Clone)]
@@ -126,6 +129,7 @@ pub(crate) enum DatabaseOperation {
     UpdateLeader,
     SetPreferredAzs,
     InsertTimeline,
+    UpdateTimelineMembership,
     GetTimeline,
     InsertTimelineReconcile,
     RemoveTimelineReconcile,
@@ -500,15 +504,13 @@ impl Persistence {
                 if let Some(np) = node_to_delete {
                     let lc = NodeLifecycle::from_str(&np.lifecycle).map_err(|e| {
                         DatabaseError::Logical(format!(
-                            "Node {} has invalid lifecycle: {}",
-                            del_node_id, e
+                            "Node {del_node_id} has invalid lifecycle: {e}"
                         ))
                     })?;
 
                     if lc != NodeLifecycle::Deleted {
                         return Err(DatabaseError::Logical(format!(
-                            "Node {} was not soft deleted before, cannot hard delete it",
-                            del_node_id
+                            "Node {del_node_id} was not soft deleted before, cannot hard delete it"
                         )));
                     }
 
@@ -642,8 +644,7 @@ impl Persistence {
                         .await?;
                     if deleted_node > 0 {
                         return Err(DatabaseError::Logical(format!(
-                            "Node {} is marked as deleted, re-attach is not allowed",
-                            input_node_id
+                            "Node {input_node_id} is marked as deleted, re-attach is not allowed"
                         )));
                     }
 
@@ -1003,7 +1004,7 @@ impl Persistence {
                 .execute(conn).await?;
             if u8::try_from(updated)
                 .map_err(|_| DatabaseError::Logical(
-                    format!("Overflow existing shard count {} while splitting", updated))
+                    format!("Overflow existing shard count {updated} while splitting"))
                 )? != old_shard_count.count() {
                 // Perhaps a deletion or another split raced with this attempt to split, mutating
                 // the parent shards that we intend to split. In this case the split request should fail.
@@ -1343,8 +1344,7 @@ impl Persistence {
 
                 if inserted_updated != 1 {
                     return Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     )));
                 }
 
@@ -1406,8 +1406,57 @@ impl Persistence {
                     0 => Ok(false),
                     1 => Ok(true),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Update timeline membership configuration in the database.
+    /// Perform a compare-and-swap (CAS) operation on the timeline's generation.
+    /// The `new_generation` must be the next (+1) generation after the one in the database.
+    pub(crate) async fn update_timeline_membership(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        new_generation: SafekeeperGeneration,
+        sk_set: &[NodeId],
+        new_sk_set: Option<&[NodeId]>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let prev_generation = new_generation.previous().unwrap();
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::UpdateTimelineMembership, move |conn| {
+            Box::pin(async move {
+                let updated = diesel::update(dsl::timelines)
+                    .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                    .filter(dsl::generation.eq(prev_generation.into_inner() as i32))
+                    .set((
+                        dsl::generation.eq(new_generation.into_inner() as i32),
+                        dsl::sk_set.eq(sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>()),
+                        dsl::new_sk_set.eq(new_sk_set
+                            .map(|set| set.iter().map(|id| id.0 as i64).collect::<Vec<_>>())),
+                    ))
+                    .execute(conn)
+                    .await?;
+
+                match updated {
+                    0 => {
+                        // TODO(diko): It makes sense to select the current generation
+                        // and include it in the error message for better debuggability.
+                        Err(DatabaseError::Cas(
+                            "Failed to update membership configuration".to_string(),
+                        ))
+                    }
+                    1 => Ok(()),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({updated})"
                     ))),
                 }
             })
@@ -1476,8 +1525,7 @@ impl Persistence {
                     0 => Ok(()),
                     1 => Ok(()),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        updated
+                        "unexpected number of rows ({updated})"
                     ))),
                 }
             })
@@ -1570,8 +1618,7 @@ impl Persistence {
                     0 => Ok(false),
                     1 => Ok(true),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     ))),
                 }
             })
@@ -2125,6 +2172,8 @@ pub(crate) struct NodePersistence {
     pub(crate) availability_zone_id: String,
     pub(crate) listen_https_port: Option<i32>,
     pub(crate) lifecycle: String,
+    pub(crate) listen_grpc_addr: Option<String>,
+    pub(crate) listen_grpc_port: Option<i32>,
 }
 
 /// Tenant metadata health status that are stored durably.

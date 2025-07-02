@@ -1184,10 +1184,18 @@ impl TenantShard {
         for secondary in self.intent.get_secondary() {
             // Make sure we don't try to migrate a secondary to our attached location: this case happens
             // easily in environments without multiple AZs.
-            let exclude = match self.intent.attached {
+            let mut exclude = match self.intent.attached {
                 Some(attached) => vec![attached],
                 None => vec![],
             };
+
+            // Exclude all other secondaries from the scheduling process to avoid replacing
+            // one existing secondary with another existing secondary.
+            for another_secondary in self.intent.secondary.iter() {
+                if another_secondary != secondary {
+                    exclude.push(*another_secondary);
+                }
+            }
 
             let replacement = match &self.policy {
                 PlacementPolicy::Attached(_) => {
@@ -1348,28 +1356,19 @@ impl TenantShard {
     /// Reconciliation may still be needed for other aspects of state such as secondaries (see [`Self::dirty`]): this
     /// funciton should not be used to decide whether to reconcile.
     pub(crate) fn stably_attached(&self) -> Option<NodeId> {
-        if let Some(attach_intent) = self.intent.attached {
-            match self.observed.locations.get(&attach_intent) {
-                Some(loc) => match &loc.conf {
-                    Some(conf) => match conf.mode {
-                        LocationConfigMode::AttachedMulti
-                        | LocationConfigMode::AttachedSingle
-                        | LocationConfigMode::AttachedStale => {
-                            // Our intent and observed state agree that this node is in an attached state.
-                            Some(attach_intent)
-                        }
-                        // Our observed config is not an attached state
-                        _ => None,
-                    },
-                    // Our observed state is None, i.e. in flux
-                    None => None,
-                },
-                // We have no observed state for this node
-                None => None,
-            }
-        } else {
-            // Our intent is not to attach
-            None
+        // We have an intent to attach for this node
+        let attach_intent = self.intent.attached?;
+        // We have an observed state for this node
+        let location = self.observed.locations.get(&attach_intent)?;
+        // Our observed state is not None, i.e. not in flux
+        let location_config = location.conf.as_ref()?;
+
+        // Check if our intent and observed state agree that this node is in an attached state.
+        match location_config.mode {
+            LocationConfigMode::AttachedMulti
+            | LocationConfigMode::AttachedSingle
+            | LocationConfigMode::AttachedStale => Some(attach_intent),
+            _ => None,
         }
     }
 
@@ -1382,8 +1381,13 @@ impl TenantShard {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf =
-                attached_location_conf(generation, &self.shard, &self.config, &self.policy);
+            let wanted_conf = attached_location_conf(
+                generation,
+                &self.shard,
+                &self.config,
+                &self.policy,
+                self.intent.get_secondary().len(),
+            );
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -3004,21 +3008,18 @@ pub(crate) mod tests {
 
             if attachments_in_wrong_az > 0 {
                 violations.push(format!(
-                    "{} attachments scheduled to the incorrect AZ",
-                    attachments_in_wrong_az
+                    "{attachments_in_wrong_az} attachments scheduled to the incorrect AZ"
                 ));
             }
 
             if secondaries_in_wrong_az > 0 {
                 violations.push(format!(
-                    "{} secondaries scheduled to the incorrect AZ",
-                    secondaries_in_wrong_az
+                    "{secondaries_in_wrong_az} secondaries scheduled to the incorrect AZ"
                 ));
             }
 
             eprintln!(
-                "attachments_in_wrong_az={} secondaries_in_wrong_az={}",
-                attachments_in_wrong_az, secondaries_in_wrong_az
+                "attachments_in_wrong_az={attachments_in_wrong_az} secondaries_in_wrong_az={secondaries_in_wrong_az}"
             );
 
             for (node_id, stats) in &node_stats {

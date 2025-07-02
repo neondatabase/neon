@@ -47,8 +47,8 @@ impl Debug for AnyMessage {
         match self {
             AnyMessage::None => write!(f, "None"),
             AnyMessage::InternalConnect => write!(f, "InternalConnect"),
-            AnyMessage::Just32(v) => write!(f, "Just32({})", v),
-            AnyMessage::ReplCell(v) => write!(f, "ReplCell({:?})", v),
+            AnyMessage::Just32(v) => write!(f, "Just32({v})"),
+            AnyMessage::ReplCell(v) => write!(f, "ReplCell({v:?})"),
             AnyMessage::Bytes(v) => write!(f, "Bytes({})", hex::encode(v)),
             AnyMessage::LSN(v) => write!(f, "LSN({})", Lsn(*v)),
         }

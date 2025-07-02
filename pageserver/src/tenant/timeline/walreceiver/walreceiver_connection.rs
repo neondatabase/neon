@@ -275,12 +275,20 @@ pub(super) async fn handle_walreceiver_connection(
     let copy_stream = replication_client.copy_both_simple(&query).await?;
     let mut physical_stream = pin!(ReplicationStream::new(copy_stream));
 
-    let mut walingest = WalIngest::new(timeline.as_ref(), startpoint, &ctx)
-        .await
-        .map_err(|e| match e.kind {
-            crate::walingest::WalIngestErrorKind::Cancelled => WalReceiverError::Cancelled,
-            _ => WalReceiverError::Other(e.into()),
-        })?;
+    let walingest_future = WalIngest::new(timeline.as_ref(), startpoint, &ctx);
+    let walingest_res = select! {
+        walingest_res = walingest_future => walingest_res,
+        _ = cancellation.cancelled() => {
+            // We are doing reads in WalIngest::new, and those can hang as they come from the network.
+            // Timeline cancellation hits the walreceiver cancellation token before it hits the timeline global one.
+            debug!("Connection cancelled");
+            return Err(WalReceiverError::Cancelled);
+        },
+    };
+    let mut walingest = walingest_res.map_err(|e| match e.kind {
+        crate::walingest::WalIngestErrorKind::Cancelled => WalReceiverError::Cancelled,
+        _ => WalReceiverError::Other(e.into()),
+    })?;
 
     let (format, compression) = match protocol {
         PostgresClientProtocol::Interpreted {
@@ -360,8 +368,7 @@ pub(super) async fn handle_walreceiver_connection(
                         match raw_wal_start_lsn.cmp(&expected_wal_start) {
                             std::cmp::Ordering::Greater => {
                                 let msg = format!(
-                                    "Gap in streamed WAL: [{}, {})",
-                                    expected_wal_start, raw_wal_start_lsn
+                                    "Gap in streamed WAL: [{expected_wal_start}, {raw_wal_start_lsn})"
                                 );
                                 critical!("{msg}");
                                 return Err(WalReceiverError::Other(anyhow!(msg)));

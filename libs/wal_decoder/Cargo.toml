@@ -14,6 +14,7 @@ bytes.workspace = true
 pageserver_api.workspace = true
 prost.workspace = true
 postgres_ffi.workspace = true
+postgres_ffi_types.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }

@@ -65,7 +65,7 @@ pub(in crate::http) async fn configure(
 
             if state.status == ComputeStatus::Failed {
                 let err = state.error.as_ref().map_or("unknown error", |x| x);
-                let msg = format!("compute configuration failed: {:?}", err);
+                let msg = format!("compute configuration failed: {err:?}");
                 return Err(msg);
             }
         }

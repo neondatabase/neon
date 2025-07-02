@@ -141,29 +141,19 @@ where
 
 struct MessageHandler<C: ProjectInfoCache + Send + Sync + 'static> {
     cache: Arc<C>,
-    region_id: String,
 }
 
 impl<C: ProjectInfoCache + Send + Sync + 'static> Clone for MessageHandler<C> {
     fn clone(&self) -> Self {
         Self {
             cache: self.cache.clone(),
-            region_id: self.region_id.clone(),
         }
     }
 }
 
 impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
-    pub(crate) fn new(cache: Arc<C>, region_id: String) -> Self {
-        Self { cache, region_id }
-    }
-
-    pub(crate) async fn increment_active_listeners(&self) {
-        self.cache.increment_active_listeners().await;
-    }
-
-    pub(crate) async fn decrement_active_listeners(&self) {
-        self.cache.decrement_active_listeners().await;
+    pub(crate) fn new(cache: Arc<C>) -> Self {
+        Self { cache }
     }
 
     #[tracing::instrument(skip(self, msg), fields(session_id = tracing::field::Empty))]
@@ -276,7 +266,7 @@ async fn handle_messages<C: ProjectInfoCache + Send + Sync + 'static>(
         }
         let mut conn = match try_connect(&redis).await {
             Ok(conn) => {
-                handler.increment_active_listeners().await;
+                handler.cache.increment_active_listeners().await;
                 conn
             }
             Err(e) => {
@@ -297,11 +287,11 @@ async fn handle_messages<C: ProjectInfoCache + Send + Sync + 'static>(
                 }
             }
             if cancellation_token.is_cancelled() {
-                handler.decrement_active_listeners().await;
+                handler.cache.decrement_active_listeners().await;
                 return Ok(());
             }
         }
-        handler.decrement_active_listeners().await;
+        handler.cache.decrement_active_listeners().await;
     }
 }
 
@@ -310,12 +300,11 @@ async fn handle_messages<C: ProjectInfoCache + Send + Sync + 'static>(
 pub async fn task_main<C>(
     redis: ConnectionWithCredentialsProvider,
     cache: Arc<C>,
-    region_id: String,
 ) -> anyhow::Result<Infallible>
 where
     C: ProjectInfoCache + Send + Sync + 'static,
 {
-    let handler = MessageHandler::new(cache, region_id);
+    let handler = MessageHandler::new(cache);
     // 6h - 1m.
     // There will be 1 minute overlap between two tasks. But at least we can be sure that no message is lost.
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60 - 60));

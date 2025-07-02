@@ -499,7 +499,7 @@ impl ApiImpl for SimulationApi {
         true
     }
 
-    fn finish_sync_safekeepers(&self, lsn: u64) {
+    fn finish_sync_safekeepers(&self, lsn: u64) -> ! {
         debug!("finish_sync_safekeepers, lsn={}", lsn);
         executor::exit(0, Lsn(lsn).to_string());
     }
@@ -523,7 +523,7 @@ impl ApiImpl for SimulationApi {
                 // Voting bug when safekeeper disconnects after voting
                 executor::exit(1, msg.to_owned());
             }
-            panic!("unknown FATAL error from walproposer: {}", msg);
+            panic!("unknown FATAL error from walproposer: {msg}");
         }
     }
 
@@ -544,10 +544,7 @@ impl ApiImpl for SimulationApi {
             }
         }
 
-        let msg = format!(
-            "prop_elected;{};{};{};{}",
-            prop_lsn, prop_term, prev_lsn, prev_term
-        );
+        let msg = format!("prop_elected;{prop_lsn};{prop_term};{prev_lsn};{prev_term}");
 
         debug!(msg);
         self.os.log_event(msg);
