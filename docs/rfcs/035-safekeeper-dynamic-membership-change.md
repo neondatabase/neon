@@ -395,9 +395,10 @@ struct TimelineSafekeeperMigrateRequest {
 }
 ```
 
-In the first version migrates the timeline to `new_sk_set` synchronously. Should be retried until success.
+In the first version the handler migrates the timeline to `new_sk_set` synchronously.
+Should be retried until success.
 
-In the future we might move to asynchronous API and returns scheduled request.
+In the future we might change it to asynchronous API and return scheduled request.
 
 Similar call should be added for the tenant.
 
@@ -447,7 +448,8 @@ table! {
 }
 ```
 
-We load all pending ops from the table on startup into the memory. The table is needed only to preserve the state between restarts.
+We load all pending ops from the table on startup into the memory.
+The table is needed only to preserve the state between restarts.
 
 `op_type` can be `include` (seed from peers and ensure generation is up to
 date), `exclude` (remove locally) and `delete`. Field is actually not strictly
@@ -512,7 +514,9 @@ corruption. The following sequence works:
    retries the call until 200 response.
 
    There is a small question how request handler (timeline creation in this
-   case) would interact with per sk reconciler. In current implementation we first persist the request in the DB, and then send an in-memory request to each safekeeper reconciler to process it.
+   case) would interact with per sk reconciler. In the current implementation
+   we first persist the request in the DB, and then send an in-memory request
+   to each safekeeper reconciler to process it.
 
 For pg version / wal segment size: while we may persist them in `timelines`
 table, it is not necessary as initial creation at step 3 can take them from
@@ -523,7 +527,9 @@ Timeline migration.
 1) CAS to the db to create joint conf. Since this moment the migration is considered to be 
    "in progress". We can detect all "in-progress" migrations looking into the database.
 2) Do steps 4-6 from the algorithm, including `pull_timeline` onto `new_sk_set`, update membership
-   configuration on all safekeepers, notify cplane, etc. All operations are idempotent, so we don't need to persist anything in the database at this stage. If any errors occur, it's safe to retry or abort the migration.
+   configuration on all safekeepers, notify cplane, etc. All operations are idempotent,
+   so we don't need to persist anything in the database at this stage. If any errors occur,
+   it's safe to retry or abort the migration.
 3) Once it becomes possible per alg description above, get out of joint conf
    with another CAS. Also should insert `exclude` entries into `safekeeper_timeline_pending_ops`
    in the same DB transaction. Adding `exclude` entries atomically is nesessary because after
@@ -533,7 +539,8 @@ Timeline migration.
    So, the migration can not be aborted anymore. But it can still be retried if the migration fails
    past stage 3. To finish the migration we need to send the new membership configuration to
    a quorum of safekeepers, notify cplane with the new safekeeper list and schedule the `exclude`
-   requests to in-memory queue for safekeeper reconciler. If the algrorithm is retried, it's possible that we have already committed `exclude` requests to DB, but didn't send them to
+   requests to in-memory queue for safekeeper reconciler. If the algrorithm is retried, it's
+   possible that we have already committed `exclude` requests to DB, but didn't send them to
    the in-memory queue. In this case we need to read them from `safekeeper_timeline_pending_ops`
    because it's the only place where they are persistent. The fields `sk_set_notified_generation`
    and `cplane_notified_generation` are updated after each step. The migration is considered
