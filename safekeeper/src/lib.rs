@@ -61,6 +61,9 @@ pub mod defaults {
 
     pub const DEFAULT_HEARTBEAT_TIMEOUT: &str = "5000ms";
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
+    /* BEGIN_HADRON */
+    pub const DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
+    /* END_HADRON */
     pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
     pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";
     pub const DEFAULT_PARTIAL_BACKUP_CONCURRENCY: &str = "5";
@@ -99,6 +102,9 @@ pub struct SafeKeeperConf {
     pub peer_recovery_enabled: bool,
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
+    /* BEGIN_HADRON */
+    pub max_reelect_offloader_lag_bytes: u64,
+    /* END_HADRON */
     pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
     pub pg_auth: Option<Arc<JwtAuth>>,
@@ -151,6 +157,9 @@ impl SafeKeeperConf {
             sk_auth_token: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
+            /* BEGIN_HADRON */
+            max_reelect_offloader_lag_bytes: defaults::DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES,
+            /* END_HADRON */
             current_thread_runtime: false,
             walsenders_keep_horizon: false,
             partial_backup_timeout: Duration::from_secs(0),

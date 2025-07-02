@@ -138,6 +138,15 @@ pub static BACKUP_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_backup_errors_total counter")
 });
+/* BEGIN_HADRON */
+pub static BACKUP_REELECT_LEADER_COUNT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backup_reelect_leader_total",
+        "Number of times the backup leader was reelected"
+    )
+    .expect("Failed to register safekeeper_backup_reelect_leader_total counter")
+});
+/* END_HADRON */
 pub static BROKER_PUSH_ALL_UPDATES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_broker_push_update_seconds",
