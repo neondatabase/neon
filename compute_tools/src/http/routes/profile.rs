@@ -19,6 +19,11 @@ use crate::http::JsonResponse;
 static CANCEL_CHANNEL: Lazy<Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
 
+static PERF_BINARY_PATH: Lazy<Option<String>> = Lazy::new(|| {
+    // The path to the perf binary, which is expected to be in the PATH.
+    std::env::var("PERF_BINARY_PATH").ok()
+});
+
 fn default_sampling_frequency() -> u16 {
     100
 }
@@ -138,7 +143,7 @@ pub(in crate::http) async fn profile_start(
 
     let options = crate::profiling::ProfileGenerationOptions {
         run_with_sudo,
-        perf_binary_path: None,
+        perf_binary_path: PERF_BINARY_PATH.as_deref().map(std::path::Path::new),
         process_pid: pg_pid,
         follow_forks: true,
         sampling_frequency: request.sampling_frequency as u32,

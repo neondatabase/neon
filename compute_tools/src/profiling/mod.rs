@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Cursor, Write},
     ops::{Deref, DerefMut},
+    os::fd::{AsRawFd, FromRawFd},
     path::{Path, PathBuf},
 };
 
@@ -9,6 +10,8 @@ use anyhow::{Context, anyhow};
 use flate2::{Compression, write::GzEncoder};
 use inferno::collapse::Collapse;
 use nix::{libc::pid_t, unistd::Pid};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tracing::{error, instrument};
 
 const SUDO_PATH: &str = "/usr/bin/sudo";
 
@@ -99,6 +102,18 @@ fn check_perf_runs(perf_binary_path: &str, run_with_sudo: bool) -> anyhow::Resul
     check_binary_runs(&command)
 }
 
+fn get_command_invocation(cmd: &tokio::process::Command) -> String {
+    format!(
+        "{} {}",
+        cmd.as_std().get_program().to_string_lossy(),
+        cmd.as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect::<Vec<String>>()
+            .join(" "),
+    )
+}
+
 /// The options for generating a pprof profile using the `perf` tool.
 #[derive(Debug)]
 pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
@@ -152,6 +167,7 @@ pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
 /// If the perf binary path is not provided, it defaults to "perf" in
 /// the system's `PATH`.
 #[allow(unsafe_code)]
+#[instrument(skip(options), fields(perf_record_cmd, perf_script_cmd))]
 pub async fn generate_pprof_using_perf<S: AsRef<str>>(
     options: ProfileGenerationOptions<'_, S>,
 ) -> anyhow::Result<PprofData> {
@@ -188,6 +204,12 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         tokio::process::Command::new(&perf_binary_path)
     };
 
+    let (read_ctl_fd, write_ctl_fd) =
+        nix::unistd::pipe().context("couldn't create the pipe for controlling perf record")?;
+
+    let (read_ack_fd, write_ack_fd) =
+        nix::unistd::pipe().context("couldn't create the pipe for perf record acknowledgment")?;
+
     let mut perf_record_command = perf_record_command
         .arg("record")
         // Target the specified process IDs.
@@ -198,7 +220,20 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .arg(options.sampling_frequency.to_string())
         // Enable call-graph (stack chain/backtrace) recording for both
         // kernel space and user space.
-        .arg("-g");
+        .arg("-g")
+        // Disable buffering to ensure that the output is written
+        // immediately to the temporary file.
+        // This is important for real-time profiling and ensures that
+        // we get the most accurate stack traces and that after we "ask"
+        // perf to stop, we get the data dumped to the file properly.
+        .arg("--no-buffering")
+        .arg("--control")
+        // .arg(format!("fd:{}", read_ctl_fd.as_raw_fd(),));
+        .arg(format!(
+            "fd:{},{}",
+            read_ctl_fd.as_raw_fd(),
+            write_ack_fd.as_raw_fd()
+        ));
 
     if options.follow_forks {
         perf_record_command = perf_record_command.arg("--inherit");
@@ -209,12 +244,23 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .arg("-o")
         .arg(temp_file_path)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
 
     tracing::debug!("Running perf record command: {perf_record_command:?}");
+
+    let perf_record_cmd_str = get_command_invocation(perf_record_command);
+    tracing::Span::current().record("perf_record_cmd", perf_record_cmd_str.clone());
+
     let mut perf_record_command = perf_record_command
         .spawn()
         .context("failed to spawn a process for perf record")?;
+
+    drop(read_ctl_fd);
+    drop(write_ack_fd);
+
+    // nix::unistd::close(read_ctl_fd).context("failed to close the read end of the control pipe")?;
+    // nix::unistd::close(write_ack_fd)
+    //     .context("failed to close the write end of the acknowledgment pipe")?;
 
     if let Some(mut rx) = options.should_stop {
         tokio::select! {
@@ -234,23 +280,130 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .id()
         .ok_or_else(|| anyhow!("failed to get perf record process ID"))?;
 
-    let _ = nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(perf_record_pid as i32),
-        nix::sys::signal::Signal::SIGTERM,
-    );
-    let _ = perf_record_command.wait().await;
+    error!("Asking perf record to stop via write_ctl_fd");
+    // nix::unistd::write(&write_ctl_fd, b"stop\n").context("COULDNT WRITE STOP TO WRITE CTL FD")?; // This will tell perf to stop
+    // SAFETY: We own the file descriptor `write_ctl_fd` and are converting it into a tokio::fs::File for async writing.
+    // This is safe because no other code will use this fd after this point.
+    let mut ctl_writer = unsafe { tokio::fs::File::from_raw_fd(write_ctl_fd.as_raw_fd()) };
+    if let Err(e) = ctl_writer.write_all(b"stop\n").await {
+        error!("failed to write stop command to perf record: {}", e);
+    }
+    error!("Wrote stop to write_ctl_fd, now waiting for acknowledgment");
+    // let mut bytes = [0; 4096];
+    // if let Err(e) = nix::unistd::read(&read_ack_fd, &mut bytes) {
+    //     error!("failed to read acknowledgment from perf record: {}", e);
+    // }
+    // SAFETY: We own the file descriptor `read_ack_fd` and are converting it into a std::fs::File for blocking reading.
+    // This is safe because no other code will use this fd after this point.
+    // let ack_file = unsafe { std::fs::File::from_raw_fd(read_ack_fd.as_raw_fd()) };
+    // let mut buf = String::new();
+    // use std::io::BufRead;
+    // let mut br = std::io::BufReader::new(ack_file);
+    let ack_file = unsafe { tokio::fs::File::from_raw_fd(read_ack_fd.as_raw_fd()) };
+    let mut br = tokio::io::BufReader::new(ack_file);
+    let mut buf = String::new();
+    loop {
+        // Read the acknowledgment line from perf record.
+        // This is a blocking read, so it will wait until perf record sends the acknowledgment.
+        match br.read_line(&mut buf).await {
+            Ok(n) => {
+                if n > 0 {
+                    // EOF reached, no more data to read.
+                    break;
+                } else {
+                    // No data read, continue reading.
+                    continue;
+                }
+            }
+            Err(e) => {
+                // An error occurred while reading the acknowledgment.
+                // Log the error and break the loop.
+                error!("failed to read acknowledgment from perf record: {e}");
+                break;
+            }
+        }
+        // if !buf.is_empty() {
+        //     break;
+        // }
+    }
 
-    let perf_script_output = tokio::process::Command::new(&perf_binary_path)
+    error!("Got ACK from perf record({}): {buf}", buf.len());
+
+    // drop(write_ctl_fd); // Close the write end of the control pipe
+    // drop(read_ctl_fd); // Close the read end of the control pipe
+    // drop(write_ack_fd); // Close the write end of the acknowledgment pipe
+    // drop(read_ack_fd); // Close the read end of the acknowledgment pipe
+
+    // // Send SIGUSR2 to the perf record process to stop it writing to
+    // // the output file gracefully.
+    // let _ = nix::sys::signal::kill(
+    //     nix::unistd::Pid::from_raw(perf_record_pid as i32),
+    //     nix::sys::signal::Signal::SIGUSR2,
+    // );
+
+    // // Send SIGINT to the perf record process to stop it
+    // // gracefully and wait for it to finish.
+    // let _ = nix::sys::signal::kill(
+    //     nix::unistd::Pid::from_raw(perf_record_pid as i32),
+    //     nix::sys::signal::Signal::SIGINT,
+    // );
+
+    let _ = perf_record_command
+        .wait()
+        .await
+        .context("failed to wait for perf record command")?;
+
+    let mut perf_record_stderr = perf_record_command
+        .stderr
+        .take()
+        .context("failed to take stderr from perf record command")?;
+
+    let mut perf_record_stderr_string: String = String::new();
+    perf_record_stderr
+        .read_to_string(&mut perf_record_stderr_string)
+        .await
+        .context("failed to read stderr from perf record command")?;
+
+    let temp_file_size = std::fs::metadata(temp_file_path)
+        .context(format!(
+            "couldn't get metadata for temp file: {temp_file_path:?}"
+        ))?
+        .len();
+
+    if temp_file_size == 0 {
+        error!(
+            "perf record output file is empty, no data collected.\nPerf stderr: {perf_record_stderr_string}"
+        );
+        return Err(anyhow!(
+            "perf record output file is empty, no data collected"
+        ));
+    }
+
+    let mut perf_script_cmd = tokio::process::Command::new(&perf_binary_path);
+    perf_script_cmd
         .arg("script")
         .arg("-i")
         .arg(temp_file_path)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    tracing::Span::current().record(
+        "perf_script_cmd",
+        get_command_invocation(&perf_script_cmd).to_string(),
+    );
+
+    let perf_script_output = perf_script_cmd
         .output()
         .await
         .context(format!("couldn't run perf script -i {temp_file_path:?}"))?;
 
     if !perf_script_output.status.success() {
+        error!(
+            "perf script command failed with status: {}, command: {}\nTemp file size: {temp_file_size} bytes\nPerf stderr: {perf_record_stderr_string}",
+            perf_script_output.status,
+            get_command_invocation(&perf_script_cmd),
+        );
+
         return Err(anyhow!(
             "perf script command failed: {}",
             String::from_utf8(perf_script_output.stderr)
