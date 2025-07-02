@@ -695,6 +695,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
+        #[cfg(feature = "testing")]
+        disable_pg_session_jwt: false,
     };
 
     let config = Box::leak(Box::new(config));
