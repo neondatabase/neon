@@ -65,6 +65,7 @@
 #include "port/pg_iovec.h"
 #include "postmaster/interrupt.h"
 #include "replication/walsender.h"
+#include "storage/ipc.h"
 #include "utils/timeout.h"
 
 #include "bitmap.h"
@@ -125,6 +126,10 @@ static void pagestore_timeout_handler(void);
 		if (unlikely(timeout_signaled && !InterruptPending)) \
 			InterruptPending = true; \
 	} while (false)
+
+/* shard to which last request was sent */
+static int last_shard_no = -1;
+static bool prefetch_on_exit_callback_registered = false;
 
 /*
  * Prefetch implementation:
@@ -637,6 +642,23 @@ readahead_buffer_resize(int newsize, void *extra)
 }
 
 
+/*
+ * Callback to be called on backend exit to ensure correct state of compute-PS communication
+ * in case of backend cancel
+ */
+static void
+prefetch_on_exit(int code, Datum arg)
+{
+	if (code != 0) /* do disconnect only on abnormal backend termination */
+	{
+		prefetch_on_ps_disconnect();
+		if (last_shard_no >= 0)
+		{
+			page_server->disconnect(last_shard_no);
+		}
+	}
+}
+
 
 /*
  * Make sure that there are no responses still in the buffer.
@@ -647,6 +669,17 @@ readahead_buffer_resize(int newsize, void *extra)
 static void
 consume_prefetch_responses(void)
 {
+	if (!prefetch_on_exit_callback_registered)
+	{
+		/*
+		 * We need to reset prefetch ring state on disconnect,
+		 * because RemoveTempRelationsCallback called by shmem_exit can traverse relations and so send requests to PS.
+		 * prefetch_on_exit should be called before RemoveTempRelationsCallback, so we are registering in lazy way using prefetch_on_exit_callback_registered flag.
+		 */
+		before_shmem_exit(prefetch_on_exit, 0);
+		prefetch_on_exit_callback_registered = true;
+	}
+
 	if (MyPState->ring_receive < MyPState->ring_unused)
 		prefetch_wait_for(MyPState->ring_unused - 1);
 	/*
@@ -875,11 +908,10 @@ communicator_prefetch_receive(BufferTag tag)
 void
 prefetch_on_ps_disconnect(void)
 {
-	bool save_readpage_reentrant_guard = readpage_reentrant_guard;
 	MyPState->ring_flush = MyPState->ring_unused;
 
-	/* Prohibit callig of prefetch_pump_state */
-	START_PREFETCH_RECEIVE_WORK();
+	/* Nothing should cancel disconnect: we should not leave connection in opaque state */
+	HOLD_INTERRUPTS();
 
 	while (MyPState->ring_receive < MyPState->ring_unused)
 	{
@@ -909,9 +941,6 @@ prefetch_on_ps_disconnect(void)
 		MyNeonCounters->getpage_prefetch_discards_total += 1;
 	}
 
-	/* Restore guard */
-	readpage_reentrant_guard = save_readpage_reentrant_guard;
-
 	/*
 	 * We can have gone into retry due to network error, so update stats with
 	 * the latest available
@@ -920,6 +949,8 @@ prefetch_on_ps_disconnect(void)
 		MyPState->n_requests_inflight;
 	MyNeonCounters->getpage_prefetches_buffered =
 		MyPState->n_responses_buffered;
+
+	RESUME_INTERRUPTS();
 }
 
 /*
@@ -1437,6 +1468,7 @@ page_server_request(void const *req)
 
 	PG_TRY();
 	{
+		last_shard_no = shard_no;
 		do
 		{
 			while (!page_server->send(shard_no, (NeonRequest *) req)
@@ -1448,9 +1480,11 @@ page_server_request(void const *req)
 			resp = page_server->receive(shard_no);
 			MyNeonCounters->pageserver_open_requests--;
 		} while (resp == NULL);
+		last_shard_no = -1;
 	}
 	PG_CATCH();
 	{
+		last_shard_no = -1;
 		/* Nothing should cancel disconnect: we should not leave connection in opaque state */
 		HOLD_INTERRUPTS();
 		page_server->disconnect(shard_no);
@@ -2405,14 +2439,17 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 
 	PG_TRY();
 	{
+		last_shard_no = shard_no;
 		do
 		{
 			while (!page_server->send(shard_no, &request.hdr) || !page_server->flush(shard_no));
 			resp = page_server->receive(shard_no);
 		} while (resp == NULL);
+		last_shard_no = -1;
 	}
 	PG_CATCH();
 	{
+		last_shard_no = -1;
 		/* Nothing should cancel disconnect: we should not leave connection in opaque state */
 		HOLD_INTERRUPTS();
 		page_server->disconnect(shard_no);
