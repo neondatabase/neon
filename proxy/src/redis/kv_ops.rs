@@ -54,7 +54,6 @@ impl RedisKVClient {
         };
 
         tracing::debug!("failed to run query: {e}");
-
         match e.retry_method() {
             redis::RetryMethod::Reconnect => {
                 tracing::info!("Redis client is disconnected. Reconnecting...");
