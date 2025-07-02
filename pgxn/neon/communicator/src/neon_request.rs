@@ -190,8 +190,7 @@ pub struct CRelExtendRequest {
     pub lsn: CLsn,
 
     // These fields define page contents. Must point into a buffer in shared memory!
-    pub src_ptr: usize,
-    pub src_size: u32,
+    pub src: ShmemBuf,
 }
 
 #[repr(C)]

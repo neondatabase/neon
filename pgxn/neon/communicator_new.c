@@ -866,8 +866,7 @@ communicator_new_rel_extend(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber 
 			.fork_number = forkNum,
 			.block_number = blockno,
 			.lsn = lsn,
-			.src_ptr = (uintptr_t) src,
-			.src_size = BLCKSZ,
+			.src.ptr = src,
 		}
 	};
 	NeonIOResult result;
