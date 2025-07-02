@@ -26,7 +26,9 @@ use utils::id::{NodeId, TenantId, TenantTimelineId};
 use utils::lsn::Lsn;
 use utils::sync::gate::Gate;
 
-use crate::metrics::{FullTimelineInfo, MISC_OPERATION_SECONDS, WalStorageMetrics, WAL_STORAGE_LIMIT_ERRORS};
+use crate::metrics::{
+    FullTimelineInfo, MISC_OPERATION_SECONDS, WAL_STORAGE_LIMIT_ERRORS, WalStorageMetrics,
+};
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};

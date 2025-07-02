@@ -213,17 +213,13 @@ impl Storage for FileStorage {
             /* BEGIN_HADRON */
             WAL_DISK_IO_ERRORS.inc();
             /*END_HADRON */
-            format!(
-                "failed to write safekeeper state into control file at: {control_partial_path}"
-            )
+            format!("failed to write safekeeper state into control file at: {control_partial_path}")
         })?;
         control_partial.flush().await.with_context(|| {
             /* BEGIN_HADRON */
             WAL_DISK_IO_ERRORS.inc();
             /*END_HADRON */
-            format!(
-                "failed to flush safekeeper state into control file at: {control_partial_path}"
-            )
+            format!("failed to flush safekeeper state into control file at: {control_partial_path}")
         })?;
 
         let control_path = self.timeline_dir.join(CONTROL_FILE_NAME);

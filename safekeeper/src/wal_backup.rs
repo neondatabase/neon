@@ -66,7 +66,12 @@ pub(crate) fn is_wal_backup_required(
 /// Based on peer information determine which safekeeper should offload; if it
 /// is me, run (per timeline) task, if not yet. OTOH, if it is not me and task
 /// is running, kill it.
-pub(crate) async fn update_task(mgr: &mut Manager, storage: Arc<GenericRemoteStorage>, need_backup: bool, state: &StateSnapshot) {
+pub(crate) async fn update_task(
+    mgr: &mut Manager,
+    storage: Arc<GenericRemoteStorage>,
+    need_backup: bool,
+    state: &StateSnapshot,
+) {
     /* BEGIN_HADRON */
     let (offloader, election_dbg_str) = hadron_determine_offloader(mgr, state);
     /* END_HADRON */

@@ -2796,9 +2796,9 @@ def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
     # Sanity check that the hanging insert is indeed still hanging. Otherwise means the circuit breaker we
     # implemented didn't work as expected.
     time.sleep(2)
-    assert (
-        bg_thread.is_alive()
-    ), "The hanging insert somehow unblocked without resolving the disk usage issue!"
+    assert bg_thread.is_alive(), (
+        "The hanging insert somehow unblocked without resolving the disk usage issue!"
+    )
 
     log.info("Restarting the safekeeper to resume WAL backup.")
     # Restart the safekeeper with defaults to both clear the failpoint and resume the larger disk usage limit.

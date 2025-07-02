@@ -31,8 +31,8 @@ use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
 use crate::metrics::{
-    time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS, WAL_DISK_IO_ERRORS,
-    WAL_STORAGE_OPERATION_SECONDS,
+    REMOVED_WAL_SEGMENTS, WAL_DISK_IO_ERRORS, WAL_STORAGE_OPERATION_SECONDS, WalStorageMetrics,
+    time_io_closure,
 };
 use crate::state::TimelinePersistentState;
 use crate::wal_backup::{WalBackup, read_object, remote_timeline_path};
