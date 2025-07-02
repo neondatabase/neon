@@ -3,6 +3,8 @@
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
+use nix::errno::Errno;
+
 pub type RwLock<T> = lock_api::RwLock<PthreadRwLock, T>;
 pub(crate) type RwLockReadGuard<'a, T> = lock_api::RwLockReadGuard<'a, PthreadRwLock, T>;
 pub type RwLockWriteGuard<'a, T> = lock_api::RwLockWriteGuard<'a, PthreadRwLock, T>;
@@ -48,7 +50,7 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
 		unsafe {
 			let res = libc::pthread_rwlock_rdlock(self.inner().as_ptr());
 			if res != 0 {
-				panic!("rdlock failed with {res}");
+				panic!("rdlock failed with {}", Errno::from_raw(res));
 			}
 		}
 	}
@@ -59,7 +61,7 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
 			match res {
 				0 => true,
 				libc::EAGAIN => false,
-				o => panic!("try_rdlock failed with {o}")
+				o => panic!("try_rdlock failed with {}", Errno::from_raw(res)),
 			}
 		}
 	}
@@ -68,7 +70,7 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
 		unsafe {
 			let res = libc::pthread_rwlock_wrlock(self.inner().as_ptr());
 			if res != 0 {
-				panic!("wrlock failed with {res}");
+				panic!("wrlock failed with {}", Errno::from_raw(res));
 			}
 		}
 	}
@@ -79,7 +81,7 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
 			match res {
 				0 => true,
 				libc::EAGAIN => false,
-				o => panic!("try_wrlock failed with {o}")
+				o => panic!("try_wrlock failed with {}", Errno::from_raw(res)),
 			}
 		}
 	}
@@ -88,7 +90,7 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
 		unsafe { 
 			let res = libc::pthread_rwlock_unlock(self.inner().as_ptr());
 			if res != 0 {
-				panic!("unlock failed with {res}");
+				panic!("unlock failed with {}", Errno::from_raw(res));
 			}
 		}
 	}
@@ -96,7 +98,7 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
 		unsafe {
 			let res = libc::pthread_rwlock_unlock(self.inner().as_ptr());
 			if res != 0 {
-				panic!("unlock failed with {res}");
+				panic!("unlock failed with {}", Errno::from_raw(res));
 			}
 		}
 	}

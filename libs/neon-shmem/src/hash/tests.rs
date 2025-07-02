@@ -114,7 +114,7 @@ fn apply_op(
 		Some(new) => {
 			match entry {
 				Entry::Occupied(mut e) => Some(e.insert(new)),
-				Entry::Vacant(e) => { e.insert(new).unwrap(); None },
+				Entry::Vacant(e) => { _ = e.insert(new).unwrap(); None },
 			}
 		},
 		None => {
@@ -277,13 +277,13 @@ fn test_idx_get() {
     do_random_ops(2000, 1500, 0.25, &mut writer, &mut shadow, &mut rng);
 	for _ in 0..100 {
 		let idx = (rng.next_u32() % 1500) as usize;
-		if let Some(mut e) = writer.entry_at_bucket(idx) {
+		if let Some(pair) = writer.get_at_bucket(idx) {
 			{ 
-				let v: *const usize = e.get();
+				let v: *const usize = &pair.1;
 				assert_eq!(writer.get_bucket_for_value(v), idx);
 			}
 			{
-				let v: *const usize = e.get_mut();
+				let v: *const usize = &pair.1;
 				assert_eq!(writer.get_bucket_for_value(v), idx);
 			}
 		}
@@ -339,7 +339,7 @@ fn test_bucket_ops() {
 	).attach_writer();
 	match writer.entry(1.into()) {
 		Entry::Occupied(mut e) => { e.insert(2); },
-		Entry::Vacant(e) => { e.insert(2).unwrap(); },
+		Entry::Vacant(e) => { _ = e.insert(2).unwrap(); },
 	}
 	assert_eq!(writer.get_num_buckets_in_use(), 1);
 	assert_eq!(writer.get_num_buckets(), 1000);
@@ -348,14 +348,16 @@ fn test_bucket_ops() {
 		Entry::Occupied(e) => {
 			assert_eq!(e._key, 1.into());
 			let pos = e.bucket_pos as usize;
-			assert_eq!(writer.entry_at_bucket(pos).unwrap()._key, 1.into());
-			assert_eq!(*writer.get_at_bucket(pos).unwrap(), (1.into(), 2));
 			pos
 		},
 		Entry::Vacant(_) => { panic!("Insert didn't affect entry"); },
 	};
-	let ptr: *const usize = &*writer.get(&1.into()).unwrap();
-	assert_eq!(writer.get_bucket_for_value(ptr), pos);
+	assert_eq!(writer.entry_at_bucket(pos).unwrap()._key, 1.into());
+	assert_eq!(*writer.get_at_bucket(pos).unwrap(), (1.into(), 2));
+	{
+		let ptr: *const usize = &*writer.get(&1.into()).unwrap();
+		assert_eq!(writer.get_bucket_for_value(ptr), pos);
+	}
 	writer.remove(&1.into());
 	assert!(writer.get(&1.into()).is_none());
 }
@@ -390,7 +392,7 @@ fn test_shrink_zero() {
 #[test]
 #[should_panic]
 fn test_grow_oom() {
-    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+    let writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
 		1500, 2000, "test_grow_oom"
 	).attach_writer();
 	writer.grow(20000).unwrap();
@@ -408,7 +410,7 @@ fn test_shrink_bigger() {
 #[test]
 #[should_panic]
 fn test_shrink_early_finish() {
-    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+    let writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
 		1500, 2500, "test_shrink_early_finish"
 	).attach_writer();
 	writer.finish_shrink().unwrap();
