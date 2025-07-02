@@ -1387,6 +1387,7 @@ impl Service {
                     };
                     sk.set_scheduling_policy(SkSchedulingPolicy::Active);
                     locked.safekeepers = Arc::new(safekeepers);
+                    tracing::info!("Activation of safekeeper {sk_id} done");
                 }
             }
         }
