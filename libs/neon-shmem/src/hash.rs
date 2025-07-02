@@ -1,23 +1,28 @@
-//! Resizable hash table implementation on top of byte-level storage (either a [`ShmemHandle`] or a fixed byte array).
+//! Resizable hash table implementation on top of byte-level storage (either a [`ShmemHandle`] or a
+//! fixed byte array).
 //!
-//! This hash table has two major components: the bucket array and the dictionary. Each bucket within the
-//! bucket array contains a `Option<(K, V)>` and an index of another bucket. In this way there is both an 
-//! implicit freelist within the bucket array (`None` buckets point to other `None` entries) and various hash
-//! chains within the bucket array (a Some bucket will point to other Some buckets that had the same hash).
+//! This hash table has two major components: the bucket array and the dictionary. Each bucket
+//! within the bucket array contains a `Option<(K, V)>` and an index of another bucket. In this way
+//! there is both an implicit freelist within the bucket array (`None` buckets point to other `None`
+//! entries) and various hash chains within the bucket array (a Some bucket will point to other Some
+//! buckets that had the same hash).
 //!
-//! Buckets are never moved unless they are within a region that is being shrunk, and so the actual hash-
-//! dependent component is done with the dictionary. When a new key is inserted into the map, a position
-//! within the dictionary is decided based on its hash, the data is inserted into an empty bucket based
-//! off of the freelist, and then the index of said bucket is placed in the dictionary.
+//! Buckets are never moved unless they are within a region that is being shrunk, and so the actual
+//! hash- dependent component is done with the dictionary. When a new key is inserted into the map,
+//! a position within the dictionary is decided based on its hash, the data is inserted into an
+//! empty bucket based off of the freelist, and then the index of said bucket is placed in the
+//! dictionary.
 //!
-//! This map is resizable (if initialized on top of a [`ShmemHandle`]). Both growing and shrinking happen
-//! in-place and are at a high level achieved by expanding/reducing the bucket array and rebuilding the
-//! dictionary by rehashing all keys.
+//! This map is resizable (if initialized on top of a [`ShmemHandle`]). Both growing and shrinking
+//! happen in-place and are at a high level achieved by expanding/reducing the bucket array and
+//! rebuilding the dictionary by rehashing all keys.
 
 use std::hash::{Hash, BuildHasher};
 use std::mem::MaybeUninit;
 
-use crate::{shmem, sync::*};
+use crate::{shmem, sync::{
+	PthreadRwLock, RwLock, RwLockReadGuard, RwLockWriteGuard, ValueReadGuard
+}};
 use crate::shmem::ShmemHandle;
 
 mod core;
@@ -97,7 +102,9 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
             std::slice::from_raw_parts_mut(dictionary_ptr.cast(), dictionary_size as usize)
         };
         let hashmap = CoreHashMap::new(buckets, dictionary);
-		let lock = RwLock::from_raw(PthreadRwLock::new(raw_lock_ptr.cast()), hashmap);
+		let lock = RwLock::from_raw(PthreadRwLock::new(
+			std::ptr::NonNull::new(raw_lock_ptr.cast()).unwrap()			
+		), hashmap);
 		unsafe {
 			std::ptr::write(shared_ptr, lock);
 		}
@@ -257,7 +264,7 @@ where
 
 	/// Remove a key given its hash. Returns the associated value if it existed.
     pub fn remove(&self, key: &K) -> Option<V> {
-		let hash = self.get_hash_value(&key);
+		let hash = self.get_hash_value(key);
         match self.entry_with_hash(key.clone(), hash) {
             Entry::Occupied(e) => Some(e.remove()),
             Entry::Vacant(_) => None
@@ -296,7 +303,7 @@ where
 				_key: key.clone(),
 				bucket_pos: pos as u32,
 				prev_pos: entry::PrevPos::Unknown(
-					self.get_hash_value(&key)
+					self.get_hash_value(key)
 				),
 				map,
 			}),
@@ -351,7 +358,7 @@ where
 	/// in the process.
 	fn rehash_dict(
 		&self,
-		inner: &mut CoreHashMap<'a, K, V>,
+		inner: &mut RwLockWriteGuard<'_, CoreHashMap<'a, K, V>>,
 		buckets_ptr: *mut core::Bucket<K, V>,
 		end_ptr: *mut u8,
 		num_buckets: u32,
@@ -482,10 +489,9 @@ where
 	/// Complete a shrink after caller has evicted entries, removing the unused buckets and rehashing.
 	///
 	/// # Panics
-	/// The following cases result in a panic: 
+	/// The following two cases result in a panic: 
 	/// - Calling this function on a map initialized with [`HashMapInit::with_fixed`].
 	/// - Calling this function on a map when no shrink operation is in progress.
-	/// - Calling this function on a map with `shrink_mode` set to [`HashMapShrinkMode::Remap`] and
 	///   there are more buckets in use than the value returned by [`HashMapAccess::shrink_goal`].
 	///
 	/// # Errors
