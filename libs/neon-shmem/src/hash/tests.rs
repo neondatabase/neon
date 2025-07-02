@@ -36,7 +36,7 @@ impl<'a> From<&'a [u8]> for TestKey {
 }
 
 fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {	
-    let mut w = HashMapInit::<TestKey, usize>::new_resizeable_named(
+    let w = HashMapInit::<TestKey, usize>::new_resizeable_named(
 		100000, 120000, "test_inserts"
 	).attach_writer();
 
@@ -190,10 +190,6 @@ fn random_ops() {
         let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
 
         apply_op(&op, &mut writer, &mut shadow);
-
-        if i % 1000 == 0 {
-            eprintln!("{i} ops processed");
-        }
     }
 }
 
@@ -267,7 +263,7 @@ fn test_idx_remove() {
 		
 	}
 	while let Some((key, val)) = shadow.pop_first() {
-		assert_eq!(writer.get(&key), Some(&val));
+		assert_eq!(*writer.get(&key).unwrap(), val);
 	}
 }
 
@@ -326,8 +322,10 @@ fn test_shrink_grow_seq() {
 	writer.grow(1500).unwrap();
 	do_random_ops(600, 1500, 0.1, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Shrinking to 200");
+	while shadow.len() > 100 {
+		do_deletes(1, &mut writer, &mut shadow);
+	}
 	do_shrink(&mut writer, &mut shadow, 200);
-	do_deletes(100, &mut writer, &mut shadow);
 	do_random_ops(50, 1500, 0.25, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Growing to 10k");
 	writer.grow(10000).unwrap();
@@ -336,7 +334,7 @@ fn test_shrink_grow_seq() {
 
 #[test]
 fn test_bucket_ops() {
-	let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+	let writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
 		1000, 1200, "test_bucket_ops"
 	).attach_writer();
 	match writer.entry(1.into()) {
@@ -345,21 +343,21 @@ fn test_bucket_ops() {
 	}
 	assert_eq!(writer.get_num_buckets_in_use(), 1);
 	assert_eq!(writer.get_num_buckets(), 1000);
-	assert_eq!(writer.get(&1.into()), Some(&2));
+	assert_eq!(*writer.get(&1.into()).unwrap(), 2);
 	let pos = match writer.entry(1.into()) {
 		Entry::Occupied(e) => {
 			assert_eq!(e._key, 1.into());
 			let pos = e.bucket_pos as usize;
 			assert_eq!(writer.entry_at_bucket(pos).unwrap()._key, 1.into());
-			assert_eq!(writer.get_at_bucket(pos), Some(&(1.into(), 2)));
+			assert_eq!(*writer.get_at_bucket(pos).unwrap(), (1.into(), 2));
 			pos
 		},
 		Entry::Vacant(_) => { panic!("Insert didn't affect entry"); },
 	};
-	let ptr: *const usize = writer.get(&1.into()).unwrap();
+	let ptr: *const usize = &*writer.get(&1.into()).unwrap();
 	assert_eq!(writer.get_bucket_for_value(ptr), pos);
 	writer.remove(&1.into());
-	assert_eq!(writer.get(&1.into()), None);
+	assert!(writer.get(&1.into()).is_none());
 }
 
 #[test]

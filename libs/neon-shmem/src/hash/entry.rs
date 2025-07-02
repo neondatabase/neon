@@ -1,11 +1,12 @@
 //! Equivalent of [`std::collections::hash_map::Entry`] for this hashmap.
 
 use crate::hash::core::{CoreHashMap, FullError, INVALID_POS};
+use crate::sync::{RwLockWriteGuard, ValueWriteGuard};
 
 use std::hash::Hash;
 use std::mem;
 
-/// View into an entry in the map (either vacant or occupied).
+
 pub enum Entry<'a, 'b, K, V> {
 	Occupied(OccupiedEntry<'a, 'b, K, V>),
     Vacant(VacantEntry<'a, 'b, K, V>),
@@ -22,10 +23,9 @@ pub(crate) enum PrevPos {
 	Unknown(u64),
 }
 
-/// View into an occupied entry within the map.
 pub struct OccupiedEntry<'a, 'b, K, V> {
 	/// Mutable reference to the map containing this entry.
-	pub(crate) map: &'b mut CoreHashMap<'a, K, V>,
+	pub(crate) map: RwLockWriteGuard<'b, CoreHashMap<'a, K, V>>,
 	/// The key of the occupied entry
     pub(crate) _key: K,
 	/// The index of the previous entry in the chain.
@@ -66,7 +66,7 @@ impl<K, V> OccupiedEntry<'_, '_, K, V> {
 	/// # Panics
 	/// Panics if the `prev_pos` field is equal to [`PrevPos::Unknown`]. In practice, this means
 	/// the entry was obtained via calling something like [`CoreHashMap::entry_at_bucket`].
-    pub fn remove(self) -> V {
+    pub fn remove(mut self) -> V {
 		// If this bucket was queried by index, go ahead and follow its chain from the start.
 		let prev = if let PrevPos::Unknown(hash) = self.prev_pos {
 			let dict_idx = hash as usize % self.map.dictionary.len();
@@ -90,15 +90,17 @@ impl<K, V> OccupiedEntry<'_, '_, K, V> {
 				self.map.dictionary[dict_pos as usize] = bucket.next;
 			},
             PrevPos::Chained(bucket_pos) => {
+				// println!("we think prev of {} is {bucket_pos}", self.bucket_pos);
                 self.map.buckets[bucket_pos as usize].next = bucket.next;
             },
 			_ => unreachable!(),			
         }
 
-        // and add it to the freelist        
+        // and add it to the freelist
+		let free = self.map.free_head;
         let bucket = &mut self.map.buckets[self.bucket_pos as usize];
         let old_value = bucket.inner.take();
-		bucket.next = self.map.free_head;
+		bucket.next = free;
         self.map.free_head = self.bucket_pos;
         self.map.buckets_in_use -= 1;
 
@@ -109,7 +111,7 @@ impl<K, V> OccupiedEntry<'_, '_, K, V> {
 /// An abstract view into a vacant entry within the map.
 pub struct VacantEntry<'a, 'b, K, V> {
 	/// Mutable reference to the map containing this entry.
-    pub(crate) map: &'b mut CoreHashMap<'a, K, V>,
+	pub(crate) map: RwLockWriteGuard<'b, CoreHashMap<'a, K, V>>,
 	/// The key to be inserted into this entry.
     pub(crate) key: K,
 	/// The position within the dictionary corresponding to the key's hash.
@@ -121,16 +123,17 @@ impl<'b, K: Clone + Hash + Eq, V> VacantEntry<'_, 'b, K, V> {
 	///
 	/// # Errors
 	/// Will return [`FullError`] if there are no unoccupied buckets in the map.
-    pub fn insert(self, value: V) -> Result<&'b mut V, FullError> {
+    pub fn insert(mut self, value: V) -> Result<ValueWriteGuard<'b, V>, FullError> {
         let pos = self.map.alloc_bucket(self.key, value)?;
         if pos == INVALID_POS {
             return Err(FullError());
         }
-        let bucket = &mut self.map.buckets[pos as usize];
-        bucket.next = self.map.dictionary[self.dict_pos as usize];
+        self.map.buckets[pos as usize].next = self.map.dictionary[self.dict_pos as usize];
         self.map.dictionary[self.dict_pos as usize] = pos;
 
-        let result = &mut self.map.buckets[pos as usize].inner.as_mut().unwrap().1;
-        Ok(result)
+		Ok(RwLockWriteGuard::map(
+			self.map,
+			|m| &mut m.buckets[pos as usize].inner.as_mut().unwrap().1
+		))
     }
 }

@@ -11,6 +11,7 @@ workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 rustc-hash = { version = "2.1.1" }
 rand = "0.9.1"
 libc.workspace = true
+lock_api = "0.4.13"
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }

@@ -4038,6 +4038,7 @@ dependencies = [
  "foldhash",
  "hashbrown 0.15.4 (git+https://github.com/quantumish/hashbrown.git?rev=6610e6d)",
  "libc",
+ "lock_api",
  "nix 0.30.1",
  "rand 0.9.1",
  "rand_distr 0.5.1",

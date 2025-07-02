@@ -3,7 +3,7 @@
 use std::hash::Hash;
 use std::mem::MaybeUninit;
 
-use crate::hash::entry::{Entry, OccupiedEntry, PrevPos, VacantEntry};
+use crate::hash::entry::*;
 
 /// Invalid position within the map (either within the dictionary or bucket array).
 pub(crate) const INVALID_POS: u32 = u32::MAX;
@@ -29,6 +29,7 @@ pub(crate) struct CoreHashMap<'a, K, V> {
 	pub(crate) alloc_limit: u32,
     /// The number of currently occupied buckets.
     pub(crate) buckets_in_use: u32,
+	// pub(crate) lock: libc::pthread_mutex_t,
 	// Unclear what the purpose of this is.
     pub(crate) _user_list_head: u32,
 }
@@ -105,47 +106,6 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
             if bucket_key == key {
                 return Some(bucket_value);
             }
-            next = bucket.next;
-        }
-    }
-
-    /// Get the [`Entry`] associated with a key given hash. This should be used for updates/inserts.
-    pub fn entry_with_hash(&mut self, key: K, hash: u64) -> Entry<'a, '_, K, V> {
-        let dict_pos = hash as usize % self.dictionary.len();
-        let first = self.dictionary[dict_pos];
-        if first == INVALID_POS {
-            // no existing entry
-            return Entry::Vacant(VacantEntry {
-                map: self,
-                key,
-                dict_pos: dict_pos as u32,
-            });
-        }
-
-        let mut prev_pos = PrevPos::First(dict_pos as u32);
-        let mut next = first;
-        loop {
-            let bucket = &mut self.buckets[next as usize];
-            let (bucket_key, _bucket_value) = bucket.inner.as_mut().expect("entry is in use");
-            if *bucket_key == key {
-                // found existing entry
-                return Entry::Occupied(OccupiedEntry {
-                    map: self,
-                    _key: key,
-                    prev_pos,
-                    bucket_pos: next,
-                });
-            }
-
-            if bucket.next == INVALID_POS {
-                // No existing entry
-                return Entry::Vacant(VacantEntry {
-                    map: self,
-                    key,
-                    dict_pos: dict_pos as u32,
-                });
-            }
-            prev_pos = PrevPos::Chained(next);
             next = bucket.next;
         }
     }
