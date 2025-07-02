@@ -544,12 +544,8 @@ impl UploadOp {
                 let uname = u.layer_desc().layer_name();
                 !i.references(&uname, umeta) && !index.references(&uname, umeta)
             }
-            (UploadOp::Delete(d), UploadOp::UploadMetadata { uploaded: i })
-            | (UploadOp::UploadMetadata { uploaded: i }, UploadOp::Delete(d)) => {
-                d.layers.iter().all(|(dname, dmeta)| {
-                    !i.references(dname, dmeta) && !index.references(dname, dmeta)
-                })
-            }
+            (UploadOp::Delete(_), UploadOp::UploadMetadata { .. })
+            | (UploadOp::UploadMetadata { .. }, UploadOp::Delete(_)) => false,
 
             // Indexes can never bypass each other. They can coalesce though, and
             // `UploadQueue::next_ready()` currently does this when possible.
