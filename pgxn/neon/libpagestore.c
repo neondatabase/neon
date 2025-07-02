@@ -1621,7 +1621,7 @@ pg_init_libpagestore(void)
 	if (neon_auth_token)
 		neon_log(LOG, "using storage auth token from NEON_AUTH_TOKEN environment variable");
 
-	if (pageserver_connstring[0] || pageserver_connstring[0])
+	if (pageserver_connstring[0] || pageserver_grpc_urls[0])
 	{
 		neon_log(PageStoreTrace, "set neon_smgr hook");
 		smgr_hook = smgr_neon;

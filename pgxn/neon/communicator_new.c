@@ -126,6 +126,12 @@ pg_init_communicator_new(void)
 {
 	BackgroundWorker bgw;
 
+	if (pageserver_connstring[0] == '\0' && pageserver_grpc_urls[0] == '\0')
+	{
+		/* running with local storage */
+		return;
+	}
+
 	/* Initialize the background worker process */
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS;
@@ -381,6 +387,12 @@ communicator_new_init(void)
 {
 	Assert(cis != NULL);
 	Assert(my_bs == NULL);
+
+	if (pageserver_connstring[0] == '\0' && pageserver_grpc_urls[0] == '\0')
+	{
+		/* running with local storage */
+		return;
+	}
 
 	if (MyBgworkerEntry && strcmp(MyBgworkerEntry->bgw_function_name, "communicator_new_bgworker_main") == 0)
 		return;
