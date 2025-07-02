@@ -16,14 +16,13 @@
 //!   single caller at a time, and is returned to the pool when dropped. Idle clients may be removed
 //!   from the pool after some time, to free up the channel.
 //!
-//! * StreamPool: manages bidirectional gRPC GetPage streams. Each stream acquires a client from
-//!   the ClientPool for the stream's lifetime. Internal streams are not exposed to callers;
-//!   instead, it returns a guard can be used to send a single request, to properly enforce queue
-//!   depth and route responses. Internally, the pool will reuse or spin up a suitable stream for
-//!   the request, possibly pipelining multiple requests from multiple callers on the same stream
-//!   (up to some queue depth). Idle streams may be removed from the pool after some time, to free
-//!   up the client.
-//!   
+//! * StreamPool: manages bidirectional gRPC GetPage streams. Each stream acquires a client from the
+//!   ClientPool for the stream's lifetime. Internal streams are not exposed to callers; instead, it
+//!   returns a guard that can be used to send a single request, to properly enforce queue depth and
+//!   route responses. Internally, the pool will reuse or spin up a suitable stream for the request,
+//!   possibly pipelining multiple requests from multiple callers on the same stream (up to some
+//!   queue depth). Idle streams may be removed from the pool after a while to free up the client.
+//!
 //! Each channel corresponds to one TCP connection. Each client unary request and each stream
 //! corresponds to one HTTP/2 stream and server task.
 //!
@@ -110,9 +109,9 @@ impl ChannelPool {
     /// client requires an owned `Channel` and we don't have access to the channel's internal
     /// refcount.
     ///
-    /// NB: this is not performance-sensitive. It is only called when creating a new client, and
-    /// clients are pooled and reused by `ClientPool`. The total number of channels will also be
-    /// small. O(n) performance is therefore okay.
+    /// This is not performance-sensitive. It is only called when creating a new client, and clients
+    /// are pooled and reused by `ClientPool`. The total number of channels will also be small. O(n)
+    /// performance is therefore okay.
     pub fn get(self: &Arc<Self>) -> ChannelGuard {
         let mut channels = self.channels.lock().unwrap();
 
@@ -392,6 +391,7 @@ impl StreamPool {
     /// This is very performance-sensitive, as it is on the GetPage hot path.
     ///
     /// TODO: this must do something more sophisticated for performance. We want:
+    ///
     /// * Cheap, concurrent access in the common case where we can use a pooled stream.
     /// * Quick acquisition of pooled streams with available capacity.
     /// * Prefer streams that belong to lower-numbered channels, to reap idle channels.
@@ -436,12 +436,6 @@ impl StreamPool {
         // No available stream, spin up a new one. We install the stream entry in the pool first and
         // return the guard, while spinning up the stream task async. This allows other callers to
         // join onto this stream and also create additional streams concurrently if this fills up.
-        //
-        // NB: we have to be careful not to overshoot here. The semaphore limit is CLIENT_LIMIT *
-        // STREAM_QUEUE_DEPTH, but if we were to miss a concurrent queue depth allocation we'd try
-        // to spin up more streams than CLIENT_LIMIT and block on the client pool ~forever. This
-        // should currently be safe, because we only acquire queue depth under lock, and only after
-        // acquiring the semaphore permit.
         let id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let queue_depth = Arc::new(AtomicUsize::new(1)); // reserve quota for this caller
         let (req_tx, req_rx) = mpsc::channel(STREAM_QUEUE_DEPTH);
@@ -453,8 +447,8 @@ impl StreamPool {
 
         // NB: make sure we don't overshoot the client limit. The semaphore limit is CLIENT_LIMIT *
         // STREAM_QUEUE_DEPTH, but if we were to misaccount queue depth we'd try to spin up more
-        // streams than CLIENT_LIMIT and block on the client pool ~forever. This should not be
-        // possible because we only acquire queue depth under lock.
+        // streams than CLIENT_LIMIT and block on the client pool ~forever. This should not happen
+        // because we only acquire queue depth under lock and after acquiring a semaphore permit.
         assert!(streams.len() <= CLIENT_LIMIT, "stream overflow");
 
         let client_pool = self.client_pool.clone();
