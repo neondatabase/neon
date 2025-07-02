@@ -8,7 +8,7 @@ use utils::backoff;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::ShardIndex;
 
-use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamPool};
+use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
 
 /// A rich Pageserver gRPC client for a single tenant timeline. This client is more capable than the
 /// basic `page_api::Client` gRPC client, and supports:
@@ -93,10 +93,10 @@ impl PageserverClient {
     ) -> tonic::Result<page_api::GetPageResponse> {
         // TODO: support multiple shards.
         let shard_id = ShardIndex::unsharded();
-        let streams = self.get_shard_streams(shard_id)?;
 
         self.with_retries("get_page", async || {
-            let resp = streams.send(req.clone()).await?;
+            let stream = self.get_shard_stream(shard_id).await?;
+            let resp = stream.send(req.clone()).await?;
 
             if resp.status_code != page_api::GetPageStatusCode::Ok {
                 return Err(tonic::Status::new(
@@ -151,14 +151,16 @@ impl PageserverClient {
             .map_err(|err| tonic::Status::internal(format!("failed to acquire client: {err}")))
     }
 
-    /// Returns the stream pool for the given shard.
+    /// Returns a pooled stream for the given shard.
     #[allow(clippy::result_large_err)] // TODO: revisit
-    fn get_shard_streams(&self, shard_id: ShardIndex) -> tonic::Result<&Arc<StreamPool>> {
-        Ok(&self
+    async fn get_shard_stream(&self, shard_id: ShardIndex) -> tonic::Result<StreamGuard> {
+        Ok(self
             .pools
             .get(&shard_id)
             .ok_or_else(|| tonic::Status::not_found(format!("unknown shard {shard_id}")))?
-            .streams)
+            .streams
+            .get()
+            .await)
     }
 
     /// Returns the shard index for shard 0.
@@ -215,12 +217,10 @@ impl PageserverClient {
 ///
 /// TODO: consider separate pools for normal and bulk traffic, with different settings.
 struct ShardPools {
-    /// Manages gRPC channels (i.e. TCP connections) for this shard.
-    #[allow(unused)]
-    channels: Arc<ChannelPool>,
-    /// Manages gRPC clients for this shard, using `channels`.
+    /// Manages unary gRPC clients for this shard.
     clients: Arc<ClientPool>,
-    /// Manages gRPC GetPage streams for this shard, using `clients`.
+    /// Manages gRPC GetPage streams for this shard. Uses a dedicated client pool, but shares the
+    /// channel pool with unary clients.
     streams: Arc<StreamPool>,
 }
 
@@ -233,20 +233,26 @@ impl ShardPools {
         shard_id: ShardIndex,
         auth_token: Option<String>,
     ) -> anyhow::Result<Self> {
+        // Use a common channel pool for all clients, to multiplex unary and stream requests across
+        // the same TCP connections. The channel pool is unbounded (client pools are bounded).
         let channels = ChannelPool::new(url)?;
+
+        // Dedicated client pool for unary requests.
         let clients = ClientPool::new(
             channels.clone(),
             tenant_id,
             timeline_id,
             shard_id,
-            auth_token,
+            auth_token.clone(),
         );
-        let streams = StreamPool::new(clients.clone());
 
-        Ok(Self {
-            channels,
-            clients,
-            streams,
-        })
+        // Dedicated client pool for streams. If this shared a client pool with unary requests,
+        // long-lived streams could fill up the client pool and starve out unary requests. It
+        // shares the same underlying channel pool with unary clients though.
+        let stream_clients =
+            ClientPool::new(channels, tenant_id, timeline_id, shard_id, auth_token);
+        let streams = StreamPool::new(stream_clients);
+
+        Ok(Self { clients, streams })
     }
 }
