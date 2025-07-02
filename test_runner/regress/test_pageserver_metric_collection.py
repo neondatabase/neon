@@ -189,7 +189,7 @@ def test_metric_collection(
             log.info(file_path)
             if file.endswith(".gz"):
                 events = []
-                with gzip.open(file_path, 'rt') as f:
+                with gzip.open(file_path, "rt") as f:
                     for line in f:
                         line = line.strip()
                         if line:
