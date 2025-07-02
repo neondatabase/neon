@@ -274,7 +274,7 @@ fn pg_array_parse_item<'a>(
     // whitespace might preceed an item.
     pg_array = pg_array.trim_start();
 
-    if pg_array.strip_prefix('{').is_some() {
+    if pg_array.starts_with('{') {
         // nested array.
         let mut nested = vec![];
         pg_array = pg_array_parse_inner(&mut nested, pg_array, elem, delim)?;
@@ -283,12 +283,11 @@ fn pg_array_parse_item<'a>(
     }
 
     if let Some(mut pg_array) = pg_array.strip_prefix('"') {
+        // the parsed string is un-escaped and written into quoted.
         pg_array = pg_array_parse_quoted(quoted, pg_array)?;
 
-        // we have unquoted an item string:
+        // we have un-escaped the string, parse it as pgtext.
         pg_text_to_json(output, quoted, elem)?;
-
-        quoted.clear();
 
         return Ok(pg_array);
     }
@@ -331,6 +330,8 @@ fn pg_array_parse_quoted<'a>(
     // or match the word `NULL`. Double quotes and backslashes embedded in element values will be backslash-escaped.
     // For numeric data types it is safe to assume that double quotes will never appear,
     // but for textual data types one should be prepared to cope with either the presence or absence of quotes.
+
+    quoted.clear();
 
     // We write to quoted in chunks terminated by an escape character.
     // Eg if we have the input `foo\"bar"`, then we write `foo`, then `"`, then finally `bar`.
