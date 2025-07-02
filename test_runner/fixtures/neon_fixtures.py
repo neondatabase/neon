@@ -4362,6 +4362,8 @@ class Endpoint(PgProtocol, LogUtils):
         basebackup_request_tries: int | None = None,
         timeout: str | None = None,
         env: dict[str, str] | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> Self:
         """
         Start the Postgres instance.
@@ -4386,6 +4388,8 @@ class Endpoint(PgProtocol, LogUtils):
             basebackup_request_tries=basebackup_request_tries,
             timeout=timeout,
             env=env,
+            autoprewarm=autoprewarm,
+            offload_lfc_interval_seconds=offload_lfc_interval_seconds,
         )
         self._running.release(1)
         self.log_config_value("shared_buffers")
@@ -4601,6 +4605,8 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         basebackup_request_tries: int | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> Self:
         """
         Create an endpoint, apply config, and start Postgres.
@@ -4621,6 +4627,8 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
+            autoprewarm=autoprewarm,
+            offload_lfc_interval_seconds=offload_lfc_interval_seconds,
         )
 
         return self
@@ -4705,6 +4713,8 @@ class EndpointFactory:
         remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         basebackup_request_tries: int | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4726,6 +4736,8 @@ class EndpointFactory:
             remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             basebackup_request_tries=basebackup_request_tries,
+            autoprewarm=autoprewarm,
+            offload_lfc_interval_seconds=offload_lfc_interval_seconds,
         )
 
     def create(

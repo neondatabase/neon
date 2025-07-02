@@ -677,6 +677,16 @@ struct EndpointStartCmdArgs {
 
     #[clap(
         long,
+        help = "Download LFC cache from endpoint storage on endpoint startup",
+        default_value = "false"
+    )]
+    autoprewarm: bool,
+
+    #[clap(long, help = "Upload LFC cache to endpoint storage periodically")]
+    offload_lfc_interval_seconds: Option<std::num::NonZeroU64>,
+
+    #[clap(
+        long,
         help = "Run in development mode, skipping VM-specific operations like process termination",
         action = clap::ArgAction::SetTrue
     )]
@@ -1585,22 +1595,24 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             let endpoint_storage_token = env.generate_auth_token(&claims)?;
             let endpoint_storage_addr = env.endpoint_storage.listen_addr.to_string();
 
+            let args = control_plane::endpoint::EndpointStartArgs {
+                auth_token,
+                endpoint_storage_token,
+                endpoint_storage_addr,
+                safekeepers_generation,
+                safekeepers,
+                pageservers,
+                remote_ext_base_url: remote_ext_base_url.clone(),
+                shard_stripe_size: stripe_size.0 as usize,
+                create_test_user: args.create_test_user,
+                start_timeout: args.start_timeout,
+                autoprewarm: args.autoprewarm,
+                offload_lfc_interval_seconds: args.offload_lfc_interval_seconds,
+                dev: args.dev,
+            };
+
             println!("Starting existing endpoint {endpoint_id}...");
-            endpoint
-                .start(
-                    &auth_token,
-                    endpoint_storage_token,
-                    endpoint_storage_addr,
-                    safekeepers_generation,
-                    safekeepers,
-                    pageservers,
-                    remote_ext_base_url.as_ref(),
-                    stripe_size.0 as usize,
-                    args.create_test_user,
-                    args.start_timeout,
-                    args.dev,
-                )
-                .await?;
+            endpoint.start(args).await?;
         }
         EndpointCmd::Reconfigure(args) => {
             let endpoint_id = &args.endpoint_id;
