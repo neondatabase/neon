@@ -302,7 +302,6 @@ where
 			}),
 			_ => None,
 		}
->>>>>>> quantumish/lfc-resizable-map
     }
 
 	/// Returns the number of buckets in the table.
