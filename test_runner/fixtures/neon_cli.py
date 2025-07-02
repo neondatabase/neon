@@ -567,7 +567,6 @@ class NeonLocalCli(AbstractNeonCli):
         basebackup_request_tries: int | None = None,
         timeout: str | None = None,
         env: dict[str, str] | None = None,
-        grpc: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -587,8 +586,6 @@ class NeonLocalCli(AbstractNeonCli):
             args.append(endpoint_id)
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
-        if grpc:
-            args.extend(["--grpc"])
         if allow_multiple:
             args.extend(["--allow-multiple"])
         if create_test_user:
@@ -605,7 +602,6 @@ class NeonLocalCli(AbstractNeonCli):
         endpoint_id: str,
         tenant_id: TenantId | None = None,
         pageserver_id: int | None = None,
-        grpc: bool = False,
         safekeepers: list[int] | None = None,
         check_return_code=True,
     ) -> subprocess.CompletedProcess[str]:
@@ -614,8 +610,6 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--tenant-id", str(tenant_id)])
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
-        if grpc:
-            args.extend(["--grpc"])
         if safekeepers is not None:
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
         return self.raw_cli(args, check_return_code=check_return_code)
