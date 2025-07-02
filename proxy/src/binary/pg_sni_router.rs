@@ -4,6 +4,7 @@
 //! This allows connecting to pods/services running in the same Kubernetes cluster from
 //! the outside. Similar to an ingress controller for HTTPS.
 
+use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -218,11 +219,6 @@ pub(super) async fn task_main(
     {
         let (socket, peer_addr) = accept_result?;
 
-        let is_public_ip = match peer_addr.ip() {
-            std::net::IpAddr::V4(ip) => !ip.is_private(),
-            std::net::IpAddr::V6(_) => true,
-        };
-
         let session_id = uuid::Uuid::new_v4();
         let tls_config = Arc::clone(&tls_config);
         let dest_suffix = Arc::clone(&dest_suffix);
@@ -234,9 +230,6 @@ pub(super) async fn task_main(
                     .set_nodelay(true)
                     .context("failed to set socket option")?;
 
-                if is_public_ip {
-                    info!(%peer_addr, "serving");
-                }
                 let ctx = RequestContext::new(
                     session_id,
                     ConnectionInfo {
@@ -247,11 +240,17 @@ pub(super) async fn task_main(
                 );
                 handle_client(ctx, dest_suffix, tls_config, compute_tls_config, socket).await
             }
-            .unwrap_or_else(move |e| {
-                if is_public_ip {
-                    // Acknowledge that the task has finished with an error.
-                    error!("per-client task finished with an error: {e:#}");
+            .unwrap_or_else(|e| {
+                if let Some(FirstMessage(io_error)) = e.downcast_ref() {
+                    // this is noisy. if we get EOF on the very first message that's likely
+                    // just NLB doing a healthcheck.
+                    if io_error.kind() == io::ErrorKind::UnexpectedEof {
+                        return;
+                    }
                 }
+
+                // Acknowledge that the task has finished with an error.
+                error!("per-client task finished with an error: {e:#}");
             })
             .instrument(tracing::info_span!("handle_client", ?session_id)),
         );
@@ -266,12 +265,19 @@ pub(super) async fn task_main(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+struct FirstMessage(io::Error);
+
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     ctx: &RequestContext,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
 ) -> anyhow::Result<TlsStream<S>> {
-    let (mut stream, msg) = PqStream::parse_startup(Stream::from_raw(raw_stream)).await?;
+    let (mut stream, msg) = PqStream::parse_startup(Stream::from_raw(raw_stream))
+        .await
+        .map_err(FirstMessage)?;
+
     match msg {
         FeStartupPacket::SslRequest { direct: None } => {
             let raw = stream.accept_tls().await?;
