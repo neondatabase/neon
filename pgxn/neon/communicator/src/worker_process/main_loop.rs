@@ -13,7 +13,7 @@ use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
-use pageserver_client_grpc::client::PageserverClient;
+use pageserver_client_grpc::PageserverClient;
 use pageserver_page_api as page_api;
 
 use metrics::{IntCounter, IntCounterVec};

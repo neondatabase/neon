@@ -39,7 +39,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tonic::transport::{Channel, Endpoint};
 use tracing::warn;
 
-use pageserver_page_api::{self as page_api, GetPageRequest, GetPageResponse};
+use pageserver_page_api as page_api;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::ShardIndex;
 
@@ -358,9 +358,9 @@ pub struct StreamPool {
 }
 
 type StreamID = usize;
-type RequestSender = Sender<(GetPageRequest, ResponseSender)>;
-type RequestReceiver = Receiver<(GetPageRequest, ResponseSender)>;
-type ResponseSender = oneshot::Sender<tonic::Result<GetPageResponse>>;
+type RequestSender = Sender<(page_api::GetPageRequest, ResponseSender)>;
+type RequestReceiver = Receiver<(page_api::GetPageRequest, ResponseSender)>;
+type ResponseSender = oneshot::Sender<tonic::Result<page_api::GetPageResponse>>;
 
 struct StreamEntry {
     /// Sends caller requests to the stream task. The stream task exits when this is dropped.
@@ -400,7 +400,10 @@ impl StreamPool {
     /// * Allow spinning up multiple streams concurrently, but don't overshoot limits.
     ///
     /// For now, we just do something simple and functional, but very inefficient (linear scan).
-    pub async fn send(&self, req: GetPageRequest) -> tonic::Result<GetPageResponse> {
+    pub async fn send(
+        &self,
+        req: page_api::GetPageRequest,
+    ) -> tonic::Result<page_api::GetPageResponse> {
         // Acquire a permit. For simplicity, we drop it when this method returns. This may exceed
         // the queue depth if a caller goes away while a request is in flight, but that's okay. We
         // do the same for queue depth tracking.
