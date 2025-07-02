@@ -12,14 +12,14 @@ use nix::sys::mman::mmap as nix_mmap;
 use nix::sys::mman::munmap as nix_munmap;
 use nix::unistd::ftruncate as nix_ftruncate;
 
-/// ShmemHandle represents a shared memory area that can be shared by processes over fork().
-/// Unlike shared memory allocated by Postgres, this area is resizable, up to 'max_size' that's
+/// `ShmemHandle` represents a shared memory area that can be shared by processes over `fork()`.
+/// Unlike shared memory allocated by Postgres, this area is resizable, up to `max_size` that's
 /// specified at creation.
 ///
-/// The area is backed by an anonymous file created with memfd_create(). The full address space for
-/// 'max_size' is reserved up-front with mmap(), but whenever you call [`ShmemHandle::set_size`],
+/// The area is backed by an anonymous file created with `memfd_create()`. The full address space for
+/// `max_size` is reserved up-front with `mmap()`, but whenever you call [`ShmemHandle::set_size`],
 /// the underlying file is resized. Do not access the area beyond the current size. Currently, that
-/// will cause the file to be expanded, but we might use mprotect() etc. to enforce that in the
+/// will cause the file to be expanded, but we might use `mprotect()` etc. to enforce that in the
 /// future.
 pub struct ShmemHandle {
     /// memfd file descriptor
@@ -38,7 +38,7 @@ pub struct ShmemHandle {
 struct SharedStruct {
     max_size: usize,
 
-    /// Current size of the backing file. The high-order bit is used for the RESIZE_IN_PROGRESS flag
+    /// Current size of the backing file. The high-order bit is used for the [`RESIZE_IN_PROGRESS`] flag.
     current_size: AtomicUsize,
 }
 
@@ -46,7 +46,7 @@ const RESIZE_IN_PROGRESS: usize = 1 << 63;
 
 const HEADER_SIZE: usize = std::mem::size_of::<SharedStruct>();
 
-/// Error type returned by the ShmemHandle functions.
+/// Error type returned by the [`ShmemHandle`] functions.
 #[derive(thiserror::Error, Debug)]
 #[error("{msg}: {errno}")]
 pub struct Error {
@@ -55,8 +55,8 @@ pub struct Error {
 }
 
 impl Error {
-    fn new(msg: &str, errno: Errno) -> Error {
-        Error {
+    fn new(msg: &str, errno: Errno) -> Self {
+        Self {
             msg: msg.to_string(),
             errno,
         }
@@ -65,11 +65,11 @@ impl Error {
 
 impl ShmemHandle {
     /// Create a new shared memory area. To communicate between processes, the processes need to be
-    /// fork()'d after calling this, so that the ShmemHandle is inherited by all processes.
+    /// `fork()`'d after calling this, so that the `ShmemHandle` is inherited by all processes.
     ///
-    /// If the ShmemHandle is dropped, the memory is unmapped from the current process. Other
+    /// If the `ShmemHandle` is dropped, the memory is unmapped from the current process. Other
     /// processes can continue using it, however.
-    pub fn new(name: &str, initial_size: usize, max_size: usize) -> Result<ShmemHandle, Error> {
+    pub fn new(name: &str, initial_size: usize, max_size: usize) -> Result<Self, Error> {
         // create the backing anonymous file.
         let fd = create_backing_file(name)?;
 
@@ -80,17 +80,17 @@ impl ShmemHandle {
         fd: OwnedFd,
         initial_size: usize,
         max_size: usize,
-    ) -> Result<ShmemHandle, Error> {
-        // We reserve the high-order bit for the RESIZE_IN_PROGRESS flag, and the actual size
+    ) -> Result<Self, Error> {
+        // We reserve the high-order bit for the `RESIZE_IN_PROGRESS` flag, and the actual size
         // is a little larger than this because of the SharedStruct header. Make the upper limit
         // somewhat smaller than that, because with anything close to that, you'll run out of
         // memory anyway.
-        if max_size >= 1 << 48 {
-            panic!("max size {} too large", max_size);
-        }
-        if initial_size > max_size {
-            panic!("initial size {initial_size} larger than max size {max_size}");
-        }
+        assert!(max_size < 1 << 48, "max size {max_size} too large");
+        
+        assert!(
+			initial_size <= max_size,
+            "initial size {initial_size} larger than max size {max_size}"
+        );
 
         // The actual initial / max size is the one given by the caller, plus the size of
         // 'SharedStruct'.
@@ -110,7 +110,7 @@ impl ShmemHandle {
                 0,
             )
         }
-        .map_err(|e| Error::new("mmap failed: {e}", e))?;
+        .map_err(|e| Error::new("mmap failed", e))?;
 
         // Reserve space for the initial size
         enlarge_file(fd.as_fd(), initial_size as u64)?;
@@ -121,13 +121,13 @@ impl ShmemHandle {
             shared.write(SharedStruct {
                 max_size: max_size.into(),
                 current_size: AtomicUsize::new(initial_size),
-            })
-        };
+            });
+        }
 
         // The user data begins after the header
         let data_ptr = unsafe { start_ptr.cast().add(HEADER_SIZE) };
 
-        Ok(ShmemHandle {
+        Ok(Self {
             fd,
             max_size: max_size.into(),
             shared_ptr: shared,
@@ -140,28 +140,28 @@ impl ShmemHandle {
         unsafe { self.shared_ptr.as_ref() }
     }
 
-    /// Resize the shared memory area. 'new_size' must not be larger than the 'max_size' specified
+    /// Resize the shared memory area. `new_size` must not be larger than the `max_size` specified
     /// when creating the area.
     ///
     /// This may only be called from one process/thread concurrently. We detect that case
-    /// and return an Error.
+    /// and return an [`shmem::Error`](Error).
     pub fn set_size(&self, new_size: usize) -> Result<(), Error> {
         let new_size = new_size + HEADER_SIZE;
         let shared = self.shared();
 
-        if new_size > self.max_size {
-            panic!(
-                "new size ({} is greater than max size ({})",
-                new_size, self.max_size
-            );
-        }
-        assert_eq!(self.max_size, shared.max_size);
+        assert!(
+			new_size <= self.max_size,
+            "new size ({new_size}) is greater than max size ({})",
+			self.max_size
+        );
 
-        // Lock the area by setting the bit in 'current_size'
+		assert_eq!(self.max_size, shared.max_size);
+
+        // Lock the area by setting the bit in `current_size`
         //
         // Ordering::Relaxed would probably be sufficient here, as we don't access any other memory
-        // and the posix_fallocate/ftruncate call is surely a synchronization point anyway. But
-        // since this is not performance-critical, better safe than sorry .
+        // and the `posix_fallocate`/`ftruncate` call is surely a synchronization point anyway. But
+        // since this is not performance-critical, better safe than sorry.
         let mut old_size = shared.current_size.load(Ordering::Acquire);
         loop {
             if (old_size & RESIZE_IN_PROGRESS) != 0 {
@@ -188,7 +188,7 @@ impl ShmemHandle {
             use std::cmp::Ordering::{Equal, Greater, Less};
             match new_size.cmp(&old_size) {
                 Less => nix_ftruncate(&self.fd, new_size as i64).map_err(|e| {
-                    Error::new("could not shrink shmem segment, ftruncate failed: {e}", e)
+                    Error::new("could not shrink shmem segment, ftruncate failed", e)
                 }),
                 Equal => Ok(()),
                 Greater => enlarge_file(self.fd.as_fd(), new_size as u64),
@@ -206,8 +206,8 @@ impl ShmemHandle {
 
     /// Returns the current user-visible size of the shared memory segment.
     ///
-    /// NOTE: a concurrent set_size() call can change the size at any time. It is the caller's
-    /// responsibility not to access the area beyond the current size.
+    /// NOTE: a concurrent [`ShmemHandle::set_size()`] call can change the size at any time.
+	/// It is the caller's responsibility not to access the area beyond the current size.
     pub fn current_size(&self) -> usize {
         let total_current_size =
             self.shared().current_size.load(Ordering::Relaxed) & !RESIZE_IN_PROGRESS;
@@ -224,23 +224,23 @@ impl Drop for ShmemHandle {
     }
 }
 
-/// Create a "backing file" for the shared memory area. On Linux, use memfd_create(), to create an
+/// Create a "backing file" for the shared memory area. On Linux, use `memfd_create()`, to create an
 /// anonymous in-memory file. One macos, fall back to a regular file. That's good enough for
 /// development and testing, but in production we want the file to stay in memory.
 ///
-/// disable 'unused_variables' warnings, because in the macos path, 'name' is unused.
+/// Disable unused variables warnings because `name` is unused in the macos path.
 #[allow(unused_variables)]
 fn create_backing_file(name: &str) -> Result<OwnedFd, Error> {
     #[cfg(not(target_os = "macos"))]
     {
         nix::sys::memfd::memfd_create(name, nix::sys::memfd::MFdFlags::empty())
-            .map_err(|e| Error::new("memfd_create failed: {e}", e))
+            .map_err(|e| Error::new("memfd_create failed", e))
     }
     #[cfg(target_os = "macos")]
     {
         let file = tempfile::tempfile().map_err(|e| {
             Error::new(
-                "could not create temporary file to back shmem area: {e}",
+                "could not create temporary file to back shmem area",
                 nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0)),
             )
         })?;
@@ -255,7 +255,7 @@ fn enlarge_file(fd: BorrowedFd, size: u64) -> Result<(), Error> {
     {
         nix::fcntl::posix_fallocate(fd, 0, size as i64).map_err(|e| {
             Error::new(
-                "could not grow shmem segment, posix_fallocate failed: {e}",
+                "could not grow shmem segment, posix_fallocate failed",
                 e,
             )
         })
@@ -264,7 +264,7 @@ fn enlarge_file(fd: BorrowedFd, size: u64) -> Result<(), Error> {
     #[cfg(target_os = "macos")]
     {
         nix::unistd::ftruncate(fd, size as i64)
-            .map_err(|e| Error::new("could not grow shmem segment, ftruncate failed: {e}", e))
+            .map_err(|e| Error::new("could not grow shmem segment, ftruncate failed", e))
     }
 }
 
@@ -330,7 +330,7 @@ mod tests {
         Ok(())
     }
 
-    /// This is used in tests to coordinate between test processes. It's like std::sync::Barrier,
+    /// This is used in tests to coordinate between test processes. It's like `std::sync::Barrier`,
     /// but is stored in the shared memory area and works across processes. It's implemented by
     /// polling, because e.g. standard rust mutexes are not guaranteed to work across processes.
     struct SimpleBarrier {

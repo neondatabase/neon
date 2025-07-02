@@ -1,14 +1,12 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
-use std::fmt::{Debug, Formatter};
-use std::mem::uninitialized;
+use std::fmt::Debug;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::hash::HashMapAccess;
 use crate::hash::HashMapInit;
 use crate::hash::Entry;
-use crate::shmem::ShmemHandle;
+use crate::hash::core::FullError;
 
 use rand::seq::SliceRandom;
 use rand::{Rng, RngCore};
@@ -38,13 +36,12 @@ impl<'a> From<&'a [u8]> for TestKey {
 }
 
 fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {	
-    let mut w = HashMapInit::<TestKey, usize>::new_resizeable_named(
+    let w = HashMapInit::<TestKey, usize>::new_resizeable_named(
 		100000, 120000, "test_inserts"
 	).attach_writer();
 
     for (idx, k) in keys.iter().enumerate() {
-		let hash = w.get_hash_value(&(*k).into());
-		let res = w.entry_with_hash((*k).into(), hash);
+		let res = w.entry((*k).into());
 		match res {
 			Entry::Occupied(mut e) => { e.insert(idx); }
 			Entry::Vacant(e) => {
@@ -55,8 +52,7 @@ fn test_inserts<K: Into<TestKey> + Copy>(keys: &[K]) {
     }
 
     for (idx, k) in keys.iter().enumerate() {
-		let hash = w.get_hash_value(&(*k).into());
-        let x = w.get_with_hash(&(*k).into(), hash);
+        let x = w.get(&(*k).into());
         let value = x.as_deref().copied();
         assert_eq!(value, Some(idx));
     }
@@ -98,30 +94,6 @@ fn sparse() {
     test_inserts(&keys);
 }
 
-struct TestValue(AtomicUsize);
-
-impl TestValue {
-    fn new(val: usize) -> TestValue {
-        TestValue(AtomicUsize::new(val))
-    }
-
-    fn load(&self) -> usize {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-impl Clone for TestValue {
-    fn clone(&self) -> TestValue {
-        TestValue::new(self.load())
-    }
-}
-
-impl Debug for TestValue {
-    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(fmt, "{:?}", self.load())
-    }
-}
-
 #[derive(Clone, Debug)]
 struct TestOp(TestKey, Option<usize>);
 
@@ -137,13 +109,12 @@ fn apply_op(
         shadow.remove(&op.0)
     };
 
-	let hash = map.get_hash_value(&op.0);
-	let entry = map.entry_with_hash(op.0, hash);
+	let entry = map.entry(op.0);
     let hash_existing = match op.1 {
 		Some(new) => {
 			match entry {
 				Entry::Occupied(mut e) => Some(e.insert(new)),
-				Entry::Vacant(e) => { e.insert(new).unwrap(); None },
+				Entry::Vacant(e) => { _ = e.insert(new).unwrap(); None },
 			}
 		},
 		None => {
@@ -177,29 +148,31 @@ fn do_deletes(
 	writer: &mut HashMapAccess<TestKey, usize>,
 	shadow: &mut BTreeMap<TestKey, usize>,
 ) {
-	for i in 0..num_ops {
+	for _ in 0..num_ops {
 		let (k, _) = shadow.pop_first().unwrap();
-		let hash = writer.get_hash_value(&k);
-		writer.remove_with_hash(&k, hash);
+		writer.remove(&k);
 	}
 }
 
 fn do_shrink(
 	writer: &mut HashMapAccess<TestKey, usize>,
 	shadow: &mut BTreeMap<TestKey, usize>,
-	from: u32,
 	to: u32
 ) {
+	assert!(writer.shrink_goal().is_none());
 	writer.begin_shrink(to);
+	assert_eq!(writer.shrink_goal(), Some(to as usize));
 	while writer.get_num_buckets_in_use() > to as usize {
 		let (k, _) = shadow.pop_first().unwrap();
-		let hash = writer.get_hash_value(&k);
-		let entry = writer.entry_with_hash(k, hash);
-		if let Entry::Occupied(mut e) = entry {
+		let entry = writer.entry(k);
+		if let Entry::Occupied(e) = entry {
 			e.remove();
 		}
 	}
+	let old_usage = writer.get_num_buckets_in_use();
 	writer.finish_shrink().unwrap();
+	assert!(writer.shrink_goal().is_none());
+	assert_eq!(writer.get_num_buckets_in_use(), old_usage);
 }
 
 #[test]
@@ -217,10 +190,6 @@ fn random_ops() {
         let op = TestOp(key, if rng.random_bool(0.75) { Some(i) } else { None });
 
         apply_op(&op, &mut writer, &mut shadow);
-
-        if i % 1000 == 0 {
-            eprintln!("{i} ops processed");
-        }
     }
 }
 
@@ -247,8 +216,78 @@ fn test_grow() {
     let mut rng = rand::rng();
 
     do_random_ops(10000, 1000, 0.75, &mut writer, &mut shadow, &mut rng);
+	let old_usage = writer.get_num_buckets_in_use();
     writer.grow(1500).unwrap();
+	assert_eq!(writer.get_num_buckets_in_use(), old_usage);
+	assert_eq!(writer.get_num_buckets(), 1500);
 	do_random_ops(10000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);
+}
+
+#[test]
+fn test_clear() {
+    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1500, 2000, "test_clear"
+	).attach_writer();
+    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
+    let mut rng = rand::rng();
+    do_random_ops(2000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);
+	writer.clear();
+	assert_eq!(writer.get_num_buckets_in_use(), 0);
+	assert_eq!(writer.get_num_buckets(), 1500);
+	while let Some((key, _)) = shadow.pop_first() {
+		assert!(writer.get(&key).is_none());
+	}
+	do_random_ops(2000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);
+	for i in 0..(1500 - writer.get_num_buckets_in_use()) {
+		writer.insert((1500 + i as u128).into(), 0).unwrap();
+	}
+	assert_eq!(writer.insert(5000.into(), 0), Err(FullError {}));
+	writer.clear();
+	assert!(writer.insert(5000.into(), 0).is_ok());
+}
+
+#[test]
+fn test_idx_remove() {
+	let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1500, 2000, "test_clear"
+	).attach_writer();
+    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
+    let mut rng = rand::rng();
+    do_random_ops(2000, 1500, 0.25, &mut writer, &mut shadow, &mut rng);
+	for _ in 0..100 {
+		let idx = (rng.next_u32() % 1500) as usize;
+		if let Some(e) = writer.entry_at_bucket(idx) {
+			shadow.remove(&e._key);
+			e.remove();
+		}
+		
+	}
+	while let Some((key, val)) = shadow.pop_first() {
+		assert_eq!(*writer.get(&key).unwrap(), val);
+	}
+}
+
+#[test]
+fn test_idx_get() {
+	let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+		1500, 2000, "test_clear"
+	).attach_writer();
+    let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
+    let mut rng = rand::rng();
+    do_random_ops(2000, 1500, 0.25, &mut writer, &mut shadow, &mut rng);
+	for _ in 0..100 {
+		let idx = (rng.next_u32() % 1500) as usize;
+		if let Some(pair) = writer.get_at_bucket(idx) {
+			{ 
+				let v: *const usize = &pair.1;
+				assert_eq!(writer.get_bucket_for_value(v), idx);
+			}
+			{
+				let v: *const usize = &pair.1;
+				assert_eq!(writer.get_bucket_for_value(v), idx);
+			}
+		}
+	}
 }
 
 #[test]
@@ -259,8 +298,9 @@ fn test_shrink() {
     let mut shadow: std::collections::BTreeMap<TestKey, usize> = BTreeMap::new();
     let mut rng = rand::rng();
 	
-    do_random_ops(10000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);
-    do_shrink(&mut writer, &mut shadow, 1500, 1000);
+    do_random_ops(10000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);	
+	do_shrink(&mut writer, &mut shadow, 1000);	
+	assert_eq!(writer.get_num_buckets(), 1000);
 	do_deletes(500, &mut writer, &mut shadow);
 	do_random_ops(10000, 500, 0.75, &mut writer, &mut shadow, &mut rng);
 	assert!(writer.get_num_buckets_in_use() <= 1000);
@@ -276,14 +316,16 @@ fn test_shrink_grow_seq() {
 
     do_random_ops(500, 1000, 0.1, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Shrinking to 750");
-    do_shrink(&mut writer, &mut shadow, 1000, 750);
+    do_shrink(&mut writer, &mut shadow, 750);
 	do_random_ops(200, 1000, 0.5, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Growing to 1500");
 	writer.grow(1500).unwrap();
 	do_random_ops(600, 1500, 0.1, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Shrinking to 200");
-	do_shrink(&mut writer, &mut shadow, 1500, 200);
-	do_deletes(100, &mut writer, &mut shadow);
+	while shadow.len() > 100 {
+		do_deletes(1, &mut writer, &mut shadow);
+	}
+	do_shrink(&mut writer, &mut shadow, 200);
 	do_random_ops(50, 1500, 0.25, &mut writer, &mut shadow, &mut rng);
 	eprintln!("Growing to 10k");
 	writer.grow(10000).unwrap();
@@ -292,31 +334,32 @@ fn test_shrink_grow_seq() {
 
 #[test]
 fn test_bucket_ops() {
-	let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+	let writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
 		1000, 1200, "test_bucket_ops"
 	).attach_writer();
-	let hash = writer.get_hash_value(&1.into());
-	match writer.entry_with_hash(1.into(), hash) {
+	match writer.entry(1.into()) {
 		Entry::Occupied(mut e) => { e.insert(2); },
-		Entry::Vacant(e) => { e.insert(2).unwrap(); },
+		Entry::Vacant(e) => { _ = e.insert(2).unwrap(); },
 	}
 	assert_eq!(writer.get_num_buckets_in_use(), 1);
 	assert_eq!(writer.get_num_buckets(), 1000);
-	assert_eq!(writer.get_with_hash(&1.into(), hash), Some(&2));
-	let pos = match writer.entry_with_hash(1.into(), hash) {
+	assert_eq!(*writer.get(&1.into()).unwrap(), 2);
+	let pos = match writer.entry(1.into()) {
 		Entry::Occupied(e) => {
 			assert_eq!(e._key, 1.into());
 			let pos = e.bucket_pos as usize;
-			assert_eq!(writer.entry_at_bucket(pos).unwrap()._key, 1.into());
-			assert_eq!(writer.get_at_bucket(pos), Some(&(1.into(), 2)));
 			pos
 		},
 		Entry::Vacant(_) => { panic!("Insert didn't affect entry"); },
 	};
-	let ptr: *const usize = writer.get_with_hash(&1.into(), hash).unwrap();
-	assert_eq!(writer.get_bucket_for_value(ptr), pos);
-	writer.remove_with_hash(&1.into(), hash);
-	assert_eq!(writer.get_with_hash(&1.into(), hash), None);
+	assert_eq!(writer.entry_at_bucket(pos).unwrap()._key, 1.into());
+	assert_eq!(*writer.get_at_bucket(pos).unwrap(), (1.into(), 2));
+	{
+		let ptr: *const usize = &*writer.get(&1.into()).unwrap();
+		assert_eq!(writer.get_bucket_for_value(ptr), pos);
+	}
+	writer.remove(&1.into());
+	assert!(writer.get(&1.into()).is_none());
 }
 
 #[test]
@@ -330,15 +373,14 @@ fn test_shrink_zero() {
 	}
 	writer.finish_shrink().unwrap();
 	assert_eq!(writer.get_num_buckets_in_use(), 0);
-	let hash = writer.get_hash_value(&1.into());
-	let entry = writer.entry_with_hash(1.into(), hash);
+	let entry = writer.entry(1.into());
 	if let Entry::Vacant(v) = entry {
 		assert!(v.insert(2).is_err());
 	} else {
 		panic!("Somehow got non-vacant entry in empty map.")
 	}
 	writer.grow(50).unwrap();
-	let entry = writer.entry_with_hash(1.into(), hash);
+	let entry = writer.entry(1.into());
 	if let Entry::Vacant(v) = entry {
 		assert!(v.insert(2).is_ok());
 	} else {
@@ -350,7 +392,7 @@ fn test_shrink_zero() {
 #[test]
 #[should_panic]
 fn test_grow_oom() {
-    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+    let writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
 		1500, 2000, "test_grow_oom"
 	).attach_writer();
 	writer.grow(20000).unwrap();
@@ -368,7 +410,7 @@ fn test_shrink_bigger() {
 #[test]
 #[should_panic]
 fn test_shrink_early_finish() {
-    let mut writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
+    let writer = HashMapInit::<TestKey, usize>::new_resizeable_named(
 		1500, 2500, "test_shrink_early_finish"
 	).attach_writer();
 	writer.finish_shrink().unwrap();

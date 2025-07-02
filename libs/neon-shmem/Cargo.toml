@@ -10,6 +10,8 @@ nix.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 rustc-hash = { version = "2.1.1" }
 rand = "0.9.1"
+libc.workspace = true
+lock_api = "0.4.13"
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
@@ -20,6 +22,7 @@ twox-hash = { version = "2.1.1" }
 seahash = "4.1.0"
 hashbrown = { git = "https://github.com/quantumish/hashbrown.git", rev = "6610e6d" }
 foldhash = "0.1.5"
+
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tempfile = "3.14.0"

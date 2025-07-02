@@ -1,9 +1,7 @@
-use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, BenchmarkId};
 use neon_shmem::hash::HashMapAccess;
 use neon_shmem::hash::HashMapInit;
 use neon_shmem::hash::entry::Entry;
-use neon_shmem::shmem::ShmemHandle;
 use rand::prelude::*;
 use rand::distr::{Distribution, StandardUniform};
 use std::hash::BuildHasher;
@@ -65,14 +63,13 @@ fn apply_op<K: Clone + std::hash::Hash + Eq, V, S: std::hash::BuildHasher>(
     op: TestOp<K,V>,
     map: &mut HashMapAccess<K,V,S>,
 ) {
-	let hash = map.get_hash_value(&op.0);
-	let entry = map.entry_with_hash(op.0, hash);
+	let entry = map.entry(op.0);
 
     match op.1 {
 		Some(new) => {
 			match entry {
 				Entry::Occupied(mut e) => Some(e.insert(new)),
-				Entry::Vacant(e) => { e.insert(new).unwrap(); None },
+				Entry::Vacant(e) => { _ = e.insert(new).unwrap(); None },
 			}
 		},
 		None => {
@@ -184,15 +181,14 @@ fn real_benchs(c: &mut Criterion) {
 		let mut rng = rand::rng();		
 		b.iter_batched(
 			|| HashMapInit::new_resizeable(size, size * 2).attach_writer(),
-			|mut writer| {
-				for i in 0..ideal_filled {
+			|writer| {
+				for _ in 0..ideal_filled {
 					let key: FileCacheKey = rng.random();
 					let val = FileCacheEntry::dummy();
-					let hash = writer.get_hash_value(&key);
-					let entry = writer.entry_with_hash(key, hash);
+					let entry = writer.entry(key);
 					std::hint::black_box(match entry {
 						Entry::Occupied(mut e) => { e.insert(val); },
-						Entry::Vacant(e) => { e.insert(val).unwrap(); },
+						Entry::Vacant(e) => { _ = e.insert(val).unwrap(); },
 					})
 				}	
 			},
