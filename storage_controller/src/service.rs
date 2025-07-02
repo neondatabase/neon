@@ -1377,7 +1377,10 @@ impl Service {
                             continue;
                         }
                     }
-                    if let Err(e) = self.set_safekeeper_scheduling_policy_in_mem(sk_id, SkSchedulingPolicy::Active).await {
+                    if let Err(e) = self
+                        .set_safekeeper_scheduling_policy_in_mem(sk_id, SkSchedulingPolicy::Active)
+                        .await
+                    {
                         tracing::info!("couldn't activate safekeeper {sk_id} in memory: {e}");
                         continue;
                     }
