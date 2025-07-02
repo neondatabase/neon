@@ -3411,7 +3411,7 @@ impl TenantShard {
         }
 
         // Update the feature resolver with the latest tenant-spcific data.
-        self.feature_resolver.update_cached_tenant_properties(self);
+        self.feature_resolver.refresh_properties_and_flags(self);
     }
 
     pub fn timeline_has_no_attached_children(&self, timeline_id: TimelineId) -> bool {
