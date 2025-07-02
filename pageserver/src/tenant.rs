@@ -3101,7 +3101,19 @@ impl TenantShard {
                 return Ok(GcResult::default());
             }
 
-            if conf.is_gc_blocked_by_lsn_lease_deadline() {
+            // Skip GC if we're within lease deadline.
+            //
+            // Rust & Python tests set single-digit second gc_period and/or
+            // do immediate gc via mgmt API. The lease deadline is hard-coded to
+            // 10min, which would make most if not all tests skip GC here.
+            // Rust tests could in theory tokio::time::advance, but Python
+            // tests have no such options.
+            // Since lease deadline is a crutch we hopefully eventually replace
+            // with durable leases, take a shortcut here and skip lease deadline check
+            // for all tests.
+            // Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
+            let ignore_lease_deadline = cfg!(test) || cfg!(feature = "testing");
+            if !ignore_lease_deadline && conf.is_gc_blocked_by_lsn_lease_deadline() {
                 info!("Skipping GC because lsn lease deadline is not reached");
                 return Ok(GcResult::default());
             }
@@ -6668,17 +6680,13 @@ mod tests {
         tline.freeze_and_flush().await.map_err(|e| e.into())
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
         let (tenant, ctx) =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")
                 .await?
                 .load()
                 .await;
-        // Advance to the lsn lease deadline so that GC is not blocked by
-        // initial transition into AttachedSingle.
-        tokio::time::advance(tenant.get_lsn_lease_length()).await;
-        tokio::time::resume();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -9377,17 +9385,13 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_lsn_lease() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_lsn_lease")
             .await
             .unwrap()
             .load()
             .await;
-        // Advance to the lsn lease deadline so that GC is not blocked by
-        // initial transition into AttachedSingle.
-        tokio::time::advance(tenant.get_lsn_lease_length()).await;
-        tokio::time::resume();
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);
