@@ -98,6 +98,7 @@ typedef struct
 typedef struct DdlHashTable
 {
 	struct DdlHashTable *prev_table;
+	size_t		subtrans_level;
 	HTAB	   *db_table;
 	HTAB	   *role_table;
 } DdlHashTable;
@@ -337,14 +338,15 @@ static void
 InitCurrentDdlTableIfNeeded()
 {
 	/* Lazy construction of DllHashTable chain */
-	while (SubtransDdlLevel != 0)
+	if (SubtransDdlLevel != 0)
 	{
-		DdlHashTable *new_table = MemoryContextAlloc(TopTransactionContext, sizeof(DdlHashTable));
+		DdlHashTable *new_table = MemoryContextAlloc(CurTransactionContext, sizeof(DdlHashTable));
 		new_table->prev_table = CurrentDdlTable;
+		new_table->subtrans_level = SubtransDdlLevel - 1;
 		new_table->role_table = NULL;
 		new_table->db_table = NULL;
 		CurrentDdlTable = new_table;
-		SubtransDdlLevel -= 1;
+		SubtransDdlLevel = 0;
 	}
 }
 
@@ -405,6 +407,7 @@ MergeTable()
 
 	old_table = CurrentDdlTable;
 	CurrentDdlTable = old_table->prev_table;
+	SubtransDdlLevel = old_table->subtrans_level;
 
 	if (old_table->db_table)
 	{
@@ -503,9 +506,8 @@ PopTable()
 	}
 	else
 	{
-		DdlHashTable *old_table = CurrentDdlTable;
-		CurrentDdlTable = CurrentDdlTable->prev_table;
-		pfree(old_table);
+		SubtransDdlLevel = CurrentDdlTable->subtrans_level;
+		CurrentDdlTable = CurrentDdlTablec->prev_table;
 	}
 }
 
