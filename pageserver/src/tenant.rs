@@ -34,7 +34,7 @@ use once_cell::sync::Lazy;
 pub use pageserver_api::models::TenantState;
 use pageserver_api::models::{self, RelSizeMigration};
 use pageserver_api::models::{
-    CompactInfoResponse, LsnLease, TimelineArchivalState, TimelineState, TopTenantShardItem,
+    CompactInfoResponse, TimelineArchivalState, TimelineState, TopTenantShardItem,
     WalRedoManagerStatus,
 };
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize, TenantShardId};
@@ -180,6 +180,7 @@ pub(super) struct AttachedTenantConf {
 
 impl AttachedTenantConf {
     fn new(
+        conf: &'static PageServerConf,
         tenant_conf: pageserver_api::models::TenantConfig,
         location: AttachedLocationConfig,
     ) -> Self {
@@ -191,9 +192,7 @@ impl AttachedTenantConf {
         let lsn_lease_deadline = if location.attach_mode == AttachmentMode::Single {
             Some(
                 tokio::time::Instant::now()
-                    + tenant_conf
-                        .lsn_lease_length
-                        .unwrap_or(LsnLease::DEFAULT_LENGTH),
+                    + TenantShard::get_lsn_lease_length_impl(conf, &tenant_conf),
             )
         } else {
             // We don't use `lsn_lease_deadline` to delay GC in AttachedMulti and AttachedStale
@@ -208,10 +207,13 @@ impl AttachedTenantConf {
         }
     }
 
-    fn try_from(location_conf: LocationConf) -> anyhow::Result<Self> {
+    fn try_from(
+        conf: &'static PageServerConf,
+        location_conf: LocationConf,
+    ) -> anyhow::Result<Self> {
         match &location_conf.mode {
             LocationMode::Attached(attach_conf) => {
-                Ok(Self::new(location_conf.tenant_conf, *attach_conf))
+                Ok(Self::new(conf, location_conf.tenant_conf, *attach_conf))
             }
             LocationMode::Secondary(_) => {
                 anyhow::bail!(
@@ -1143,6 +1145,22 @@ pub(crate) enum LoadConfigError {
 
     #[error("Config not found at {0}")]
     NotFound(Utf8PathBuf),
+}
+
+pub(crate) enum IgnoreLeaseDeadline {
+    Default,
+    No,
+    Yes,
+}
+
+impl From<Option<bool>> for IgnoreLeaseDeadline {
+    fn from(value: Option<bool>) -> Self {
+        match value {
+            None => IgnoreLeaseDeadline::Default,
+            Some(false) => IgnoreLeaseDeadline::No,
+            Some(true) => IgnoreLeaseDeadline::Yes,
+        }
+    }
 }
 
 impl TenantShard {
@@ -3076,6 +3094,7 @@ impl TenantShard {
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
+        ignore_lease_deadline: IgnoreLeaseDeadline,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<GcResult, GcError> {
@@ -3101,7 +3120,23 @@ impl TenantShard {
                 return Ok(GcResult::default());
             }
 
-            if conf.is_gc_blocked_by_lsn_lease_deadline() {
+            // Skip GC if we're within lease deadline.
+            //
+            // Rust & Python tests set single-digit second gc_period and/or
+            // do immediate gc via mgmt API. The lease deadline is hard-coded to
+            // 10min, which would make most if not all tests skip GC here.
+            // Rust tests could in theory tokio::time::advance, but Python
+            // tests have no such options.
+            // Since lease deadline is a crutch we hopefully eventually replace
+            // with durable leases, take a shortcut here and skip lease deadline check
+            // for all tests.
+            // Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
+            let ignore_lease_deadline = match ignore_lease_deadline {
+                IgnoreLeaseDeadline::Default => cfg!(test) || cfg!(feature = "testing"),
+                IgnoreLeaseDeadline::No => false,
+                IgnoreLeaseDeadline::Yes => true,
+            };
+            if !ignore_lease_deadline && conf.is_gc_blocked_by_lsn_lease_deadline() {
                 info!("Skipping GC because lsn lease deadline is not reached");
                 return Ok(GcResult::default());
             }
@@ -3872,6 +3907,10 @@ impl TenantShard {
         &self.tenant_shard_id
     }
 
+    pub(crate) fn get_shard_identity(&self) -> ShardIdentity {
+        self.shard_identity
+    }
+
     pub(crate) fn get_shard_stripe_size(&self) -> ShardStripeSize {
         self.shard_identity.stripe_size
     }
@@ -4197,10 +4236,16 @@ impl TenantShard {
     }
 
     pub fn get_lsn_lease_length(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        Self::get_lsn_lease_length_impl(self.conf, &self.tenant_conf.load().tenant_conf)
+    }
+
+    pub fn get_lsn_lease_length_impl(
+        conf: &'static PageServerConf,
+        tenant_conf: &pageserver_api::models::TenantConfig,
+    ) -> Duration {
         tenant_conf
             .lsn_lease_length
-            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+            .unwrap_or(conf.default_tenant_conf.lsn_lease_length)
     }
 
     pub fn get_timeline_offloading_enabled(&self) -> bool {
@@ -4525,6 +4570,10 @@ impl TenantShard {
         Ok(toml_edit::de::from_str::<LocationConf>(&config)?)
     }
 
+    /// Stores a tenant location config to disk.
+    ///
+    /// NB: make sure to call `ShardIdentity::assert_equal` before persisting a new config, to avoid
+    /// changes to shard parameters that may result in data corruption.
     #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(super) async fn persist_tenant_config(
         conf: &'static PageServerConf,
@@ -6008,7 +6057,7 @@ pub(crate) mod harness {
                 AttachedTenantConf::try_from(LocationConf::attached_single(
                     self.tenant_conf.clone(),
                     self.generation,
-                    &ShardParameters::default(),
+                    ShardParameters::default(),
                 ))
                 .unwrap(),
                 self.shard_identity,
@@ -6660,17 +6709,13 @@ mod tests {
         tline.freeze_and_flush().await.map_err(|e| e.into())
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
         let (tenant, ctx) =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")
                 .await?
                 .load()
                 .await;
-        // Advance to the lsn lease deadline so that GC is not blocked by
-        // initial transition into AttachedSingle.
-        tokio::time::advance(tenant.get_lsn_lease_length()).await;
-        tokio::time::resume();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -6685,6 +6730,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0x10,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )
@@ -6798,6 +6844,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0x10,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )
@@ -6858,6 +6905,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0x10,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )
@@ -6892,6 +6940,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0x10,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )
@@ -7173,7 +7222,14 @@ mod tests {
             // this doesn't really need to use the timeline_id target, but it is closer to what it
             // originally was.
             let res = tenant
-                .gc_iteration(Some(timeline.timeline_id), 0, Duration::ZERO, &cancel, ctx)
+                .gc_iteration(
+                    Some(timeline.timeline_id),
+                    0,
+                    Duration::ZERO,
+                    IgnoreLeaseDeadline::Default,
+                    &cancel,
+                    ctx,
+                )
                 .await?;
 
             assert_eq!(res.layers_removed, 0, "this never removes anything");
@@ -7791,7 +7847,14 @@ mod tests {
             // Perform a cycle of flush, and GC
             tline.freeze_and_flush().await?;
             tenant
-                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .gc_iteration(
+                    Some(tline.timeline_id),
+                    0,
+                    Duration::ZERO,
+                    IgnoreLeaseDeadline::Default,
+                    &cancel,
+                    &ctx,
+                )
                 .await?;
         }
 
@@ -7882,7 +7945,14 @@ mod tests {
             tline.freeze_and_flush().await?;
             tline.compact(&cancel, EnumSet::default(), &ctx).await?;
             tenant
-                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                .gc_iteration(
+                    Some(tline.timeline_id),
+                    0,
+                    Duration::ZERO,
+                    IgnoreLeaseDeadline::Default,
+                    &cancel,
+                    &ctx,
+                )
                 .await?;
         }
 
@@ -8218,7 +8288,14 @@ mod tests {
                     )
                     .await?;
                 tenant
-                    .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
+                    .gc_iteration(
+                        Some(tline.timeline_id),
+                        0,
+                        Duration::ZERO,
+                        IgnoreLeaseDeadline::Default,
+                        &cancel,
+                        &ctx,
+                    )
                     .await?;
             }
         }
@@ -9369,17 +9446,13 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_lsn_lease() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_lsn_lease")
             .await
             .unwrap()
             .load()
             .await;
-        // Advance to the lsn lease deadline so that GC is not blocked by
-        // initial transition into AttachedSingle.
-        tokio::time::advance(tenant.get_lsn_lease_length()).await;
-        tokio::time::resume();
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);
@@ -9443,6 +9516,7 @@ mod tests {
                 Some(TIMELINE_ID),
                 0,
                 Duration::ZERO,
+                IgnoreLeaseDeadline::Default,
                 &CancellationToken::new(),
                 &ctx,
             )

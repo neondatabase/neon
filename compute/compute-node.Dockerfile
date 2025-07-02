@@ -1983,7 +1983,7 @@ RUN apt update && \
         locales \
         lsof \
         procps \
-        rsyslog \
+        rsyslog-gnutls \
         screen \
         tcpdump \
         $VERSION_INSTALLS && \

@@ -695,6 +695,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         gc_horizon: int | None,
+        ignore_lease_deadline: bool | None = None,
     ) -> dict[str, Any]:
         """
         Unlike most handlers, this will wait for the layers to be actually
@@ -707,7 +708,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc",
-            json={"gc_horizon": gc_horizon},
+            json={"gc_horizon": gc_horizon, "ignore_lease_deadline": ignore_lease_deadline},
         )
         log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)

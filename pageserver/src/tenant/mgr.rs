@@ -664,7 +664,7 @@ pub async fn init_tenant_mgr(
                     tenant_shard_id,
                     &tenant_dir_path,
                     resources.clone(),
-                    AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
+                    AttachedTenantConf::new(conf, location_conf.tenant_conf, attached_conf),
                     shard_identity,
                     Some(init_order.clone()),
                     SpawnMode::Lazy,
@@ -842,7 +842,7 @@ impl TenantManager {
                             // take our fast path and just provide the updated configuration
                             // to the tenant.
                             tenant.set_new_location_config(
-                                AttachedTenantConf::try_from(new_location_config.clone())
+                                AttachedTenantConf::try_from(self.conf, new_location_config.clone())
                                     .map_err(UpsertLocationError::BadRequest)?,
                             );
 
@@ -880,6 +880,9 @@ impl TenantManager {
         // phase of writing config and/or waiting for flush, before returning.
         match fast_path_taken {
             Some(FastPathModified::Attached(tenant)) => {
+                tenant
+                    .shard_identity
+                    .assert_equal(new_location_config.shard);
                 TenantShard::persist_tenant_config(
                     self.conf,
                     &tenant_shard_id,
@@ -914,7 +917,10 @@ impl TenantManager {
 
                 return Ok(Some(tenant));
             }
-            Some(FastPathModified::Secondary(_secondary_tenant)) => {
+            Some(FastPathModified::Secondary(secondary_tenant)) => {
+                secondary_tenant
+                    .shard_identity
+                    .assert_equal(new_location_config.shard);
                 TenantShard::persist_tenant_config(
                     self.conf,
                     &tenant_shard_id,
@@ -948,6 +954,10 @@ impl TenantManager {
 
         match slot_guard.get_old_value() {
             Some(TenantSlot::Attached(tenant)) => {
+                tenant
+                    .shard_identity
+                    .assert_equal(new_location_config.shard);
+
                 // The case where we keep a Tenant alive was covered above in the special case
                 // for Attached->Attached transitions in the same generation.  By this point,
                 // if we see an attached tenant we know it will be discarded and should be
@@ -981,9 +991,13 @@ impl TenantManager {
                 // rather than assuming it to be empty.
                 spawn_mode = SpawnMode::Eager;
             }
-            Some(TenantSlot::Secondary(state)) => {
+            Some(TenantSlot::Secondary(secondary_tenant)) => {
+                secondary_tenant
+                    .shard_identity
+                    .assert_equal(new_location_config.shard);
+
                 info!("Shutting down secondary tenant");
-                state.shutdown().await;
+                secondary_tenant.shutdown().await;
             }
             Some(TenantSlot::InProgress(_)) => {
                 // This should never happen: acquire_slot should error out
@@ -1032,7 +1046,7 @@ impl TenantManager {
                 // Testing hack: if we are configured with no control plane, then drop the generation
                 // from upserts.  This enables creating generation-less tenants even though neon_local
                 // always uses generations when calling the location conf API.
-                let attached_conf = AttachedTenantConf::try_from(new_location_config)
+                let attached_conf = AttachedTenantConf::try_from(self.conf, new_location_config)
                     .map_err(UpsertLocationError::BadRequest)?;
 
                 let tenant = tenant_spawn(
@@ -1236,7 +1250,7 @@ impl TenantManager {
             tenant_shard_id,
             &tenant_path,
             self.resources.clone(),
-            AttachedTenantConf::try_from(config)?,
+            AttachedTenantConf::try_from(self.conf, config)?,
             shard_identity,
             None,
             SpawnMode::Eager,
@@ -2117,7 +2131,7 @@ impl TenantManager {
                 tenant_shard_id,
                 &tenant_path,
                 self.resources.clone(),
-                AttachedTenantConf::try_from(config).map_err(Error::DetachReparent)?,
+                AttachedTenantConf::try_from(self.conf, config).map_err(Error::DetachReparent)?,
                 shard_identity,
                 None,
                 SpawnMode::Eager,
@@ -2351,7 +2365,14 @@ impl TenantManager {
 
         #[allow(unused_mut)]
         let mut result = tenant
-            .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
+            .gc_iteration(
+                Some(timeline_id),
+                gc_horizon,
+                pitr,
+                crate::tenant::IgnoreLeaseDeadline::from(gc_req.ignore_lease_deadline),
+                &cancel,
+                &ctx,
+            )
             .await;
         // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
         // better once the types support it.

@@ -145,7 +145,7 @@ pub(crate) async fn load_schedule_requests(
                         }
                         let Some(sk) = safekeepers.get(&other_node_id) else {
                             tracing::warn!(
-                                "couldnt find safekeeper with pending op id {other_node_id}, not pulling from it"
+                                "couldn't find safekeeper with pending op id {other_node_id}, not pulling from it"
                             );
                             return None;
                         };

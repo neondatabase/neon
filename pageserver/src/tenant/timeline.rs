@@ -761,7 +761,7 @@ pub(crate) enum CreateImageLayersError {
     PageReconstructError(#[source] PageReconstructError),
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl From<layer_manager::Shutdown> for CreateImageLayersError {
@@ -5586,7 +5586,7 @@ impl Timeline {
                 self.should_check_if_image_layers_required(lsn)
             };
 
-        let mut batch_image_writer = BatchLayerWriter::new(self.conf).await?;
+        let mut batch_image_writer = BatchLayerWriter::new(self.conf);
 
         let mut all_generated = true;
 
@@ -5690,7 +5690,8 @@ impl Timeline {
                 self.cancel.clone(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
             fail_point!("image-layer-writer-fail-before-finish", |_| {
                 Err(CreateImageLayersError::Other(anyhow::anyhow!(
@@ -5785,7 +5786,10 @@ impl Timeline {
             }
         }
 
-        let image_layers = batch_image_writer.finish(self, ctx).await?;
+        let image_layers = batch_image_writer
+            .finish(self, ctx)
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
         let mut guard = self.layers.write(LayerManagerLockHolder::Compaction).await;
 
