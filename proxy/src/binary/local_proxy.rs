@@ -21,8 +21,8 @@ use utils::{pid_file, project_build_tag, project_git_version};
 use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::local::LocalBackend;
 use crate::auth::{self};
-use crate::binary::refresh_config_loop;
 use crate::cancellation::CancellationHandler;
+use crate::config::refresh_config_loop;
 use crate::config::{
     self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
 };

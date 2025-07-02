@@ -26,9 +26,9 @@ use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::local::LocalBackend;
 use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::batch::BatchQueue;
-#[cfg(any(test, feature = "testing"))]
-use crate::binary::refresh_config_loop;
 use crate::cancellation::{CancellationHandler, CancellationProcessor};
+#[cfg(any(test, feature = "testing"))]
+use crate::config::refresh_config_loop;
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
     ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
@@ -69,7 +69,6 @@ enum AuthBackendType {
     #[cfg(any(test, feature = "testing"))]
     Postgres,
 
-    #[clap(alias("local"))]
     #[cfg(any(test, feature = "testing"))]
     Local,
 }
@@ -410,6 +409,8 @@ pub async fn run() -> anyhow::Result<()> {
         64,
     ));
 
+    #[cfg(any(test, feature = "testing"))]
+    let refresh_config_notify = Arc::new(Notify::new());
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
@@ -440,17 +441,11 @@ pub async fn run() -> anyhow::Result<()> {
             // if auth backend is local, we need to load the config file
             #[cfg(any(test, feature = "testing"))]
             if let auth::Backend::Local(_) = &auth_backend {
-                // trigger the first config load **after** setting up the signal hook
-                // to avoid the race condition where:
-                // 1. No config file registered when local_proxy starts up
-                // 2. The config file is written but the signal hook is not yet received
-                // 3. local_proxy completes startup but has no config loaded, despite there being a registerd config.
-                let refresh_config_notify = Arc::new(Notify::new());
                 refresh_config_notify.notify_one();
                 tokio::spawn(refresh_config_loop(
                     config,
                     args.config_path,
-                    refresh_config_notify,
+                    refresh_config_notify.clone(),
                 ));
             }
         }
@@ -503,7 +498,13 @@ pub async fn run() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(crate::signals::handle(cancellation_token.clone(), || {}));
+
+    maintenance_tasks.spawn(crate::signals::handle(cancellation_token.clone(), {
+        move || {
+            #[cfg(any(test, feature = "testing"))]
+            refresh_config_notify.notify_one();
+        }
+    }));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
