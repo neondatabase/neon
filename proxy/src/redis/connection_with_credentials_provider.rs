@@ -89,7 +89,7 @@ impl ConnectionWithCredentialsProvider {
         redis::cmd("PING").query_async(con).await
     }
 
-    pub(crate) fn is_credentials_refreshed(&self) -> bool {
+    pub(crate) fn credentials_refreshed(&self) -> bool {
         self.credentials_refreshed.load(Ordering::Acquire)
     }
 

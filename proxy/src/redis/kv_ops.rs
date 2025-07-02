@@ -40,6 +40,10 @@ impl RedisKVClient {
             .inspect_err(|e| tracing::error!("failed to connect to redis: {e}"))
     }
 
+    pub(crate) fn credentials_refreshed(&self) -> bool {
+        self.client.credentials_refreshed()
+    }
+
     pub(crate) async fn query<T: FromRedisValue>(
         &mut self,
         q: &impl Queryable,
@@ -49,11 +53,7 @@ impl RedisKVClient {
             Err(e) => e,
         };
 
-        if self.client.is_credentials_refreshed() {
-            tracing::error!("failed to run query: {e}");
-        } else {
-            tracing::debug!("failed to run query: {e}");
-        }
+        tracing::debug!("failed to run query: {e}");
 
         match e.retry_method() {
             redis::RetryMethod::Reconnect => {
