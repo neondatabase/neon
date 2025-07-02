@@ -507,7 +507,7 @@ PopTable()
 	else
 	{
 		SubtransDdlLevel = CurrentDdlTable->subtrans_level;
-		CurrentDdlTable = CurrentDdlTablec->prev_table;
+		CurrentDdlTable = CurrentDdlTable->prev_table;
 	}
 }
 
