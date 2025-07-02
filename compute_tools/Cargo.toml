@@ -27,6 +27,7 @@ fail.workspace = true
 flate2.workspace = true
 futures.workspace = true
 http.workspace = true
+hostname-validator = "1.1"
 indexmap.workspace = true
 itertools.workspace = true
 jsonwebtoken.workspace = true

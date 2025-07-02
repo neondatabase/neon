@@ -780,6 +780,7 @@ impl Endpoint {
                 endpoint_storage_addr: Some(endpoint_storage_addr),
                 endpoint_storage_token: Some(endpoint_storage_token),
                 autoprewarm: false,
+                suspend_timeout_seconds: -1, // Only used in neon_local.
             };
 
             // this strange code is needed to support respec() in tests
@@ -974,12 +975,11 @@ impl Endpoint {
 
     pub async fn reconfigure(
         &self,
-        pageservers: Vec<(PageserverProtocol, Host, u16)>,
+        pageservers: Option<Vec<(PageserverProtocol, Host, u16)>>,
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
+        safekeeper_generation: Option<SafekeeperGeneration>,
     ) -> Result<()> {
-        anyhow::ensure!(!pageservers.is_empty(), "no pageservers provided");
-
         let (mut spec, compute_ctl_config) = {
             let config_path = self.endpoint_path().join("config.json");
             let file = std::fs::File::open(config_path)?;
@@ -991,16 +991,24 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
-        spec.pageserver_connstring = Some(pageserver_connstr);
-        if stripe_size.is_some() {
-            spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
+        // If pageservers are not specified, don't change them.
+        if let Some(pageservers) = pageservers {
+            anyhow::ensure!(!pageservers.is_empty(), "no pageservers provided");
+
+            let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
+            spec.pageserver_connstring = Some(pageserver_connstr);
+            if stripe_size.is_some() {
+                spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
+            }
         }
 
         // If safekeepers are not specified, don't change them.
         if let Some(safekeepers) = safekeepers {
             let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
             spec.safekeeper_connstrings = safekeeper_connstrings;
+            if let Some(g) = safekeeper_generation {
+                spec.safekeepers_generation = Some(g.into_inner());
+            }
         }
 
         let client = reqwest::Client::builder()
@@ -1036,6 +1044,24 @@ impl Endpoint {
             };
             Err(anyhow::anyhow!(msg))
         }
+    }
+
+    pub async fn reconfigure_pageservers(
+        &self,
+        pageservers: Vec<(PageserverProtocol, Host, u16)>,
+        stripe_size: Option<ShardStripeSize>,
+    ) -> Result<()> {
+        self.reconfigure(Some(pageservers), stripe_size, None, None)
+            .await
+    }
+
+    pub async fn reconfigure_safekeepers(
+        &self,
+        safekeepers: Vec<NodeId>,
+        generation: SafekeeperGeneration,
+    ) -> Result<()> {
+        self.reconfigure(None, None, Some(safekeepers), Some(generation))
+            .await
     }
 
     pub async fn stop(

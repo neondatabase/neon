@@ -64,6 +64,13 @@ impl Pipeline {
         let responses = self.replies;
         let batch_size = self.inner.len();
 
+        if !client.credentials_refreshed() {
+            tracing::debug!(
+                "Redis credentials are not refreshed. Sleeping for 5 seconds before retrying..."
+            );
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+
         match client.query(&self.inner).await {
             // for each reply, we expect that many values.
             Ok(Value::Array(values)) if values.len() == responses => {
@@ -127,6 +134,14 @@ impl QueueProcessing for CancellationProcessor {
     }
 
     async fn apply(&mut self, batch: Vec<Self::Req>) -> Vec<Self::Res> {
+        if !self.client.credentials_refreshed() {
+            // this will cause a timeout for cancellation operations
+            tracing::debug!(
+                "Redis credentials are not refreshed. Sleeping for 5 seconds before retrying..."
+            );
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+
         let mut pipeline = Pipeline::with_capacity(batch.len());
 
         let batch_size = batch.len();
