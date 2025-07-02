@@ -20,6 +20,7 @@ use pageserver_page_api::proto::PageServiceClient;
 use pageserver_page_api::*;
 use utils::shard::ShardIndex;
 
+pub mod client;
 pub mod client_cache;
 pub mod pool;
 pub mod request_tracker;

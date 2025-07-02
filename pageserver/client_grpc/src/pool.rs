@@ -5,16 +5,16 @@
 //! a dedicated TCP connection and server task for every Postgres backend.
 //!
 //! Each resource has its own, nested pool. The pools are custom-built for the properties of each
-//! resource -- these are different enough that a generic pool isn't suitable.
+//! resource -- they are different enough that a generic pool isn't suitable.
 //!
 //! * ChannelPool: manages gRPC channels (TCP connections) to a single Pageserver. Multiple clients
 //!   can acquire and use the same channel concurrently (via HTTP/2 stream multiplexing), up to a
-//!   per-channel limit. Channels may be closed when they are no longer used by any clients.
+//!   per-channel client limit. Channels may be closed when they are no longer used by any clients.
 //!
 //! * ClientPool: manages gRPC clients for a single tenant shard. Each client acquires a (shared)
-//!   channel from the ChannelPool for client's lifetime. A client can only be acquired by a single
-//!   caller at a time, and is returned to the pool when dropped. Idle clients may be removed from
-//!   the pool after some time, to free up the channel.
+//!   channel from the ChannelPool for the client's lifetime. A client can only be acquired by a
+//!   single caller at a time, and is returned to the pool when dropped. Idle clients may be removed
+//!   from the pool after some time, to free up the channel.
 //!
 //! * StreamPool: manages bidirectional gRPC GetPage streams. Each stream acquires a client from
 //!   the ClientPool for the stream's lifetime. Internal streams are not exposed to callers;
@@ -23,6 +23,9 @@
 //!   pipelining multiple requests from multiple callers on the same stream (up to some queue
 //!   depth), and route the response back to the original caller. Idle streams may be removed from
 //!   the pool after some time, to free up the client.
+//!
+//! Each channel corresponds to one TCP connection. Each client unary request and each stream
+//! corresponds to one HTTP/2 stream and server task.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Deref, DerefMut};
@@ -108,7 +111,7 @@ impl ChannelPool {
     /// NB: this is not very performance-sensitive. It is only called when creating a new client,
     /// and clients are cached and reused by ClientPool. The total number of channels will also be
     /// small. O(n) performance is therefore okay.
-    pub fn get(self: &Arc<Self>) -> anyhow::Result<ChannelGuard> {
+    pub fn get(self: &Arc<Self>) -> ChannelGuard {
         let mut channels = self.channels.lock().unwrap();
 
         // Try to find an existing channel with available capacity. We check entries in BTreeMap
@@ -119,11 +122,11 @@ impl ChannelPool {
             assert!(entry.clients <= CLIENTS_PER_CHANNEL, "channel overflow");
             if entry.clients < CLIENTS_PER_CHANNEL {
                 entry.clients += 1;
-                return Ok(ChannelGuard {
+                return ChannelGuard {
                     pool: Arc::downgrade(self),
                     id,
                     channel: Some(entry.channel.clone()),
-                });
+                };
             }
         }
 
@@ -138,11 +141,11 @@ impl ChannelPool {
         };
         channels.insert(id, entry);
 
-        Ok(ChannelGuard {
+        ChannelGuard {
             pool: Arc::downgrade(self),
             id,
             channel: Some(channel.clone()),
-        })
+        }
     }
 }
 
@@ -239,7 +242,8 @@ impl ClientPool {
     }
 
     /// Gets a client from the pool, or creates a new one if necessary. Blocks if the pool is at
-    /// `CLIENT_LIMIT`. The client is returned to the pool when the guard is dropped.
+    /// `CLIENT_LIMIT`, but connection happens lazily (if needed). The client is returned to the
+    /// pool when the guard is dropped.
     ///
     /// This is moderately performance-sensitive. It is called for every unary request, but recall
     /// that these establish a new gRPC stream per request so it's already expensive. GetPage
@@ -264,7 +268,7 @@ impl ClientPool {
         }
 
         // Slow path: construct a new client.
-        let mut channel_guard = self.channel_pool.get()?;
+        let mut channel_guard = self.channel_pool.get();
         let client = page_api::Client::new(
             channel_guard.take(),
             self.tenant_id,
@@ -368,13 +372,13 @@ struct StreamEntry {
 
 impl StreamPool {
     /// Creates a new stream pool, using the given client pool.
-    pub fn new(client_pool: Arc<ClientPool>) -> Self {
-        Self {
+    pub fn new(client_pool: Arc<ClientPool>) -> Arc<Self> {
+        Arc::new(Self {
             client_pool,
             streams: Arc::default(),
             limiter: Semaphore::new(CLIENT_LIMIT * STREAM_QUEUE_DEPTH),
             next_stream_id: AtomicUsize::default(),
-        }
+        })
     }
 
     /// Sends a request via the stream pool and awaits the response. Blocks if the pool is at
@@ -402,8 +406,8 @@ impl StreamPool {
         // do the same for queue depth tracking.
         let _permit = self.limiter.acquire().await.expect("never closed");
 
-        // Acquire a stream sender. We increment and decrement the queue depth here instead of in
-        // the stream task to ensure we don't exceed the queue depth limit.
+        // Acquire a stream sender. We increment and decrement the queue depth here while acquiring
+        // a stream, instead of in the stream task, to ensure we don't acquire a full stream.
         #[allow(clippy::await_holding_lock)] // TODO: Clippy doesn't understand drop()
         let (req_tx, queue_depth) = async {
             let mut streams = self.streams.lock().unwrap();
@@ -480,7 +484,8 @@ impl StreamPool {
 
     /// Runs a stream task. This acquires a client from the `ClientPool` and establishes a
     /// bidirectional GetPage stream, then forwards requests and responses between callers and the
-    /// stream. It does not track or enforce queue depths, see `send()`.
+    /// stream. It does not track or enforce queue depths -- that's done by `send()` since it must
+    /// be atomic with pool stream acquisition.
     ///
     /// The task exits when the request channel is closed, or on a stream error. The caller is
     /// responsible for removing the stream from the pool on exit.
