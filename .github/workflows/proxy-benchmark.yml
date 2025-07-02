@@ -32,15 +32,19 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [self-hosted, unit-perf]
+    runs-on: [ self-hosted, unit-perf ]
     timeout-minutes: 60  # 1h timeout
-    container:
-      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init
     steps:
+    - name: Checkout only needed scripts
+      uses: actions/checkout@v4
+      with:
+        sparse-checkout: |
+          scripts/proxy_bench_results_ingest.py
+          scripts/ingest_perf_test_result.py
+          scripts/generate_and_push_perf_report.sh
+          scripts/pysync
+        sparse-checkout-cone-mode: false
+
     - name: Checkout proxy-bench Repo
       uses: actions/checkout@v4
       with:
@@ -59,6 +63,16 @@ jobs:
           echo "DOCKER_COMPOSE_FILE=${PROXY_BENCH_PATH}/docker-compose.yml"
           echo ""
         } >> "$GITHUB_ENV"
+
+    - name: Cache poetry deps
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pypoetry/virtualenvs
+        key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
+
+    - name: Install Python deps
+      shell: bash -euxo pipefail {0}
+      run: ./scripts/pysync
 
     - name: Run proxy-bench
       env:
@@ -89,3 +103,18 @@ jobs:
     - name: Notify Failure
       if: failure()
       run: echo "Proxy bench job failed" && exit 1
+
+    - name: Cleanup Test Resources
+      if: always()
+      shell: bash -euxo pipefail {0}
+      run: |
+        # Cleanup the test resources
+        if [[ -d "${TEST_OUTPUT}" ]]; then
+          rm -rf ${TEST_OUTPUT}
+        fi
+        if [[ -d "${PROXY_BENCH_PATH}/test_output" ]]; then
+          rm -rf ${PROXY_BENCH_PATH}/test_output
+        fi
+        if [[ -d "./scripts" ]]; then
+          rm -rf ./scripts
+        fi
