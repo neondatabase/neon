@@ -31,8 +31,8 @@ use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
     NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
     ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
-    TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
-    TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
+    SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
+    TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
 use pageserver_api::models::{
@@ -1341,18 +1341,53 @@ impl Service {
                 }
             }
             if let Ok(deltas) = res_sk {
-                let mut locked = self.inner.write().unwrap();
-                let mut safekeepers = (*locked.safekeepers).clone();
-                for (id, state) in deltas.0 {
-                    let Some(sk) = safekeepers.get_mut(&id) else {
+                let mut to_activate = Vec::new();
+                {
+                    let mut locked = self.inner.write().unwrap();
+                    let mut safekeepers = (*locked.safekeepers).clone();
+
+                    for (id, state) in deltas.0 {
+                        let Some(sk) = safekeepers.get_mut(&id) else {
+                            tracing::info!(
+                                "Couldn't update safekeeper safekeeper state for id {id} from heartbeat={state:?}"
+                            );
+                            continue;
+                        };
+                        if sk.scheduling_policy() == SkSchedulingPolicy::Activating
+                            && let SafekeeperState::Available { .. } = state
+                        {
+                            to_activate.push(id);
+                        }
+                        sk.set_availability(state);
+                    }
+                    locked.safekeepers = Arc::new(safekeepers);
+                }
+                for sk_id in to_activate {
+                    // TODO this can race with set_scheduling_policy (can create disjoint DB <-> in-memory state)
+                    tracing::info!("Activating safekeeper {sk_id}");
+                    match self.persistence.activate_safekeeper(sk_id.0 as i64).await {
+                        Ok(Some(())) => {}
+                        Ok(None) => {
+                            tracing::info!(
+                                "safekeeper {sk_id} has been removed from db or has different scheduling policy than active or activating"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("couldn't apply activation of {sk_id} to db: {e}");
+                            continue;
+                        }
+                    }
+                    let mut locked = self.inner.write().unwrap();
+                    let mut safekeepers = (*locked.safekeepers).clone();
+                    let Some(sk) = safekeepers.get_mut(&sk_id) else {
                         tracing::info!(
-                            "Couldn't update safekeeper safekeeper state for id {id} from heartbeat={state:?}"
+                            "Couldn't update safekeeper state for id {sk_id} for activation"
                         );
                         continue;
                     };
-                    sk.set_availability(state);
+                    sk.set_scheduling_policy(SkSchedulingPolicy::Active);
+                    locked.safekeepers = Arc::new(safekeepers);
                 }
-                locked.safekeepers = Arc::new(safekeepers);
             }
         }
     }

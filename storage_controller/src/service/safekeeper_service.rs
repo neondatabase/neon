@@ -869,7 +869,9 @@ impl Service {
                         .safekeeper_reconcilers
                         .start_reconciler(node_id, self);
                 }
-                SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause | SkSchedulingPolicy::Activating => {
+                SkSchedulingPolicy::Decomissioned
+                | SkSchedulingPolicy::Pause
+                | SkSchedulingPolicy::Activating => {
                     locked.safekeeper_reconcilers.stop_reconciler(node_id);
                 }
             }
