@@ -42,7 +42,8 @@ jobs:
 
     if: |
       contains(fromJSON('["opened", "synchronize", "reopened", "closed"]'), github.event.action) &&
-      contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run')
+      contains(github.event.pull_request.labels.*.name, 'approved-for-ci-run') &&
+      !contains(github.event.pull_request.labels.*.name, 'always-approved-for-ci-run')
 
     runs-on: ubuntu-22.04
 
