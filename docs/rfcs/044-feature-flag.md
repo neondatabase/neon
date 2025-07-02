@@ -130,6 +130,7 @@ We only need to pay for the 86400Y local evaluation requests (that would be sett
 * Supported properties: AZ, neon_region, pageserver, tenant_id.
 * You may use "Pageserver Feature Flags" dashboard to see the evaluation status.
 * The feature flag spec is polled on storcon every 30s (in each of the region) and storcon will propagate the spec to the pageservers.
+* The pageserver housekeeping loop updates the tenant-specific properties (e.g., remote size) for evaluation.
 
 Each tenant has a `feature_resolver` object. After you add a feature flag in the PostHog console, you can retrieve it with:
 
@@ -137,12 +138,12 @@ Each tenant has a `feature_resolver` object. After you add a feature flag in the
 // Boolean flag
 self
     .feature_resolver
-    .evaluate_boolean("flag", self.tenant_shard_id.tenant_id)
+    .evaluate_boolean("flag")
     .is_ok()
 // Multivariate flag
 self
     .feature_resolver
-    .evaluate_multivariate("gc-comapction-strategy", self.tenant_shard_id.tenant_id)
+    .evaluate_multivariate("gc-comapction-strategy")
     .ok();
 ```
 
