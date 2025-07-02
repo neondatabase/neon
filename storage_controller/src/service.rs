@@ -1214,7 +1214,7 @@ impl Service {
     }
     /// Heartbeat all storage nodes once in a while.
     #[instrument(skip_all)]
-    async fn spawn_heartbeat_driver(&self) {
+    async fn spawn_heartbeat_driver(self: &Arc<Self>) {
         self.startup_complete.clone().wait().await;
 
         let mut interval = tokio::time::interval(self.config.heartbeat_interval);
@@ -1377,16 +1377,10 @@ impl Service {
                             continue;
                         }
                     }
-                    let mut locked = self.inner.write().unwrap();
-                    let mut safekeepers = (*locked.safekeepers).clone();
-                    let Some(sk) = safekeepers.get_mut(&sk_id) else {
-                        tracing::info!(
-                            "Couldn't update safekeeper state for id {sk_id} for activation"
-                        );
+                    if let Err(e) = self.set_safekeeper_scheduling_policy_in_mem(sk_id, SkSchedulingPolicy::Active).await {
+                        tracing::info!("couldn't activate safekeeper {sk_id} in memory: {e}");
                         continue;
-                    };
-                    sk.set_scheduling_policy(SkSchedulingPolicy::Active);
-                    locked.safekeepers = Arc::new(safekeepers);
+                    }
                     tracing::info!("Activation of safekeeper {sk_id} done");
                 }
             }
