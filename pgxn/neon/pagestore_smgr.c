@@ -829,6 +829,8 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 			if (!communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum))
 				communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
 		}
+		else
+			communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
 	}
 	else
 	{
