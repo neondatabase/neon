@@ -3836,8 +3836,6 @@ impl<S, Req, Resp> tower::Service<http::Request<Req>> for ObservabilityLayerServ
 where
     S: tower::Service<http::Request<Req>, Response = http::Response<Resp>> + Send,
     S::Future: Send + 'static,
-    Req: Send + 'static,
-    Resp: Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
