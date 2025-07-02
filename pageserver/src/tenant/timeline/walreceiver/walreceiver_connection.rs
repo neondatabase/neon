@@ -389,7 +389,9 @@ pub(super) async fn handle_walreceiver_connection(
                                         );
                                         critical_timeline!(
                                             timeline.tenant_shard_id,
-                                            timeline.timeline_id,"{msg}");
+                                            timeline.timeline_id,
+                                            "{msg}"
+                                        );
                                         return Err(WalReceiverError::Other(anyhow!(msg)));
                                     }
                                 }

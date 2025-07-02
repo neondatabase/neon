@@ -1425,7 +1425,8 @@ impl Timeline {
                 critical_timeline!(
                     self.tenant_shard_id,
                     self.timeline_id,
-                    "could not compact, repartitioning keyspace failed: {err:?}");
+                    "could not compact, repartitioning keyspace failed: {err:?}"
+                );
             }
 
             // Log other errors. No partitioning? This is normal, if the timeline was just created
