@@ -195,7 +195,7 @@ impl StateSK {
         Ok(TimelineMembershipSwitchResponse {
             previous_conf: result.previous_conf,
             current_conf: result.current_conf,
-            term: self.state().acceptor_state.term,
+            last_log_term: self.state().acceptor_state.term,
             flush_lsn: self.flush_lsn(),
         })
     }

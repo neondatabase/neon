@@ -915,13 +915,13 @@ impl Service {
                         // so it isn't counted toward the quorum.
                         if let Some(min_position) = min_position {
                             if let Ok(ok_res) = &res {
-                                if (ok_res.term, ok_res.flush_lsn) < min_position {
+                                if (ok_res.last_log_term, ok_res.flush_lsn) < min_position {
                                     // Use Error::Timeout to make this error retriable.
                                     res = Err(mgmt_api::Error::Timeout(
                                         format!(
                                         "safekeeper {} returned position {:?} which is less than minimum required position {:?}",
                                         client.node_id_label(),
-                                        (ok_res.term, ok_res.flush_lsn),
+                                        (ok_res.last_log_term, ok_res.flush_lsn),
                                         min_position
                                         )
                                     ));
@@ -1217,7 +1217,7 @@ impl Service {
 
         let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
         for res in results.into_iter().flatten() {
-            let sk_position = (res.term, res.flush_lsn);
+            let sk_position = (res.last_log_term, res.flush_lsn);
             if sync_position < sk_position {
                 sync_position = sk_position;
             }
