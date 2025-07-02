@@ -127,10 +127,6 @@ static void pagestore_timeout_handler(void);
 			InterruptPending = true; \
 	} while (false)
 
-/* shard to which last request was sent */
-static int last_shard_no = -1;
-static bool prefetch_on_exit_callback_registered = false;
-
 /*
  * Prefetch implementation:
  *
@@ -651,11 +647,9 @@ prefetch_on_exit(int code, Datum arg)
 {
 	if (code != 0) /* do disconnect only on abnormal backend termination */
 	{
+		shardno_t shard_no = DatumGetInt32(arg);
 		prefetch_on_ps_disconnect();
-		if (last_shard_no >= 0)
-		{
-			page_server->disconnect(last_shard_no);
-		}
+		page_server->disconnect(shard_no);
 	}
 }
 
@@ -669,17 +663,6 @@ prefetch_on_exit(int code, Datum arg)
 static void
 consume_prefetch_responses(void)
 {
-	if (!prefetch_on_exit_callback_registered)
-	{
-		/*
-		 * We need to reset prefetch ring state on disconnect,
-		 * because RemoveTempRelationsCallback called by shmem_exit can traverse relations and so send requests to PS.
-		 * prefetch_on_exit should be called before RemoveTempRelationsCallback, so we are registering in lazy way using prefetch_on_exit_callback_registered flag.
-		 */
-		before_shmem_exit(prefetch_on_exit, 0);
-		prefetch_on_exit_callback_registered = true;
-	}
-
 	if (MyPState->ring_receive < MyPState->ring_unused)
 		prefetch_wait_for(MyPState->ring_unused - 1);
 	/*
@@ -1468,7 +1451,7 @@ page_server_request(void const *req)
 
 	PG_TRY();
 	{
-		last_shard_no = shard_no;
+		before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 		do
 		{
 			while (!page_server->send(shard_no, (NeonRequest *) req)
@@ -1480,11 +1463,11 @@ page_server_request(void const *req)
 			resp = page_server->receive(shard_no);
 			MyNeonCounters->pageserver_open_requests--;
 		} while (resp == NULL);
-		last_shard_no = -1;
+		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 	}
 	PG_CATCH();
 	{
-		last_shard_no = -1;
+		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 		/* Nothing should cancel disconnect: we should not leave connection in opaque state */
 		HOLD_INTERRUPTS();
 		page_server->disconnect(shard_no);
@@ -2439,17 +2422,17 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 
 	PG_TRY();
 	{
-		last_shard_no = shard_no;
+		before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 		do
 		{
 			while (!page_server->send(shard_no, &request.hdr) || !page_server->flush(shard_no));
 			resp = page_server->receive(shard_no);
 		} while (resp == NULL);
-		last_shard_no = -1;
+		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 	}
 	PG_CATCH();
 	{
-		last_shard_no = -1;
+		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 		/* Nothing should cancel disconnect: we should not leave connection in opaque state */
 		HOLD_INTERRUPTS();
 		page_server->disconnect(shard_no);
