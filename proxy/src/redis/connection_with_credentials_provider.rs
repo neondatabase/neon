@@ -90,7 +90,7 @@ impl ConnectionWithCredentialsProvider {
     }
 
     pub(crate) fn credentials_refreshed(&self) -> bool {
-        self.credentials_refreshed.load(Ordering::Acquire)
+        self.credentials_refreshed.load(Ordering::Relaxed)
     }
 
     pub(crate) async fn connect(&mut self) -> anyhow::Result<()> {
