@@ -113,10 +113,10 @@ impl PgMajorVersion {
 impl Display for PgMajorVersion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            PgMajorVersion::PG14 => "PgMajorVersion::PG14",
-            PgMajorVersion::PG15 => "PgMajorVersion::PG15",
-            PgMajorVersion::PG16 => "PgMajorVersion::PG16",
-            PgMajorVersion::PG17 => "PgMajorVersion::PG17",
+            PgMajorVersion::PG14 => "14",
+            PgMajorVersion::PG15 => "15",
+            PgMajorVersion::PG16 => "16",
+            PgMajorVersion::PG17 => "17",
         })
     }
 }
