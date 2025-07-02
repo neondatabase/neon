@@ -111,8 +111,8 @@ impl ChannelPool {
     /// client requires an owned `Channel` and we don't have access to the channel's internal
     /// refcount.
     ///
-    /// NB: this is not very performance-sensitive. It is only called when creating a new client,
-    /// and clients are cached and reused by ClientPool. The total number of channels will also be
+    /// NB: this is not performance-sensitive. It is only called when creating a new client, and
+    /// clients are pooled and reused by `ClientPool`. The total number of channels will also be
     /// small. O(n) performance is therefore okay.
     pub fn get(self: &Arc<Self>) -> ChannelGuard {
         let mut channels = self.channels.lock().unwrap();
@@ -140,7 +140,7 @@ impl ChannelPool {
         let id = self.next_channel_id.fetch_add(1, Ordering::Relaxed);
         let entry = ChannelEntry {
             channel: channel.clone(),
-            clients: 1, // we're returning the guard below
+            clients: 1, // account for the guard below
         };
         channels.insert(id, entry);
 
@@ -215,7 +215,9 @@ pub struct ClientPool {
 type ClientID = (ChannelID, usize);
 
 struct ClientEntry {
+    /// The pooled gRPC client.
     client: page_api::Client,
+    /// The channel guard for the channel used by the client.
     channel_guard: ChannelGuard,
 }
 
