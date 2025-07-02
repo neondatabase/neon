@@ -62,10 +62,11 @@ pub mod defaults {
     pub const DEFAULT_HEARTBEAT_TIMEOUT: &str = "5000ms";
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
     /* BEGIN_HADRON */
-    pub const DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
-    // Default disk usage limit is 100GB. It means each timeline by default can use up to 100GB of WAL
+    // Default leader re-elect is 0(disabled). SK will re-elect leader if the current leader is lagging this many bytes.
+    pub const DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES: u64 = 0;
+    // Default disk usage limit is 0 (disabled). It means each timeline by default can use up to this many WAL
     // disk space on this SK until SK begins to reject WALs.
-    pub const DEFAULT_MAX_TIMELINE_DISK_USAGE_BYTES: u64 = 100 * (1 << 30);
+    pub const DEFAULT_MAX_TIMELINE_DISK_USAGE_BYTES: u64 = 0;
     /* END_HADRON */
     pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
     pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";

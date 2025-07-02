@@ -155,7 +155,10 @@ fn hadron_determine_offloader(mgr: &Manager, state: &StateSnapshot) -> (Option<N
     (offloader, election_dbg_str, caughtup_peers_count) =
         determine_offloader(&state.peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
 
-    if offloader.is_none() || caughtup_peers_count <= 1 {
+    if offloader.is_none()
+        || caughtup_peers_count <= 1
+        || mgr.conf.max_reelect_offloader_lag_bytes == 0
+    {
         return (offloader, election_dbg_str);
     }
 
@@ -170,10 +173,6 @@ fn hadron_determine_offloader(mgr: &Manager, state: &StateSnapshot) -> (Option<N
     let backup_lag = backup_lag.unwrap().0;
 
     if backup_lag < mgr.conf.max_reelect_offloader_lag_bytes {
-        info!(
-            "Backup lag {} is lower than the threshold {}. Skipping re-election.",
-            backup_lag, mgr.conf.max_reelect_offloader_lag_bytes
-        );
         return (offloader, election_dbg_str);
     }
 
