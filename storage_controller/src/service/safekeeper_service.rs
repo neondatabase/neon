@@ -814,7 +814,7 @@ impl Service {
                         Safekeeper::from_persistence(
                             crate::persistence::SafekeeperPersistence::from_upsert(
                                 record,
-                                SkSchedulingPolicy::Pause,
+                                SkSchedulingPolicy::Activating,
                             ),
                             CancellationToken::new(),
                             use_https,
@@ -869,7 +869,7 @@ impl Service {
                         .safekeeper_reconcilers
                         .start_reconciler(node_id, self);
                 }
-                SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
+                SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause | SkSchedulingPolicy::Activating => {
                     locked.safekeeper_reconcilers.stop_reconciler(node_id);
                 }
             }
