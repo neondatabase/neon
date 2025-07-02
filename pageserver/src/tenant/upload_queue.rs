@@ -544,9 +544,12 @@ impl UploadOp {
                 let uname = u.layer_desc().layer_name();
                 !i.references(&uname, umeta) && !index.references(&uname, umeta)
             }
-            (UploadOp::Delete(_), UploadOp::UploadMetadata { .. })
-            | (UploadOp::UploadMetadata { .. }, UploadOp::Delete(_)) => false,
-
+            (UploadOp::Delete(d), UploadOp::UploadMetadata { uploaded: i })
+            | (UploadOp::UploadMetadata { uploaded: i }, UploadOp::Delete(d)) => {
+                d.layers.iter().all(|(dname, dmeta)| {
+                    !i.references(dname, dmeta) && !index.references(dname, dmeta)
+                })
+            }
             // Indexes can never bypass each other. They can coalesce though, and
             // `UploadQueue::next_ready()` currently does this when possible.
             (UploadOp::UploadMetadata { .. }, UploadOp::UploadMetadata { .. }) => false,
@@ -1394,6 +1397,42 @@ mod tests {
         // Different generations can bypass, both sharded and unsharded.
         assert_can_bypass(layer(name0, None, 0), layer(name0, None, 1), true);
         assert_can_bypass(layer(name0, Some(1), 0), layer(name0, Some(1), 1), true);
+
+        Ok(())
+    }
+
+    /// Delete should be done after the index_part is uploaded.
+    #[test]
+    fn schedule_upload_index_bypass() -> anyhow::Result<()> {
+        let mut queue = UploadQueue::Uninitialized;
+        let mut index_part = IndexPart::example();
+
+        let tli = make_timeline();
+        let layer0 = make_layer(
+            &tli,
+            "000000000000000000000000000000000000-100000000000000000000000000000000000__00000000016B59D8-00000000016B5A51",
+        );
+        index_part
+            .layer_metadata
+            .insert(layer0.layer_desc().layer_name(), layer0.metadata());
+        let queue = queue.initialize_with_current_remote_index_part(&index_part, 0)?;
+        let mut index_part_2 = index_part.clone();
+        index_part_2.layer_metadata.clear();
+
+        let ops = [
+            UploadOp::UploadMetadata {
+                uploaded: Box::new(index_part_2),
+            },
+            UploadOp::Delete(Delete {
+                layers: vec![(layer0.layer_desc().layer_name(), layer0.metadata())],
+            }),
+        ];
+
+        queue.queued_operations.extend(ops.clone());
+
+        let tasks = queue.schedule_ready();
+        assert_same_ops(tasks.iter().map(|t| &t.op), [&ops[0]]);
+        assert_eq!(queue.queued_operations.len(), 1);
 
         Ok(())
     }
