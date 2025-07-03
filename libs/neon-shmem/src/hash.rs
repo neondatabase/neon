@@ -21,6 +21,8 @@ pub mod entry;
 #[cfg(test)]
 mod tests;
 
+mod optim;
+
 use core::{CoreHashMap, INVALID_POS};
 use entry::{Entry, OccupiedEntry};
 
