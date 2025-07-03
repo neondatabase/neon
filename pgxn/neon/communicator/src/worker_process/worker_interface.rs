@@ -30,13 +30,15 @@ pub extern "C" fn communicator_worker_process_launch(
     // Convert the arguments into more convenient Rust types
     let tenant_id = unsafe { CStr::from_ptr(tenant_id) }.to_str().unwrap();
     let timeline_id = unsafe { CStr::from_ptr(timeline_id) }.to_str().unwrap();
-    let auth_token = {
-        let token_str = unsafe { CStr::from_ptr(auth_token) }.to_str().unwrap();
-        if token_str == "" {
-            None
-        } else {
-            Some(token_str.to_string())
-        }
+    let auth_token = if auth_token.is_null() {
+        None
+    } else {
+        Some(
+            unsafe { CStr::from_ptr(auth_token) }
+                .to_str()
+                .unwrap()
+                .to_string(),
+        )
     };
     let file_cache_path = {
         if file_cache_path.is_null() {
