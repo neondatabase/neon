@@ -462,7 +462,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval,
             disk_usage_based_eviction: Some(disk_usage_based_eviction.unwrap_or(
                 DiskUsageEvictionTaskConfig {
-                    max_usage_pct: Percent::new(50).unwrap(),
+                    max_usage_pct: Percent::new(80).unwrap(),
                     min_avail_bytes: 2_000_000_000,
                     period: Duration::from_secs(60),
                     #[cfg(feature = "testing")]
@@ -821,7 +821,7 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         let config = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir).unwrap();
         let disk_usage_based_eviction = config.disk_usage_based_eviction.unwrap();
-        assert_eq!(disk_usage_based_eviction.max_usage_pct.get(), 50);
+        assert_eq!(disk_usage_based_eviction.max_usage_pct.get(), 80);
         assert_eq!(disk_usage_based_eviction.min_avail_bytes, 2_000_000_000);
         assert_eq!(disk_usage_based_eviction.period, Duration::from_secs(60));
         assert_eq!(disk_usage_based_eviction.eviction_order, Default::default());
