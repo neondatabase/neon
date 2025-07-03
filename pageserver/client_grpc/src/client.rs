@@ -103,11 +103,11 @@ impl PageserverClient {
             return self.get_page_for_shard(shard_id, req).await;
         }
 
-        // Slow path: request spans multiple shards. Split it, dispatch per-shard requests in
-        // parallel, and reassemble the responses.
+        // Request spans multiple shards. Split it, dispatch concurrent per-shard requests, and
+        // reassemble the responses.
         //
-        // TODO: when we add shard map updates, we need to detect that case and re-split the
-        // request on errors.
+        // TODO: when we support shard map updates, we need to detect when it changes and re-split
+        // the request on errors.
         let mut splitter = GetPageSplitter::split(req, self.shards.count, self.shards.stripe_size);
 
         let mut shard_requests: FuturesUnordered<_> = splitter
@@ -123,7 +123,7 @@ impl PageserverClient {
             splitter.add_response(shard_id, shard_response)?;
         }
 
-        splitter.reassemble()
+        splitter.assemble_response()
     }
 
     /// Fetches pages that belong to the given shard.
