@@ -2371,24 +2371,23 @@ LIMIT 100",
             installed_extensions_collection_interval
         );
         let handle = tokio::spawn(async move {
-            // An initial sleep is added to ensure that two collections don't happen at the same time.
-            // The first collection happens during compute startup.
-            tokio::time::sleep(tokio::time::Duration::from_secs(
-                installed_extensions_collection_interval,
-            ))
-            .await;
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
-                installed_extensions_collection_interval,
-            ));
             loop {
-                interval.tick().await;
+                info!(
+                    "[NEON_EXT_INT_SLEEP]: Interval: {}",
+                    installed_extensions_collection_interval
+                );
+                // Sleep at the start of the loop to ensure that two collections don't happen at the same time.
+                // The first collection happens during compute startup.
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    installed_extensions_collection_interval,
+                ))
+                .await;
                 let _ = installed_extensions(conf.clone()).await;
                 // Acquire a read lock on the compute spec and then update the interval if necessary
-                interval = tokio::time::interval(tokio::time::Duration::from_secs(std::cmp::max(
+                installed_extensions_collection_interval = std::cmp::max(
                     installed_extensions_collection_interval,
                     2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst),
-                )));
-                installed_extensions_collection_interval = interval.period().as_secs();
+                );
             }
         });
 
