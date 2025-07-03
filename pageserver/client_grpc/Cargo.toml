@@ -13,3 +13,4 @@ tokio-stream.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 utils.workspace = true
+workspace_hack.workspace = true
