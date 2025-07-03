@@ -144,7 +144,7 @@ pub(crate) fn get_conn_info(
     config: &'static AuthenticationConfig,
     ctx: &RequestContext,
     connection_string: Option<&str>,
-    headers: &HeaderMap
+    headers: &HeaderMap,
 ) -> Result<ConnInfoWithAuth, ConnInfoError> {
     let connection_url = match connection_string {
         Some(connection_string) => Url::parse(connection_string)?,
