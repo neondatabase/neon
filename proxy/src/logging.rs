@@ -52,7 +52,7 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
             StderrWriter {
                 stderr: std::io::stderr(),
             },
-            &["request_id", "session_id", "conn_id"],
+            &["conn_id", "ep", "query_id", "request_id", "session_id"],
         ))
     } else {
         None
