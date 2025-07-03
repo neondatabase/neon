@@ -3882,7 +3882,8 @@ where
         );
         let _guard = span.enter();
 
-        // Call the inner service, but don't await it, to avoid cloning it into the future below.
+        // Construct a future for calling the inner service, but don't await it. This avoids having
+        // to clone the inner service into the future below.
         let call = self.inner.call(req);
 
         async move {
