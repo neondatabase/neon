@@ -236,40 +236,30 @@ impl Service {
         F: std::future::Future<Output = mgmt_api::Result<T>> + Send + 'static,
         T: Sync + Send + 'static,
     {
+        let target_sk_count = safekeepers.len();
+
+        if target_sk_count == 0 {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "timeline configured without any safekeepers"
+            )));
+        }
+
+        if target_sk_count < self.config.timeline_safekeeper_count {
+            tracing::warn!(
+                "running a quorum operation with {} safekeepers, which is less than configured {} safekeepers per timeline",
+                target_sk_count,
+                self.config.timeline_safekeeper_count
+            );
+        }
+
         let results = self
             .tenant_timeline_safekeeper_op(safekeepers, op, timeout)
             .await?;
 
         // Now check if quorum was reached in results.
 
-        let target_sk_count = safekeepers.len();
-        let quorum_size = match target_sk_count {
-            0 => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "timeline configured without any safekeepers",
-                )));
-            }
-            1 | 2 => {
-                #[cfg(feature = "testing")]
-                {
-                    // In test settings, it is allowed to have one or two safekeepers
-                    target_sk_count
-                }
-                #[cfg(not(feature = "testing"))]
-                {
-                    // The region is misconfigured: we need at least three safekeepers to be configured
-                    // in order to schedule work to them
-                    tracing::warn!(
-                        "couldn't find at least 3 safekeepers for timeline, found: {:?}",
-                        target_sk_count
-                    );
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                        "couldn't find at least 3 safekeepers to put timeline to"
-                    )));
-                }
-            }
-            _ => target_sk_count / 2 + 1,
-        };
+        let quorum_size = target_sk_count / 2 + 1;
+
         let success_count = results.iter().filter(|res| res.is_ok()).count();
         if success_count < quorum_size {
             // Failure

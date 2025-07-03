@@ -759,10 +759,15 @@ impl ComputeNode {
         // Configure and start rsyslog for compliance audit logging
         match pspec.spec.audit_log_level {
             ComputeAudit::Hipaa | ComputeAudit::Extended | ComputeAudit::Full => {
-                let remote_endpoint =
+                let remote_tls_endpoint =
+                    std::env::var("AUDIT_LOGGING_TLS_ENDPOINT").unwrap_or("".to_string());
+                let remote_plain_endpoint =
                     std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
-                if remote_endpoint.is_empty() {
-                    anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+
+                if remote_plain_endpoint.is_empty() && remote_tls_endpoint.is_empty() {
+                    anyhow::bail!(
+                        "AUDIT_LOGGING_ENDPOINT and AUDIT_LOGGING_TLS_ENDPOINT are both empty"
+                    );
                 }
 
                 let log_directory_path = Path::new(&self.params.pgdata).join("log");
@@ -778,7 +783,8 @@ impl ComputeNode {
                     log_directory_path.clone(),
                     endpoint_id,
                     project_id,
-                    &remote_endpoint,
+                    &remote_plain_endpoint,
+                    &remote_tls_endpoint,
                 )?;
 
                 // Launch a background task to clean up the audit logs

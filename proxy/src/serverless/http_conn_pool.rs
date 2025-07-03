@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{self, AtomicUsize};
 use std::sync::{Arc, Weak};
 
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
@@ -21,8 +23,9 @@ use crate::protocol2::ConnectionInfoExtra;
 use crate::types::EndpointCacheKey;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 
-pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
-pub(crate) type Connect = http2::Connection<TokioIo<AsyncRW>, hyper::body::Incoming, TokioExecutor>;
+pub(crate) type Send = http2::SendRequest<BoxBody<Bytes, hyper::Error>>;
+pub(crate) type Connect =
+    http2::Connection<TokioIo<AsyncRW>, BoxBody<Bytes, hyper::Error>, TokioExecutor>;
 
 #[derive(Clone)]
 pub(crate) struct ClientDataHttp();
@@ -237,10 +240,10 @@ pub(crate) fn poll_http2_client(
             }
 
             // remove from connection pool
-            if let Some(pool) = pool.clone().upgrade() {
-                if pool.write().remove_conn(conn_id) {
-                    info!("closed connection removed");
-                }
+            if let Some(pool) = pool.clone().upgrade()
+                && pool.write().remove_conn(conn_id)
+            {
+                info!("closed connection removed");
             }
         }
         .instrument(span),
