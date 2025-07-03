@@ -3530,18 +3530,18 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     # some small tests for the scheduling policy querying and returning APIs
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
-    assert newest_info["scheduling_policy"] == "Pause"
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
-    newest_info = target.get_safekeeper(inserted["id"])
-    assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
-    # Ensure idempotency
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
-    newest_info = target.get_safekeeper(inserted["id"])
-    assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
-    # change back to paused again
+    assert newest_info["scheduling_policy"] == "Activating" or newest_info["scheduling_policy"] == "Active"
     target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Pause"
+    # Ensure idempotency
+    target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Pause"
+    # change back to active again
+    target.safekeeper_scheduling_policy(inserted["id"], "Active")
 
     def storcon_heartbeat():
         assert env.storage_controller.log_contains(
