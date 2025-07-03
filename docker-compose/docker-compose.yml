@@ -9,6 +9,7 @@ services:
       - MINIO_ROOT_USER=minio
       - MINIO_ROOT_PASSWORD=password
     command: server /data --address :9000 --console-address ":9001"
+
   minio_create_buckets:
     image: minio/mc
     environment:
@@ -18,9 +19,14 @@ services:
       - "/bin/sh"
       - "-c"
     command:
-      - "until (/usr/bin/mc alias set minio http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD) do echo 'Waiting to start minio...' && sleep 1; done; /usr/bin/mc mb minio/neon --region=eu-north-1; exit 0;"
+      - "until (/usr/bin/mc alias set minio http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD) do
+             echo 'Waiting to start minio...' && sleep 1;
+         done;
+         /usr/bin/mc mb minio/neon --region=eu-north-1;
+         exit 0;"
     depends_on:
       - minio
+
   pageserver:
     restart: always
     image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
@@ -29,13 +35,14 @@ services:
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
     ports:
-      #- 6400:6400  # pg protocol handler
-      - 9898:9898 # http endpoints
+       #- 6400:6400  # pg protocol handler
+       - 9898:9898 # http endpoints
     volumes:
       - ./pageserver_config:/data/.neon/
     depends_on:
       - storage_broker
       - minio_create_buckets
+
   safekeeper1:
     restart: always
     image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
@@ -53,10 +60,19 @@ services:
       - "/bin/sh"
       - "-c"
     command:
-      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL --listen-http='0.0.0.0:7676' --id=$$SAFEKEEPER_ID --broker-endpoint=$$BROKER_ENDPOINT -D /data --remote-storage=\"{endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/safekeeper/'}\""
+      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
+                    --listen-http='0.0.0.0:7676'
+                    --id=$$SAFEKEEPER_ID
+                    --broker-endpoint=$$BROKER_ENDPOINT
+                    -D /data
+                    --remote-storage=\"{endpoint='http://minio:9000',
+                                        bucket_name='neon',
+                                        bucket_region='eu-north-1',
+                                        prefix_in_bucket='/safekeeper/'}\""
     depends_on:
       - storage_broker
       - minio_create_buckets
+
   safekeeper2:
     restart: always
     image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
@@ -74,10 +90,19 @@ services:
       - "/bin/sh"
       - "-c"
     command:
-      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL --listen-http='0.0.0.0:7676' --id=$$SAFEKEEPER_ID --broker-endpoint=$$BROKER_ENDPOINT -D /data --remote-storage=\"{endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/safekeeper/'}\""
+      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
+                    --listen-http='0.0.0.0:7676'
+                    --id=$$SAFEKEEPER_ID
+                    --broker-endpoint=$$BROKER_ENDPOINT
+                    -D /data
+                    --remote-storage=\"{endpoint='http://minio:9000',
+                                        bucket_name='neon',
+                                        bucket_region='eu-north-1',
+                                        prefix_in_bucket='/safekeeper/'}\""
     depends_on:
       - storage_broker
       - minio_create_buckets
+
   safekeeper3:
     restart: always
     image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
@@ -95,10 +120,19 @@ services:
       - "/bin/sh"
       - "-c"
     command:
-      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL --listen-http='0.0.0.0:7676' --id=$$SAFEKEEPER_ID --broker-endpoint=$$BROKER_ENDPOINT -D /data --remote-storage=\"{endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/safekeeper/'}\""
+      - "safekeeper --listen-pg=$$SAFEKEEPER_ADVERTISE_URL
+                    --listen-http='0.0.0.0:7676'
+                    --id=$$SAFEKEEPER_ID
+                    --broker-endpoint=$$BROKER_ENDPOINT
+                    -D /data
+                    --remote-storage=\"{endpoint='http://minio:9000',
+                                        bucket_name='neon',
+                                        bucket_region='eu-north-1',
+                                        prefix_in_bucket='/safekeeper/'}\""
     depends_on:
       - storage_broker
       - minio_create_buckets
+
   storage_broker:
     restart: always
     image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${TAG:-latest}
@@ -107,8 +141,17 @@ services:
     command:
       - "storage_broker"
       - "--listen-addr=0.0.0.0:50051"
+
   compute1:
     restart: always
+    build:
+      context: ./compute_wrapper/
+      args:
+        - REPOSITORY=${REPOSITORY:-ghcr.io/neondatabase}
+        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-16}
+        - TAG=${COMPUTE_TAG:-${TAG:-latest}}
+        - http_proxy=${http_proxy:-}
+        - https_proxy=${https_proxy:-}
     image: built-compute
     environment:
       - PG_VERSION=${PG_VERSION:-16}
@@ -119,6 +162,9 @@ services:
     volumes:
       - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
       - ./compute_wrapper/shell/:/shell/
+    ports:
+      - 55433:55433 # pg protocol handler
+      - 3080:3080 # http endpoints
     entrypoint:
       - "/shell/compute.sh"
     depends_on:
@@ -126,6 +172,7 @@ services:
       - safekeeper2
       - safekeeper3
       - pageserver
+
   neon-test-extensions:
     profiles: ["test-extensions", "parallel-test-extensions"]
     image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-${PG_VERSION:-16}}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
@@ -139,6 +186,7 @@ services:
       - sleep 3600
     depends_on:
       - compute1
+
   compute_is_ready:
     image: postgres:latest
     environment:
@@ -147,54 +195,11 @@ services:
       - "/bin/bash"
       - "-c"
     command:
-      - "for i in {1..${PARALLEL_COMPUTES}}; do until pg_isready -h compute$$i -p 55433 -U cloud_admin ; do sleep 1; done; done; echo All computes are started"
-    depends_on:
-      - compute1
-  compute2:
-    restart: always
-    image: built-compute
-    environment:
-      - PG_VERSION=${PG_VERSION:-16}
-      - TENANT_ID=${TENANT_ID:-}
-      - TIMELINE_ID=${TIMELINE_ID:-}
-      #- RUST_BACKTRACE=1
-    # Mount the test files directly, for faster editing cycle.
-    volumes:
-      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
-      - ./compute_wrapper/shell/:/shell/
-    entrypoint:
-      - "/shell/compute.sh"
-    depends_on:
-      - compute1
-  compute3:
-    restart: always
-    image: built-compute
-    environment:
-      - PG_VERSION=${PG_VERSION:-16}
-      - TENANT_ID=${TENANT_ID:-}
-      - TIMELINE_ID=${TIMELINE_ID:-}
-      #- RUST_BACKTRACE=1
-    # Mount the test files directly, for faster editing cycle.
-    volumes:
-      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
-      - ./compute_wrapper/shell/:/shell/
-    entrypoint:
-      - "/shell/compute.sh"
-    depends_on:
-      - compute1
-  compute4:
-    restart: always
-    image: built-compute
-    environment:
-      - PG_VERSION=${PG_VERSION:-16}
-      - TENANT_ID=${TENANT_ID:-}
-      - TIMELINE_ID=${TIMELINE_ID:-}
-      #- RUST_BACKTRACE=1
-    # Mount the test files directly, for faster editing cycle.
-    volumes:
-      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
-      - ./compute_wrapper/shell/:/shell/
-    entrypoint:
-      - "/shell/compute.sh"
+      - "for i in {1..${PARALLEL_COMPUTES}}; do
+           until pg_isready -h compute$$i -p 55433 -U cloud_admin ; do
+             sleep 1;
+           done;
+         done;
+         echo All computes are started"
     depends_on:
       - compute1
