@@ -602,6 +602,21 @@ impl TryFrom<tonic::Code> for GetPageStatusCode {
     }
 }
 
+impl From<GetPageStatusCode> for tonic::Code {
+    fn from(status_code: GetPageStatusCode) -> Self {
+        use tonic::Code;
+
+        match status_code {
+            GetPageStatusCode::Unknown => Code::Unknown,
+            GetPageStatusCode::Ok => Code::Ok,
+            GetPageStatusCode::NotFound => Code::NotFound,
+            GetPageStatusCode::InvalidRequest => Code::InvalidArgument,
+            GetPageStatusCode::InternalError => Code::Internal,
+            GetPageStatusCode::SlowDown => Code::ResourceExhausted,
+        }
+    }
+}
+
 // Fetches the size of a relation at a given LSN, as # of blocks. Only valid on shard 0, other
 // shards will error.
 #[derive(Clone, Copy, Debug)]
