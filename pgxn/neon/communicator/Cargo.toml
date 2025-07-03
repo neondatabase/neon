@@ -30,6 +30,7 @@ metrics.workspace = true
 uring-common = { workspace = true, features = ["bytes"] }
 
 pageserver_client_grpc.workspace = true
+pageserver_api.workspace = true
 pageserver_page_api.workspace = true
 
 neon-shmem.workspace = true

@@ -3353,6 +3353,8 @@ impl GrpcPageServiceHandler {
     /// TODO: get_vectored() currently enforces a batch limit of 32. Postgres will typically send
     /// batches up to effective_io_concurrency = 100. Either we have to accept large batches, or
     /// split them up in the client or server.
+    ///
+    /// TODO: verify that the given keys belong to this shard.
     #[instrument(skip_all, fields(req_id, rel, blkno, blks, req_lsn, mod_lsn))]
     async fn get_page(
         ctx: &RequestContext,
