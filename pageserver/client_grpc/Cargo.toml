@@ -11,9 +11,16 @@ http.workspace = true
 thiserror.workspace = true
 tonic.workspace = true
 tracing.workspace = true
-tokio = { version = "1.43.1", features = ["full", "macros", "net", "io-util", "rt", "rt-multi-thread"] }
+tokio = { version = "1.43.1", features = [
+    "full",
+    "macros",
+    "net",
+    "io-util",
+    "rt",
+    "rt-multi-thread",
+] }
 uuid = { version = "1", features = ["v4"] }
-tower = {  version = "0.4", features = ["timeout", "util"] }
+tower = { version = "0.4", features = ["timeout", "util"] }
 rand = "0.8"
 tokio-util = { version = "0.7", features = ["compat"] }
 hyper-util = "0.1.9"
@@ -25,6 +32,7 @@ async-trait = { version = "0.1" }
 tokio-stream = "0.1"
 dashmap = "5"
 chrono = { version = "0.4", features = ["serde"] }
+compute_api.workspace = true
 
 
 pageserver_page_api.workspace = true

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, ensure};
+use compute_api::spec::PageserverProtocol;
 use pageserver_page_api as page_api;
 use tokio::time::Instant;
 use tracing::{error, info, instrument, warn};
@@ -28,7 +29,8 @@ pub struct PageserverClient {
 }
 
 impl PageserverClient {
-    /// Creates a new Pageserver client.
+    /// Creates a new Pageserver client for a given tenant and timeline. Uses the Pageservers given
+    /// in the shard map, which must be complete and must use gRPC URLs.
     pub fn new(
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -334,6 +336,11 @@ impl Shard {
         shard_id: ShardIndex,
         auth_token: Option<String>,
     ) -> anyhow::Result<Self> {
+        // Sanity-check that the URL uses gRPC.
+        if PageserverProtocol::from_connstring(&url)? != PageserverProtocol::Grpc {
+            return Err(anyhow!("invalid shard URL {url}: must use gRPC"));
+        }
+
         // Use a common channel pool for all clients, to multiplex unary and stream requests across
         // the same TCP connections. The channel pool is unbounded (but client pools are bounded).
         let channel_pool = ChannelPool::new(url)?;

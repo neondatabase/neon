@@ -457,7 +457,7 @@ pub struct JwksSettings {
 }
 
 /// Protocol used to connect to a Pageserver. Parsed from the connstring scheme.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PageserverProtocol {
     /// The original protocol based on libpq and COPY. Uses postgresql:// or postgres:// scheme.
     #[default]
