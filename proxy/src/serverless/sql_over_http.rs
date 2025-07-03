@@ -22,7 +22,7 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{Level, debug, error, info};
 use typed_json::json;
 use url::Url;
 use uuid::Uuid;
@@ -33,9 +33,9 @@ use super::conn_pool_lib::{self, ConnInfo};
 use super::error::HttpCodeError;
 use super::http_util::json_response;
 use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
+use crate::auth::ComputeUserInfoParseError;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::{ComputeUserInfoParseError, endpoint_sni};
-use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
+use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::{ReadBodyError, read_body_with_limit};
@@ -43,7 +43,7 @@ use crate::metrics::{HttpDirection, Metrics, SniGroup, SniKind};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
-use crate::types::{DbName, RoleName};
+use crate::types::{DbName, EndpointId, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
 use crate::util::run_until_cancelled;
 
@@ -113,8 +113,6 @@ pub(crate) enum ConnInfoError {
     MissingHostname,
     #[error("invalid hostname: {0}")]
     InvalidEndpoint(#[from] ComputeUserInfoParseError),
-    #[error("malformed endpoint")]
-    MalformedEndpoint,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -141,7 +139,6 @@ fn get_conn_info(
     config: &'static AuthenticationConfig,
     ctx: &RequestContext,
     headers: &HeaderMap,
-    tls: Option<&TlsConfig>,
 ) -> Result<ConnInfoWithAuth, ConnInfoError> {
     let connection_string = headers
         .get(&CONN_STRING)
@@ -199,17 +196,11 @@ fn get_conn_info(
         return Err(ConnInfoError::MissingCredentials(Credentials::Password));
     };
 
-    let endpoint = match connection_url.host() {
-        Some(url::Host::Domain(hostname)) => {
-            if let Some(tls) = tls {
-                endpoint_sni(hostname, &tls.common_names).ok_or(ConnInfoError::MalformedEndpoint)?
-            } else {
-                hostname
-                    .split_once('.')
-                    .map_or(hostname, |(prefix, _)| prefix)
-                    .into()
-            }
-        }
+    let endpoint: EndpointId = match connection_url.host() {
+        Some(url::Host::Domain(hostname)) => hostname
+            .split_once('.')
+            .map_or(hostname, |(prefix, _)| prefix)
+            .into(),
         Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
             return Err(ConnInfoError::MissingHostname);
         }
@@ -390,12 +381,35 @@ pub(crate) async fn handle(
             let line = get(db_error, |db| db.line().map(|l| l.to_string()));
             let routine = get(db_error, |db| db.routine());
 
-            tracing::info!(
-                kind=error_kind.to_metric_label(),
-                error=%e,
-                msg=message,
-                "forwarding error to user"
-            );
+            match &e {
+                SqlOverHttpError::Postgres(e)
+                    if e.as_db_error().is_some() && error_kind == ErrorKind::User =>
+                {
+                    // this error contains too much info, and it's not an error we care about.
+                    if tracing::enabled!(Level::DEBUG) {
+                        tracing::debug!(
+                            kind=error_kind.to_metric_label(),
+                            error=%e,
+                            msg=message,
+                            "forwarding error to user"
+                        );
+                    } else {
+                        tracing::info!(
+                            kind = error_kind.to_metric_label(),
+                            error = "bad query",
+                            "forwarding error to user"
+                        );
+                    }
+                }
+                _ => {
+                    tracing::info!(
+                        kind=error_kind.to_metric_label(),
+                        error=%e,
+                        msg=message,
+                        "forwarding error to user"
+                    );
+                }
+            }
 
             json_response(
                 e.get_http_status_code(),
@@ -460,7 +474,15 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
             SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
-            SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            // customer initiated SQL errors.
+            SqlOverHttpError::Postgres(p) => {
+                if p.as_db_error().is_some() {
+                    ErrorKind::User
+                } else {
+                    ErrorKind::Compute
+                }
+            }
+            // proxy initiated SQL errors.
             SqlOverHttpError::InternalPostgres(p) => {
                 if p.as_db_error().is_some() {
                     ErrorKind::Service
@@ -468,6 +490,7 @@ impl ReportableError for SqlOverHttpError {
                     ErrorKind::Compute
                 }
             }
+            // postgres returned a bad row format that we couldn't parse.
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
             SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
         }
@@ -638,14 +661,7 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    let conn_info = get_conn_info(
-        &config.authentication_config,
-        ctx,
-        request.headers(),
-        // todo: race condition?
-        // we're unlikely to change the common names.
-        config.tls_config.load().as_deref(),
-    )?;
+    let conn_info = get_conn_info(&config.authentication_config, ctx, request.headers())?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
         "credentials"
@@ -1103,7 +1119,6 @@ async fn query_to_json<T: GenericClient>(
 
     let columns_len = row_stream.statement.columns().len();
     let mut fields = Vec::with_capacity(columns_len);
-    let mut types = Vec::with_capacity(columns_len);
 
     for c in row_stream.statement.columns() {
         fields.push(json!({
@@ -1115,8 +1130,6 @@ async fn query_to_json<T: GenericClient>(
             "dataTypeModifier": c.type_modifier(),
             "format": "text",
         }));
-
-        types.push(c.type_().clone());
     }
 
     let raw_output = parsed_headers.raw_output;
@@ -1138,7 +1151,7 @@ async fn query_to_json<T: GenericClient>(
             ));
         }
 
-        let row = pg_text_row_to_json(&row, &types, raw_output, array_mode)?;
+        let row = pg_text_row_to_json(&row, raw_output, array_mode)?;
         rows.push(row);
 
         // assumption: parsing pg text and converting to json takes CPU time.

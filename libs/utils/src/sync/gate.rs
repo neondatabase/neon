@@ -86,6 +86,14 @@ pub enum GateError {
     GateClosed,
 }
 
+impl GateError {
+    pub fn is_cancel(&self) -> bool {
+        match self {
+            GateError::GateClosed => true,
+        }
+    }
+}
+
 impl Default for Gate {
     fn default() -> Self {
         Self {

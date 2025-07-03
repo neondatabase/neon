@@ -355,9 +355,6 @@ impl Client for GrpcClient {
             full: false,
             compression: self.compression,
         };
-        let stream = self.inner.get_base_backup(req).await?;
-        Ok(Box::pin(StreamReader::new(
-            stream.map_err(std::io::Error::other),
-        )))
+        Ok(Box::pin(self.inner.get_base_backup(req).await?))
     }
 }

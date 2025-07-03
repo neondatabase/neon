@@ -4,6 +4,7 @@
 !Cargo.lock
 !Cargo.toml
 !Makefile
+!postgres.mk
 !rust-toolchain.toml
 !scripts/ninstall.sh
 !docker-compose/run-tests.sh

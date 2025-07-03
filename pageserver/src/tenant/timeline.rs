@@ -106,7 +106,7 @@ use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
-use crate::feature_resolver::FeatureResolver;
+use crate::feature_resolver::TenantFeatureResolver;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
@@ -202,7 +202,7 @@ pub struct TimelineResources {
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
     pub basebackup_cache: Arc<BasebackupCache>,
-    pub feature_resolver: FeatureResolver,
+    pub feature_resolver: TenantFeatureResolver,
 }
 
 pub struct Timeline {
@@ -450,7 +450,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
-    feature_resolver: FeatureResolver,
+    feature_resolver: TenantFeatureResolver,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -763,7 +763,7 @@ pub(crate) enum CreateImageLayersError {
     PageReconstructError(#[source] PageReconstructError),
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl From<layer_manager::Shutdown> for CreateImageLayersError {
@@ -5308,6 +5308,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         io_concurrency: IoConcurrency,
+        progress: Option<(usize, usize)>,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         let mut wrote_keys = false;
 
@@ -5384,11 +5385,15 @@ impl Timeline {
             }
         }
 
+        let progress_report = progress
+            .map(|(idx, total)| format!("({idx}/{total}) "))
+            .unwrap_or_default();
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
             info!(
-                "produced image layer for rel {}",
+                "{} produced image layer for rel {}",
+                progress_report,
                 ImageLayerName {
                     key_range: img_range.clone(),
                     lsn
@@ -5398,7 +5403,12 @@ impl Timeline {
                 unfinished_image_layer: image_layer_writer,
             })
         } else {
-            tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
+            tracing::debug!(
+                "{} no data in range {}-{}",
+                progress_report,
+                img_range.start,
+                img_range.end
+            );
             Ok(ImageLayerCreationOutcome::Empty)
         }
     }
@@ -5590,7 +5600,7 @@ impl Timeline {
                 self.should_check_if_image_layers_required(lsn)
             };
 
-        let mut batch_image_writer = BatchLayerWriter::new(self.conf).await?;
+        let mut batch_image_writer = BatchLayerWriter::new(self.conf);
 
         let mut all_generated = true;
 
@@ -5633,7 +5643,8 @@ impl Timeline {
             }
         }
 
-        for partition in partition_parts.iter() {
+        let total = partition_parts.len();
+        for (idx, partition) in partition_parts.iter().enumerate() {
             if self.cancel.is_cancelled() {
                 return Err(CreateImageLayersError::Cancelled);
             }
@@ -5694,7 +5705,8 @@ impl Timeline {
                 self.cancel.clone(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
             fail_point!("image-layer-writer-fail-before-finish", |_| {
                 Err(CreateImageLayersError::Other(anyhow::anyhow!(
@@ -5717,6 +5729,7 @@ impl Timeline {
                     ctx,
                     img_range.clone(),
                     io_concurrency,
+                    Some((idx, total)),
                 )
                 .await?
             } else {
@@ -5789,7 +5802,10 @@ impl Timeline {
             }
         }
 
-        let image_layers = batch_image_writer.finish(self, ctx).await?;
+        let image_layers = batch_image_writer
+            .finish(self, ctx)
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
         let mut guard = self.layers.write(LayerManagerLockHolder::Compaction).await;
 

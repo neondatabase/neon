@@ -55,11 +55,11 @@ pub struct BatchLayerWriter {
 }
 
 impl BatchLayerWriter {
-    pub async fn new(conf: &'static PageServerConf) -> anyhow::Result<Self> {
-        Ok(Self {
+    pub fn new(conf: &'static PageServerConf) -> Self {
+        Self {
             generated_layer_writers: Vec::new(),
             conf,
-        })
+        }
     }
 
     pub fn add_unfinished_image_writer(
@@ -182,7 +182,7 @@ impl BatchLayerWriter {
 /// An image writer that takes images and produces multiple image layers.
 #[must_use]
 pub struct SplitImageLayerWriter<'a> {
-    inner: ImageLayerWriter,
+    inner: Option<ImageLayerWriter>,
     target_layer_size: u64,
     lsn: Lsn,
     conf: &'static PageServerConf,
@@ -196,7 +196,7 @@ pub struct SplitImageLayerWriter<'a> {
 
 impl<'a> SplitImageLayerWriter<'a> {
     #[allow(clippy::too_many_arguments)]
-    pub async fn new(
+    pub fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
@@ -205,30 +205,19 @@ impl<'a> SplitImageLayerWriter<'a> {
         target_layer_size: u64,
         gate: &'a utils::sync::gate::Gate,
         cancel: CancellationToken,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             target_layer_size,
-            inner: ImageLayerWriter::new(
-                conf,
-                timeline_id,
-                tenant_shard_id,
-                &(start_key..Key::MAX),
-                lsn,
-                gate,
-                cancel.clone(),
-                ctx,
-            )
-            .await?,
+            inner: None,
             conf,
             timeline_id,
             tenant_shard_id,
-            batches: BatchLayerWriter::new(conf).await?,
+            batches: BatchLayerWriter::new(conf),
             lsn,
             start_key,
             gate,
             cancel,
-        })
+        }
     }
 
     pub async fn put_image(
@@ -237,12 +226,31 @@ impl<'a> SplitImageLayerWriter<'a> {
         img: Bytes,
         ctx: &RequestContext,
     ) -> Result<(), PutError> {
+        if self.inner.is_none() {
+            self.inner = Some(
+                ImageLayerWriter::new(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_shard_id,
+                    &(self.start_key..Key::MAX),
+                    self.lsn,
+                    self.gate,
+                    self.cancel.clone(),
+                    ctx,
+                )
+                .await
+                .map_err(PutError::Other)?,
+            );
+        }
+
+        let inner = self.inner.as_mut().unwrap();
+
         // The current estimation is an upper bound of the space that the key/image could take
         // because we did not consider compression in this estimation. The resulting image layer
         // could be smaller than the target size.
         let addition_size_estimation = KEY_SIZE as u64 + img.len() as u64;
-        if self.inner.num_keys() >= 1
-            && self.inner.estimated_size() + addition_size_estimation >= self.target_layer_size
+        if inner.num_keys() >= 1
+            && inner.estimated_size() + addition_size_estimation >= self.target_layer_size
         {
             let next_image_writer = ImageLayerWriter::new(
                 self.conf,
@@ -256,7 +264,7 @@ impl<'a> SplitImageLayerWriter<'a> {
             )
             .await
             .map_err(PutError::Other)?;
-            let prev_image_writer = std::mem::replace(&mut self.inner, next_image_writer);
+            let prev_image_writer = std::mem::replace(inner, next_image_writer);
             self.batches.add_unfinished_image_writer(
                 prev_image_writer,
                 self.start_key..key,
@@ -264,7 +272,7 @@ impl<'a> SplitImageLayerWriter<'a> {
             );
             self.start_key = key;
         }
-        self.inner.put_image(key, img, ctx).await
+        inner.put_image(key, img, ctx).await
     }
 
     pub(crate) async fn finish_with_discard_fn<D, F>(
@@ -281,8 +289,10 @@ impl<'a> SplitImageLayerWriter<'a> {
         let Self {
             mut batches, inner, ..
         } = self;
-        if inner.num_keys() != 0 {
-            batches.add_unfinished_image_writer(inner, self.start_key..end_key, self.lsn);
+        if let Some(inner) = inner {
+            if inner.num_keys() != 0 {
+                batches.add_unfinished_image_writer(inner, self.start_key..end_key, self.lsn);
+            }
         }
         batches.finish_with_discard_fn(tline, ctx, discard_fn).await
     }
@@ -319,7 +329,7 @@ pub struct SplitDeltaLayerWriter<'a> {
 }
 
 impl<'a> SplitDeltaLayerWriter<'a> {
-    pub async fn new(
+    pub fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
@@ -327,8 +337,8 @@ impl<'a> SplitDeltaLayerWriter<'a> {
         target_layer_size: u64,
         gate: &'a utils::sync::gate::Gate,
         cancel: CancellationToken,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             target_layer_size,
             inner: None,
             conf,
@@ -336,10 +346,10 @@ impl<'a> SplitDeltaLayerWriter<'a> {
             tenant_shard_id,
             lsn_range,
             last_key_written: Key::MIN,
-            batches: BatchLayerWriter::new(conf).await?,
+            batches: BatchLayerWriter::new(conf),
             gate,
             cancel,
-        })
+        }
     }
 
     pub async fn put_value(
@@ -497,10 +507,7 @@ mod tests {
             4 * 1024 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-            &ctx,
-        )
-        .await
-        .unwrap();
+        );
 
         let mut delta_writer = SplitDeltaLayerWriter::new(
             tenant.conf,
@@ -510,9 +517,7 @@ mod tests {
             4 * 1024 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-        )
-        .await
-        .unwrap();
+        );
 
         image_writer
             .put_image(get_key(0), get_img(0), &ctx)
@@ -578,10 +583,7 @@ mod tests {
             4 * 1024 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-            &ctx,
-        )
-        .await
-        .unwrap();
+        );
         let mut delta_writer = SplitDeltaLayerWriter::new(
             tenant.conf,
             tline.timeline_id,
@@ -590,9 +592,7 @@ mod tests {
             4 * 1024 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-        )
-        .await
-        .unwrap();
+        );
         const N: usize = 2000;
         for i in 0..N {
             let i = i as u32;
@@ -679,10 +679,7 @@ mod tests {
             4 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-            &ctx,
-        )
-        .await
-        .unwrap();
+        );
 
         let mut delta_writer = SplitDeltaLayerWriter::new(
             tenant.conf,
@@ -692,9 +689,7 @@ mod tests {
             4 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-        )
-        .await
-        .unwrap();
+        );
 
         image_writer
             .put_image(get_key(0), get_img(0), &ctx)
@@ -770,9 +765,7 @@ mod tests {
             4 * 1024 * 1024,
             &tline.gate,
             tline.cancel.clone(),
-        )
-        .await
-        .unwrap();
+        );
 
         for i in 0..N {
             let i = i as u32;

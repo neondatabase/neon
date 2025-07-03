@@ -8,10 +8,10 @@ use crate::config::TlsConfig;
 use crate::context::RequestContext;
 use crate::error::ReportableError;
 use crate::metrics::Metrics;
+use crate::pglb::TlsRequired;
 use crate::pqproto::{
     BeMessage, CancelKeyData, FeStartupPacket, ProtocolVersion, StartupMessageParams,
 };
-use crate::proxy::TlsRequired;
 use crate::stream::{PqStream, Stream, StreamUpgradeError};
 use crate::tls::PG_ALPN_PROTOCOL;
 

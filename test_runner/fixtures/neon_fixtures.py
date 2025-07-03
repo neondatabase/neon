@@ -453,7 +453,7 @@ class NeonEnvBuilder:
         pageserver_get_vectored_concurrent_io: str | None = None,
         pageserver_tracing_config: PageserverTracingConfig | None = None,
         pageserver_import_config: PageserverImportConfig | None = None,
-        storcon_kick_secondary_downloads: bool | None = None,
+        storcon_kick_secondary_downloads: bool | None = True,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -724,15 +724,21 @@ class NeonEnvBuilder:
 
         shutil.copytree(storcon_db_from_dir, storcon_db_to_dir, ignore=ignore_postgres_log)
         assert not (storcon_db_to_dir / "postgres.log").exists()
+
         # NB: neon_local rewrites postgresql.conf on each start based on neon_local config. No need to patch it.
-        # However, in this new NeonEnv, the pageservers listen on different ports, and the storage controller
-        # will currently reject re-attach requests from them because the NodeMetadata isn't identical.
+        # However, in this new NeonEnv, the pageservers and safekeepers listen on different ports, and the storage
+        # controller will currently reject re-attach requests from them because the NodeMetadata isn't identical.
         # So, from_repo_dir patches up the the storcon database.
         patch_script_path = self.repo_dir / "storage_controller_db.startup.sql"
         assert not patch_script_path.exists()
         patch_script = ""
+
         for ps in self.env.pageservers:
-            patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';"
+            patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';\n"
+
+        for sk in self.env.safekeepers:
+            patch_script += f"UPDATE safekeepers SET http_port={sk.port.http}, port={sk.port.pg} WHERE id = '{sk.id}';\n"
+
         patch_script_path.write_text(patch_script)
 
         # Update the config with info about tenants and timelines
@@ -1214,6 +1220,13 @@ class NeonEnv:
         if config.use_https_safekeeper_api:
             storage_controller_config = storage_controller_config or {}
             storage_controller_config["use_https_safekeeper_api"] = True
+
+        # TODO(diko): uncomment when timeline_safekeeper_count option is in the release branch,
+        # so the compat tests will not fail bacause of it presence.
+        # if config.num_safekeepers < 3:
+        #     storage_controller_config = storage_controller_config or {}
+        #     if "timeline_safekeeper_count" not in storage_controller_config:
+        #         storage_controller_config["timeline_safekeeper_count"] = config.num_safekeepers
 
         if storage_controller_config is not None:
             cfg["storage_controller"] = storage_controller_config
@@ -2225,6 +2238,21 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         response.raise_for_status()
         log.info(f"timeline_create success: {response.json()}")
+
+    def migrate_safekeepers(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        new_sk_set: list[int],
+    ):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate",
+            json={"new_sk_set": new_sk_set},
+            headers=self.headers(TokenScope.PAGE_SERVER_API),
+        )
+        response.raise_for_status()
+        log.info(f"migrate_safekeepers success: {response.json()}")
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """

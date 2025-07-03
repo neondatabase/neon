@@ -6,7 +6,7 @@ use compute_api::responses::{
     LfcPrewarmState, TlsConfig,
 };
 use compute_api::spec::{
-    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverProtocol, PgIdent,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -15,17 +15,17 @@ use itertools::Itertools;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use once_cell::sync::Lazy;
+use pageserver_page_api::{self as page_api, BaseBackupCompression};
 use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
@@ -36,6 +36,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
 use utils::pid_file;
+use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
@@ -69,6 +70,7 @@ pub static BUILD_TAG: Lazy<String> = Lazy::new(|| {
         .unwrap_or(BUILD_TAG_DEFAULT)
         .to_string()
 });
+const DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL: u64 = 3600;
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
@@ -102,7 +104,7 @@ pub struct ComputeNodeParams {
     pub remote_ext_base_url: Option<Url>,
 
     /// Interval for installed extensions collection
-    pub installed_extensions_collection_interval: u64,
+    pub installed_extensions_collection_interval: Arc<AtomicU64>,
 }
 
 /// Compute node info shared across several `compute_ctl` threads.
@@ -125,6 +127,9 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub compute_ctl_config: ComputeCtlConfig,
+
+    /// Handle to the extension stats collection task
+    extension_stats_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 // store some metrics about download size that might impact startup time
@@ -218,7 +223,8 @@ pub struct ParsedSpec {
     pub pageserver_connstr: String,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
-    pub endpoint_storage_addr: Option<SocketAddr>,
+    /// k8s dns name and port
+    pub endpoint_storage_addr: Option<String>,
     pub endpoint_storage_token: Option<String>,
 }
 
@@ -313,13 +319,10 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                 .or(Err("invalid timeline id"))?
         };
 
-        let endpoint_storage_addr: Option<SocketAddr> = spec
+        let endpoint_storage_addr: Option<String> = spec
             .endpoint_storage_addr
             .clone()
-            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"))
-            .unwrap_or_default()
-            .parse()
-            .ok();
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"));
         let endpoint_storage_token = spec
             .endpoint_storage_token
             .clone()
@@ -429,6 +432,7 @@ impl ComputeNode {
             state_changed: Condvar::new(),
             ext_download_progress: RwLock::new(HashMap::new()),
             compute_ctl_config: config.compute_ctl_config,
+            extension_stats_task: Mutex::new(None),
         })
     }
 
@@ -515,6 +519,9 @@ impl ComputeNode {
         } else {
             None
         };
+
+        // Terminate the extension stats collection task
+        this.terminate_extension_stats_task();
 
         // Terminate the vm_monitor so it releases the file watcher on
         // /sys/fs/cgroup/neon-postgres.
@@ -752,10 +759,15 @@ impl ComputeNode {
         // Configure and start rsyslog for compliance audit logging
         match pspec.spec.audit_log_level {
             ComputeAudit::Hipaa | ComputeAudit::Extended | ComputeAudit::Full => {
-                let remote_endpoint =
+                let remote_tls_endpoint =
+                    std::env::var("AUDIT_LOGGING_TLS_ENDPOINT").unwrap_or("".to_string());
+                let remote_plain_endpoint =
                     std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
-                if remote_endpoint.is_empty() {
-                    anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+
+                if remote_plain_endpoint.is_empty() && remote_tls_endpoint.is_empty() {
+                    anyhow::bail!(
+                        "AUDIT_LOGGING_ENDPOINT and AUDIT_LOGGING_TLS_ENDPOINT are both empty"
+                    );
                 }
 
                 let log_directory_path = Path::new(&self.params.pgdata).join("log");
@@ -771,7 +783,8 @@ impl ComputeNode {
                     log_directory_path.clone(),
                     endpoint_id,
                     project_id,
-                    &remote_endpoint,
+                    &remote_plain_endpoint,
+                    &remote_tls_endpoint,
                 )?;
 
                 // Launch a background task to clean up the audit logs
@@ -998,13 +1011,80 @@ impl ComputeNode {
         Ok(())
     }
 
-    // Get basebackup from the libpq connection to pageserver using `connstr` and
-    // unarchive it to `pgdata` directory overriding all its previous content.
+    /// Fetches a basebackup from the Pageserver using the compute state's Pageserver connstring and
+    /// unarchives it to `pgdata` directory, replacing any existing contents.
     #[instrument(skip_all, fields(%lsn))]
     fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
-        let start_time = Instant::now();
 
+        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
+        let started = Instant::now();
+
+        let (connected, size) = match PageserverProtocol::from_connstring(shard0_connstr)? {
+            PageserverProtocol::Libpq => self.try_get_basebackup_libpq(spec, lsn)?,
+            PageserverProtocol::Grpc => self.try_get_basebackup_grpc(spec, lsn)?,
+        };
+
+        let mut state = self.state.lock().unwrap();
+        state.metrics.pageserver_connect_micros =
+            connected.duration_since(started).as_micros() as u64;
+        state.metrics.basebackup_bytes = size as u64;
+        state.metrics.basebackup_ms = started.elapsed().as_millis() as u64;
+
+        Ok(())
+    }
+
+    /// Fetches a basebackup via gRPC. The connstring must use grpc://. Returns the timestamp when
+    /// the connection was established, and the (compressed) size of the basebackup.
+    fn try_get_basebackup_grpc(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
+        let shard0_connstr = spec
+            .pageserver_connstr
+            .split(',')
+            .next()
+            .unwrap()
+            .to_string();
+        let shard_index = match spec.pageserver_connstr.split(',').count() as u8 {
+            0 | 1 => ShardIndex::unsharded(),
+            count => ShardIndex::new(ShardNumber(0), ShardCount(count)),
+        };
+
+        let (reader, connected) = tokio::runtime::Handle::current().block_on(async move {
+            let mut client = page_api::Client::new(
+                shard0_connstr,
+                spec.tenant_id,
+                spec.timeline_id,
+                shard_index,
+                spec.storage_auth_token.clone(),
+                None, // NB: base backups use payload compression
+            )
+            .await?;
+            let connected = Instant::now();
+            let reader = client
+                .get_base_backup(page_api::GetBaseBackupRequest {
+                    lsn: (lsn != Lsn(0)).then_some(lsn),
+                    compression: BaseBackupCompression::Gzip,
+                    replica: spec.spec.mode != ComputeMode::Primary,
+                    full: false,
+                })
+                .await?;
+            anyhow::Ok((reader, connected))
+        })?;
+
+        let mut reader = MeasuredReader::new(tokio_util::io::SyncIoBridge::new(reader));
+
+        // Set `ignore_zeros` so that unpack() reads the entire stream and doesn't just stop at the
+        // end-of-archive marker. If the server errors, the tar::Builder drop handler will write an
+        // end-of-archive marker before the error is emitted, and we would not see the error.
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut reader));
+        ar.set_ignore_zeros(true);
+        ar.unpack(&self.params.pgdata)?;
+
+        Ok((connected, reader.get_byte_count()))
+    }
+
+    /// Fetches a basebackup via libpq. The connstring must use postgresql://. Returns the timestamp
+    /// when the connection was established, and the (compressed) size of the basebackup.
+    fn try_get_basebackup_libpq(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
         let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
         let mut config = postgres::Config::from_str(shard0_connstr)?;
 
@@ -1018,16 +1098,14 @@ impl ComputeNode {
         }
 
         config.application_name("compute_ctl");
-        if let Some(spec) = &compute_state.pspec {
-            config.options(&format!(
-                "-c neon.compute_mode={}",
-                spec.spec.mode.to_type_str()
-            ));
-        }
+        config.options(&format!(
+            "-c neon.compute_mode={}",
+            spec.spec.mode.to_type_str()
+        ));
 
         // Connect to pageserver
         let mut client = config.connect(NoTls)?;
-        let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
+        let connected = Instant::now();
 
         let basebackup_cmd = match lsn {
             Lsn(0) => {
@@ -1064,16 +1142,13 @@ impl ComputeNode {
         // Set `ignore_zeros` so that unpack() reads all the Copy data and
         // doesn't stop at the end-of-archive marker. Otherwise, if the server
         // sends an Error after finishing the tarball, we will not notice it.
+        // The tar::Builder drop handler will write an end-of-archive marker
+        // before emitting the error, and we would not see it otherwise.
         let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
         ar.set_ignore_zeros(true);
         ar.unpack(&self.params.pgdata)?;
 
-        // Report metrics
-        let mut state = self.state.lock().unwrap();
-        state.metrics.pageserver_connect_micros = pageserver_connect_micros;
-        state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
-        state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
-        Ok(())
+        Ok((connected, measured_reader.get_byte_count()))
     }
 
     // Gets the basebackup in a retry loop
@@ -1610,6 +1685,8 @@ impl ComputeNode {
             tls_config = self.compute_ctl_config.tls.clone();
         }
 
+        self.update_installed_extensions_collection_interval(&spec);
+
         let max_concurrent_connections = self.max_service_connections(compute_state, &spec);
 
         // Merge-apply spec & changes to PostgreSQL state.
@@ -1673,6 +1750,8 @@ impl ComputeNode {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
         let tls_config = self.tls_config(&spec);
+
+        self.update_installed_extensions_collection_interval(&spec);
 
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
@@ -2278,10 +2357,20 @@ LIMIT 100",
     }
 
     pub fn spawn_extension_stats_task(&self) {
+        // Cancel any existing task
+        if let Some(handle) = self.extension_stats_task.lock().unwrap().take() {
+            handle.abort();
+        }
+
         let conf = self.tokio_conn_conf.clone();
-        let installed_extensions_collection_interval =
-            self.params.installed_extensions_collection_interval;
-        tokio::spawn(async move {
+        let atomic_interval = self.params.installed_extensions_collection_interval.clone();
+        let mut installed_extensions_collection_interval =
+            2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst);
+        info!(
+            "[NEON_EXT_SPAWN] Spawning background installed extensions worker with Timeout: {}",
+            installed_extensions_collection_interval
+        );
+        let handle = tokio::spawn(async move {
             // An initial sleep is added to ensure that two collections don't happen at the same time.
             // The first collection happens during compute startup.
             tokio::time::sleep(tokio::time::Duration::from_secs(
@@ -2294,8 +2383,48 @@ LIMIT 100",
             loop {
                 interval.tick().await;
                 let _ = installed_extensions(conf.clone()).await;
+                // Acquire a read lock on the compute spec and then update the interval if necessary
+                interval = tokio::time::interval(tokio::time::Duration::from_secs(std::cmp::max(
+                    installed_extensions_collection_interval,
+                    2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst),
+                )));
+                installed_extensions_collection_interval = interval.period().as_secs();
             }
         });
+
+        // Store the new task handle
+        *self.extension_stats_task.lock().unwrap() = Some(handle);
+    }
+
+    fn terminate_extension_stats_task(&self) {
+        if let Some(handle) = self.extension_stats_task.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+
+    fn update_installed_extensions_collection_interval(&self, spec: &ComputeSpec) {
+        // Update the interval for collecting installed extensions statistics
+        // If the value is -1, we never suspend so set the value to default collection.
+        // If the value is 0, it means default, we will just continue to use the default.
+        if spec.suspend_timeout_seconds == -1 || spec.suspend_timeout_seconds == 0 {
+            info!(
+                "[NEON_EXT_INT_UPD] Spec Timeout: {}, New Timeout: {}",
+                spec.suspend_timeout_seconds, DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL
+            );
+            self.params.installed_extensions_collection_interval.store(
+                DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        } else {
+            info!(
+                "[NEON_EXT_INT_UPD] Spec Timeout: {}",
+                spec.suspend_timeout_seconds
+            );
+            self.params.installed_extensions_collection_interval.store(
+                spec.suspend_timeout_seconds as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
     }
 }
 
