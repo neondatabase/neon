@@ -494,7 +494,6 @@ MergeTable()
 		}
 		hash_destroy(old_table->role_table);
 	}
-	pfree(old_table);
 }
 
 static void
@@ -506,6 +505,10 @@ PopTable()
 	}
 	else
 	{
+		/*
+		 * Current table gets freed because it is allocated in aborted
+		 * subtransaction's memory context.
+		 */
 		SubtransDdlLevel = CurrentDdlTable->subtrans_level;
 		CurrentDdlTable = CurrentDdlTable->prev_table;
 	}
