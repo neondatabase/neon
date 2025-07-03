@@ -349,11 +349,11 @@ impl PoolingBackend {
             debug!("setting up backend session state");
 
             // initiates the auth session
-            if !disable_pg_session_jwt {
-                if let Err(e) = client.batch_execute("select auth.init();").await {
-                    discard.discard();
-                    return Err(e.into());
-                }
+            if !disable_pg_session_jwt
+                && let Err(e) = client.batch_execute("select auth.init();").await
+            {
+                discard.discard();
+                return Err(e.into());
             }
 
             info!("backend session state initialized");

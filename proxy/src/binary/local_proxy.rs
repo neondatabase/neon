@@ -7,9 +7,7 @@ use anyhow::bail;
 use arc_swap::ArcSwapOption;
 use camino::Utf8PathBuf;
 use clap::Parser;
-
 use futures::future::Either;
-
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -22,9 +20,9 @@ use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::local::LocalBackend;
 use crate::auth::{self};
 use crate::cancellation::CancellationHandler;
-use crate::config::refresh_config_loop;
 use crate::config::{
     self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
+    refresh_config_loop,
 };
 use crate::control_plane::locks::ApiLocks;
 use crate::http::health_server::AppMetrics;

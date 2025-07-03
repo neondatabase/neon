@@ -12,8 +12,7 @@ use serde::Serialize;
 use url::Url;
 use uuid::Uuid;
 
-use super::conn_pool::AuthData;
-use super::conn_pool::ConnInfoWithAuth;
+use super::conn_pool::{AuthData, ConnInfoWithAuth};
 use super::conn_pool_lib::ConnInfo;
 use super::error::{ConnInfoError, Credentials};
 use crate::auth::backend::ComputeUserInfo;
