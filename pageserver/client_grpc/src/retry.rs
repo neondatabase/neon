@@ -88,10 +88,9 @@ impl Retry {
                 // Error, retry or bail out.
                 Err(status) => {
                     let (code, message) = (status.code(), status.message());
-                    let should_retry = Self::should_retry(code);
                     let attempt = retries + 1;
 
-                    if !should_retry {
+                    if !Self::should_retry(code) {
                         // NB: include the attempt here too. This isn't necessarily the first
                         // attempt, because the error may change between attempts.
                         error!(
