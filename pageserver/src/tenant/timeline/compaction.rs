@@ -36,7 +36,7 @@ use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, trace, warn};
-use utils::critical;
+use utils::critical_timeline;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use wal_decoder::models::record::NeonWalRecord;
@@ -1390,7 +1390,11 @@ impl Timeline {
                             GetVectoredError::MissingKey(_),
                         ) = err
                         {
-                            critical!("missing key during compaction: {err:?}");
+                            critical_timeline!(
+                                self.tenant_shard_id,
+                                self.timeline_id,
+                                "missing key during compaction: {err:?}"
+                            );
                         }
                     })?;
 
@@ -1418,7 +1422,11 @@ impl Timeline {
 
             // Alert on critical errors that indicate data corruption.
             Err(err) if err.is_critical() => {
-                critical!("could not compact, repartitioning keyspace failed: {err:?}");
+                critical_timeline!(
+                    self.tenant_shard_id,
+                    self.timeline_id,
+                    "could not compact, repartitioning keyspace failed: {err:?}"
+                );
             }
 
             // Log other errors. No partitioning? This is normal, if the timeline was just created

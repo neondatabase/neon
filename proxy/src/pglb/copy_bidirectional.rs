@@ -90,27 +90,27 @@ where
         // TODO: 1 info log, with a enum label for close direction.
 
         // Early termination checks from compute to client.
-        if let TransferState::Done(_) = compute_to_client {
-            if let TransferState::Running(buf) = &client_to_compute {
-                info!("Compute is done, terminate client");
-                // Initiate shutdown
-                client_to_compute = TransferState::ShuttingDown(buf.amt);
-                client_to_compute_result =
-                    transfer_one_direction(cx, &mut client_to_compute, client, compute)
-                        .map_err(ErrorSource::from_client)?;
-            }
+        if let TransferState::Done(_) = compute_to_client
+            && let TransferState::Running(buf) = &client_to_compute
+        {
+            info!("Compute is done, terminate client");
+            // Initiate shutdown
+            client_to_compute = TransferState::ShuttingDown(buf.amt);
+            client_to_compute_result =
+                transfer_one_direction(cx, &mut client_to_compute, client, compute)
+                    .map_err(ErrorSource::from_client)?;
         }
 
         // Early termination checks from client to compute.
-        if let TransferState::Done(_) = client_to_compute {
-            if let TransferState::Running(buf) = &compute_to_client {
-                info!("Client is done, terminate compute");
-                // Initiate shutdown
-                compute_to_client = TransferState::ShuttingDown(buf.amt);
-                compute_to_client_result =
-                    transfer_one_direction(cx, &mut compute_to_client, compute, client)
-                        .map_err(ErrorSource::from_compute)?;
-            }
+        if let TransferState::Done(_) = client_to_compute
+            && let TransferState::Running(buf) = &compute_to_client
+        {
+            info!("Client is done, terminate compute");
+            // Initiate shutdown
+            compute_to_client = TransferState::ShuttingDown(buf.amt);
+            compute_to_client_result =
+                transfer_one_direction(cx, &mut compute_to_client, compute, client)
+                    .map_err(ErrorSource::from_compute)?;
         }
 
         // It is not a problem if ready! returns early ... (comment remains the same)

@@ -87,13 +87,20 @@ impl<'a> ClientFirstMessage<'a> {
         salt_base64: &str,
         iterations: u32,
     ) -> OwnedServerFirstMessage {
-        use std::fmt::Write;
+        let mut message = String::with_capacity(128);
+        message.push_str("r=");
 
-        let mut message = String::new();
-        write!(&mut message, "r={}", self.nonce).unwrap();
+        // write combined nonce
+        let combined_nonce_start = message.len();
+        message.push_str(self.nonce);
         BASE64_STANDARD.encode_string(nonce, &mut message);
-        let combined_nonce = 2..message.len();
-        write!(&mut message, ",s={salt_base64},i={iterations}").unwrap();
+        let combined_nonce = combined_nonce_start..message.len();
+
+        // write salt and iterations
+        message.push_str(",s=");
+        message.push_str(salt_base64);
+        message.push_str(",i=");
+        message.push_str(itoa::Buffer::new().format(iterations));
 
         // This design guarantees that it's impossible to create a
         // server-first-message without receiving a client-first-message

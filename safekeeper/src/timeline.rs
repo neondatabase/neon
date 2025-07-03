@@ -26,7 +26,9 @@ use utils::id::{NodeId, TenantId, TenantTimelineId};
 use utils::lsn::Lsn;
 use utils::sync::gate::Gate;
 
-use crate::metrics::{FullTimelineInfo, MISC_OPERATION_SECONDS, WalStorageMetrics};
+use crate::metrics::{
+    FullTimelineInfo, MISC_OPERATION_SECONDS, WAL_STORAGE_LIMIT_ERRORS, WalStorageMetrics,
+};
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
@@ -1050,6 +1052,39 @@ impl WalResidentTimeline {
         Ok(ss)
     }
 
+    // BEGIN HADRON
+    // Check if disk usage by WAL segment files for this timeline exceeds the configured limit.
+    fn hadron_check_disk_usage(
+        &self,
+        shared_state_locked: &mut WriteGuardSharedState<'_>,
+    ) -> Result<()> {
+        // The disk usage is calculated based on the number of segments between `last_removed_segno`
+        // and the current flush LSN segment number. `last_removed_segno` is advanced after
+        // unneeded WAL files are physically removed from disk (see `update_wal_removal_end()`
+        // in `timeline_manager.rs`).
+        let max_timeline_disk_usage_bytes = self.conf.max_timeline_disk_usage_bytes;
+        if max_timeline_disk_usage_bytes > 0 {
+            let last_removed_segno = self.last_removed_segno.load(Ordering::Relaxed);
+            let flush_lsn = shared_state_locked.sk.flush_lsn();
+            let wal_seg_size = shared_state_locked.sk.state().server.wal_seg_size as u64;
+            let current_segno = flush_lsn.segment_number(wal_seg_size as usize);
+
+            let segno_count = current_segno - last_removed_segno;
+            let disk_usage_bytes = segno_count * wal_seg_size;
+
+            if disk_usage_bytes > max_timeline_disk_usage_bytes {
+                WAL_STORAGE_LIMIT_ERRORS.inc();
+                bail!(
+                    "WAL storage utilization exceeds configured limit of {} bytes: current disk usage: {} bytes",
+                    max_timeline_disk_usage_bytes,
+                    disk_usage_bytes
+                );
+            }
+        }
+        Ok(())
+    }
+    // END HADRON
+
     /// Pass arrived message to the safekeeper.
     pub async fn process_msg(
         &self,
@@ -1062,6 +1097,13 @@ impl WalResidentTimeline {
         let mut rmsg: Option<AcceptorProposerMessage>;
         {
             let mut shared_state = self.write_shared_state().await;
+            // BEGIN HADRON
+            // Errors from the `hadron_check_disk_usage()` function fail the process_msg() function, which
+            // gets propagated upward and terminates the entire WalAcceptor. This will cause postgres to
+            // disconnect from the safekeeper and reestablish another connection. Postgres will keep retrying
+            // safekeeper connections every second until it can successfully propose WAL to the SK again.
+            self.hadron_check_disk_usage(&mut shared_state)?;
+            // END HADRON
             rmsg = shared_state.sk.safekeeper().process_msg(msg).await?;
 
             // if this is AppendResponse, fill in proper hot standby feedback.
