@@ -233,12 +233,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     fn request_lsns(&self, not_modified_since_lsn: Lsn) -> page_api::ReadLsn {
         let mut request_lsn = get_request_lsn();
 
-	// Is it possible that the last-written LSN is ahead of last flush
-	// LSN? Generally not, we shouldn't evict a page from the buffer cache
-	// before all its modifications have been safely flushed. That's the
-	// "WAL before data" rule. However, such case does exist at index
-	// building, _bt_blwritepage logs the full page without flushing WAL
-	// before smgrextend (files are fsynced before build ends).
+        // Is it possible that the last-written LSN is ahead of last flush LSN? Generally not, we
+        // shouldn't evict a page from the buffer cache before all its modifications have been
+        // safely flushed. That's the "WAL before data" rule. However, such case does exist at index
+        // building, _bt_blwritepage logs the full page without flushing WAL before smgrextend
+        // (files are fsynced before build ends).
         //
         // FIXME: I'm seeing some other cases of this too in the regression tests.
         // Maybe it's OK? Would be nice to dig a little deeper.
@@ -246,7 +245,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         if not_modified_since_lsn > request_lsn {
             tracing::info!(
                 "not_modified_since_lsn {} is ahead of last flushed LSN {}",
-                not_modified_since_lsn, request_lsn
+                not_modified_since_lsn,
+                request_lsn
             );
             request_lsn = not_modified_since_lsn;
         }
@@ -495,7 +495,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 .get_page(page_api::GetPageRequest {
                     request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
                     request_class: page_api::GetPageClass::Normal,
-                    read_lsn: read_lsn,
+                    read_lsn,
                     rel,
                     block_numbers: vec![*blkno],
                 })
@@ -520,7 +520,13 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                     // Also store it in the LFC while we have it
                     self.cache
-                        .remember_page(&rel, *blkno, page_image, read_lsn.not_modified_since_lsn.unwrap(), false)
+                        .remember_page(
+                            &rel,
+                            *blkno,
+                            page_image,
+                            read_lsn.not_modified_since_lsn.unwrap(),
+                            false,
+                        )
                         .await;
                 }
                 Err(err) => {
