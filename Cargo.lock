@@ -4467,6 +4467,7 @@ dependencies = [
  "tonic 0.13.1",
  "tracing",
  "utils",
+ "workspace_hack",
 ]
 
 [[package]]
