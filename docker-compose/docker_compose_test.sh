@@ -13,6 +13,7 @@
 #
 set -eux -o pipefail
 
+cd "$(dirname "${0}")"
 export COMPOSE_FILE='docker-compose.yml'
 export COMPOSE_PROFILES=test-extensions
 export PARALLEL_COMPUTES=${PARALLEL_COMPUTES:-1}
