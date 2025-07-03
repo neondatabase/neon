@@ -14,16 +14,17 @@ use anyhow::{Context, Result, anyhow};
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
 use azure_core::{Continuable, HttpClient, RetryOptions, TransportOptions};
 use azure_storage::StorageCredentials;
-use azure_storage_blobs::container::operations::ListBlobsBuilder;
-use futures::FutureExt;
 use azure_storage_blobs::blob::BlobBlockType;
 use azure_storage_blobs::blob::BlockList;
 use azure_storage_blobs::blob::{Blob, CopyStatus};
+use azure_storage_blobs::container::operations::ListBlobsBuilder;
 use azure_storage_blobs::prelude::ClientBuilder;
 use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::Bytes;
 use camino::Utf8Path;
+use futures::FutureExt;
 use futures::future::Either;
 use futures::stream::Stream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -643,7 +644,7 @@ impl RemoteStorage for AzureBlobStorage {
 
                 let mut encoded_block_id = [0u8; 8];
                 BigEndian::write_u64(&mut encoded_block_id, block_id);
-                base64::encode_config(encoded_block_id, base64::URL_SAFE);
+                URL_SAFE.encode(encoded_block_id);
 
                 // Put one block.
                 let part_fut = async move {
