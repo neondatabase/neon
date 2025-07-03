@@ -1889,6 +1889,31 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
 
 
+def test_detach_ancestors_with_no_writes(
+    neon_env_builder: NeonEnvBuilder,
+):
+    env = neon_env_builder.init_start()
+
+    endpoint = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_1', 'pgoutput')"
+    )
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.stop()
+
+    for i in range(0, 5):
+        if i == 0:
+            ancestor_name = "main"
+        else:
+            ancestor_name = f"b{i}"
+
+        tlid = env.create_branch(f"b{i + 1}", ancestor_branch_name=ancestor_name)
+
+        client = env.pageserver.http_client()
+        client.detach_ancestor(tenant_id=env.initial_tenant, timeline_id=tlid)
+
+
 # TODO:
 # - branch near existing L1 boundary, image layers?
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
