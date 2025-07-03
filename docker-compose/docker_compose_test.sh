@@ -24,8 +24,6 @@ for i in $(seq 1 "${PARALLEL_COMPUTES}"); do
 done
 cp docker-compose.yml docker-compose.yml.bak
 trap 'mv docker-compose.yml.bak docker-compose.yml' EXIT
-# XXX remove before merge
-docker compose cp run-tests.sh neon-test-extensions:/
 if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
   for i in $(seq 2 "${PARALLEL_COMPUTES}"); do
     yq -i "
