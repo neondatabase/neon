@@ -5,6 +5,7 @@ import random
 import threading
 import time
 from collections import defaultdict
+from threading import Event
 from typing import TYPE_CHECKING, Any
 
 import pytest
