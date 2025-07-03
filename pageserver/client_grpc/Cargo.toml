@@ -1,0 +1,16 @@
+[package]
+name = "pageserver_client_grpc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+pageserver_page_api.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+utils.workspace = true
+workspace_hack.workspace = true
