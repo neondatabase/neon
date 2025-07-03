@@ -9,7 +9,7 @@ use std::ops::{Deref, Range};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::layer_manager::{LayerManagerLockHolder, LayerManagerReadGuard};
+use super::layer_manager::LayerManagerLockHolder;
 use super::{
     CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
     GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
@@ -101,7 +101,11 @@ pub enum GcCompactionQueueItem {
         /// Whether the compaction is triggered automatically (determines whether we need to update L2 LSN)
         auto: bool,
     },
-    SubCompactionJob(CompactOptions),
+    SubCompactionJob {
+        i: usize,
+        total: usize,
+        options: CompactOptions,
+    },
     Notify(GcCompactionJobId, Option<Lsn>),
 }
 
@@ -163,7 +167,7 @@ impl GcCompactionQueueItem {
                 running,
                 job_id: id.0,
             }),
-            GcCompactionQueueItem::SubCompactionJob(options) => Some(CompactInfoResponse {
+            GcCompactionQueueItem::SubCompactionJob { options, .. } => Some(CompactInfoResponse {
                 compact_key_range: options.compact_key_range,
                 compact_lsn_range: options.compact_lsn_range,
                 sub_compaction: options.sub_compaction,
@@ -489,7 +493,7 @@ impl GcCompactionQueue {
                 .map(|job| job.compact_lsn_range.end)
                 .max()
                 .unwrap();
-            for job in jobs {
+            for (i, job) in jobs.into_iter().enumerate() {
                 // Unfortunately we need to convert the `GcCompactJob` back to `CompactionOptions`
                 // until we do further refactors to allow directly call `compact_with_gc`.
                 let mut flags: EnumSet<CompactFlags> = EnumSet::default();
@@ -507,7 +511,11 @@ impl GcCompactionQueue {
                     compact_lsn_range: Some(job.compact_lsn_range.into()),
                     sub_compaction_max_job_size_mb: None,
                 };
-                pending_tasks.push(GcCompactionQueueItem::SubCompactionJob(options));
+                pending_tasks.push(GcCompactionQueueItem::SubCompactionJob {
+                    options,
+                    i,
+                    total: jobs_len,
+                });
             }
 
             if !auto {
@@ -651,7 +659,7 @@ impl GcCompactionQueue {
                     }
                 }
             }
-            GcCompactionQueueItem::SubCompactionJob(options) => {
+            GcCompactionQueueItem::SubCompactionJob { options, i, total } => {
                 // TODO: error handling, clear the queue if any task fails?
                 let _gc_guard = match gc_block.start().await {
                     Ok(guard) => guard,
@@ -663,6 +671,7 @@ impl GcCompactionQueue {
                         )));
                     }
                 };
+                info!("running gc-compaction subcompaction job {}/{}", i, total);
                 let res = timeline.compact_with_options(cancel, options, ctx).await;
                 let compaction_result = match res {
                     Ok(res) => res,
@@ -1310,7 +1319,7 @@ impl Timeline {
             || cfg!(feature = "testing")
             || self
                 .feature_resolver
-                .evaluate_boolean("image-compaction-boundary", self.tenant_shard_id.tenant_id)
+                .evaluate_boolean("image-compaction-boundary")
                 .is_ok()
         {
             let last_repartition_lsn = self.partitioning.read().1;
@@ -1591,13 +1600,15 @@ impl Timeline {
         let started = Instant::now();
 
         let mut replace_image_layers = Vec::new();
+        let total = layers_to_rewrite.len();
 
-        for layer in layers_to_rewrite {
+        for (i, layer) in layers_to_rewrite.into_iter().enumerate() {
             if self.cancel.is_cancelled() {
                 return Err(CompactionError::ShuttingDown);
             }
 
-            info!(layer=%layer, "rewriting layer after shard split");
+            info!(layer=%layer, "rewriting layer after shard split: {}/{}", i, total);
+
             let mut image_layer_writer = ImageLayerWriter::new(
                 self.conf,
                 self.timeline_id,
@@ -1779,20 +1790,14 @@ impl Timeline {
         } = {
             let phase1_span = info_span!("compact_level0_phase1");
             let ctx = ctx.attached_child();
-            let mut stats = CompactLevel0Phase1StatsBuilder {
+            let stats = CompactLevel0Phase1StatsBuilder {
                 version: Some(2),
                 tenant_id: Some(self.tenant_shard_id),
                 timeline_id: Some(self.timeline_id),
                 ..Default::default()
             };
 
-            let begin = tokio::time::Instant::now();
-            let phase1_layers_locked = self.layers.read(LayerManagerLockHolder::Compaction).await;
-            let now = tokio::time::Instant::now();
-            stats.read_lock_acquisition_micros =
-                DurationRecorder::Recorded(RecordedDuration(now - begin), now);
             self.compact_level0_phase1(
-                phase1_layers_locked,
                 stats,
                 target_file_size,
                 force_compaction_ignore_threshold,
@@ -1813,16 +1818,19 @@ impl Timeline {
     }
 
     /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
-    async fn compact_level0_phase1<'a>(
-        self: &'a Arc<Self>,
-        guard: LayerManagerReadGuard<'a>,
+    async fn compact_level0_phase1(
+        self: &Arc<Self>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
-        stats.read_lock_held_spawn_blocking_startup_micros =
-            stats.read_lock_acquisition_micros.till_now(); // set by caller
+        let begin = tokio::time::Instant::now();
+        let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
+        let now = tokio::time::Instant::now();
+        stats.read_lock_acquisition_micros =
+            DurationRecorder::Recorded(RecordedDuration(now - begin), now);
+
         let layers = guard.layer_map()?;
         let level0_deltas = layers.level0_deltas();
         stats.level0_deltas_count = Some(level0_deltas.len());
@@ -1856,6 +1864,12 @@ impl Timeline {
             .iter()
             .map(|x| guard.get_from_desc(x))
             .collect::<Vec<_>>();
+
+        drop_layer_manager_rlock(guard);
+
+        // The is the last LSN that we have seen for L0 compaction in the timeline. This LSN might be updated
+        // by the time we finish the compaction. So we need to get it here.
+        let l0_last_record_lsn = self.get_last_record_lsn();
 
         // Gather the files to compact in this iteration.
         //
@@ -1944,9 +1958,7 @@ impl Timeline {
         // we don't accidentally use it later in the function.
         drop(level0_deltas);
 
-        stats.read_lock_held_prerequisites_micros = stats
-            .read_lock_held_spawn_blocking_startup_micros
-            .till_now();
+        stats.compaction_prerequisites_micros = stats.read_lock_acquisition_micros.till_now();
 
         // TODO: replace with streaming k-merge
         let all_keys = {
@@ -1968,7 +1980,7 @@ impl Timeline {
             all_keys
         };
 
-        stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
+        stats.read_lock_held_key_sort_micros = stats.compaction_prerequisites_micros.till_now();
 
         // Determine N largest holes where N is number of compacted layers. The vec is sorted by key range start.
         //
@@ -2002,7 +2014,6 @@ impl Timeline {
                 }
             }
             let max_holes = deltas_to_compact.len();
-            let last_record_lsn = self.get_last_record_lsn();
             let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
             let min_hole_coverage_size = 3; // TODO: something more flexible?
             // min-heap (reserve space for one more element added before eviction)
@@ -2021,8 +2032,12 @@ impl Timeline {
                         // has not so much sense, because largest holes will corresponds field1/field2 changes.
                         // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
                         // That is why it is better to measure size of hole as number of covering image layers.
-                        let coverage_size =
-                            layers.image_coverage(&key_range, last_record_lsn).len();
+                        let coverage_size = {
+                            // TODO: optimize this with copy-on-write layer map.
+                            let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
+                            let layers = guard.layer_map()?;
+                            layers.image_coverage(&key_range, l0_last_record_lsn).len()
+                        };
                         if coverage_size >= min_hole_coverage_size {
                             heap.push(Hole {
                                 key_range,
@@ -2041,7 +2056,6 @@ impl Timeline {
             holes
         };
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
-        drop_layer_manager_rlock(guard);
 
         if self.cancel.is_cancelled() {
             return Err(CompactionError::ShuttingDown);
@@ -2382,9 +2396,8 @@ struct CompactLevel0Phase1StatsBuilder {
     tenant_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
     read_lock_acquisition_micros: DurationRecorder,
-    read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
     read_lock_held_key_sort_micros: DurationRecorder,
-    read_lock_held_prerequisites_micros: DurationRecorder,
+    compaction_prerequisites_micros: DurationRecorder,
     read_lock_held_compute_holes_micros: DurationRecorder,
     read_lock_drop_micros: DurationRecorder,
     write_layer_files_micros: DurationRecorder,
@@ -2399,9 +2412,8 @@ struct CompactLevel0Phase1Stats {
     tenant_id: TenantShardId,
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
-    read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
     read_lock_held_key_sort_micros: RecordedDuration,
-    read_lock_held_prerequisites_micros: RecordedDuration,
+    compaction_prerequisites_micros: RecordedDuration,
     read_lock_held_compute_holes_micros: RecordedDuration,
     read_lock_drop_micros: RecordedDuration,
     write_layer_files_micros: RecordedDuration,
@@ -2426,16 +2438,12 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .read_lock_acquisition_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_acquisition_micros not set"))?,
-            read_lock_held_spawn_blocking_startup_micros: value
-                .read_lock_held_spawn_blocking_startup_micros
-                .into_recorded()
-                .ok_or_else(|| anyhow!("read_lock_held_spawn_blocking_startup_micros not set"))?,
             read_lock_held_key_sort_micros: value
                 .read_lock_held_key_sort_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_key_sort_micros not set"))?,
-            read_lock_held_prerequisites_micros: value
-                .read_lock_held_prerequisites_micros
+            compaction_prerequisites_micros: value
+                .compaction_prerequisites_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_prerequisites_micros not set"))?,
             read_lock_held_compute_holes_micros: value
@@ -4346,6 +4354,7 @@ impl TimelineAdaptor {
                 ctx,
                 key_range.clone(),
                 IoConcurrency::sequential(),
+                None,
             )
             .await?;
 

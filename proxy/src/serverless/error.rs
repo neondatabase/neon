@@ -31,8 +31,6 @@ pub(crate) enum ConnInfoError {
     MissingHostname,
     #[error("invalid hostname: {0}")]
     InvalidEndpoint(#[from] ComputeUserInfoParseError),
-    #[error("malformed endpoint")]
-    MalformedEndpoint,
 }
 
 #[derive(Debug, thiserror::Error)]

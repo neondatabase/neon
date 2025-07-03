@@ -17,18 +17,20 @@ use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, error, info, warn};
 #[cfg(any(test, feature = "testing"))]
 use tracing::debug;
+use tracing::{Instrument, error, info, warn};
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
 use crate::auth::backend::jwt::JwkCache;
 #[cfg(any(test, feature = "testing"))]
-use crate::auth::backend::local::{JWKS_ROLE_MAP, LocalBackend};
+use crate::auth::backend::local::LocalBackend;
 use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::batch::BatchQueue;
 use crate::cancellation::{CancellationHandler, CancellationProcessor};
+#[cfg(any(test, feature = "testing"))]
+use crate::config::refresh_config_loop;
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
     ProxyConfig, ProxyProtocolV2, RestConfig, remote_storage_from_toml,
@@ -57,13 +59,7 @@ use crate::types::RoleName;
 use crate::url::ApiUrl;
 use crate::{auth, control_plane, http, serverless, usage_metrics};
 #[cfg(any(test, feature = "testing"))]
-use camino::{Utf8Path, Utf8PathBuf};
-#[cfg(any(test, feature = "testing"))]
-use compute_api::spec::LocalProxySpec;
-#[cfg(any(test, feature = "testing"))]
-use std::str::FromStr;
-#[cfg(any(test, feature = "testing"))]
-use thiserror::Error;
+use camino::Utf8PathBuf;
 #[cfg(any(test, feature = "testing"))]
 use tokio::sync::Notify;
 
@@ -84,7 +80,6 @@ enum AuthBackendType {
     #[cfg(any(test, feature = "testing"))]
     Postgres,
 
-    #[clap(alias("local"))]
     #[cfg(any(test, feature = "testing"))]
     Local,
 }
@@ -425,6 +420,8 @@ pub async fn run() -> anyhow::Result<()> {
         64,
     ));
 
+    #[cfg(any(test, feature = "testing"))]
+    let refresh_config_notify = Arc::new(Notify::new());
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
@@ -455,17 +452,11 @@ pub async fn run() -> anyhow::Result<()> {
             // if auth backend is local, we need to load the config file
             #[cfg(any(test, feature = "testing"))]
             if let auth::Backend::Local(_) = &auth_backend {
-                // trigger the first config load **after** setting up the signal hook
-                // to avoid the race condition where:
-                // 1. No config file registered when local_proxy starts up
-                // 2. The config file is written but the signal hook is not yet received
-                // 3. local_proxy completes startup but has no config loaded, despite there being a registerd config.
-                let refresh_config_notify = Arc::new(Notify::new());
                 refresh_config_notify.notify_one();
                 tokio::spawn(refresh_config_loop(
                     config,
                     args.config_path,
-                    refresh_config_notify,
+                    refresh_config_notify.clone(),
                 ));
             }
         }
@@ -518,7 +509,13 @@ pub async fn run() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(crate::signals::handle(cancellation_token.clone(), || {}));
+
+    maintenance_tasks.spawn(crate::signals::handle(cancellation_token.clone(), {
+        move || {
+            #[cfg(any(test, feature = "testing"))]
+            refresh_config_notify.notify_one();
+        }
+    }));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
@@ -737,6 +734,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
+        #[cfg(feature = "testing")]
         disable_pg_session_jwt: false,
         rest_config,
     };
@@ -892,7 +890,7 @@ fn build_auth_backend(
 
             Ok(Either::Right(config))
         }
-        
+
         #[cfg(any(test, feature = "testing"))]
         AuthBackendType::Local => {
             let postgres: SocketAddr = "127.0.0.1:7432".parse()?;
@@ -952,7 +950,6 @@ async fn configure_redis(
 
     Ok(redis_client)
 }
-
 
 // TODO: move this to a common place (the exact same code is used in local_proxy.rs)
 #[cfg(any(test, feature = "testing"))]

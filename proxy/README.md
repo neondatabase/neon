@@ -141,6 +141,7 @@ PGSSLROOTCERT=./server.crt psql  "postgresql://proxy:password@endpoint.local.neo
 
 ## auth broker setup:
 
+Create a postgres instance:
 ```sh
 docker run \
   --detach \
@@ -152,14 +153,31 @@ docker run \
   postgres:17-bookworm
 ```
 
+Create a configuration file called `local_proxy.json` in the root of the repo (used also by the auth broker to validate JWTs)
+```sh
+{
+    "jwks": [
+        {
+            "id": "1",
+            "role_names": ["authenticator", "authenticated", "anon"],
+            "jwks_url": "https://climbing-minnow-11.clerk.accounts.dev/.well-known/jwks.json",
+            "provider_name": "foo",
+            "jwt_audience": null
+        }
+    ]
+}
+```
+
+Start the local proxy:
 ```sh
 cargo run --bin local_proxy -- \
   --disable_pg_session_jwt true \
   --http 0.0.0.0:7432
 ```
 
+Start the auth broker:
 ```sh
-LOGFMT=text OTEL_SDK_DISABLED=true cargo run --release --bin proxy --features testing -- \
+LOGFMT=text OTEL_SDK_DISABLED=true cargo run --bin proxy --features testing -- \
   -c server.crt -k server.key \
   --is-auth-broker true \
   --is-rest-broker true \
@@ -168,11 +186,14 @@ LOGFMT=text OTEL_SDK_DISABLED=true cargo run --release --bin proxy --features te
   --auth-backend local
 ```
 
-
-
+Create a JWT in your auth provider (e.g. Clerk) and set it in the `NEON_JWT` environment variable.
 ```sh
 export NEON_JWT="..."
-curl -k "http://127.0.0.1:8080/sql" \
+```
+
+Run a query against the auth broker:
+```sh
+curl -k "https://foo.local.neon.build:8080/sql" \
   -H "Authorization: Bearer $NEON_JWT" \
   -H "neon-connection-string: postgresql://authenticator@foo.local.neon.build/database" \
   -d '{"query":"select 1","params":[]}'

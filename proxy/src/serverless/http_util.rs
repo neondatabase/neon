@@ -17,13 +17,12 @@ use super::conn_pool::ConnInfoWithAuth;
 use super::conn_pool_lib::ConnInfo;
 use super::error::{ConnInfoError, Credentials};
 use crate::auth::backend::ComputeUserInfo;
-use crate::auth::endpoint_sni;
-use crate::config::{AuthenticationConfig, TlsConfig};
+use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::metrics::{Metrics, SniGroup, SniKind};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::NeonOptions;
-use crate::types::{DbName, RoleName};
+use crate::types::{DbName, EndpointId, RoleName};
 
 // Common header names used across serverless modules
 pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
@@ -146,7 +145,6 @@ pub(crate) fn get_conn_info(
     ctx: &RequestContext,
     connection_string: Option<&str>,
     headers: &HeaderMap,
-    tls: Option<&TlsConfig>,
 ) -> Result<ConnInfoWithAuth, ConnInfoError> {
     let connection_url = match connection_string {
         Some(connection_string) => Url::parse(connection_string)?,
@@ -207,17 +205,11 @@ pub(crate) fn get_conn_info(
     } else {
         return Err(ConnInfoError::MissingCredentials(Credentials::Password));
     };
-    let endpoint = match connection_url.host() {
-        Some(url::Host::Domain(hostname)) => {
-            if let Some(tls) = tls {
-                endpoint_sni(hostname, &tls.common_names).ok_or(ConnInfoError::MalformedEndpoint)?
-            } else {
-                hostname
-                    .split_once('.')
-                    .map_or(hostname, |(prefix, _)| prefix)
-                    .into()
-            }
-        }
+    let endpoint: EndpointId = match connection_url.host() {
+        Some(url::Host::Domain(hostname)) => hostname
+            .split_once('.')
+            .map_or(hostname, |(prefix, _)| prefix)
+            .into(),
         Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
             return Err(ConnInfoError::MissingHostname);
         }

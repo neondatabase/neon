@@ -20,7 +20,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{Level, debug, error, info};
 use typed_json::json;
 
 use super::backend::{LocalProxyConnError, PoolingBackend};
@@ -194,12 +194,35 @@ pub(crate) async fn handle(
             let line = get(db_error, |db| db.line().map(|l| l.to_string()));
             let routine = get(db_error, |db| db.routine());
 
-            tracing::info!(
-                kind=error_kind.to_metric_label(),
-                error=%e,
-                msg=message,
-                "forwarding error to user"
-            );
+            match &e {
+                SqlOverHttpError::Postgres(e)
+                    if e.as_db_error().is_some() && error_kind == ErrorKind::User =>
+                {
+                    // this error contains too much info, and it's not an error we care about.
+                    if tracing::enabled!(Level::DEBUG) {
+                        tracing::debug!(
+                            kind=error_kind.to_metric_label(),
+                            error=%e,
+                            msg=message,
+                            "forwarding error to user"
+                        );
+                    } else {
+                        tracing::info!(
+                            kind = error_kind.to_metric_label(),
+                            error = "bad query",
+                            "forwarding error to user"
+                        );
+                    }
+                }
+                _ => {
+                    tracing::info!(
+                        kind=error_kind.to_metric_label(),
+                        error=%e,
+                        msg=message,
+                        "forwarding error to user"
+                    );
+                }
+            }
 
             json_response(
                 e.get_http_status_code(),
@@ -264,7 +287,15 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
             SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
-            SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            // customer initiated SQL errors.
+            SqlOverHttpError::Postgres(p) => {
+                if p.as_db_error().is_some() {
+                    ErrorKind::User
+                } else {
+                    ErrorKind::Compute
+                }
+            }
+            // proxy initiated SQL errors.
             SqlOverHttpError::InternalPostgres(p) => {
                 if p.as_db_error().is_some() {
                     ErrorKind::Service
@@ -272,6 +303,7 @@ impl ReportableError for SqlOverHttpError {
                     ErrorKind::Compute
                 }
             }
+            // postgres returned a bad row format that we couldn't parse.
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
             SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
         }
@@ -403,15 +435,7 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    let conn_info = get_conn_info(
-        &config.authentication_config,
-        ctx,
-        None,
-        request.headers(),
-        // todo: race condition?
-        // we're unlikely to change the common names.
-        config.tls_config.load().as_deref(),
-    )?;
+    let conn_info = get_conn_info(&config.authentication_config, ctx, None, request.headers())?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
         "credentials"
@@ -497,10 +521,14 @@ async fn handle_db_inner(
                 ComputeCredentialKeys::JwtPayload(payload)
                     if backend.auth_backend.is_local_proxy() =>
                 {
+                    #[cfg(feature = "testing")]
+                    let disable_pg_session_jwt = config.disable_pg_session_jwt;
+                    #[cfg(not(feature = "testing"))]
+                    let disable_pg_session_jwt = false;
                     let mut client = backend
-                        .connect_to_local_postgres(ctx, conn_info, config.disable_pg_session_jwt)
+                        .connect_to_local_postgres(ctx, conn_info, disable_pg_session_jwt)
                         .await?;
-                    if !config.disable_pg_session_jwt {
+                    if !disable_pg_session_jwt {
                         let (cli_inner, _dsc) = client.client_inner();
                         cli_inner.set_jwt_session(&payload).await?;
                     }
@@ -867,7 +895,6 @@ async fn query_to_json<T: GenericClient>(
 
     let columns_len = row_stream.statement.columns().len();
     let mut fields = Vec::with_capacity(columns_len);
-    let mut types = Vec::with_capacity(columns_len);
 
     for c in row_stream.statement.columns() {
         fields.push(json!({
@@ -879,8 +906,6 @@ async fn query_to_json<T: GenericClient>(
             "dataTypeModifier": c.type_modifier(),
             "format": "text",
         }));
-
-        types.push(c.type_().clone());
     }
 
     let raw_output = parsed_headers.raw_output;
@@ -902,7 +927,7 @@ async fn query_to_json<T: GenericClient>(
             ));
         }
 
-        let row = pg_text_row_to_json(&row, &types, raw_output, array_mode)?;
+        let row = pg_text_row_to_json(&row, raw_output, array_mode)?;
         rows.push(row);
 
         // assumption: parsing pg text and converting to json takes CPU time.
