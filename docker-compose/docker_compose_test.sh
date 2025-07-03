@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # A basic test to ensure Docker images are built correctly.
 # Build a wrapper around the compute, start all services and runs a simple SQL query.
@@ -23,14 +23,14 @@ for i in $(seq 1 "${PARALLEL_COMPUTES}"); do
 done
 cp docker-compose.yml docker-compose.yml.bak
 trap 'mv docker-compose.yml.bak docker-compose.yml' EXIT
-PARALLEL_FLAG=
+# XXX remove before merge
+docker compose cp run-tests.sh neon-test-extensions:/
 if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
   for i in $(seq 2 "${PARALLEL_COMPUTES}"); do
     yq -i "
-      .services.compute${i} = ( .services.compute1 | (del .build) | (del . ports))
+      .services.compute${i} = ( .services.compute1 | (del .build) | (del .ports)) |
       .services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
   done
-  PARALLEL_FLAG="-p"
 fi
 cd "$(dirname "${0}")"
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
@@ -98,13 +98,12 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         # Tests listed in the RUN_FIRST variable will be run before others.
         # If parallelization is not used, this environment variable will be ignored.
 
-        # XXX remove before merge
-        docker compose cp run-tests.sh neon-test-extensions:/
         docker compose exec -e USE_PGXS=1 -e SKIP=timescaledb-src,rdkit-src,pg_jsonschema-src,kq_imcx-src,wal2json_2_5-src,rag_jina_reranker_v1_tiny_en-src,rag_bge_small_en_v15-src \
-        -e RUN_FIRST=hll-src,postgis-src,pgtap-src \
-        neon-test-extensions /run-tests.sh ${PARALLEL_FLAG} /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
+        -e RUN_FIRST=hll-src,postgis-src,pgtap-src -e PARALLEL_COMPUTES="${PARALLEL_COMPUTES}" \
+        neon-test-extensions /run-tests.sh /ext-src | tee testout.txt && EXT_SUCCESS=1 || EXT_SUCCESS=0
         docker compose exec -e SKIP=start-scripts,postgres_fdw,ltree_plpython,jsonb_plpython,jsonb_plperl,hstore_plpython,hstore_plperl,dblink,bool_plperl \
-        neon-test-extensions /run-tests.sh ${PARALLEL_FLAG} /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
+        -e PARALLEL_COMPUTES="${PARALLEL_COMPUTES}" \
+        neon-test-extensions /run-tests.sh /postgres/contrib | tee testout_contrib.txt && CONTRIB_SUCCESS=1 || CONTRIB_SUCCESS=0
         if [[ ${EXT_SUCCESS} -eq 0 || ${CONTRIB_SUCCESS} -eq 0 ]]; then
             CONTRIB_FAILED=
             FAILED=

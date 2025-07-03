@@ -26,15 +26,11 @@ if [[ -v BENCHMARK_CONNSTR ]]; then
   fi
 fi
 REGULAR_USER=false
-RUN_PARALLEL=false
+PARALLEL_COMPUTES=${PARALLEL_COMPUTES:-1}
 while getopts pr arg; do
   case ${arg} in
   r)
     REGULAR_USER=true
-    shift $((OPTIND-1))
-    ;;
-  p)
-    RUN_PARALLEL=true
     shift $((OPTIND-1))
     ;;
   *) :
@@ -49,13 +45,13 @@ FAILED=
 export FAILED_FILE=/tmp/failed
 rm -f ${FAILED_FILE}
 mapfile -t LIST < <( (echo -e "${SKIP//","/"\n"}"; ls) | sort | uniq -u)
-if [[ ${RUN_PARALLEL} = true ]]; then
+if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
   # Avoid errors if RUN_FIRST is not defined
   RUN_FIRST=${RUN_FIRST:-}
   # Move entries listed in the RUN_FIRST variable to the beginning
   ORDERED_LIST=$(printf "%s\n" "${LIST[@]}" | grep -x -Ff <(echo -e "${RUN_FIRST//,/$'\n'}"); printf "%s\n" "${LIST[@]}" | grep -vx -Ff <(echo -e "${RUN_FIRST//,/$'\n'}"))
-  parallel -j3 "[[ -d {} ]] || exit 0
-                export PGHOST=pcompute{%}
+  parallel -j"${PARALLEL_COMPUTES}" "[[ -d {} ]] || exit 0
+                export PGHOST=compute{%}
                 if ! psql -c 'select 1'>/dev/null; then
                   exit 1
                 fi
