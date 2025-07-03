@@ -84,11 +84,16 @@ pub(in crate::http) async fn profile_status() -> impl IntoResponse {
 
     let cancel_channel = CANCEL_CHANNEL.lock().await;
 
-    if cancel_channel.is_some() {
-        JsonResponse::create_response(StatusCode::OK, "Profiling is currently in progress.")
-    } else {
-        JsonResponse::create_response(StatusCode::NO_CONTENT, "Profiling is not in progress.")
+    if let Some(tx) = cancel_channel.as_ref() {
+        if tx.receiver_count() > 0 {
+            return JsonResponse::create_response(
+                StatusCode::OK,
+                "Profiling is currently in progress.",
+            );
+        }
     }
+
+    JsonResponse::create_response(StatusCode::NO_CONTENT, "Profiling is not in progress.")
 }
 
 /// The HTTP request handler for stopping profiling the compute.

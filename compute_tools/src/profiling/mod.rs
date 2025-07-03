@@ -226,9 +226,27 @@ async fn profile_with_bcc_profile(
         .arg(options.timeout.as_secs().to_string())
         .env_clear()
         .env("PATH", path)
-        .output()
-        .await
-        .context("couldn't run bcc profile")?;
+        .output();
+
+    let result = match options.should_stop.as_ref().map(|s| s.subscribe()) {
+        Some(mut rx) => {
+            tokio::select! {
+                _ = rx.recv() => {
+                    tracing::trace!("Received shutdown signal, stopping perf...");
+
+                    return Err(anyhow!("Profiling was stopped by shutdown signal"));
+                }
+                result = result => {
+                    tracing::trace!("Profiling completed, processing result...");
+                    result
+                }
+            }
+        }
+        None => {
+            tracing::trace!("No shutdown signal receiver provided, running bcc profile...");
+            result.await
+        }
+    }?;
 
     match result.status.success() {
         true => Ok(result.stdout),

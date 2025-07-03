@@ -172,33 +172,30 @@ def test_compute_profiling_cpu_with_timeout(neon_simple_env: NeonEnv):
     thread2.join(timeout=60)
 
 
-# @run_only_on_default_postgres(reason=REASON)
-# def test_compute_profiling_cpu_start_and_stop(neon_simple_env: NeonEnv):
-#     """
-#     Test that CPU profiling can be started and stopped correctly.
-#     """
-#     env = neon_simple_env
-#     endpoint = env.endpoints.create_start("main")
-#     http_client = endpoint.http_client()
+@run_only_on_default_postgres(reason=REASON)
+def test_compute_profiling_cpu_start_and_stop(neon_simple_env: NeonEnv):
+    """
+    Test that CPU profiling can be started and stopped correctly.
+    """
+    env = neon_simple_env
+    endpoint = env.endpoints.create_start("main")
+    http_client = endpoint.http_client()
 
-#     def _wait_and_assert_cpu_profiling():
-#         # Should raise as the profiling will be stopped.
-#         with pytest.raises(HTTPError) as _:
-#             _start_profiling_cpu(http_client, None)
+    def _wait_and_assert_cpu_profiling():
+        # Should raise as the profiling will be stopped.
+        with pytest.raises(HTTPError) as _:
+            _start_profiling_cpu(http_client, None)
 
-#     thread = threading.Thread(target=_wait_and_assert_cpu_profiling)
-#     thread.start()
+    thread = threading.Thread(target=_wait_and_assert_cpu_profiling)
+    thread.start()
 
-#     profiling_started_event = threading.Event()
-#     assert _wait_till_profiling_starts(http_client, profiling_started_event)
-#     profiling_started_event.wait()
-#     _stop_profiling_cpu(http_client, None)
+    assert _wait_till_profiling_starts(http_client, None)
+    _stop_profiling_cpu(http_client, None)
 
-#     # Should raise as the profiling is already stopped.
-#     status = _stop_profiling_cpu(http_client, None)
-#     assert status == 412
+    # Should raise as the profiling is already stopped.
+    assert _stop_profiling_cpu(http_client, None) == 412
 
-#     thread.join(timeout=60)
+    thread.join(timeout=60)
 
 
 @run_only_on_default_postgres(reason=REASON)
@@ -257,34 +254,34 @@ def test_compute_profiling_cpu_conflict(neon_simple_env: NeonEnv):
     thread2.join(timeout=600)
 
 
-# @run_only_on_default_postgres(reason=REASON)
-# def test_compute_profiling_cpu_stop_when_not_running(neon_simple_env: NeonEnv):
-#     """
-#     Test that CPU profiling throws the expected error when is attempted
-#     to be stopped when it hasn't be running.
-#     """
-#     env = neon_simple_env
-#     endpoint = env.endpoints.create_start("main")
-#     http_client = endpoint.http_client()
+@run_only_on_default_postgres(reason=REASON)
+def test_compute_profiling_cpu_stop_when_not_running(neon_simple_env: NeonEnv):
+    """
+    Test that CPU profiling throws the expected error when is attempted
+    to be stopped when it hasn't be running.
+    """
+    env = neon_simple_env
+    endpoint = env.endpoints.create_start("main")
+    http_client = endpoint.http_client()
 
-#     for _ in range(3):
-#         status = _stop_profiling_cpu(http_client, None)
-#         assert status == 412
+    for _ in range(3):
+        status = _stop_profiling_cpu(http_client, None)
+        assert status == 412
 
 
-# @run_only_on_default_postgres(reason=REASON)
-# def test_compute_profiling_cpu_start_arguments_validation_works(neon_simple_env: NeonEnv):
-#     """
-#     Test that CPU profiling start request properly validated the
-#     arguments and throws the expected error (bad request).
-#     """
-#     env = neon_simple_env
-#     endpoint = env.endpoints.create_start("main")
-#     http_client = endpoint.http_client()
+@run_only_on_default_postgres(reason=REASON)
+def test_compute_profiling_cpu_start_arguments_validation_works(neon_simple_env: NeonEnv):
+    """
+    Test that CPU profiling start request properly validated the
+    arguments and throws the expected error (bad request).
+    """
+    env = neon_simple_env
+    endpoint = env.endpoints.create_start("main")
+    http_client = endpoint.http_client()
 
-#     for sampling_frequency in [-1, 0, 1000000]:
-#         status, _ = http_client.start_profiling_cpu(sampling_frequency, 5)
-#         assert status == 400
-#     for timeout_seconds in [-1, 0, 1000000]:
-#         status, _ = http_client.start_profiling_cpu(5, timeout_seconds)
-#         assert status == 400
+    for sampling_frequency in [-1, 0, 1000000]:
+        status, _ = http_client.start_profiling_cpu(sampling_frequency, 5)
+        assert status == 422
+    for timeout_seconds in [-1, 0, 1000000]:
+        status, _ = http_client.start_profiling_cpu(5, timeout_seconds)
+        assert status == 422
