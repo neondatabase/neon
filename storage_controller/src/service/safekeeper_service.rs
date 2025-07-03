@@ -240,7 +240,7 @@ impl Service {
 
         if target_sk_count == 0 {
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "can not collect a quorum without any safekeepers"
+                "timeline configured without any safekeepers"
             )));
         }
 
