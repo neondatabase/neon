@@ -62,6 +62,8 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         libpq-dev \
         libzstd-dev \
         linux-perf \
+        bpfcc-tools \
+        linux-headers-$(uname -r) \
         postgresql-16 \
         postgresql-server-dev-16 \
         postgresql-common  \
@@ -139,6 +141,8 @@ RUN set -e \
         libxmlsec1-dev \
         libxxhash-dev \
         linux-perf \
+        bpfcc-tools \
+        linux-headers-$(uname -r) \
         lsof \
         make \
         netcat-openbsd \
