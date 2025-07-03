@@ -2,17 +2,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use tokio::time::Instant;
+use tracing::{error, info, instrument, warn};
+
+use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
 use compute_api::spec::PageserverProtocol;
 use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::shard::{ShardStripeSize, key_to_shard_number};
 use pageserver_page_api as page_api;
-use tokio::time::Instant;
-use tracing::{error, info, instrument, warn};
 use utils::backoff::exponential_backoff_duration;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::{ShardCount, ShardIndex, ShardNumber};
-
-use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
 
 /// A rich Pageserver gRPC client for a single tenant timeline. This client is more capable than the
 /// basic `page_api::Client` gRPC client, and supports:
@@ -20,7 +20,7 @@ use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool}
 /// * Sharded tenants across multiple Pageservers.
 /// * Pooling of connections, clients, and streams for efficient resource use.
 /// * Concurrent use by many callers.
-/// * Internal handling of GetPage bidirectional streams.
+/// * Internal handling of GetPage bidirectional streams, with pipelining and error handling.
 /// * Automatic retries.
 /// * Observability.
 ///
@@ -337,7 +337,7 @@ impl Shards {
 ///
 /// TODO: consider separate pools for normal and bulk traffic, with different settings.
 struct Shard {
-    /// Dedicated channel pool for this shard. Used by all clients/streams in this shard.
+    /// Dedicated channel pool for this shard. Shared by all clients/streams in this shard.
     _channel_pool: Arc<ChannelPool>,
     /// Unary gRPC client pool for this shard. Uses the shared channel pool.
     client_pool: Arc<ClientPool>,
