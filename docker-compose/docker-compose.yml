@@ -142,7 +142,7 @@ services:
       - "storage_broker"
       - "--listen-addr=0.0.0.0:50051"
 
-  compute:
+  compute1:
     restart: always
     build:
       context: ./compute_wrapper/
@@ -173,18 +173,6 @@ services:
       - safekeeper3
       - pageserver
 
-  compute_is_ready:
-    image: postgres:latest
-    entrypoint:
-      - "/bin/bash"
-      - "-c"
-    command:
-      - "until pg_isready -h compute -p 55433 -U cloud_admin ; do
-            echo 'Waiting to start compute...' && sleep 1;
-         done"
-    depends_on:
-      - compute
-
   neon-test-extensions:
     profiles: ["test-extensions", "parallel-test-extensions"]
     image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-${PG_VERSION:-16}}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
@@ -197,85 +185,21 @@ services:
     command:
       - sleep 3600
     depends_on:
-      - compute
+      - compute1
 
-  pcompute1:
-    profiles: ["parallel-test-extensions"]
-    restart: always
-    image: built-compute
-    environment:
-      - PG_VERSION=${PG_VERSION:-16}
-      - RUN_PARALLEL=true
-      #- RUST_BACKTRACE=1
-    # Mount the test files directly, for faster editing cycle.
-    volumes:
-      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
-      - ./compute_wrapper/shell/:/shell/
-    entrypoint:
-      - "/shell/compute.sh"
-    depends_on:
-      - safekeeper1
-      - safekeeper2
-      - safekeeper3
-      - pageserver
-      - compute
-
-  pcompute2:
-    profiles: ["parallel-test-extensions"]
-    restart: always
-    image: built-compute
-    environment:
-      - PG_VERSION=${PG_VERSION:-16}
-      - RUN_PARALLEL=true
-      #- RUST_BACKTRACE=1
-    # Mount the test files directly, for faster editing cycle.
-    volumes:
-      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
-      - ./compute_wrapper/shell/:/shell/
-    entrypoint:
-      - "/shell/compute.sh"
-    depends_on:
-      - safekeeper1
-      - safekeeper2
-      - safekeeper3
-      - pageserver
-      - compute
-
-  pcompute3:
-    profiles: ["parallel-test-extensions"]
-    restart: always
-    image: built-compute
-    environment:
-      - PG_VERSION=${PG_VERSION:-16}
-      - RUN_PARALLEL=true
-      #- RUST_BACKTRACE=1
-    # Mount the test files directly, for faster editing cycle.
-    volumes:
-      - ./compute_wrapper/var/db/postgres/configs/:/var/db/postgres/configs/
-      - ./compute_wrapper/shell/:/shell/
-    entrypoint:
-      - "/shell/compute.sh"
-    depends_on:
-      - safekeeper1
-      - safekeeper2
-      - safekeeper3
-      - pageserver
-      - compute
-
-  pcomputes_are_ready:
-    profiles: ["parallel-test-extensions"]
+  compute_is_ready:
     image: postgres:latest
+    environment:
+      - PARALLEL_COMPUTES=${PARALLEL_COMPUTES:-1}
     entrypoint:
       - "/bin/bash"
       - "-c"
     command:
-      - "for i in {1..3}; do
-           until pg_isready -h pcompute$$i -p 55433 -U cloud_admin ; do
+      - "for i in {1..${PARALLEL_COMPUTES}}; do
+           until pg_isready -h compute$$i -p 55433 -U cloud_admin ; do
              sleep 1;
            done;
          done;
-         echo All pcomputes are started"
+         echo All computes are started"
     depends_on:
-      - pcompute1
-      - pcompute2
-      - pcompute3
+      - compute1

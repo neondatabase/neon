@@ -14,18 +14,23 @@
 set -eux -o pipefail
 
 export COMPOSE_FILE='docker-compose.yml'
-if [[ ${RUN_PARALLEL:-false} = true ]]; then
-  export COMPOSE_PROFILES=parallel-test-extensions
-  READY_CONTAINER=pcomputes_are_ready
-  READY_MESSAGE="All pcomputes are started"
-  COMPUTES=$(echo pcompute{1..3})
-  PARALLEL_FLAG=-p
-else
-  export COMPOSE_PROFILES=test-extensions
-  READY_CONTAINER=compute_is_ready
-  READY_MESSAGE="accepting connections"
-  COMPUTES=compute
-  PARALLEL_FLAG=
+export COMPOSE_PROFILES=test-extensions
+export PARALLEL_COMPUTES=${PARALLEL_COMPUTES:-1}
+READY_MESSAGE="All computes are started"
+COMPUTES=()
+for i in $(seq 1 "${PARALLEL_COMPUTES}"); do
+  COMPUTES+=("compute${i}")
+done
+cp docker-compose.yml docker-compose.yml.bak
+trap 'mv docker-compose.yml.bak docker-compose.yml' EXIT
+PARALLEL_FLAG=
+if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
+  for i in $(seq 2 "${PARALLEL_COMPUTES}"); do
+    yq -i "
+      .services.compute${i} = ( .services.compute1 | (del .build) | (del . ports))
+      .services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
+  done
+  PARALLEL_FLAG="-p"
 fi
 cd "$(dirname "${0}")"
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
@@ -39,7 +44,7 @@ function cleanup() {
 
 for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     pg_version=${pg_version/v/}
-    echo "clean up containers if exists"
+    echo "clean up containers if exist"
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
     PG_VERSION=${pg_version} PG_TEST_VERSION=${PG_TEST_VERSION} docker compose up --quiet-pull --build -d
@@ -52,10 +57,12 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
             echo "timeout before the compute is ready."
             exit 1
         fi
-        if docker compose logs ${READY_CONTAINER} | grep -q "${READY_MESSAGE}"; then
+        if docker compose logs compute_is_ready | grep -q "${READY_MESSAGE}"; then
             echo "OK. The compute is ready to connect."
             echo "execute simple queries."
-            docker compose exec compute /bin/bash -c "psql ${PSQL_OPTION} -c 'SELECT 1'"
+            for compute in "${COMPUTES[@]}"; do
+              docker compose exec "${compute}" /bin/bash -c "psql ${PSQL_OPTION} -c 'SELECT 1'"
+            done
             break
         fi
     done
@@ -69,7 +76,7 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data "${TMPDIR}/pg_hint_plan-src/data"
         docker compose cp neon-test-extensions:/postgres/contrib/file_fdw/data "${TMPDIR}/file_fdw/data"
 
-        for compute in ${COMPUTES}; do
+        for compute in "${COMPUTES[@]}"; do
           # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
           # It cannot be moved to Dockerfile now because the database directory is created after the start of the container
           echo Adding dummy config on "${compute}"
@@ -85,8 +92,6 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
         done
         # Apply patches
         docker compose exec -T neon-test-extensions bash -c "(cd /postgres && patch -p1)" <"../compute/patches/contrib_pg${pg_version}.patch"
-        # Add packages
-        docker compose exec neon-test-extensions bash -c "apt update; apt -y install parallel"
         # We are running tests now
         rm -f testout.txt testout_contrib.txt
         # We want to run the longest tests first to better utilize parallelization and reduce overall test time.
