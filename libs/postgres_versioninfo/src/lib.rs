@@ -173,3 +173,19 @@ impl FromStr for PgMajorVersion {
         })
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use rstest::rstest;
+
+    #[rstest]
+    #[case("14", PgMajorVersion::PG14)]
+    #[case("15", PgMajorVersion::PG15)]
+    #[case("16", PgMajorVersion::PG16)]
+    #[case("17", PgMajorVersion::PG17)]
+    fn test_pg_major_version_parse(#[case] s: &str, #[case] expected: PgMajorVersion) {
+        assert_eq!(Ok(expected), PgMajorVersion::from_str(s));
+        assert_eq!(expected.to_string(), s);
+    }
+}
