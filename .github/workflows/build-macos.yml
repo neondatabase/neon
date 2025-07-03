@@ -32,6 +32,20 @@ permissions:
   contents: read
 
 jobs:
+  debug:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - name: Print inputs
+        run: |
+          echo "PG versions: ${{ inputs.pg_versions }}"
+          echo "Rebuild Rust code: ${{ inputs.rebuild_rust_code }}"
+          echo "Rebuild everything: ${{ inputs.rebuild_everything }}"
+
   build-pgxn:
     if: |
       inputs.pg_versions != '[]' || inputs.rebuild_everything ||
