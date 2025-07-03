@@ -5,6 +5,7 @@
 //!
 //! The profiling is done using the `perf` tool, which is expected to be
 //! available somewhere in `$PATH`.
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 
 use axum::extract::Query;
@@ -16,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::http::JsonResponse;
 
-static CANCEL_CHANNEL: Lazy<Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
+static CANCEL_CHANNEL: Lazy<Mutex<Option<tokio::sync::broadcast::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
 
 static PERF_BINARY_PATH: Lazy<Option<String>> = Lazy::new(|| {
@@ -122,7 +123,7 @@ pub(in crate::http) async fn profile_start(
 ) -> impl IntoResponse {
     tracing::info!("Profile start request received: {request:?}");
 
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let tx = tokio::sync::broadcast::Sender::<()>::new(1);
 
     {
         let mut cancel_channel = CANCEL_CHANNEL.lock().await;
@@ -133,7 +134,7 @@ pub(in crate::http) async fn profile_start(
                 "Profiling is already in progress.",
             );
         }
-        *cancel_channel = Some(tx);
+        *cancel_channel = Some(tx.clone());
     }
 
     tracing::info!("Profiling will start with parameters: {request:?}");
@@ -143,16 +144,27 @@ pub(in crate::http) async fn profile_start(
 
     let options = crate::profiling::ProfileGenerationOptions {
         run_with_sudo,
-        perf_binary_path: PERF_BINARY_PATH.as_deref().map(std::path::Path::new),
-        process_pid: pg_pid,
+        perf_binary_path: PERF_BINARY_PATH
+            .as_deref()
+            .and_then(|s| std::path::PathBuf::from_str(s).ok()),
+        pid: pg_pid,
         follow_forks: true,
         sampling_frequency: request.sampling_frequency as u32,
-        blocklist_symbols: &["libc", "libgcc", "pthread", "vdso"],
-        timeout: std::time::Duration::from_secs(request.timeout_seconds as u64),
-        should_stop: Some(rx),
+        blocklist_symbols: vec![
+            "libc".to_owned(),
+            "libgcc".to_owned(),
+            "pthread".to_owned(),
+            "vdso".to_owned(),
+        ],
     };
 
-    let pprof_data = crate::profiling::generate_pprof_using_perf(options).await;
+    let options = crate::profiling::ProfileGenerationTaskOptions {
+        options,
+        timeout: std::time::Duration::from_secs(request.timeout_seconds as u64),
+        should_stop: Some(tx),
+    };
+
+    let pprof_data = crate::profiling::generate_pprof_profile(options).await;
 
     if CANCEL_CHANNEL.lock().await.take().is_none() {
         tracing::error!("Profiling was cancelled from another request.");

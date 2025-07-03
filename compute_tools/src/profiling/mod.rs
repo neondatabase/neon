@@ -1,17 +1,19 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufRead, BufReader, Cursor, Write},
     ops::{Deref, DerefMut},
-    os::fd::{AsRawFd, FromRawFd},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use anyhow::{Context, anyhow};
+use aws_config::profile::Profile;
 use flate2::{Compression, write::GzEncoder};
+use futures::{StreamExt, stream::FuturesUnordered};
 use inferno::collapse::Collapse;
 use nix::{libc::pid_t, unistd::Pid};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tracing::{error, instrument};
+use tracing::{Instrument, error, instrument};
+use x509_cert::der::oid::db::rfc4519::L;
 
 const SUDO_PATH: &str = "/usr/bin/sudo";
 
@@ -53,6 +55,7 @@ fn list_children_processes(parent_pid: Pid) -> anyhow::Result<Vec<Pid>> {
         .filter_map(|proc| {
             if let Ok(stat) = proc.and_then(|p| p.stat()) {
                 if stat.ppid == parent_pid.as_raw() {
+                    tracing::error!("Found child process with PID: {} ({})", stat.pid, stat.comm);
                     return Some(Pid::from_raw(stat.pid));
                 }
             }
@@ -102,21 +105,35 @@ fn check_perf_runs(perf_binary_path: &str, run_with_sudo: bool) -> anyhow::Resul
     check_binary_runs(&command)
 }
 
-fn get_command_invocation(cmd: &tokio::process::Command) -> String {
-    format!(
-        "{} {}",
-        cmd.as_std().get_program().to_string_lossy(),
-        cmd.as_std()
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect::<Vec<String>>()
-            .join(" "),
-    )
+fn pause_processes(pids: &HashSet<Pid>) -> anyhow::Result<()> {
+    for pid in pids {
+        if let Err(e) = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid.as_raw()),
+            nix::sys::signal::Signal::SIGSTOP,
+        ) {
+            tracing::error!("Failed to pause process with PID: {pid}: {e}");
+        }
+    }
+
+    Ok(())
+}
+
+fn unpause_processes(pids: &HashSet<Pid>) -> anyhow::Result<()> {
+    for pid in pids {
+        if let Err(e) = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid.as_raw()),
+            nix::sys::signal::Signal::SIGCONT,
+        ) {
+            tracing::error!("Failed to unpause process with PID: {pid}: {e}");
+        }
+    }
+
+    Ok(())
 }
 
 /// The options for generating a pprof profile using the `perf` tool.
-#[derive(Debug)]
-pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
+#[derive(Debug, Clone)]
+pub struct ProfileGenerationOptions {
     /// If set to `true`, the `perf` command will be run with `sudo`.
     /// This is useful for profiling processes that require elevated
     /// privileges.
@@ -124,11 +141,11 @@ pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
     pub run_with_sudo: bool,
     /// The path to the `perf` binary. If `None`, it defaults to "perf",
     /// so it will look for `perf` in the system's `PATH`.
-    pub perf_binary_path: Option<&'a Path>,
+    pub perf_binary_path: Option<PathBuf>,
     /// The PID of the process to profile. This can be the main process
     /// or a child process. For targeting postgres, this should be the
     /// PID of the main postgres process.
-    pub process_pid: Pid,
+    pub pid: Pid,
     /// If set to `true`, the `perf` command will follow forks.
     /// This means that it will continue to profile child processes
     /// that are created by the main process after it has already
@@ -140,7 +157,14 @@ pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
     /// A list of symbols to block from the profiling output.
     /// This is useful for filtering out noise from the profiling data,
     /// such as system libraries or other irrelevant symbols.
-    pub blocklist_symbols: &'a [S],
+    pub blocklist_symbols: Vec<String>,
+}
+
+/// The options for the task for generating a pprof profile using the
+/// `perf` tool.
+#[derive(Debug, Clone)]
+pub struct ProfileGenerationTaskOptions {
+    pub options: ProfileGenerationOptions,
     /// The duration for which the profiling should run.
     /// This is the maximum time the profiling will run before it is
     /// stopped. If the profiling is not stopped manually, it will run
@@ -150,53 +174,70 @@ pub struct ProfileGenerationOptions<'a, S: AsRef<str>> {
     /// profiling to stop early. If provided, the profiling will stop
     /// when a message is received on this channel or when the timeout
     /// is reached, whichever comes first.
-    pub should_stop: Option<tokio::sync::oneshot::Receiver<()>>,
+    pub should_stop: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
-/// Run perf against a process with the given name and generate a pprof
-/// profile from the output.
-///
-/// The pipeline is as follows:
-/// 1. Running perf for the specified process name and duration.
-/// 2. Collapsing the perf output into a folded stack trace.
-/// 3. Generating a pprof profile from the collapsed stack trace.
-///
-/// This function blocks until the profiling is complete or the timeout
-/// is reached.
-///
-/// If the perf binary path is not provided, it defaults to "perf" in
-/// the system's `PATH`.
+async fn profile_single_process_bcc_profile(
+    _perf_binary_path: PathBuf,
+    pids: HashSet<Pid>,
+    options: ProfileGenerationTaskOptions,
+) -> anyhow::Result<Vec<u8>> {
+    let path = std::env::var("PATH").unwrap_or_else(|_| {
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+    });
+
+    #[cfg(feature = "testing")]
+    let path = path
+        .split(':')
+        .filter(|p| {
+            let p = p.to_lowercase();
+            !p.contains("virtualenv")
+                && !p.contains("venv")
+                && !p.contains("pyenv")
+                && !p.contains("pypoetry")
+                && !p.contains("pyenv-virtualenv")
+                && !p.contains("pyenv-virtualenvs")
+        })
+        .collect::<Vec<_>>()
+        .join(":");
+
+    let cmd = tokio::process::Command::new(SUDO_PATH)
+        .arg("/usr/share/bcc/tools/profile")
+        .arg("-f")
+        .arg("-F")
+        .arg(options.options.sampling_frequency.to_string())
+        .arg("-p")
+        .arg(
+            pids.iter()
+                .map(|p| p.as_raw().to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+        .arg(options.timeout.as_secs().to_string())
+        .env_clear()
+        .env("PATH", path)
+        .output()
+        .await
+        .context("failed to run bcc profile command")?;
+
+    Ok(cmd.stdout)
+}
+
+/// Profiles a single process using the `perf` tool and returns the
+/// output of `perf script` as [`Vec<u8>`].
 #[allow(unsafe_code)]
-#[instrument(skip(options), fields(perf_record_cmd, perf_script_cmd))]
-pub async fn generate_pprof_using_perf<S: AsRef<str>>(
-    options: ProfileGenerationOptions<'_, S>,
-) -> anyhow::Result<PprofData> {
-    let perf_binary_path = options
-        .perf_binary_path
-        .map_or_else(|| PathBuf::from("perf"), |p| p.to_owned());
-
-    check_perf_runs(
-        perf_binary_path
-            .to_str()
-            .context("couldn't reconstruct perf binary path as string.")?,
-        options.run_with_sudo,
-    )
-    .context("couldn't check that perf is available and can be run")?;
-
-    let pids = list_children_processes(options.process_pid)
-        .unwrap_or_default()
-        .into_iter()
-        .chain(std::iter::once(options.process_pid))
-        .map(|pid| pid.to_string())
-        .collect::<Vec<String>>()
-        .join(",");
-
+#[instrument]
+async fn profile_single_process_perf(
+    perf_binary_path: PathBuf,
+    pids: HashSet<Pid>,
+    options: ProfileGenerationTaskOptions,
+) -> anyhow::Result<Vec<u8>> {
     let temp_file = tempfile::NamedTempFile::new()
         .context("failed to create temporary file for perf output")?;
     let temp_file_path = temp_file.path();
 
     // Step 1: Run perf to collect stack traces
-    let mut perf_record_command = if options.run_with_sudo {
+    let mut perf_record_command = if options.options.run_with_sudo {
         let mut cmd = tokio::process::Command::new(SUDO_PATH);
         cmd.arg(&perf_binary_path);
         cmd
@@ -204,20 +245,13 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         tokio::process::Command::new(&perf_binary_path)
     };
 
-    let (read_ctl_fd, write_ctl_fd) =
-        nix::unistd::pipe().context("couldn't create the pipe for controlling perf record")?;
-
-    let (read_ack_fd, write_ack_fd) =
-        nix::unistd::pipe().context("couldn't create the pipe for perf record acknowledgment")?;
-
     let mut perf_record_command = perf_record_command
         .arg("record")
         // Target the specified process IDs.
-        .arg("-p")
-        .arg(pids)
+        .arg("-a")
         // Specify the sampling frequency or default to 99 Hz.
         .arg("-F")
-        .arg(options.sampling_frequency.to_string())
+        .arg(options.options.sampling_frequency.to_string())
         // Enable call-graph (stack chain/backtrace) recording for both
         // kernel space and user space.
         .arg("-g")
@@ -227,15 +261,10 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         // we get the most accurate stack traces and that after we "ask"
         // perf to stop, we get the data dumped to the file properly.
         .arg("--no-buffering")
-        .arg("--control")
-        // .arg(format!("fd:{}", read_ctl_fd.as_raw_fd(),));
-        .arg(format!(
-            "fd:{},{}",
-            read_ctl_fd.as_raw_fd(),
-            write_ack_fd.as_raw_fd()
-        ));
+        // #[cfg(feature = "testing")]
+        .arg("-v");
 
-    if options.follow_forks {
+    if options.options.follow_forks {
         perf_record_command = perf_record_command.arg("--inherit");
     }
 
@@ -246,25 +275,15 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 
-    tracing::debug!("Running perf record command: {perf_record_command:?}");
-
-    let perf_record_cmd_str = get_command_invocation(perf_record_command);
-    tracing::Span::current().record("perf_record_cmd", perf_record_cmd_str.clone());
-
     let mut perf_record_command = perf_record_command
         .spawn()
         .context("failed to spawn a process for perf record")?;
 
-    drop(read_ctl_fd);
-    drop(write_ack_fd);
+    let rx = options.should_stop.as_ref().map(|s| s.subscribe());
 
-    // nix::unistd::close(read_ctl_fd).context("failed to close the read end of the control pipe")?;
-    // nix::unistd::close(write_ack_fd)
-    //     .context("failed to close the write end of the acknowledgment pipe")?;
-
-    if let Some(mut rx) = options.should_stop {
+    if let Some(mut rx) = rx {
         tokio::select! {
-            _ = &mut rx => {
+            _ = rx.recv() => {
                 tracing::trace!("Received shutdown signal, stopping perf...");
             }
             _ = tokio::time::sleep(options.timeout) => {
@@ -280,73 +299,26 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .id()
         .ok_or_else(|| anyhow!("failed to get perf record process ID"))?;
 
-    error!("Asking perf record to stop via write_ctl_fd");
-    // nix::unistd::write(&write_ctl_fd, b"stop\n").context("COULDNT WRITE STOP TO WRITE CTL FD")?; // This will tell perf to stop
-    // SAFETY: We own the file descriptor `write_ctl_fd` and are converting it into a tokio::fs::File for async writing.
-    // This is safe because no other code will use this fd after this point.
-    let mut ctl_writer = unsafe { tokio::fs::File::from_raw_fd(write_ctl_fd.as_raw_fd()) };
-    if let Err(e) = ctl_writer.write_all(b"stop\n").await {
-        error!("failed to write stop command to perf record: {}", e);
+    // Send SIGTERM to the perf record process to stop it
+    // gracefully and wait for it to finish.
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(perf_record_pid as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    );
+
+    tracing::trace!(
+        "Waiting for perf record to finish for pid = {}...",
+        options.options.pid
+    );
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    if perf_record_command.try_wait().is_err() {
+        perf_record_command
+            .kill()
+            .await
+            .context("failed to kill perf record command")?;
     }
-    error!("Wrote stop to write_ctl_fd, now waiting for acknowledgment");
-    // let mut bytes = [0; 4096];
-    // if let Err(e) = nix::unistd::read(&read_ack_fd, &mut bytes) {
-    //     error!("failed to read acknowledgment from perf record: {}", e);
-    // }
-    // SAFETY: We own the file descriptor `read_ack_fd` and are converting it into a std::fs::File for blocking reading.
-    // This is safe because no other code will use this fd after this point.
-    // let ack_file = unsafe { std::fs::File::from_raw_fd(read_ack_fd.as_raw_fd()) };
-    // let mut buf = String::new();
-    // use std::io::BufRead;
-    // let mut br = std::io::BufReader::new(ack_file);
-    let ack_file = unsafe { tokio::fs::File::from_raw_fd(read_ack_fd.as_raw_fd()) };
-    let mut br = tokio::io::BufReader::new(ack_file);
-    let mut buf = String::new();
-    loop {
-        // Read the acknowledgment line from perf record.
-        // This is a blocking read, so it will wait until perf record sends the acknowledgment.
-        match br.read_line(&mut buf).await {
-            Ok(n) => {
-                if n > 0 {
-                    // EOF reached, no more data to read.
-                    break;
-                } else {
-                    // No data read, continue reading.
-                    continue;
-                }
-            }
-            Err(e) => {
-                // An error occurred while reading the acknowledgment.
-                // Log the error and break the loop.
-                error!("failed to read acknowledgment from perf record: {e}");
-                break;
-            }
-        }
-        // if !buf.is_empty() {
-        //     break;
-        // }
-    }
-
-    error!("Got ACK from perf record({}): {buf}", buf.len());
-
-    // drop(write_ctl_fd); // Close the write end of the control pipe
-    // drop(read_ctl_fd); // Close the read end of the control pipe
-    // drop(write_ack_fd); // Close the write end of the acknowledgment pipe
-    // drop(read_ack_fd); // Close the read end of the acknowledgment pipe
-
-    // // Send SIGUSR2 to the perf record process to stop it writing to
-    // // the output file gracefully.
-    // let _ = nix::sys::signal::kill(
-    //     nix::unistd::Pid::from_raw(perf_record_pid as i32),
-    //     nix::sys::signal::Signal::SIGUSR2,
-    // );
-
-    // // Send SIGINT to the perf record process to stop it
-    // // gracefully and wait for it to finish.
-    // let _ = nix::sys::signal::kill(
-    //     nix::unistd::Pid::from_raw(perf_record_pid as i32),
-    //     nix::sys::signal::Signal::SIGINT,
-    // );
 
     let _ = perf_record_command
         .wait()
@@ -371,39 +343,33 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         .len();
 
     if temp_file_size == 0 {
-        error!(
+        tracing::warn!(
             "perf record output file is empty, no data collected.\nPerf stderr: {perf_record_stderr_string}"
         );
+
         return Err(anyhow!(
             "perf record output file is empty, no data collected"
         ));
     }
 
-    let mut perf_script_cmd = tokio::process::Command::new(&perf_binary_path);
-    perf_script_cmd
+    let perf_script_output = tokio::process::Command::new(&perf_binary_path)
         .arg("script")
         .arg("-i")
         .arg(temp_file_path)
+        .arg(format!(
+            "--pid={}",
+            pids.iter()
+                .map(|p| p.as_raw().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    tracing::Span::current().record(
-        "perf_script_cmd",
-        get_command_invocation(&perf_script_cmd).to_string(),
-    );
-
-    let perf_script_output = perf_script_cmd
+        .stderr(std::process::Stdio::piped())
         .output()
         .await
         .context(format!("couldn't run perf script -i {temp_file_path:?}"))?;
 
     if !perf_script_output.status.success() {
-        error!(
-            "perf script command failed with status: {}, command: {}\nTemp file size: {temp_file_size} bytes\nPerf stderr: {perf_record_stderr_string}",
-            perf_script_output.status,
-            get_command_invocation(&perf_script_cmd),
-        );
-
         return Err(anyhow!(
             "perf script command failed: {}",
             String::from_utf8(perf_script_output.stderr)
@@ -411,36 +377,177 @@ pub async fn generate_pprof_using_perf<S: AsRef<str>>(
         ));
     }
 
-    let perf_script_stdout = perf_script_output.stdout;
-    let perf_output_str =
-        String::from_utf8(perf_script_stdout).context("expected utf-8 output from perf script")?;
-    if perf_output_str.is_empty() {
-        return Err(anyhow!(format!("Perf script output is empty.\n")));
+    error!(
+        "Reading perf script stdout for pid = {}",
+        options.options.pid
+    );
+
+    if perf_script_output.stdout.is_empty() {
+        return Err(anyhow!(format!(
+            "Perf script output is empty for pid = {}.\n",
+            options.options.pid
+        )));
     }
 
-    // Step 2: Collapse the stack traces into a folded stack trace
-    let mut folder = {
-        let mut options = inferno::collapse::perf::Options::default();
-        options.annotate_jit = true; // Enable JIT annotation if needed
-        options.annotate_kernel = true; // Enable kernel annotation if needed
-        options.include_addrs = true; // Include addresses in the output
-        options.include_pid = true; // Include PIDs in the output
-        options.include_tid = true; // Include TIDs in the output
-        inferno::collapse::perf::Folder::from(options)
+    error!("Profiling succeeded for pid = {}", options.options.pid);
+
+    Ok(perf_script_output.stdout)
+}
+
+/// Run perf against a process with the given name and generate a pprof
+/// profile from the output.
+///
+/// The pipeline is as follows:
+/// 1. Running perf for the specified process name and duration.
+/// 2. Collapsing the perf output into a folded stack trace.
+/// 3. Generating a pprof profile from the collapsed stack trace.
+///
+/// This function blocks until the profiling is complete or the timeout
+/// is reached.
+///
+/// If the perf binary path is not provided, it defaults to "perf" in
+/// the system's `PATH`.
+pub async fn generate_pprof_profile(
+    options: ProfileGenerationTaskOptions,
+) -> anyhow::Result<PprofData> {
+    let perf_binary_path = options
+        .options
+        .perf_binary_path
+        .clone()
+        .map_or_else(|| PathBuf::from("perf"), |p| p.to_owned());
+
+    check_perf_runs(
+        perf_binary_path
+            .to_str()
+            .context("couldn't reconstruct perf binary path as string.")?,
+        options.options.run_with_sudo,
+    )
+    .context("couldn't check that perf is available and can be run")?;
+
+    let mut pids = list_children_processes(options.options.pid)
+        .unwrap_or_default()
+        .into_iter()
+        .chain(std::iter::once(options.options.pid))
+        .collect::<HashSet<_>>();
+    // let mut pids = HashSet::new();
+    // pids.insert(options.options.pid);
+
+    pause_processes(&pids).context("couldn't pause the processes for profiling")?;
+
+    let mut futures_unordered = FuturesUnordered::new();
+
+    {
+        let options = options.clone();
+        let perf_binary_path = perf_binary_path.clone();
+        let pids = pids.clone();
+
+        let task = tokio::task::spawn(async move {
+            (
+                // profile_single_process_perf(perf_binary_path, pids.clone(), options.clone()).await,
+                profile_single_process_bcc_profile(perf_binary_path, pids.clone(), options.clone())
+                    .await,
+                options.options.pid,
+            )
+        });
+        futures_unordered.push(task);
+    }
+    // for pid in &pids {
+    //     let mut options = options.clone();
+    //     let pid = *pid;
+    //     options.options.pid = pid;
+    //     let perf_binary_path = perf_binary_path.clone();
+
+    //     let task = tokio::task::spawn(async move {
+    //         (profile_single_process(perf_binary_path, options).await, pid)
+    //     });
+    //     futures_unordered.push(task);
+    // }
+
+    unpause_processes(&pids).context("couldn't pause the processes for profiling")?;
+
+    let collapsed: Vec<u8> = {
+        let mut ret = Vec::new();
+
+        let mut count = 1;
+        let total = futures_unordered.len();
+        // TODO: timeout here as well (tokio::select with timeout)
+        while let Some(result) = futures_unordered.next().await {
+            match result {
+                Ok((Ok(output), pid)) => {
+                    pids.remove(&pid);
+                    error!(
+                        "Per-process profiling task completed successfully {count} / {total} (for pid = {pid})"
+                    );
+                    error!(
+                        "Perf script output for pid {pid}: {}",
+                        String::from_utf8_lossy(&output)
+                    );
+                    ret.push(output);
+                }
+                Ok((Err(e), pid)) => {
+                    pids.remove(&pid);
+                    error!("Per-process profiling task failed {count} / {total} (for pid = {pid})");
+                    tracing::info!("Empty profiling info for a process: {e}");
+                }
+                Err(e) => {
+                    error!("Per-process profiling task failed {count} / {total}");
+                    tracing::error!("Per-process profiling task failed: {e}");
+                }
+            }
+
+            count += 1;
+            error!(
+                "Waiting for next profiling task to complete {count} / {total}, remaining pids: {pids:?}"
+            );
+        }
+
+        error!("Perf script output collected: {count} / {total}");
+
+        ret.into_iter().flatten().collect()
     };
 
-    let mut collapsed = Vec::new();
-
-    folder
-        .collapse(perf_output_str.as_bytes(), &mut collapsed)
-        .context("couldn't collapse the output of perf script into the folded format")?;
-
     if collapsed.is_empty() {
-        return Err(anyhow!("collapsed stack trace is empty"));
+        error!("perf script output is empty, no data collected");
+        return Err(anyhow!("perf script output is empty, no data collected"));
     }
 
+    // let perf_script_output = futured_unordered
+    //     .await
+    //     .into_iter()
+    //     .collect::<anyhow::Result<Vec<Vec<u8>>>>()
+    //     .context("failed to run perf for all processes")?
+    //     .into_iter()
+    //     .flatten()
+    //     .collect::<Vec<_>>();
+
+    // // Step 2: Collapse the stack traces into a folded stack trace
+    // let mut folder = {
+    //     let mut options = inferno::collapse::perf::Options::default();
+    //     options.annotate_jit = true; // Enable JIT annotation if needed
+    //     options.annotate_kernel = true; // Enable kernel annotation if needed
+    //     options.include_addrs = true; // Include addresses in the output
+    //     options.include_pid = true; // Include PIDs in the output
+    //     options.include_tid = true; // Include TIDs in the output
+    //     inferno::collapse::perf::Folder::from(options)
+    // };
+
+    // let mut collapsed = Vec::new();
+
+    // folder
+    //     .collapse(perf_script_output.as_slice(), &mut collapsed)
+    //     .context("couldn't collapse the output of perf script into the folded format")?;
+
+    // if collapsed.is_empty() {
+    //     error!(
+    //         "collapsed stack trace is empty for output: {}",
+    //         String::from_utf8_lossy(&perf_script_output)
+    //     );
+
+    //     return Err(anyhow!("collapsed stack trace is empty"));
+    // }
+
     // Step 3: Generate pprof profile from collapsed stack trace
-    generate_pprof_from_collapsed(&collapsed, options.blocklist_symbols, false)
+    generate_pprof_from_collapsed(&collapsed, &options.options.blocklist_symbols, false)
 }
 
 fn archive_bytes<W: Write>(bytes: &[u8], output: &mut W) -> anyhow::Result<()> {

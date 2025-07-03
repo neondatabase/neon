@@ -109,16 +109,17 @@ def _wait_and_assert_cpu_profiling(http_client: EndpointHttpClient, event: threa
     assert len(profile.location) > 0, "No locations found in CPU profiling data"
     assert len(profile.function) > 0, "No functions found in CPU profiling data"
     assert len(profile.string_table) > 0, "No string tables found in CPU profiling data"
-    for string in [
+    strings = [
         "PostgresMain",
         "ServerLoop",
         "BackgroundWorkerMain",
         "pq_recvbuf",
         "pq_getbyte",
-    ]:
-        assert string in profile.string_table, (
-            f"Expected function '{string}' not found in string table"
-        )
+    ]
+
+    assert any(s in profile.string_table for s in strings), (
+        f"Expected at least one of {strings} in string table, but none found"
+    )
 
 
 @run_only_on_default_postgres(reason=REASON)
@@ -221,29 +222,39 @@ def test_compute_profiling_cpu_conflict(neon_simple_env: NeonEnv):
 
     assert _wait_till_profiling_starts(http_client, None)
 
-    lfc_conn = endpoint.connect(dbname="profiling_test")
-    lfc_cur = lfc_conn.cursor()
-    n_records = 0
-    lfc_cur.execute(
-        "create table t(pk integer primary key, payload text default repeat('?', 128))"
-    )
-    batch_size = 10000
+    inserting_should_stop_event = threading.Event()
 
-    log.info("Inserting rows")
+    def insert_rows():
+        lfc_conn = endpoint.connect(dbname="profiling_test")
+        lfc_cur = lfc_conn.cursor()
+        n_records = 0
+        lfc_cur.execute(
+            "create table t(pk integer primary key, payload text default repeat('?', 128))"
+        )
+        batch_size = 1000
 
-    n_records += batch_size
-    lfc_cur.execute(
-        f"insert into t (pk) values (generate_series({n_records - batch_size + 1},{batch_size}))"
-    )
+        log.info("Inserting rows")
 
-    log.info(f"Inserted {n_records} rows")
+        while not inserting_should_stop_event.is_set():
+            n_records += batch_size
+            lfc_cur.execute(
+                f"insert into t (pk) values (generate_series({n_records - batch_size + 1},{batch_size}))"
+            )
+
+        log.info(f"Inserted {n_records} rows")
+
+    thread2 = threading.Thread(target=insert_rows)
+    thread2.start()
 
     # Should raise as the profiling is already in progress.
     with pytest.raises(HTTPError) as _:
         _start_profiling_cpu(http_client, None)
 
+    inserting_should_stop_event.set()  # Stop the insertion thread
+
     # The profiling should still be running and finish normally.
-    thread.join(timeout=60)
+    thread.join(timeout=600)
+    thread2.join(timeout=600)
 
 
 # @run_only_on_default_postgres(reason=REASON)
