@@ -2,9 +2,14 @@ DO $$
 DECLARE
 i numeric;
 BEGIN
+  create role somebody;
   FOR i IN 1..1_000_000 LOOP
     BEGIN
-      PERFORM 1;
+	  IF i % 1000 = 0 THEN
+	    alter role somebody password 'welcome';
+	  ELSE
+        PERFORM 1;
+	  END IF;
     EXCEPTION WHEN OTHERS THEN
       RAISE WARNING 'error';
     END;
