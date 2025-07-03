@@ -2830,6 +2830,23 @@ pub(crate) static LOCAL_DATA_LOSS_SUSPECTED: Lazy<IntGauge> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+// Counter keeping track of misrouted PageStream requests. Spelling out PageStream requests here to distinguish
+// it from other types of reqeusts (SK wal replication, http requests, etc.). PageStream requests are used by
+// Postgres compute to fetch data from pageservers.
+// A misrouted PageStream request is registered if the pageserver cannot find the tenant identified in the
+// request, or if the pageserver is not the "primary" serving the tenant shard. These error almost always identify
+// issues with compute configuration, caused by either the compute node itself being stuck in the wrong
+// configuration or Storage Controller reconciliation bugs. Misrouted requests are expected during tenant migration
+// and/or during recovery following a pageserver failure, but persistently high rates of misrouted requests
+// are indicative of bugs (and unavailability).
+pub(crate) static MISROUTED_PAGESTREAM_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_misrouted_pagestream_requests_total",
+        "Number of pageserver pagestream requests that were routed to the wrong pageserver"
+    )
+    .expect("failed to define a metric")
+});
+
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting
@@ -4567,6 +4584,7 @@ pub fn preinitialize_metrics(
         &CIRCUIT_BREAKERS_UNBROKEN,
         &PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL,
         &WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS,
+        &MISROUTED_PAGESTREAM_REQUESTS,
     ]
     .into_iter()
     .for_each(|c| {
