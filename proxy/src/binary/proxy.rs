@@ -22,9 +22,13 @@ use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
 use crate::auth::backend::jwt::JwkCache;
+#[cfg(any(test, feature = "testing"))]
+use crate::auth::backend::local::LocalBackend;
 use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::batch::BatchQueue;
 use crate::cancellation::{CancellationHandler, CancellationProcessor};
+#[cfg(any(test, feature = "testing"))]
+use crate::config::refresh_config_loop;
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
     ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
@@ -43,6 +47,10 @@ use crate::tls::client_config::compute_client_config_with_root_certs;
 #[cfg(any(test, feature = "testing"))]
 use crate::url::ApiUrl;
 use crate::{auth, control_plane, http, serverless, usage_metrics};
+#[cfg(any(test, feature = "testing"))]
+use camino::Utf8PathBuf;
+#[cfg(any(test, feature = "testing"))]
+use tokio::sync::Notify;
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
@@ -60,6 +68,9 @@ enum AuthBackendType {
 
     #[cfg(any(test, feature = "testing"))]
     Postgres,
+
+    #[cfg(any(test, feature = "testing"))]
+    Local,
 }
 
 /// Neon proxy/router
@@ -74,6 +85,10 @@ struct ProxyCliArgs {
     proxy: SocketAddr,
     #[clap(value_enum, long, default_value_t = AuthBackendType::ConsoleRedirect)]
     auth_backend: AuthBackendType,
+    /// Path of the local proxy config file (used for local-file auth backend)
+    #[clap(long, default_value = "./local_proxy.json")]
+    #[cfg(any(test, feature = "testing"))]
+    config_path: Utf8PathBuf,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
     mgmt: SocketAddr,
@@ -226,6 +241,14 @@ struct ProxyCliArgs {
 
     #[clap(flatten)]
     pg_sni_router: PgSniRouterArgs,
+
+    /// if this is not local proxy, this toggles whether we accept Postgres REST requests
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    is_rest_broker: bool,
+
+    /// cache for `db_schema_cache` introspection (use `size=0` to disable)
+    #[clap(long, default_value = "size=1000,ttl=1h")]
+    db_schema_cache: String,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -386,6 +409,8 @@ pub async fn run() -> anyhow::Result<()> {
         64,
     ));
 
+    #[cfg(any(test, feature = "testing"))]
+    let refresh_config_notify = Arc::new(Notify::new());
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
@@ -410,6 +435,17 @@ pub async fn run() -> anyhow::Result<()> {
                     cancellation_token.clone(),
                     cancellation_handler.clone(),
                     endpoint_rate_limiter.clone(),
+                ));
+            }
+
+            // if auth backend is local, we need to load the config file
+            #[cfg(any(test, feature = "testing"))]
+            if let auth::Backend::Local(_) = &auth_backend {
+                refresh_config_notify.notify_one();
+                tokio::spawn(refresh_config_loop(
+                    config,
+                    args.config_path,
+                    refresh_config_notify.clone(),
                 ));
             }
         }
@@ -462,7 +498,13 @@ pub async fn run() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(crate::signals::handle(cancellation_token.clone(), || {}));
+
+    maintenance_tasks.spawn(crate::signals::handle(cancellation_token.clone(), {
+        move || {
+            #[cfg(any(test, feature = "testing"))]
+            refresh_config_notify.notify_one();
+        }
+    }));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
@@ -653,6 +695,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
+        #[cfg(feature = "testing")]
+        disable_pg_session_jwt: false,
     };
 
     let config = Box::leak(Box::new(config));
@@ -805,6 +849,19 @@ fn build_auth_backend(
             let config = Box::leak(Box::new(backend));
 
             Ok(Either::Right(config))
+        }
+
+        #[cfg(any(test, feature = "testing"))]
+        AuthBackendType::Local => {
+            let postgres: SocketAddr = "127.0.0.1:7432".parse()?;
+            let compute_ctl: ApiUrl = "http://127.0.0.1:3081/".parse()?;
+            let auth_backend = crate::auth::Backend::Local(
+                crate::auth::backend::MaybeOwned::Owned(LocalBackend::new(postgres, compute_ctl)),
+            );
+
+            let config = Box::leak(Box::new(auth_backend));
+
+            Ok(Either::Left(config))
         }
     }
 }
