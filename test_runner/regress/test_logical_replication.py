@@ -624,3 +624,45 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg: Van
     log.info("waiting for sync after restart")
     logical_replication_wait_flush_lsn_sync(vanilla_pg)
     assert sub.safe_psql_scalar("SELECT count(*) FROM t") == 1000
+
+
+def test_logical_replication_ondemand_download(neon_simple_env: NeonEnv, vanilla_pg):
+    env = neon_simple_env
+
+    env.create_branch("publisher")
+    endpoint = env.endpoints.create("publisher", config_lines=["max_slot_wal_keep_size=1MB"])
+    endpoint.start()
+
+    pg_conn = endpoint.connect()
+    cur = pg_conn.cursor()
+
+    # create table...
+    cur.execute(
+        "create table t(x integer primary key, fillter text default repeat(' ', 1000)) with (fillfactor=10)"
+    )
+    cur.execute("create publication pub1 for table t")
+
+    # now start subscriber
+    vanilla_pg.start()
+    vanilla_pg.safe_psql(
+        "create table t(x integer primary key, fillter text default repeat(' ', 1000)) with (fillfactor=10)"
+    )
+
+    connstr = endpoint.connstr().replace("'", "''")
+    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
+
+    # Stop subscriber...
+    vanilla_pg.stop()
+
+    # ... and insert some data which should be delivered to subscriber after restart
+    cur.execute("insert into t values (generate_series(1,1000000))")  # 8Gb
+
+    # Stop subscriber...
+    vanilla_pg.start()
+
+    # Check that subscribers receives all data
+    def check_that_changes_propagated():
+        assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == 1000000
+
+    wait_until(check_that_changes_propagated, timeout=200.0, interval=10.0)
