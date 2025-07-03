@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import random
+import threading
 import time
 from collections import defaultdict
+from threading import Event
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -1503,6 +1506,171 @@ def test_sharding_split_failures(
         assert len(response["shards"]) == bystander_shard_count
 
     env.storage_controller.consistency_check()
+
+
+@pytest.mark.skip(reason="The backpressure change has not been merged yet.")
+def test_back_pressure_during_split(neon_env_builder: NeonEnvBuilder):
+    """
+    Test backpressure can ignore new shards during tenant split so that if we abort the split,
+    PG can continue without being blocked.
+    """
+    DBNAME = "regression"
+
+    init_shard_count = 4
+    neon_env_builder.num_pageservers = init_shard_count
+    stripe_size = 32
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=init_shard_count, initial_tenant_shard_stripe_size=stripe_size
+    )
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            # All split failures log a warning when then enqueue the abort operation
+            ".*Enqueuing background abort.*",
+            # Tolerate any error lots that mention a failpoint
+            ".*failpoint.*",
+        ]
+    )
+
+    endpoint = env.endpoints.create(
+        "main",
+        config_lines=[
+            "max_replication_write_lag = 1MB",
+            "databricks.max_wal_mb_per_second = 1",
+            "neon.max_cluster_size = 10GB",
+        ],
+    )
+    endpoint.respec(skip_pg_catalog_updates=False)  # Needed for databricks_system to get created.
+    endpoint.start()
+
+    endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
+
+    endpoint.safe_psql("CREATE TABLE usertable ( YCSB_KEY INT, FIELD0 TEXT);")
+    write_done = Event()
+
+    def write_data(write_done):
+        while not write_done.is_set():
+            endpoint.safe_psql(
+                "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+            )
+        log.info("write_data thread exiting")
+
+    writer_thread = threading.Thread(target=write_data, args=(write_done,))
+    writer_thread.start()
+
+    env.storage_controller.configure_failpoints(("shard-split-pre-complete", "return(1)"))
+    # split the tenant
+    with pytest.raises(StorageControllerApiException):
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=16)
+
+    write_done.set()
+    writer_thread.join()
+
+    # writing more data to page servers after split is aborted
+    for _i in range(5000):
+        endpoint.safe_psql(
+            "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+        )
+
+    # wait until write lag becomes 0
+    def check_write_lag_is_zero():
+        res = endpoint.safe_psql(
+            """
+            SELECT
+                pg_wal_lsn_diff(pg_current_wal_flush_lsn(), received_lsn) as received_lsn_lag
+                FROM neon.backpressure_lsns();
+            """,
+            dbname="databricks_system",
+            log_query=False,
+        )
+        log.info(f"received_lsn_lag = {res[0][0]}")
+        assert res[0][0] == 0
+
+    wait_until(check_write_lag_is_zero)
+    endpoint.stop_and_destroy()
+
+
+# BEGIN_HADRON
+def test_shard_resolve_during_split_abort(neon_env_builder: NeonEnvBuilder):
+    """
+    Tests that page service is able to resolve the correct shard during tenant split without causing query errors
+    """
+    DBNAME = "regression"
+    WORKER_THREADS = 16
+    ROW_COUNT = 10000
+
+    init_shard_count = 4
+    neon_env_builder.num_pageservers = 1
+    stripe_size = 16
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=init_shard_count, initial_tenant_shard_stripe_size=stripe_size
+    )
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            # All split failures log a warning when then enqueue the abort operation
+            ".*Enqueuing background abort.*",
+            # Tolerate any error lots that mention a failpoint
+            ".*failpoint.*",
+        ]
+    )
+
+    endpoint = env.endpoints.create("main")
+    endpoint.respec(skip_pg_catalog_updates=False)  # Needed for databricks_system to get created.
+    endpoint.start()
+
+    endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
+
+    # generate 10MB of data
+    endpoint.safe_psql(
+        f"CREATE TABLE usertable AS SELECT s AS KEY, repeat('a', 1000) as VALUE from generate_series(1, {ROW_COUNT}) s;"
+    )
+    read_done = Event()
+
+    def read_data(read_done):
+        i = 0
+        while not read_done.is_set() or i < 10:
+            endpoint.safe_psql(
+                f"SELECT * FROM usertable where KEY = {random.randint(1, ROW_COUNT)}",
+                log_query=False,
+            )
+            i += 1
+        log.info(f"read_data thread exiting. Executed {i} queries.")
+
+    reader_threads = []
+    for _i in range(WORKER_THREADS):
+        reader_thread = threading.Thread(target=read_data, args=(read_done,))
+        reader_thread.start()
+        reader_threads.append(reader_thread)
+
+    env.storage_controller.configure_failpoints(("shard-split-pre-complete", "return(1)"))
+    # split the tenant
+    with pytest.raises(StorageControllerApiException):
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=16)
+
+    # wait until abort is done
+    def check_tenant_status():
+        active_count = 0
+        for i in range(init_shard_count):
+            status = env.pageserver.http_client().tenant_status(
+                TenantShardId(env.initial_tenant, i, init_shard_count)
+            )
+            if status["state"]["slug"] == "Active":
+                active_count += 1
+        assert active_count == 4
+
+    wait_until(check_tenant_status)
+
+    read_done.set()
+    for thread in reader_threads:
+        thread.join()
+
+    endpoint.stop()
+
+
+# END_HADRON
 
 
 def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):

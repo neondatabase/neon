@@ -212,8 +212,12 @@
 //! to the parent shard during a shard split. Eventually, the shard split task will
 //! shut down the parent => case (1).
 
-use std::collections::{HashMap, hash_map};
-use std::sync::{Arc, Mutex, Weak};
+use std::collections::HashMap;
+use std::collections::hash_map;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
+use std::time::Duration;
 
 use pageserver_api::shard::ShardIdentity;
 use tracing::{instrument, trace};
@@ -333,6 +337,44 @@ enum RoutingResult<T: Types> {
 }
 
 impl<T: Types> Cache<T> {
+    /* BEGIN_HADRON */
+    /// A wrapper of do_get to resolve the tenant shard for a get page request.
+    #[instrument(level = "trace", skip_all)]
+    pub(crate) async fn get(
+        &mut self,
+        timeline_id: TimelineId,
+        shard_selector: ShardSelector,
+        tenant_manager: &T::TenantManager,
+    ) -> Result<Handle<T>, GetError<T>> {
+        const GET_MAX_RETRIES: usize = 10;
+        const RETRY_BACKOFF: Duration = Duration::from_millis(100);
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self
+                .do_get(timeline_id, shard_selector, tenant_manager)
+                .await
+            {
+                Ok(handle) => return Ok(handle),
+                Err(e) => {
+                    // Retry on tenant manager error to handle tenant split more gracefully
+                    if attempt < GET_MAX_RETRIES {
+                        tracing::warn!(
+                            "Fail to resolve tenant shard in attempt {}: {:?}. Retrying...",
+                            attempt,
+                            e
+                        );
+                        tokio::time::sleep(RETRY_BACKOFF).await;
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+    /* END_HADRON */
+
     /// See module-level comment for details.
     ///
     /// Does NOT check for the shutdown state of [`Types::Timeline`].
@@ -341,7 +383,7 @@ impl<T: Types> Cache<T> {
     /// and if so, return an error that causes the page service to
     /// close the connection.
     #[instrument(level = "trace", skip_all)]
-    pub(crate) async fn get(
+    async fn do_get(
         &mut self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
@@ -879,6 +921,7 @@ mod tests {
             .await
             .err()
             .expect("documented behavior: can't get new handle after shutdown");
+
         assert_eq!(cache.map.len(), 1, "next access cleans up the cache");
 
         cache

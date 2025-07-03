@@ -159,6 +159,9 @@ PAGESERVER_GLOBAL_METRICS: tuple[str, ...] = (
 )
 
 PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
+    # BEGIN_HADRON
+    "pageserver_active_storage_operations_count",
+    # END_HADRON
     "pageserver_current_logical_size",
     "pageserver_resident_physical_size",
     "pageserver_io_operations_bytes_total",

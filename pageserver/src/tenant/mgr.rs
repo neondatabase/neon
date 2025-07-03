@@ -43,7 +43,7 @@ use crate::controller_upcall_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
-use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
+use crate::metrics::{LOCAL_DATA_LOSS_SUSPECTED, TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
@@ -537,6 +537,21 @@ pub async fn init_tenant_mgr(
 
     // Determine which tenants are to be secondary or attached, and in which generation
     let tenant_modes = init_load_generations(conf, &tenant_configs, resources, cancel).await?;
+
+    // Hadron local SSD check: Raise an alert if our local filesystem does not contain any tenants but the re-attach request returned tenants.
+    // This can happen if the PS suffered a Kubernetes node failure resulting in loss of all local data, but recovered quickly on another node
+    // so the Storage Controller has not had the time to move tenants out.
+    let data_loss_suspected = if let Some(tenant_modes) = &tenant_modes {
+        tenant_configs.is_empty() && !tenant_modes.is_empty()
+    } else {
+        false
+    };
+    if data_loss_suspected {
+        tracing::error!(
+            "Local data loss suspected: no tenants found on local filesystem, but re-attach request returned tenants"
+        );
+    }
+    LOCAL_DATA_LOSS_SUSPECTED.set(if data_loss_suspected { 1 } else { 0 });
 
     tracing::info!(
         "Attaching {} tenants at startup, warming up {} at a time",

@@ -458,6 +458,9 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 match next {
                     Ok(Ok(file_size)) => {
                         METRICS.layers_evicted.inc();
+                        /*BEGIN_HADRON */
+                        METRICS.bytes_evicted.inc_by(file_size);
+                        /*END_HADRON */
                         usage_assumed.add_available_bytes(file_size);
                     }
                     Ok(Err((

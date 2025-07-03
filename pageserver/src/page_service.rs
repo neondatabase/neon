@@ -69,7 +69,7 @@ use crate::context::{
 };
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, GetPageBatchBreakReason, LIVE_CONNECTIONS,
-    SmgrOpTimer, TimelineMetrics,
+    MISROUTED_PAGESTREAM_REQUESTS, SmgrOpTimer, TimelineMetrics,
 };
 use crate::pgdatadir_mapping::{LsnRange, Version};
 use crate::span::{
@@ -90,7 +90,8 @@ use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 /// is not yet in state [`TenantState::Active`].
 ///
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
+/// HADRON: reduced timeout and we will retry in Cache::get().
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Threshold at which to log slow GetPage requests.
 const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
@@ -533,6 +534,7 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
             match resolved {
                 ShardResolveResult::Found(tenant_shard) => break tenant_shard,
                 ShardResolveResult::NotFound => {
+                    MISROUTED_PAGESTREAM_REQUESTS.inc();
                     return Err(GetActiveTimelineError::Tenant(
                         GetActiveTenantError::NotFound(GetTenantError::NotFound(*tenant_id)),
                     ));
@@ -1127,6 +1129,7 @@ impl PageServerHandler {
                                 // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
                                 // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
                                 // and talk to a different pageserver.
+                                MISROUTED_PAGESTREAM_REQUESTS.inc();
                                 return respond_error!(
                                     span,
                                     PageStreamError::Reconnect(

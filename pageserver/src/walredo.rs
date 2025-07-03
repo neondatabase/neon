@@ -567,21 +567,54 @@ impl PostgresRedoManager {
 }
 
 #[cfg(test)]
+pub(crate) mod harness {
+    use super::PostgresRedoManager;
+    use crate::config::PageServerConf;
+    use utils::{id::TenantId, shard::TenantShardId};
+
+    pub struct RedoHarness {
+        // underscored because unused, except for removal at drop
+        _repo_dir: camino_tempfile::Utf8TempDir,
+        pub manager: PostgresRedoManager,
+        tenant_shard_id: TenantShardId,
+    }
+
+    impl RedoHarness {
+        pub fn new() -> anyhow::Result<Self> {
+            crate::tenant::harness::setup_logging();
+
+            let repo_dir = camino_tempfile::tempdir()?;
+            let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
+            let conf = Box::leak(Box::new(conf));
+            let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
+
+            let manager = PostgresRedoManager::new(conf, tenant_shard_id);
+
+            Ok(RedoHarness {
+                _repo_dir: repo_dir,
+                manager,
+                tenant_shard_id,
+            })
+        }
+        pub fn span(&self) -> tracing::Span {
+            tracing::info_span!("RedoHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
     use bytes::Bytes;
     use pageserver_api::key::Key;
-    use pageserver_api::shard::TenantShardId;
     use postgres_ffi::PgMajorVersion;
     use tracing::Instrument;
-    use utils::id::TenantId;
     use utils::lsn::Lsn;
     use wal_decoder::models::record::NeonWalRecord;
 
-    use super::PostgresRedoManager;
-    use crate::config::PageServerConf;
     use crate::walredo::RedoAttemptType;
+    use crate::walredo::harness::RedoHarness;
 
     #[tokio::test]
     async fn test_ping() {
@@ -691,34 +724,5 @@ mod tests {
                 }
             )
         ]
-    }
-
-    struct RedoHarness {
-        // underscored because unused, except for removal at drop
-        _repo_dir: camino_tempfile::Utf8TempDir,
-        manager: PostgresRedoManager,
-        tenant_shard_id: TenantShardId,
-    }
-
-    impl RedoHarness {
-        fn new() -> anyhow::Result<Self> {
-            crate::tenant::harness::setup_logging();
-
-            let repo_dir = camino_tempfile::tempdir()?;
-            let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
-            let conf = Box::leak(Box::new(conf));
-            let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
-
-            let manager = PostgresRedoManager::new(conf, tenant_shard_id);
-
-            Ok(RedoHarness {
-                _repo_dir: repo_dir,
-                manager,
-                tenant_shard_id,
-            })
-        }
-        fn span(&self) -> tracing::Span {
-            tracing::info_span!("RedoHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
-        }
     }
 }

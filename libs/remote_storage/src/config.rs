@@ -195,7 +195,18 @@ pub struct AzureConfig {
     pub max_keys_per_list_response: Option<i32>,
     #[serde(default = "default_azure_conn_pool_size")]
     pub conn_pool_size: usize,
+    /* BEGIN_HADRON */
+    #[serde(default = "default_azure_put_block_size_mb")]
+    pub put_block_size_mb: Option<usize>,
+    /* END_HADRON */
 }
+
+/* BEGIN_HADRON */
+fn default_azure_put_block_size_mb() -> Option<usize> {
+    // Disable parallel upload by default.
+    Some(0)
+}
+/* END_HADRON */
 
 fn default_remote_storage_azure_concurrency_limit() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT).unwrap()
@@ -213,6 +224,9 @@ impl Debug for AzureConfig {
                 "max_keys_per_list_response",
                 &self.max_keys_per_list_response,
             )
+            /* BEGIN_HADRON */
+            .field("put_block_size_mb", &self.put_block_size_mb)
+            /* END_HADRON */
             .finish()
     }
 }
@@ -352,6 +366,7 @@ timeout = '5s'";
     upload_storage_class = 'INTELLIGENT_TIERING'
     timeout = '7s'
     conn_pool_size = 8
+    put_block_size_mb = 1024
     ";
 
         let config = parse(toml).unwrap();
@@ -367,6 +382,9 @@ timeout = '5s'";
                     concurrency_limit: default_remote_storage_azure_concurrency_limit(),
                     max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
                     conn_pool_size: 8,
+                    /* BEGIN_HADRON */
+                    put_block_size_mb: Some(1024),
+                    /* END_HADRON */
                 }),
                 timeout: Duration::from_secs(7),
                 small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT

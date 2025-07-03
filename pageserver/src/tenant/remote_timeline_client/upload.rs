@@ -141,11 +141,29 @@ pub(super) async fn upload_timeline_layer<'a>(
 
     let fs_size = usize::try_from(fs_size)
         .with_context(|| format!("convert {local_path:?} size {fs_size} usize"))?;
-
+    /* BEGIN_HADRON */
+    let mut metadata = None;
+    match storage {
+        // Pass the file path as a storage metadata to minimize changes to neon.
+        // Otherwise, we need to change the upload interface.
+        GenericRemoteStorage::AzureBlob(s) => {
+            let block_size_mb = s.put_block_size_mb.unwrap_or(0);
+            if block_size_mb > 0 && fs_size > block_size_mb * 1024 * 1024 {
+                metadata = Some(remote_storage::StorageMetadata::from([(
+                    "databricks_azure_put_block",
+                    local_path.as_str(),
+                )]));
+            }
+        }
+        GenericRemoteStorage::LocalFs(_) => {}
+        GenericRemoteStorage::AwsS3(_) => {}
+        GenericRemoteStorage::Unreliable(_) => {}
+    };
+    /* END_HADRON */
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, super::BUFFER_SIZE);
 
     storage
-        .upload(reader, fs_size, remote_path, None, cancel)
+        .upload(reader, fs_size, remote_path, metadata, cancel)
         .await
         .with_context(|| format!("upload layer from local path '{local_path}'"))
 }

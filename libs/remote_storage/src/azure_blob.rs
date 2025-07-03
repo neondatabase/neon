@@ -14,17 +14,25 @@ use anyhow::{Context, Result, anyhow};
 use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
 use azure_core::{Continuable, HttpClient, RetryOptions, TransportOptions};
 use azure_storage::StorageCredentials;
-use azure_storage_blobs::blob::operations::GetBlobBuilder;
+use azure_storage_blobs::blob::BlobBlockType;
+use azure_storage_blobs::blob::BlockList;
 use azure_storage_blobs::blob::{Blob, CopyStatus};
 use azure_storage_blobs::container::operations::ListBlobsBuilder;
-use azure_storage_blobs::prelude::{ClientBuilder, ContainerClient};
+use azure_storage_blobs::prelude::ClientBuilder;
+use azure_storage_blobs::{blob::operations::GetBlobBuilder, prelude::ContainerClient};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE};
+use byteorder::{BigEndian, ByteOrder};
 use bytes::Bytes;
+use camino::Utf8Path;
 use futures::FutureExt;
 use futures::future::Either;
 use futures::stream::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use http_types::{StatusCode, Url};
 use scopeguard::ScopeGuard;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use utils::backoff;
@@ -51,6 +59,9 @@ pub struct AzureBlobStorage {
 
     // Alternative timeout used for metadata objects which are expected to be small
     pub small_timeout: Duration,
+    /* BEGIN_HADRON */
+    pub put_block_size_mb: Option<usize>,
+    /* END_HADRON */
 }
 
 impl AzureBlobStorage {
@@ -107,6 +118,9 @@ impl AzureBlobStorage {
             concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
             timeout,
             small_timeout,
+            /* BEGIN_HADRON */
+            put_block_size_mb: azure_config.put_block_size_mb,
+            /* END_HADRON */
         })
     }
 
@@ -583,31 +597,137 @@ impl RemoteStorage for AzureBlobStorage {
 
         let started_at = start_measuring_requests(kind);
 
-        let op = async {
+        let mut metadata_map = metadata.unwrap_or([].into());
+        let timeline_file_path = metadata_map.0.remove("databricks_azure_put_block");
+
+        /* BEGIN_HADRON */
+        let op = async move {
             let blob_client = self.client.blob_client(self.relative_path_to_name(to));
+            let put_block_size = self.put_block_size_mb.unwrap_or(0) * 1024 * 1024;
+            if timeline_file_path.is_none() || put_block_size == 0 {
+                // Use put_block_blob directly.
+                let from: Pin<
+                    Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>,
+                > = Box::pin(from);
+                let from = NonSeekableStream::new(from, data_size_bytes);
+                let body = azure_core::Body::SeekableStream(Box::new(from));
 
-            let from: Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>> =
-                Box::pin(from);
+                let mut builder = blob_client.put_block_blob(body);
+                if !metadata_map.0.is_empty() {
+                    builder = builder.metadata(to_azure_metadata(metadata_map));
+                }
+                let fut = builder.into_future();
+                let fut = tokio::time::timeout(self.timeout, fut);
+                let result = fut.await;
+                match result {
+                    Ok(Ok(_response)) => return Ok(()),
+                    Ok(Err(azure)) => return Err(azure.into()),
+                    Err(_timeout) => return Err(TimeoutOrCancel::Timeout.into()),
+                };
+            }
+            // Upload chunks concurrently using Put Block.
+            // Each PutBlock uploads put_block_size bytes of the file.
+            let mut upload_futures: Vec<tokio::task::JoinHandle<Result<(), azure_core::Error>>> =
+                vec![];
+            let mut block_list = BlockList::default();
+            let mut start_bytes = 0u64;
+            let mut remaining_bytes = data_size_bytes;
+            let mut block_list_count = 0;
 
-            let from = NonSeekableStream::new(from, data_size_bytes);
+            while remaining_bytes > 0 {
+                let block_size = std::cmp::min(remaining_bytes, put_block_size);
+                let end_bytes = start_bytes + block_size as u64;
+                let block_id = block_list_count;
+                let timeout = self.timeout;
+                let blob_client = blob_client.clone();
+                let timeline_file = timeline_file_path.clone().unwrap().clone();
 
-            let body = azure_core::Body::SeekableStream(Box::new(from));
+                let mut encoded_block_id = [0u8; 8];
+                BigEndian::write_u64(&mut encoded_block_id, block_id);
+                URL_SAFE.encode(encoded_block_id);
 
-            let mut builder = blob_client.put_block_blob(body);
+                // Put one block.
+                let part_fut = async move {
+                    let mut file = File::open(Utf8Path::new(&timeline_file.clone())).await?;
+                    file.seek(io::SeekFrom::Start(start_bytes)).await?;
+                    let limited_reader = file.take(block_size as u64);
+                    let file_chunk_stream =
+                        tokio_util::io::ReaderStream::with_capacity(limited_reader, 1024 * 1024);
+                    let file_chunk_stream_pin: Pin<
+                        Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>,
+                    > = Box::pin(file_chunk_stream);
+                    let stream_wrapper = NonSeekableStream::new(file_chunk_stream_pin, block_size);
+                    let body = azure_core::Body::SeekableStream(Box::new(stream_wrapper));
+                    // Azure put block takes URL-encoded block ids and all blocks must have the same byte length.
+                    // https://learn.microsoft.com/en-us/rest/api/storageservices/put-block?tabs=microsoft-entra-id#uri-parameters
+                    let builder = blob_client.put_block(encoded_block_id.to_vec(), body);
+                    let fut = builder.into_future();
+                    let fut = tokio::time::timeout(timeout, fut);
+                    let result = fut.await;
+                    tracing::debug!(
+                        "azure put block id-{} size {} start {} end {} file {} response {:#?}",
+                        block_id,
+                        block_size,
+                        start_bytes,
+                        end_bytes,
+                        timeline_file,
+                        result
+                    );
+                    match result {
+                        Ok(Ok(_response)) => Ok(()),
+                        Ok(Err(azure)) => Err(azure),
+                        Err(_timeout) => Err(azure_core::Error::new(
+                            azure_core::error::ErrorKind::Io,
+                            std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "Operation timed out",
+                            ),
+                        )),
+                    }
+                };
+                upload_futures.push(tokio::spawn(part_fut));
 
-            if let Some(metadata) = metadata {
-                builder = builder.metadata(to_azure_metadata(metadata));
+                block_list_count += 1;
+                remaining_bytes -= block_size;
+                start_bytes += block_size as u64;
+
+                block_list
+                    .blocks
+                    .push(BlobBlockType::Uncommitted(encoded_block_id.to_vec().into()));
             }
 
+            tracing::debug!(
+                "azure put blocks {} total MB: {} chunk size MB: {}",
+                block_list_count,
+                data_size_bytes / 1024 / 1024,
+                put_block_size / 1024 / 1024
+            );
+            // Wait for all blocks to be uploaded.
+            let upload_results = futures::future::try_join_all(upload_futures).await;
+            if upload_results.is_err() {
+                return Err(anyhow::anyhow!(format!(
+                    "Failed to upload all blocks {:#?}",
+                    upload_results.unwrap_err()
+                )));
+            }
+
+            // Commit the blocks.
+            let mut builder = blob_client.put_block_list(block_list);
+            if !metadata_map.0.is_empty() {
+                builder = builder.metadata(to_azure_metadata(metadata_map));
+            }
             let fut = builder.into_future();
             let fut = tokio::time::timeout(self.timeout, fut);
+            let result = fut.await;
+            tracing::debug!("azure put block list response {:#?}", result);
 
-            match fut.await {
+            match result {
                 Ok(Ok(_response)) => Ok(()),
                 Ok(Err(azure)) => Err(azure.into()),
                 Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
             }
         };
+        /* END_HADRON */
 
         let res = tokio::select! {
             res = op => res,
@@ -622,7 +742,6 @@ impl RemoteStorage for AzureBlobStorage {
         crate::metrics::BUCKET_METRICS
             .req_seconds
             .observe_elapsed(kind, outcome, started_at);
-
         res
     }
 

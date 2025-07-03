@@ -13,6 +13,7 @@ aws-smithy-async.workspace = true
 aws-smithy-types.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
+base64.workspace = true
 bytes.workspace = true
 camino = { workspace = true, features = ["serde1"] }
 humantime-serde.workspace = true
@@ -40,6 +41,8 @@ http-types.workspace = true
 http-body-util.workspace = true
 itertools.workspace = true
 sync_wrapper = { workspace = true, features = ["futures"] }
+
+byteorder = "1.4"
 
 [dev-dependencies]
 camino-tempfile.workspace = true

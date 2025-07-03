@@ -112,6 +112,7 @@ twox-hash.workspace = true
 procfs.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }

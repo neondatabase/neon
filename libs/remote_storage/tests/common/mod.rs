@@ -165,9 +165,41 @@ pub(crate) async fn upload_remote_data(
 
             let (data, data_len) =
                 upload_stream(format!("remote blob data {i}").into_bytes().into());
+
+            /* BEGIN_HADRON */
+            let mut metadata = None;
+            if matches!(&*task_client, GenericRemoteStorage::AzureBlob(_)) {
+                let file_path = "/tmp/dbx_upload_tmp_file.txt";
+                {
+                    // Open the file in append mode
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .create(true) // Create the file if it doesn't exist
+                        .open(file_path)?;
+                    // Append some bytes to the file
+                    std::io::Write::write_all(
+                        &mut file,
+                        &format!("remote blob data {i}").into_bytes(),
+                    )?;
+                    file.sync_all()?;
+                }
+                metadata = Some(remote_storage::StorageMetadata::from([(
+                    "databricks_azure_put_block",
+                    file_path,
+                )]));
+            }
+            /* END_HADRON */
+
             task_client
-                .upload(data, data_len, &blob_path, None, &cancel)
+                .upload(data, data_len, &blob_path, metadata, &cancel)
                 .await?;
+
+            // TODO: Check upload is using the put_block upload.
+            // We cannot consume data here since data is moved inside the upload.
+            // let total_bytes = data.fold(0, |acc, chunk| async move {
+            //     acc + chunk.map(|bytes| bytes.len()).unwrap_or(0)
+            // }).await;
+            // assert_eq!(total_bytes, data_len);
 
             Ok::<_, anyhow::Error>((blob_prefix, blob_path))
         });
