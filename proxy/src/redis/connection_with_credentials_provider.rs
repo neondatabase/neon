@@ -122,12 +122,10 @@ impl ConnectionWithCredentialsProvider {
             let con2 = con.clone();
             let credentials_refreshed = self.credentials_refreshed.clone();
             let f = tokio::spawn(async move {
-                let result = Self::keep_connection(con2, credentials_provider).await;
+                let result =
+                    Self::keep_connection(con2, credentials_provider, credentials_refreshed).await;
                 if let Err(e) = result {
-                    credentials_refreshed.store(false, Ordering::Release);
                     debug!("keep_connection failed: {e}");
-                } else {
-                    credentials_refreshed.store(true, Ordering::Release);
                 }
             });
             self.refresh_token_task = Some(f);
@@ -165,6 +163,7 @@ impl ConnectionWithCredentialsProvider {
 
     async fn get_client(&self) -> anyhow::Result<redis::Client> {
         let client = redis::Client::open(self.get_connection_info().await?)?;
+        self.credentials_refreshed.store(true, Ordering::Relaxed);
         Ok(client)
     }
 
@@ -180,6 +179,7 @@ impl ConnectionWithCredentialsProvider {
     async fn keep_connection(
         mut con: MultiplexedConnection,
         credentials_provider: Arc<CredentialsProvider>,
+        credentials_refreshed: Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
         loop {
             // The connection lives for 12h, for the sanity check we refresh it every hour.
@@ -187,9 +187,11 @@ impl ConnectionWithCredentialsProvider {
             match Self::refresh_token(&mut con, credentials_provider.clone()).await {
                 Ok(()) => {
                     info!("Token refreshed");
+                    credentials_refreshed.store(true, Ordering::Relaxed);
                 }
                 Err(e) => {
                     error!("Error during token refresh: {e:?}");
+                    credentials_refreshed.store(false, Ordering::Relaxed);
                 }
             }
         }
