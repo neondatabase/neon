@@ -488,12 +488,7 @@ async fn request_handler(
             .body(Empty::new().map_err(|x| match x {}).boxed())
             .map_err(|e| ApiError::InternalServerError(e.into()))
     } else if config.rest_config.is_rest_broker && request.uri().path().starts_with("/rest") {
-        let ctx = RequestContext::new(
-            session_id,
-            conn_info,
-            crate::metrics::Protocol::Http,
-            &config.region,
-        );
+        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
         let span = ctx.span();
 
         let testodrome_id = request
