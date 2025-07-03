@@ -78,7 +78,7 @@ use utils::rate_limit::RateLimit;
 use utils::seqwait::SeqWait;
 use utils::simple_rcu::{Rcu, RcuReadGuard};
 use utils::sync::gate::{Gate, GateGuard};
-use utils::{completion, critical, fs_ext, pausable_failpoint};
+use utils::{completion, critical_timeline, fs_ext, pausable_failpoint};
 #[cfg(test)]
 use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
@@ -6819,7 +6819,11 @@ impl Timeline {
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
                     Err(walredo::Error::Other(err)) => {
                         if fire_critical_error {
-                            critical!("walredo failure during page reconstruction: {err:?}");
+                            critical_timeline!(
+                                self.tenant_shard_id,
+                                self.timeline_id,
+                                "walredo failure during page reconstruction: {err:?}"
+                            );
                         }
                         return Err(PageReconstructError::WalRedo(
                             err.context("reconstruct a page image"),
