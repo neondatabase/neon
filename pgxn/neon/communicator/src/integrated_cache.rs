@@ -742,7 +742,8 @@ impl<'t> IntegratedCacheReadAccess<'t> {
     /// Check if the given page is present in the cache
     pub fn cache_contains_page(&'t self, rel: &RelTag, block_number: u32) -> bool {
         self.block_map
-            .get(&BlockKey::from((rel, block_number))).is_some()
+            .get(&BlockKey::from((rel, block_number)))
+            .is_some()
     }
 }
 
