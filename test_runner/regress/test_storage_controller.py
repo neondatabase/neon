@@ -989,6 +989,102 @@ def test_storage_controller_compute_hook_retry(
     )
 
 
+@run_only_on_default_postgres("postgres behavior is not relevant")
+def test_storage_controller_compute_hook_keep_failing(
+    httpserver: HTTPServer,
+    neon_env_builder: NeonEnvBuilder,
+    httpserver_listen_address: ListenAddress,
+):
+    neon_env_builder.num_pageservers = 4
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
+    (host, port) = httpserver_listen_address
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
+
+    # Set up CP handler for compute notifications
+    status_by_tenant: dict[TenantId, int] = {}
+
+    def handler(request: Request):
+        notify_request = request.json
+        assert notify_request is not None
+        status = status_by_tenant[TenantId(notify_request["tenant_id"])]
+        log.info(f"Notify request[{status}]: {notify_request}")
+        return Response(status=status)
+
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
+
+    # Run neon environment
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    # Create two tenants:
+    # - The first tenant is banned by CP and contains only one shard
+    # - The second tenant is allowed by CP and contains four shards
+    banned_tenant = TenantId.generate()
+    status_by_tenant[banned_tenant] = 200  # we will ban this tenant later
+    env.create_tenant(banned_tenant, placement_policy='{"Attached": 1}')
+
+    shard_count = 4
+    allowed_tenant = TenantId.generate()
+    status_by_tenant[allowed_tenant] = 200
+    env.create_tenant(allowed_tenant, shard_count=shard_count, placement_policy='{"Attached": 1}')
+
+    # Find the pageserver of the banned tenant
+    banned_tenant_ps = env.get_tenant_pageserver(banned_tenant)
+    assert banned_tenant_ps is not None
+    alive_pageservers = [p for p in env.pageservers if p.id != banned_tenant_ps.id]
+
+    # Stop pageserver and ban tenant to trigger failed reconciliation
+    status_by_tenant[banned_tenant] = 423
+    banned_tenant_ps.stop()
+    env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
+    env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
+    env.storage_controller.allowed_errors.append(".*Shard reconciliation is keep-failing.*")
+    env.storage_controller.node_configure(banned_tenant_ps.id, {"availability": "Offline"})
+
+    # Migrate all allowed tenant shards to the first alive pageserver
+    # to trigger storage controller optimizations due to affinity rules
+    for shard_number in range(shard_count):
+        env.storage_controller.tenant_shard_migrate(
+            TenantShardId(allowed_tenant, shard_number, shard_count),
+            alive_pageservers[0].id,
+            config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
+        )
+
+    # Make some reconcile_all calls to trigger optimizations
+    # RECONCILE_COUNT must be greater than storcon's MAX_CONSECUTIVE_RECONCILIATION_ERRORS
+    RECONCILE_COUNT = 12
+    for i in range(RECONCILE_COUNT):
+        try:
+            n = env.storage_controller.reconcile_all()
+            log.info(f"Reconciliation attempt {i} finished with success: {n}")
+        except StorageControllerApiException as e:
+            assert "Control plane tenant busy" in str(e)
+            log.info(f"Reconciliation attempt {i} finished with failure")
+
+        banned_descr = env.storage_controller.tenant_describe(banned_tenant)
+        assert banned_descr["shards"][0]["is_pending_compute_notification"] is True
+        time.sleep(2)
+
+    # Check that the allowed tenant shards are optimized due to affinity rules
+    locations = alive_pageservers[0].http_client().tenant_list_locations()["tenant_shards"]
+    not_optimized_shard_count = 0
+    for loc in locations:
+        tsi = TenantShardId.parse(loc[0])
+        if tsi.tenant_id != allowed_tenant:
+            continue
+        if loc[1]["mode"] == "AttachedSingle":
+            not_optimized_shard_count += 1
+        log.info(f"Shard {tsi} seen in mode {loc[1]['mode']}")
+
+    assert not_optimized_shard_count < shard_count, "At least one shard should be optimized"
+
+    # Unban the tenant and run reconciliations
+    status_by_tenant[banned_tenant] = 200
+    env.storage_controller.reconcile_all()
+    banned_descr = env.storage_controller.tenant_describe(banned_tenant)
+    assert banned_descr["shards"][0]["is_pending_compute_notification"] is False
+
+
 @run_only_on_default_postgres("this test doesn't start an endpoint")
 def test_storage_controller_compute_hook_revert(
     httpserver: HTTPServer,
@@ -3530,18 +3626,21 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     # some small tests for the scheduling policy querying and returning APIs
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
-    assert newest_info["scheduling_policy"] == "Pause"
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
-    newest_info = target.get_safekeeper(inserted["id"])
-    assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
-    # Ensure idempotency
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
-    newest_info = target.get_safekeeper(inserted["id"])
-    assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
-    # change back to paused again
+    assert (
+        newest_info["scheduling_policy"] == "Activating"
+        or newest_info["scheduling_policy"] == "Active"
+    )
     target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Pause"
+    # Ensure idempotency
+    target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Pause"
+    # change back to active again
+    target.safekeeper_scheduling_policy(inserted["id"], "Active")
 
     def storcon_heartbeat():
         assert env.storage_controller.log_contains(
@@ -3549,6 +3648,57 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_until(storcon_heartbeat)
+
+    # Now decomission it
+    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+
+
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
+def test_safekeeper_activating_to_active(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    fake_id = 5
+
+    target = env.storage_controller
+
+    assert target.get_safekeeper(fake_id) is None
+
+    start_sks = target.get_safekeepers()
+
+    sk_0 = env.safekeepers[0]
+
+    body = {
+        "active": True,
+        "id": fake_id,
+        "created_at": "2023-10-25T09:11:25Z",
+        "updated_at": "2024-08-28T11:32:43Z",
+        "region_id": "aws-eu-central-1",
+        "host": "localhost",
+        "port": sk_0.port.pg,
+        "http_port": sk_0.port.http,
+        "https_port": None,
+        "version": 5957,
+        "availability_zone_id": "eu-central-1a",
+    }
+
+    target.on_safekeeper_deploy(fake_id, body)
+
+    inserted = target.get_safekeeper(fake_id)
+    assert inserted is not None
+    assert target.get_safekeepers() == start_sks + [inserted]
+    assert eq_safekeeper_records(body, inserted)
+
+    def safekeeper_is_active():
+        newest_info = target.get_safekeeper(inserted["id"])
+        assert newest_info
+        assert newest_info["scheduling_policy"] == "Active"
+
+    wait_until(safekeeper_is_active)
+
+    target.safekeeper_scheduling_policy(inserted["id"], "Activating")
+
+    wait_until(safekeeper_is_active)
 
     # Now decomission it
     target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
