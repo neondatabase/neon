@@ -31,8 +31,8 @@ use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
     NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
     ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
-    TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
-    TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
+    SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
+    TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
 use pageserver_api::models::{
@@ -209,6 +209,10 @@ enum ShardGenerationValidity {
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 pub const PRIORITY_RECONCILER_CONCURRENCY_DEFAULT: usize = 256;
 pub const SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT: usize = 32;
+
+// Number of consecutive reconciliation errors, occured for one shard,
+// after which the shard is ignored when considering to run optimizations.
+const MAX_CONSECUTIVE_RECONCILIATION_ERRORS: usize = 5;
 
 // Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
 // This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
@@ -702,6 +706,36 @@ struct ShardMutationLocations {
 #[derive(Default, Clone)]
 struct TenantMutationLocations(BTreeMap<TenantShardId, ShardMutationLocations>);
 
+struct ReconcileAllResult {
+    spawned_reconciles: usize,
+    keep_failing_reconciles: usize,
+    has_delayed_reconciles: bool,
+}
+
+impl ReconcileAllResult {
+    fn new(
+        spawned_reconciles: usize,
+        keep_failing_reconciles: usize,
+        has_delayed_reconciles: bool,
+    ) -> Self {
+        assert!(
+            spawned_reconciles >= keep_failing_reconciles,
+            "It is impossible to have more keep-failing reconciles than spawned reconciles"
+        );
+        Self {
+            spawned_reconciles,
+            keep_failing_reconciles,
+            has_delayed_reconciles,
+        }
+    }
+
+    /// We can run optimizations only if we don't have any delayed reconciles and
+    /// all spawned reconciles are also keep-failing reconciles.
+    fn can_run_optimizations(&self) -> bool {
+        !self.has_delayed_reconciles && self.spawned_reconciles == self.keep_failing_reconciles
+    }
+}
+
 impl Service {
     pub fn get_config(&self) -> &Config {
         &self.config
@@ -899,7 +933,7 @@ impl Service {
         // which require it: under normal circumstances this should only include tenants that were in some
         // transient state before we restarted, or any tenants whose compute hooks failed above.
         tracing::info!("Checking for shards in need of reconciliation...");
-        let reconcile_tasks = self.reconcile_all();
+        let reconcile_all_result = self.reconcile_all();
         // We will not wait for these reconciliation tasks to run here: we're now done with startup and
         // normal operations may proceed.
 
@@ -947,8 +981,9 @@ impl Service {
             }
         }
 
+        let spawned_reconciles = reconcile_all_result.spawned_reconciles;
         tracing::info!(
-            "Startup complete, spawned {reconcile_tasks} reconciliation tasks ({shard_count} shards total)"
+            "Startup complete, spawned {spawned_reconciles} reconciliation tasks ({shard_count} shards total)"
         );
     }
 
@@ -1199,8 +1234,8 @@ impl Service {
         while !self.reconcilers_cancel.is_cancelled() {
             tokio::select! {
               _ = interval.tick() => {
-                let reconciles_spawned = self.reconcile_all();
-                if reconciles_spawned == 0 {
+                let reconcile_all_result = self.reconcile_all();
+                if reconcile_all_result.can_run_optimizations() {
                     // Run optimizer only when we didn't find any other work to do
                     self.optimize_all().await;
                 }
@@ -1214,7 +1249,7 @@ impl Service {
     }
     /// Heartbeat all storage nodes once in a while.
     #[instrument(skip_all)]
-    async fn spawn_heartbeat_driver(&self) {
+    async fn spawn_heartbeat_driver(self: &Arc<Self>) {
         self.startup_complete.clone().wait().await;
 
         let mut interval = tokio::time::interval(self.config.heartbeat_interval);
@@ -1341,18 +1376,51 @@ impl Service {
                 }
             }
             if let Ok(deltas) = res_sk {
-                let mut locked = self.inner.write().unwrap();
-                let mut safekeepers = (*locked.safekeepers).clone();
-                for (id, state) in deltas.0 {
-                    let Some(sk) = safekeepers.get_mut(&id) else {
-                        tracing::info!(
-                            "Couldn't update safekeeper safekeeper state for id {id} from heartbeat={state:?}"
-                        );
-                        continue;
-                    };
-                    sk.set_availability(state);
+                let mut to_activate = Vec::new();
+                {
+                    let mut locked = self.inner.write().unwrap();
+                    let mut safekeepers = (*locked.safekeepers).clone();
+
+                    for (id, state) in deltas.0 {
+                        let Some(sk) = safekeepers.get_mut(&id) else {
+                            tracing::info!(
+                                "Couldn't update safekeeper safekeeper state for id {id} from heartbeat={state:?}"
+                            );
+                            continue;
+                        };
+                        if sk.scheduling_policy() == SkSchedulingPolicy::Activating
+                            && let SafekeeperState::Available { .. } = state
+                        {
+                            to_activate.push(id);
+                        }
+                        sk.set_availability(state);
+                    }
+                    locked.safekeepers = Arc::new(safekeepers);
                 }
-                locked.safekeepers = Arc::new(safekeepers);
+                for sk_id in to_activate {
+                    // TODO this can race with set_scheduling_policy (can create disjoint DB <-> in-memory state)
+                    tracing::info!("Activating safekeeper {sk_id}");
+                    match self.persistence.activate_safekeeper(sk_id.0 as i64).await {
+                        Ok(Some(())) => {}
+                        Ok(None) => {
+                            tracing::info!(
+                                "safekeeper {sk_id} has been removed from db or has different scheduling policy than active or activating"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("couldn't apply activation of {sk_id} to db: {e}");
+                            continue;
+                        }
+                    }
+                    if let Err(e) = self
+                        .set_safekeeper_scheduling_policy_in_mem(sk_id, SkSchedulingPolicy::Active)
+                        .await
+                    {
+                        tracing::info!("couldn't activate safekeeper {sk_id} in memory: {e}");
+                        continue;
+                    }
+                    tracing::info!("Activation of safekeeper {sk_id} done");
+                }
             }
         }
     }
@@ -1408,6 +1476,7 @@ impl Service {
 
         match result.result {
             Ok(()) => {
+                tenant.consecutive_errors_count = 0;
                 tenant.apply_observed_deltas(deltas);
                 tenant.waiter.advance(result.sequence);
             }
@@ -1425,6 +1494,8 @@ impl Service {
                         tracing::warn!("Reconcile error: {}", e);
                     }
                 }
+
+                tenant.consecutive_errors_count = tenant.consecutive_errors_count.saturating_add(1);
 
                 // Ordering: populate last_error before advancing error_seq,
                 // so that waiters will see the correct error after waiting.
@@ -8026,7 +8097,7 @@ impl Service {
     /// Returns how many reconciliation tasks were started, or `1` if no reconciles were
     /// spawned but some _would_ have been spawned if `reconciler_concurrency` units where
     /// available.  A return value of 0 indicates that everything is fully reconciled already.
-    fn reconcile_all(&self) -> usize {
+    fn reconcile_all(&self) -> ReconcileAllResult {
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, scheduler) = locked.parts_mut();
         let pageservers = nodes.clone();
@@ -8034,13 +8105,16 @@ impl Service {
         // This function is an efficient place to update lazy statistics, since we are walking
         // all tenants.
         let mut pending_reconciles = 0;
+        let mut keep_failing_reconciles = 0;
         let mut az_violations = 0;
 
         // If we find any tenants to drop from memory, stash them to offload after
         // we're done traversing the map of tenants.
         let mut drop_detached_tenants = Vec::new();
 
-        let mut reconciles_spawned = 0;
+        let mut spawned_reconciles = 0;
+        let mut has_delayed_reconciles = false;
+
         for shard in tenants.values_mut() {
             // Accumulate scheduling statistics
             if let (Some(attached), Some(preferred)) =
@@ -8060,18 +8134,32 @@ impl Service {
                 // If there is something delayed, then return a nonzero count so that
                 // callers like reconcile_all_now do not incorrectly get the impression
                 // that the system is in a quiescent state.
-                reconciles_spawned = std::cmp::max(1, reconciles_spawned);
+                has_delayed_reconciles = true;
                 pending_reconciles += 1;
                 continue;
             }
 
             // Eventual consistency: if an earlier reconcile job failed, and the shard is still
             // dirty, spawn another one
+            let consecutive_errors_count = shard.consecutive_errors_count;
             if self
                 .maybe_reconcile_shard(shard, &pageservers, ReconcilerPriority::Normal)
                 .is_some()
             {
-                reconciles_spawned += 1;
+                spawned_reconciles += 1;
+
+                // Count shards that are keep-failing. We still want to reconcile them
+                // to avoid a situation where a shard is stuck.
+                // But we don't want to consider them when deciding to run optimizations.
+                if consecutive_errors_count >= MAX_CONSECUTIVE_RECONCILIATION_ERRORS {
+                    tracing::warn!(
+                        tenant_id=%shard.tenant_shard_id.tenant_id,
+                        shard_id=%shard.tenant_shard_id.shard_slug(),
+                        "Shard reconciliation is keep-failing: {} errors",
+                        consecutive_errors_count
+                    );
+                    keep_failing_reconciles += 1;
+                }
             } else if shard.delayed_reconcile {
                 // Shard wanted to reconcile but for some reason couldn't.
                 pending_reconciles += 1;
@@ -8110,7 +8198,16 @@ impl Service {
             .storage_controller_pending_reconciles
             .set(pending_reconciles as i64);
 
-        reconciles_spawned
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_keep_failing_reconciles
+            .set(keep_failing_reconciles as i64);
+
+        ReconcileAllResult::new(
+            spawned_reconciles,
+            keep_failing_reconciles,
+            has_delayed_reconciles,
+        )
     }
 
     /// `optimize` in this context means identifying shards which have valid scheduled locations, but
@@ -8783,13 +8880,13 @@ impl Service {
     /// also wait for any generated Reconcilers to complete.  Calling this until it returns zero should
     /// put the system into a quiescent state where future background reconciliations won't do anything.
     pub(crate) async fn reconcile_all_now(&self) -> Result<usize, ReconcileWaitError> {
-        let reconciles_spawned = self.reconcile_all();
-        let reconciles_spawned = if reconciles_spawned == 0 {
+        let reconcile_all_result = self.reconcile_all();
+        let mut spawned_reconciles = reconcile_all_result.spawned_reconciles;
+        if reconcile_all_result.can_run_optimizations() {
             // Only optimize when we are otherwise idle
-            self.optimize_all().await
-        } else {
-            reconciles_spawned
-        };
+            let optimization_reconciles = self.optimize_all().await;
+            spawned_reconciles += optimization_reconciles;
+        }
 
         let waiters = {
             let mut waiters = Vec::new();
@@ -8826,11 +8923,11 @@ impl Service {
 
         tracing::info!(
             "{} reconciles in reconcile_all, {} waiters",
-            reconciles_spawned,
+            spawned_reconciles,
             waiter_count
         );
 
-        Ok(std::cmp::max(waiter_count, reconciles_spawned))
+        Ok(std::cmp::max(waiter_count, spawned_reconciles))
     }
 
     async fn stop_reconciliations(&self, reason: StopReconciliationsReason) {

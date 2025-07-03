@@ -1,23 +1,25 @@
+use std::pin::pin;
+use std::sync::Arc;
+
 use bytes::Bytes;
 use futures::future::{Either, select, try_join};
 use futures::{StreamExt, TryFutureExt};
-use http::{Method, header::AUTHORIZATION};
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use http::Method;
+use http::header::AUTHORIZATION;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
-use hyper::{
-    Request, Response, StatusCode, header,
-    http::{HeaderName, HeaderValue},
-};
+use hyper::http::{HeaderName, HeaderValue};
+use hyper::{Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{
     GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, RowStream, Transaction,
 };
 use serde::Serialize;
-use serde_json::{Value, value::RawValue};
-use std::pin::pin;
-use std::sync::Arc;
+use serde_json::Value;
+use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, debug, error, info};
@@ -33,7 +35,6 @@ use super::http_util::{
 };
 use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
 use crate::auth::backend::ComputeCredentialKeys;
-
 use crate::config::{HttpConfig, ProxyConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};

@@ -1388,6 +1388,48 @@ impl Persistence {
         .await
     }
 
+    /// Activate the given safekeeper, ensuring that there is no TOCTOU.
+    /// Returns `Some` if the safekeeper has indeed been activating (or already active). Other states return `None`.
+    pub(crate) async fn activate_safekeeper(&self, id_: i64) -> Result<Option<()>, DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| {
+            Box::pin(async move {
+                #[derive(Insertable, AsChangeset)]
+                #[diesel(table_name = crate::schema::safekeepers)]
+                struct UpdateSkSchedulingPolicy<'a> {
+                    id: i64,
+                    scheduling_policy: &'a str,
+                }
+                let scheduling_policy_active = String::from(SkSchedulingPolicy::Active);
+                let scheduling_policy_activating = String::from(SkSchedulingPolicy::Activating);
+
+                let rows_affected = diesel::update(
+                    safekeepers.filter(id.eq(id_)).filter(
+                        scheduling_policy
+                            .eq(scheduling_policy_activating)
+                            .or(scheduling_policy.eq(&scheduling_policy_active)),
+                    ),
+                )
+                .set(scheduling_policy.eq(&scheduling_policy_active))
+                .execute(conn)
+                .await?;
+
+                if rows_affected == 0 {
+                    return Ok(Some(()));
+                }
+                if rows_affected != 1 {
+                    return Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({rows_affected})",
+                    )));
+                }
+
+                Ok(Some(()))
+            })
+        })
+        .await
+    }
+
     /// Persist timeline. Returns if the timeline was newly inserted. If it wasn't, we haven't done any writes.
     pub(crate) async fn insert_timeline(&self, entry: TimelinePersistence) -> DatabaseResult<bool> {
         use crate::schema::timelines;

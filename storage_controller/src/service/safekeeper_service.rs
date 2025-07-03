@@ -236,40 +236,30 @@ impl Service {
         F: std::future::Future<Output = mgmt_api::Result<T>> + Send + 'static,
         T: Sync + Send + 'static,
     {
+        let target_sk_count = safekeepers.len();
+
+        if target_sk_count == 0 {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "timeline configured without any safekeepers"
+            )));
+        }
+
+        if target_sk_count < self.config.timeline_safekeeper_count {
+            tracing::warn!(
+                "running a quorum operation with {} safekeepers, which is less than configured {} safekeepers per timeline",
+                target_sk_count,
+                self.config.timeline_safekeeper_count
+            );
+        }
+
         let results = self
             .tenant_timeline_safekeeper_op(safekeepers, op, timeout)
             .await?;
 
         // Now check if quorum was reached in results.
 
-        let target_sk_count = safekeepers.len();
-        let quorum_size = match target_sk_count {
-            0 => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "timeline configured without any safekeepers",
-                )));
-            }
-            1 | 2 => {
-                #[cfg(feature = "testing")]
-                {
-                    // In test settings, it is allowed to have one or two safekeepers
-                    target_sk_count
-                }
-                #[cfg(not(feature = "testing"))]
-                {
-                    // The region is misconfigured: we need at least three safekeepers to be configured
-                    // in order to schedule work to them
-                    tracing::warn!(
-                        "couldn't find at least 3 safekeepers for timeline, found: {:?}",
-                        target_sk_count
-                    );
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                        "couldn't find at least 3 safekeepers to put timeline to"
-                    )));
-                }
-            }
-            _ => target_sk_count / 2 + 1,
-        };
+        let quorum_size = target_sk_count / 2 + 1;
+
         let success_count = results.iter().filter(|res| res.is_ok()).count();
         if success_count < quorum_size {
             // Failure
@@ -815,7 +805,7 @@ impl Service {
                         Safekeeper::from_persistence(
                             crate::persistence::SafekeeperPersistence::from_upsert(
                                 record,
-                                SkSchedulingPolicy::Pause,
+                                SkSchedulingPolicy::Activating,
                             ),
                             CancellationToken::new(),
                             use_https,
@@ -856,27 +846,36 @@ impl Service {
             .await?;
         let node_id = NodeId(id as u64);
         // After the change has been persisted successfully, update the in-memory state
-        {
-            let mut locked = self.inner.write().unwrap();
-            let mut safekeepers = (*locked.safekeepers).clone();
-            let sk = safekeepers
-                .get_mut(&node_id)
-                .ok_or(DatabaseError::Logical("Not found".to_string()))?;
-            sk.set_scheduling_policy(scheduling_policy);
+        self.set_safekeeper_scheduling_policy_in_mem(node_id, scheduling_policy)
+            .await
+    }
 
-            match scheduling_policy {
-                SkSchedulingPolicy::Active => {
-                    locked
-                        .safekeeper_reconcilers
-                        .start_reconciler(node_id, self);
-                }
-                SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
-                    locked.safekeeper_reconcilers.stop_reconciler(node_id);
-                }
+    pub(crate) async fn set_safekeeper_scheduling_policy_in_mem(
+        self: &Arc<Service>,
+        node_id: NodeId,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        let mut locked = self.inner.write().unwrap();
+        let mut safekeepers = (*locked.safekeepers).clone();
+        let sk = safekeepers
+            .get_mut(&node_id)
+            .ok_or(DatabaseError::Logical("Not found".to_string()))?;
+        sk.set_scheduling_policy(scheduling_policy);
+
+        match scheduling_policy {
+            SkSchedulingPolicy::Active => {
+                locked
+                    .safekeeper_reconcilers
+                    .start_reconciler(node_id, self);
             }
-
-            locked.safekeepers = Arc::new(safekeepers);
+            SkSchedulingPolicy::Decomissioned
+            | SkSchedulingPolicy::Pause
+            | SkSchedulingPolicy::Activating => {
+                locked.safekeeper_reconcilers.stop_reconciler(node_id);
+            }
         }
+
+        locked.safekeepers = Arc::new(safekeepers);
         Ok(())
     }
 
