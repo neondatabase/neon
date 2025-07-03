@@ -1,11 +1,11 @@
-use std::convert::Infallible;
-use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::FutureExt;
 use redis::aio::{ConnectionLike, MultiplexedConnection};
 use redis::{ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo, RedisResult};
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
 use super::elasticache::CredentialsProvider;
@@ -32,7 +32,7 @@ pub struct ConnectionWithCredentialsProvider {
     credentials: Credentials,
     // TODO: with more load on the connection, we should consider using a connection pool
     con: Option<MultiplexedConnection>,
-    refresh_token_task: Option<JoinHandle<Infallible>>,
+    refresh_token_task: Option<AbortHandle>,
     mutex: tokio::sync::Mutex<()>,
     credentials_refreshed: Arc<AtomicBool>,
 }
@@ -127,7 +127,7 @@ impl ConnectionWithCredentialsProvider {
                 credentials_provider,
                 credentials_refreshed,
             ));
-            self.refresh_token_task = Some(f);
+            self.refresh_token_task = Some(f.abort_handle());
         }
         match Self::ping(&mut con).await {
             Ok(()) => {
@@ -179,7 +179,7 @@ impl ConnectionWithCredentialsProvider {
         mut con: MultiplexedConnection,
         credentials_provider: Arc<CredentialsProvider>,
         credentials_refreshed: Arc<AtomicBool>,
-    ) -> Infallible {
+    ) -> ! {
         loop {
             // The connection lives for 12h, for the sanity check we refresh it every hour.
             tokio::time::sleep(Duration::from_secs(60 * 60)).await;
@@ -244,7 +244,7 @@ impl ConnectionLike for ConnectionWithCredentialsProvider {
         &'a mut self,
         cmd: &'a redis::Cmd,
     ) -> redis::RedisFuture<'a, redis::Value> {
-        (async move { self.send_packed_command(cmd).await }).boxed()
+        self.send_packed_command(cmd).boxed()
     }
 
     fn req_packed_commands<'a>(
@@ -253,10 +253,10 @@ impl ConnectionLike for ConnectionWithCredentialsProvider {
         offset: usize,
         count: usize,
     ) -> redis::RedisFuture<'a, Vec<redis::Value>> {
-        (async move { self.send_packed_commands(cmd, offset, count).await }).boxed()
+        self.send_packed_commands(cmd, offset, count).boxed()
     }
 
     fn get_db(&self) -> i64 {
-        0
+        self.con.as_ref().map_or(0, |c| c.get_db())
     }
 }
