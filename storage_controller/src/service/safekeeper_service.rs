@@ -805,7 +805,7 @@ impl Service {
                         Safekeeper::from_persistence(
                             crate::persistence::SafekeeperPersistence::from_upsert(
                                 record,
-                                SkSchedulingPolicy::Pause,
+                                SkSchedulingPolicy::Activating,
                             ),
                             CancellationToken::new(),
                             use_https,
@@ -846,27 +846,36 @@ impl Service {
             .await?;
         let node_id = NodeId(id as u64);
         // After the change has been persisted successfully, update the in-memory state
-        {
-            let mut locked = self.inner.write().unwrap();
-            let mut safekeepers = (*locked.safekeepers).clone();
-            let sk = safekeepers
-                .get_mut(&node_id)
-                .ok_or(DatabaseError::Logical("Not found".to_string()))?;
-            sk.set_scheduling_policy(scheduling_policy);
+        self.set_safekeeper_scheduling_policy_in_mem(node_id, scheduling_policy)
+            .await
+    }
 
-            match scheduling_policy {
-                SkSchedulingPolicy::Active => {
-                    locked
-                        .safekeeper_reconcilers
-                        .start_reconciler(node_id, self);
-                }
-                SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
-                    locked.safekeeper_reconcilers.stop_reconciler(node_id);
-                }
+    pub(crate) async fn set_safekeeper_scheduling_policy_in_mem(
+        self: &Arc<Service>,
+        node_id: NodeId,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        let mut locked = self.inner.write().unwrap();
+        let mut safekeepers = (*locked.safekeepers).clone();
+        let sk = safekeepers
+            .get_mut(&node_id)
+            .ok_or(DatabaseError::Logical("Not found".to_string()))?;
+        sk.set_scheduling_policy(scheduling_policy);
+
+        match scheduling_policy {
+            SkSchedulingPolicy::Active => {
+                locked
+                    .safekeeper_reconcilers
+                    .start_reconciler(node_id, self);
             }
-
-            locked.safekeepers = Arc::new(safekeepers);
+            SkSchedulingPolicy::Decomissioned
+            | SkSchedulingPolicy::Pause
+            | SkSchedulingPolicy::Activating => {
+                locked.safekeeper_reconcilers.stop_reconciler(node_id);
+            }
         }
+
+        locked.safekeepers = Arc::new(safekeepers);
         Ok(())
     }
 

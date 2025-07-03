@@ -31,8 +31,8 @@ use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
     NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
     ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
-    TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
-    TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
+    SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
+    TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
 use pageserver_api::models::{
@@ -1249,7 +1249,7 @@ impl Service {
     }
     /// Heartbeat all storage nodes once in a while.
     #[instrument(skip_all)]
-    async fn spawn_heartbeat_driver(&self) {
+    async fn spawn_heartbeat_driver(self: &Arc<Self>) {
         self.startup_complete.clone().wait().await;
 
         let mut interval = tokio::time::interval(self.config.heartbeat_interval);
@@ -1376,18 +1376,51 @@ impl Service {
                 }
             }
             if let Ok(deltas) = res_sk {
-                let mut locked = self.inner.write().unwrap();
-                let mut safekeepers = (*locked.safekeepers).clone();
-                for (id, state) in deltas.0 {
-                    let Some(sk) = safekeepers.get_mut(&id) else {
-                        tracing::info!(
-                            "Couldn't update safekeeper safekeeper state for id {id} from heartbeat={state:?}"
-                        );
-                        continue;
-                    };
-                    sk.set_availability(state);
+                let mut to_activate = Vec::new();
+                {
+                    let mut locked = self.inner.write().unwrap();
+                    let mut safekeepers = (*locked.safekeepers).clone();
+
+                    for (id, state) in deltas.0 {
+                        let Some(sk) = safekeepers.get_mut(&id) else {
+                            tracing::info!(
+                                "Couldn't update safekeeper safekeeper state for id {id} from heartbeat={state:?}"
+                            );
+                            continue;
+                        };
+                        if sk.scheduling_policy() == SkSchedulingPolicy::Activating
+                            && let SafekeeperState::Available { .. } = state
+                        {
+                            to_activate.push(id);
+                        }
+                        sk.set_availability(state);
+                    }
+                    locked.safekeepers = Arc::new(safekeepers);
                 }
-                locked.safekeepers = Arc::new(safekeepers);
+                for sk_id in to_activate {
+                    // TODO this can race with set_scheduling_policy (can create disjoint DB <-> in-memory state)
+                    tracing::info!("Activating safekeeper {sk_id}");
+                    match self.persistence.activate_safekeeper(sk_id.0 as i64).await {
+                        Ok(Some(())) => {}
+                        Ok(None) => {
+                            tracing::info!(
+                                "safekeeper {sk_id} has been removed from db or has different scheduling policy than active or activating"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("couldn't apply activation of {sk_id} to db: {e}");
+                            continue;
+                        }
+                    }
+                    if let Err(e) = self
+                        .set_safekeeper_scheduling_policy_in_mem(sk_id, SkSchedulingPolicy::Active)
+                        .await
+                    {
+                        tracing::info!("couldn't activate safekeeper {sk_id} in memory: {e}");
+                        continue;
+                    }
+                    tracing::info!("Activation of safekeeper {sk_id} done");
+                }
             }
         }
     }

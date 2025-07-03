@@ -3626,18 +3626,21 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     # some small tests for the scheduling policy querying and returning APIs
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
-    assert newest_info["scheduling_policy"] == "Pause"
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
-    newest_info = target.get_safekeeper(inserted["id"])
-    assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
-    # Ensure idempotency
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
-    newest_info = target.get_safekeeper(inserted["id"])
-    assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
-    # change back to paused again
+    assert (
+        newest_info["scheduling_policy"] == "Activating"
+        or newest_info["scheduling_policy"] == "Active"
+    )
     target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Pause"
+    # Ensure idempotency
+    target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Pause"
+    # change back to active again
+    target.safekeeper_scheduling_policy(inserted["id"], "Active")
 
     def storcon_heartbeat():
         assert env.storage_controller.log_contains(
@@ -3645,6 +3648,57 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_until(storcon_heartbeat)
+
+    # Now decomission it
+    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+
+
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
+def test_safekeeper_activating_to_active(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    fake_id = 5
+
+    target = env.storage_controller
+
+    assert target.get_safekeeper(fake_id) is None
+
+    start_sks = target.get_safekeepers()
+
+    sk_0 = env.safekeepers[0]
+
+    body = {
+        "active": True,
+        "id": fake_id,
+        "created_at": "2023-10-25T09:11:25Z",
+        "updated_at": "2024-08-28T11:32:43Z",
+        "region_id": "aws-eu-central-1",
+        "host": "localhost",
+        "port": sk_0.port.pg,
+        "http_port": sk_0.port.http,
+        "https_port": None,
+        "version": 5957,
+        "availability_zone_id": "eu-central-1a",
+    }
+
+    target.on_safekeeper_deploy(fake_id, body)
+
+    inserted = target.get_safekeeper(fake_id)
+    assert inserted is not None
+    assert target.get_safekeepers() == start_sks + [inserted]
+    assert eq_safekeeper_records(body, inserted)
+
+    def safekeeper_is_active():
+        newest_info = target.get_safekeeper(inserted["id"])
+        assert newest_info
+        assert newest_info["scheduling_policy"] == "Active"
+
+    wait_until(safekeeper_is_active)
+
+    target.safekeeper_scheduling_policy(inserted["id"], "Activating")
+
+    wait_until(safekeeper_is_active)
 
     # Now decomission it
     target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
