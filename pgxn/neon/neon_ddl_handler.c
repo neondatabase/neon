@@ -105,7 +105,7 @@ typedef struct DdlHashTable
 
 static DdlHashTable RootTable;
 static DdlHashTable *CurrentDdlTable = &RootTable;
-static int SubtransDdlLevel; /* number of subtransactions since last DDL or top transaction */
+static int SubtransLevel; /* current nesting level of subtransactions */
 
 static void
 PushKeyValue(JsonbParseState **state, char *key, char *value)
@@ -338,15 +338,14 @@ static void
 InitCurrentDdlTableIfNeeded()
 {
 	/* Lazy construction of DllHashTable chain */
-	if (SubtransDdlLevel != 0)
+	if (SubtransLevel > CurrentDdlTable->subtrans_level)
 	{
 		DdlHashTable *new_table = MemoryContextAlloc(CurTransactionContext, sizeof(DdlHashTable));
 		new_table->prev_table = CurrentDdlTable;
-		new_table->subtrans_level = SubtransDdlLevel - 1;
+		new_table->subtrans_level = SubtransLevel;
 		new_table->role_table = NULL;
 		new_table->db_table = NULL;
 		CurrentDdlTable = new_table;
-		SubtransDdlLevel = 0;
 	}
 }
 
@@ -391,7 +390,7 @@ InitRoleTableIfNeeded()
 static void
 PushTable()
 {
-	SubtransDdlLevel += 1;
+	SubtransLevel += 1;
 }
 
 static void
@@ -399,15 +398,14 @@ MergeTable()
 {
 	DdlHashTable *old_table;
 
-	if (SubtransDdlLevel != 0)
+	Assert(SubtransLevel >= CurrentDdlTable->subtrans_level);
+	if (--SubtransLevel >= CurrentDdlTable->subtrans_level)
 	{
-		SubtransDdlLevel -= 1;
 		return;
 	}
 
 	old_table = CurrentDdlTable;
 	CurrentDdlTable = old_table->prev_table;
-	SubtransDdlLevel = old_table->subtrans_level;
 
 	if (old_table->db_table)
 	{
@@ -499,17 +497,13 @@ MergeTable()
 static void
 PopTable()
 {
-	if (SubtransDdlLevel != 0)
-	{
-		SubtransDdlLevel -= 1;
-	}
-	else
+	Assert(SubtransLevel >= CurrentDdlTable->subtrans_level);
+	if (--SubtransLevel < CurrentDdlTable->subtrans_level)
 	{
 		/*
 		 * Current table gets freed because it is allocated in aborted
 		 * subtransaction's memory context.
 		 */
-		SubtransDdlLevel = CurrentDdlTable->subtrans_level;
 		CurrentDdlTable = CurrentDdlTable->prev_table;
 	}
 }
