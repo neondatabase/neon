@@ -4948,7 +4948,6 @@ name = "postgres_versioninfo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "rstest",
  "serde",
  "serde_repr",
  "thiserror 1.0.69",

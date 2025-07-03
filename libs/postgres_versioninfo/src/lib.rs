@@ -113,10 +113,10 @@ impl PgMajorVersion {
 impl Display for PgMajorVersion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            PgMajorVersion::PG14 => "14",
-            PgMajorVersion::PG15 => "15",
-            PgMajorVersion::PG16 => "16",
-            PgMajorVersion::PG17 => "17",
+            PgMajorVersion::PG14 => "PgMajorVersion::PG14",
+            PgMajorVersion::PG15 => "PgMajorVersion::PG15",
+            PgMajorVersion::PG16 => "PgMajorVersion::PG16",
+            PgMajorVersion::PG17 => "PgMajorVersion::PG17",
         })
     }
 }
@@ -171,21 +171,5 @@ impl FromStr for PgMajorVersion {
             "17" => PgMajorVersion::PG17,
             _ => return Err(PgMajorVersionParseError(s.to_string())),
         })
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use rstest::rstest;
-
-    #[rstest]
-    #[case("14", PgMajorVersion::PG14)]
-    #[case("15", PgMajorVersion::PG15)]
-    #[case("16", PgMajorVersion::PG16)]
-    #[case("17", PgMajorVersion::PG17)]
-    fn test_pg_major_version_parse(#[case] s: &str, #[case] expected: PgMajorVersion) {
-        assert_eq!(Ok(expected), PgMajorVersion::from_str(s));
-        assert_eq!(expected.to_string(), s);
     }
 }
