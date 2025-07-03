@@ -1508,6 +1508,7 @@ def test_sharding_split_failures(
     env.storage_controller.consistency_check()
 
 
+@pytest.mark.skip(reason="The backpressure change has not been merged yet.")
 def test_back_pressure_during_split(neon_env_builder: NeonEnvBuilder):
     """
     Test backpressure can ignore new shards during tenant split so that if we abort the split,
