@@ -2,15 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use tokio::time::Instant;
-use tracing::{error, info, instrument, warn};
+use tracing::instrument;
 
 use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
+use crate::retry::Retry;
 use compute_api::spec::PageserverProtocol;
 use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::shard::{ShardStripeSize, key_to_shard_number};
 use pageserver_page_api as page_api;
-use utils::backoff::exponential_backoff_duration;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 
@@ -29,6 +28,7 @@ use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 pub struct PageserverClient {
     // TODO: support swapping out the shard map, e.g. via an ArcSwap.
     shards: Shards,
+    retry: Retry,
 }
 
 impl PageserverClient {
@@ -42,7 +42,10 @@ impl PageserverClient {
         auth_token: Option<String>,
     ) -> anyhow::Result<Self> {
         let shards = Shards::new(tenant_id, timeline_id, shard_map, stripe_size, auth_token)?;
-        Ok(Self { shards })
+        Ok(Self {
+            shards,
+            retry: Retry,
+        })
     }
 
     /// Returns whether a relation exists.
@@ -51,12 +54,13 @@ impl PageserverClient {
         &self,
         req: page_api::CheckRelExistsRequest,
     ) -> tonic::Result<page_api::CheckRelExistsResponse> {
-        self.with_retries(async || {
-            // Relation metadata is only available on shard 0.
-            let mut client = self.shards.get_zero().client().await?;
-            client.check_rel_exists(req).await
-        })
-        .await
+        self.retry
+            .with(async || {
+                // Relation metadata is only available on shard 0.
+                let mut client = self.shards.get_zero().client().await?;
+                client.check_rel_exists(req).await
+            })
+            .await
     }
 
     /// Returns the total size of a database, as # of bytes.
@@ -65,12 +69,13 @@ impl PageserverClient {
         &self,
         req: page_api::GetDbSizeRequest,
     ) -> tonic::Result<page_api::GetDbSizeResponse> {
-        self.with_retries(async || {
-            // Relation metadata is only available on shard 0.
-            let mut client = self.shards.get_zero().client().await?;
-            client.get_db_size(req).await
-        })
-        .await
+        self.retry
+            .with(async || {
+                // Relation metadata is only available on shard 0.
+                let mut client = self.shards.get_zero().client().await?;
+                client.get_db_size(req).await
+            })
+            .await
     }
 
     /// Fetches a page. The `request_id` must be unique across all in-flight requests.
@@ -99,20 +104,21 @@ impl PageserverClient {
                 .ok_or_else(|| tonic::Status::invalid_argument("no block numbers provided"))?,
         );
 
-        self.with_retries(async || {
-            let stream = self.shards.get_for_key(key).stream().await;
-            let resp = stream.send(req.clone()).await?;
+        self.retry
+            .with(async || {
+                let stream = self.shards.get_for_key(key).stream().await;
+                let resp = stream.send(req.clone()).await?;
 
-            if resp.status_code != page_api::GetPageStatusCode::Ok {
-                return Err(tonic::Status::new(
-                    resp.status_code.into(),
-                    resp.reason.unwrap_or_else(|| String::from("unknown error")),
-                ));
-            }
+                if resp.status_code != page_api::GetPageStatusCode::Ok {
+                    return Err(tonic::Status::new(
+                        resp.status_code.into(),
+                        resp.reason.unwrap_or_else(|| String::from("unknown error")),
+                    ));
+                }
 
-            Ok(resp)
-        })
-        .await
+                Ok(resp)
+            })
+            .await
     }
 
     /// Returns the size of a relation, as # of blocks.
@@ -121,12 +127,13 @@ impl PageserverClient {
         &self,
         req: page_api::GetRelSizeRequest,
     ) -> tonic::Result<page_api::GetRelSizeResponse> {
-        self.with_retries(async || {
-            // Relation metadata is only available on shard 0.
-            let mut client = self.shards.get_zero().client().await?;
-            client.get_rel_size(req).await
-        })
-        .await
+        self.retry
+            .with(async || {
+                // Relation metadata is only available on shard 0.
+                let mut client = self.shards.get_zero().client().await?;
+                client.get_rel_size(req).await
+            })
+            .await
     }
 
     /// Fetches an SLRU segment.
@@ -135,123 +142,13 @@ impl PageserverClient {
         &self,
         req: page_api::GetSlruSegmentRequest,
     ) -> tonic::Result<page_api::GetSlruSegmentResponse> {
-        self.with_retries(async || {
-            // SLRU segments are only available on shard 0.
-            let mut client = self.shards.get_zero().client().await?;
-            client.get_slru_segment(req).await
-        })
-        .await
-    }
-
-    /// Runs the given closure with retries (exponential backoff). Logs errors.
-    async fn with_retries<T, F, O>(&self, mut f: F) -> tonic::Result<T>
-    where
-        F: FnMut() -> O,
-        O: Future<Output = tonic::Result<T>>,
-    {
-        // TODO: tune these, and/or make them configurable. Should we retry forever?
-        const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-        const BASE_BACKOFF: f64 = 0.1;
-        const MAX_BACKOFF: f64 = 10.0;
-        const LOG_SUCCESS: bool = false; // TODO: for debugging
-
-        fn should_retry(code: tonic::Code) -> bool {
-            match code {
-                tonic::Code::Ok => panic!("unexpected Ok status code"),
-                // These codes are transient, so retry them.
-                tonic::Code::Aborted => true,
-                tonic::Code::Cancelled => true,
-                tonic::Code::DeadlineExceeded => true, // maybe transient slowness
-                tonic::Code::Internal => true,         // maybe transient failure?
-                tonic::Code::ResourceExhausted => true,
-                tonic::Code::Unavailable => true,
-                // The following codes will like continue to fail, so don't retry.
-                tonic::Code::AlreadyExists => false,
-                tonic::Code::DataLoss => false,
-                tonic::Code::FailedPrecondition => false,
-                tonic::Code::InvalidArgument => false,
-                tonic::Code::NotFound => false,
-                tonic::Code::OutOfRange => false,
-                tonic::Code::PermissionDenied => false,
-                tonic::Code::Unauthenticated => false,
-                tonic::Code::Unimplemented => false,
-                tonic::Code::Unknown => false,
-            }
-        }
-
-        let started = Instant::now();
-        let deadline = started + TOTAL_TIMEOUT;
-        let mut last_error = None;
-        let mut retries = 0;
-        loop {
-            // Set up a future to wait for the backoff (if any) and run the request with a timeout.
-            let backoff = exponential_backoff_duration(retries, BASE_BACKOFF, MAX_BACKOFF);
-            let backoff_and_try = async {
-                tokio::time::sleep(backoff).await;
-                let request_started = Instant::now();
-                tokio::time::timeout(REQUEST_TIMEOUT, f())
-                    .await
-                    .map_err(|_| {
-                        tonic::Status::deadline_exceeded(format!(
-                            "request timed out after {:.3}s",
-                            request_started.elapsed().as_secs_f64()
-                        ))
-                    })?
-            };
-
-            // Wait for the backoff and request, or bail out if the total timeout is exceeded.
-            let result = tokio::select! {
-                result = backoff_and_try => result,
-
-                _ = tokio::time::sleep_until(deadline) => {
-                    let last_error = last_error.unwrap_or_else(|| {
-                        tonic::Status::deadline_exceeded(format!(
-                            "request timed out after {:.3}s",
-                            started.elapsed().as_secs_f64()
-                        ))
-                    });
-                    error!(
-                        "giving up after {:.3}s and {retries} retries, last error {:?}: {}",
-                        started.elapsed().as_secs_f64(), last_error.code(), last_error.message(),
-                    );
-                    return Err(last_error);
-                }
-            };
-
-            match result {
-                Ok(result) => {
-                    if retries > 0 || LOG_SUCCESS {
-                        info!(
-                            "request succeeded after {retries} retries in {:.3}s",
-                            started.elapsed().as_secs_f64(),
-                        );
-                    }
-
-                    return Ok(result);
-                }
-
-                Err(status) => {
-                    let (code, message) = (status.code(), status.message());
-                    let should_retry = should_retry(code);
-                    let attempt = retries + 1;
-
-                    if !should_retry {
-                        // NB: include the attempt here too. This isn't necessarily the first
-                        // attempt, because the error may change between attempts.
-                        error!(
-                            "request failed with {code:?}: {message}, not retrying (attempt {attempt})"
-                        );
-                        return Err(status);
-                    }
-
-                    warn!("request failed with {code:?}: {message}, retrying (attempt {attempt})");
-
-                    retries += 1;
-                    last_error = Some(status);
-                }
-            }
-        }
+        self.retry
+            .with(async || {
+                // SLRU segments are only available on shard 0.
+                let mut client = self.shards.get_zero().client().await?;
+                client.get_slru_segment(req).await
+            })
+            .await
     }
 }
 
