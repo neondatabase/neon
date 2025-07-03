@@ -3897,7 +3897,9 @@ where
                 && let Some(status) = tonic::Status::from_header_map(resp.headers())
                 && status.code() != tonic::Code::Ok
             {
-                // TODO: it would be nice if we could propagate the handler span fields here.
+                // TODO: it would be nice if we could propagate the handler span's request fields
+                // here. This could e.g. be done by attaching the request fields to
+                // tonic::Status::metadata via a proc macro.
                 warn!(
                     "request failed with {:?}: {}",
                     status.code(),
