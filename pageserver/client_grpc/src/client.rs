@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, ensure};
 use pageserver_page_api as page_api;
 use tokio::time::Instant;
-use tracing::{error, info, warn};
+use tracing::{error, info, instrument, warn};
 use utils::backoff::exponential_backoff_duration;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::{ShardCount, ShardIndex, ShardNumber};
@@ -40,6 +40,7 @@ impl PageserverClient {
     }
 
     /// Returns whether a relation exists.
+    #[instrument(skip_all, fields(rel=%req.rel, lsn=%req.read_lsn))]
     pub async fn check_rel_exists(
         &self,
         req: page_api::CheckRelExistsRequest,
@@ -53,6 +54,7 @@ impl PageserverClient {
     }
 
     /// Returns the total size of a database, as # of bytes.
+    #[instrument(skip_all, fields(db_oid=%req.db_oid, lsn=%req.read_lsn))]
     pub async fn get_db_size(
         &self,
         req: page_api::GetDbSizeRequest,
@@ -69,6 +71,13 @@ impl PageserverClient {
     ///
     /// Unlike the `page_api::Client`, this client automatically converts `status_code` into
     /// `tonic::Status` errors. All responses will have `GetPageStatusCode::Ok`.
+    #[instrument(skip_all, fields(
+        req_id = %req.request_id,
+        rel = %req.rel,
+        blkno = %req.block_numbers[0],
+        blks = %req.block_numbers.len(),
+        lsn = %req.read_lsn,
+    ))]
     pub async fn get_page(
         &self,
         req: page_api::GetPageRequest,
@@ -93,6 +102,7 @@ impl PageserverClient {
     }
 
     /// Returns the size of a relation, as # of blocks.
+    #[instrument(skip_all, fields(rel=%req.rel, lsn=%req.read_lsn))]
     pub async fn get_rel_size(
         &self,
         req: page_api::GetRelSizeRequest,
@@ -106,6 +116,7 @@ impl PageserverClient {
     }
 
     /// Fetches an SLRU segment.
+    #[instrument(skip_all, fields(kind=%req.kind, segno=%req.segno, lsn=%req.read_lsn))]
     pub async fn get_slru_segment(
         &self,
         req: page_api::GetSlruSegmentRequest,
@@ -129,6 +140,7 @@ impl PageserverClient {
         const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
         const BASE_BACKOFF: f64 = 0.1;
         const MAX_BACKOFF: f64 = 10.0;
+        const LOG_SUCCESS: bool = false; // TODO: for debugging
 
         fn should_retry(code: tonic::Code) -> bool {
             match code {
@@ -195,7 +207,7 @@ impl PageserverClient {
 
             match result {
                 Ok(result) => {
-                    if retries > 0 {
+                    if retries > 0 || LOG_SUCCESS {
                         info!(
                             "request succeeded after {retries} retries in {:.3}s",
                             started.elapsed().as_secs_f64(),
