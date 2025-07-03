@@ -847,6 +847,9 @@ communicator_new_write_page(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber 
 	};
 	NeonIOResult result;
 
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(lsn);
+
 	perform_request(&request, &result);
 	switch (result.tag)
 	{
@@ -883,6 +886,9 @@ communicator_new_rel_extend(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber 
 	};
 	NeonIOResult result;
 
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(lsn);
+
 	perform_request(&request, &result);
 	switch (result.tag)
 	{
@@ -917,6 +923,9 @@ communicator_new_rel_zeroextend(NRelFileInfo rinfo, ForkNumber forkNum, BlockNum
 		}
 	};
 	NeonIOResult result;
+
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(lsn);
 
 	perform_request(&request, &result);
 	switch (result.tag)

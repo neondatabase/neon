@@ -158,7 +158,6 @@ pub extern "C" fn bcomm_finish_cache_read(bs: &mut CommunicatorBackendStruct) ->
     }
 }
 
-
 /// Check if the local file cache contians the given block
 #[unsafe(no_mangle)]
 pub extern "C" fn bcomm_cache_contains(
@@ -176,10 +175,9 @@ pub extern "C" fn bcomm_cache_contains(
             relnode: rel_number,
             forknum: fork_number,
         },
-        block_number
+        block_number,
     )
 }
-
 
 impl<'t> CommunicatorBackendStruct<'t> {
     /// Send a wakeup to the communicator process

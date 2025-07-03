@@ -239,12 +239,26 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         // Is it possible that the last-written LSN is ahead of last flush LSN? Generally not, we
         // shouldn't evict a page from the buffer cache before all its modifications have been
         // safely flushed. That's the "WAL before data" rule. However, such case does exist at index
-        // building, _bt_blwritepage logs the full page without flushing WAL before smgrextend
+        // building: _bt_blwritepage logs the full page without flushing WAL before smgrextend
         // (files are fsynced before build ends).
         //
-        // FIXME: I'm seeing some other cases of this too in the regression tests.
-        // Maybe it's OK? Would be nice to dig a little deeper.
-        // See the old logic in neon_get_request_lsns() C function
+        // XXX: If we make a request LSN greater than the current WAL flush LSN, the pageserver would
+        // block waiting for the WAL arrive, until we flush it and it propagates through the
+        // safekeepers to the pageserver. If there's nothing that forces the WAL to be flushed,
+        // the pageserver would get stuck waiting forever. To avoid that, all the write-
+        // functions in communicator_new.c call XLogSetAsyncXactLSN(). That nudges the WAL writer to
+        // perform the flush relatively soon.
+        //
+        // It would perhaps be nicer to do the WAL flush here, but it's tricky to call back into
+        // Postgres code to do that from here. That's why we rely on communicator_new.c to do the
+        // calls "pre-emptively".
+        //
+        // FIXME: Because of the above, it can still happen that the flush LSN is ahead of
+        // not_modified_since, if the WAL writer hasn't done the flush yet. It would be nice to know
+        // if there are other cases like that that we have mised, but unfortunately we cannot turn
+        // this into an assertion because of that legit case.
+        //
+        // See also the old logic in neon_get_request_lsns() C function
         if not_modified_since_lsn > request_lsn {
             tracing::info!(
                 "not_modified_since_lsn {} is ahead of last flushed LSN {}",
