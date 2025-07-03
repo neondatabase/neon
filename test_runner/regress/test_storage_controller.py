@@ -3530,7 +3530,10 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     # some small tests for the scheduling policy querying and returning APIs
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
-    assert newest_info["scheduling_policy"] == "Activating" or newest_info["scheduling_policy"] == "Active"
+    assert (
+        newest_info["scheduling_policy"] == "Activating"
+        or newest_info["scheduling_policy"] == "Active"
+    )
     target.safekeeper_scheduling_policy(inserted["id"], "Pause")
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
@@ -3552,6 +3555,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     # Now decomission it
     target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+
 
 @run_only_on_default_postgres("this is like a 'unit test' against storcon db")
 def test_safekeeper_activating_to_active(neon_env_builder: NeonEnvBuilder):
