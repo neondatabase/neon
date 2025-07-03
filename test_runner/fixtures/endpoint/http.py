@@ -99,13 +99,14 @@ class EndpointHttpClient(requests.Session):
     ) -> tuple[int, bytes]:
         url = f"http://localhost:{self.external_port}/profile/cpu"
         params = {
+            "profiler": { "BccProfile": None },
             "sampling_frequency": sampling_frequency,
             "timeout_seconds": timeout_seconds,
         }
 
-        res = self.put(
+        res = self.post(
             url,
-            params=params,
+            json=params,
             auth=self.auth,
         )
 

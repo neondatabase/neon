@@ -5,10 +5,9 @@
 //!
 //! The profiling is done using the `perf` tool, which is expected to be
 //! available somewhere in `$PATH`.
-use std::str::FromStr;
 use std::sync::atomic::Ordering;
 
-use axum::extract::Query;
+use axum::Json;
 use axum::response::IntoResponse;
 use http::StatusCode;
 use nix::unistd::Pid;
@@ -19,11 +18,6 @@ use crate::http::JsonResponse;
 
 static CANCEL_CHANNEL: Lazy<Mutex<Option<tokio::sync::broadcast::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
-
-static PERF_BINARY_PATH: Lazy<Option<String>> = Lazy::new(|| {
-    // The path to the perf binary, which is expected to be in the PATH.
-    std::env::var("PERF_BINARY_PATH").ok()
-});
 
 fn default_sampling_frequency() -> u16 {
     100
@@ -72,8 +66,10 @@ where
 }
 
 /// Request parameters for profiling the compute.
-#[derive(Debug, Copy, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub(in crate::http) struct ProfileRequest {
+    /// The profiling tool to use, currently only `perf` is supported.
+    profiler: crate::profiling::ProfileGenerator,
     #[serde(default = "default_sampling_frequency")]
     #[serde(deserialize_with = "deserialize_sampling_frequency")]
     sampling_frequency: u16,
@@ -119,7 +115,7 @@ pub(in crate::http) async fn profile_stop() -> impl IntoResponse {
 
 /// The HTTP request handler for starting profiling the compute.
 pub(in crate::http) async fn profile_start(
-    Query(request): Query<ProfileRequest>,
+    Json(request): Json<ProfileRequest>,
 ) -> impl IntoResponse {
     tracing::info!("Profile start request received: {request:?}");
 
@@ -143,11 +139,9 @@ pub(in crate::http) async fn profile_start(
     let run_with_sudo = !cfg!(feature = "testing");
 
     let options = crate::profiling::ProfileGenerationOptions {
+        profiler: request.profiler,
         run_with_sudo,
-        perf_binary_path: PERF_BINARY_PATH
-            .as_deref()
-            .and_then(|s| std::path::PathBuf::from_str(s).ok()),
-        pid: pg_pid,
+        pids: [pg_pid].into_iter().collect(),
         follow_forks: true,
         sampling_frequency: request.sampling_frequency as u32,
         blocklist_symbols: vec![

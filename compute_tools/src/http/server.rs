@@ -87,7 +87,7 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route(
                         "/profile/cpu",
                         get(profile::profile_status)
-                            .put(profile::profile_start)
+                            .post(profile::profile_start)
                             .delete(profile::profile_stop),
                     );
 

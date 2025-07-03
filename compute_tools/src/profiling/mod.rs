@@ -6,16 +6,21 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use aws_config::profile::Profile;
 use flate2::{Compression, write::GzEncoder};
-use futures::{StreamExt, stream::FuturesUnordered};
 use inferno::collapse::Collapse;
 use nix::{libc::pid_t, unistd::Pid};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tracing::{Instrument, error, instrument};
-use x509_cert::der::oid::db::rfc4519::L;
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
+use tracing::instrument;
 
 const SUDO_PATH: &str = "/usr/bin/sudo";
+const PERF_BINARY_DEFAULT_PATH: &str = "perf";
+const BCC_PROFILE_BINARY_DEFAULT_PATH: &str = "/usr/share/bcc/tools/profile";
+const STANDARD_PATH_PATHS: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+fn sudo_path() -> String {
+    std::env::var("SUDO_BINARY_PATH").unwrap_or_else(|_| SUDO_PATH.to_owned())
+}
 
 /// Represents the pprof data generated from a profiling tool.
 #[repr(transparent)]
@@ -55,7 +60,7 @@ fn list_children_processes(parent_pid: Pid) -> anyhow::Result<Vec<Pid>> {
         .filter_map(|proc| {
             if let Ok(stat) = proc.and_then(|p| p.stat()) {
                 if stat.ppid == parent_pid.as_raw() {
-                    tracing::error!("Found child process with PID: {} ({})", stat.pid, stat.comm);
+                    tracing::trace!("Found child process with PID: {} ({})", stat.pid, stat.comm);
                     return Some(Pid::from_raw(stat.pid));
                 }
             }
@@ -96,8 +101,10 @@ fn check_binary_runs(command: &[&str]) -> anyhow::Result<()> {
 }
 
 fn check_perf_runs(perf_binary_path: &str, run_with_sudo: bool) -> anyhow::Result<()> {
+    let sudo_path = sudo_path();
+
     let command = if run_with_sudo {
-        vec![SUDO_PATH, perf_binary_path, "version"]
+        vec![&sudo_path, perf_binary_path, "version"]
     } else {
         vec![perf_binary_path, "version"]
     };
@@ -105,47 +112,33 @@ fn check_perf_runs(perf_binary_path: &str, run_with_sudo: bool) -> anyhow::Resul
     check_binary_runs(&command)
 }
 
-fn pause_processes(pids: &HashSet<Pid>) -> anyhow::Result<()> {
-    for pid in pids {
-        if let Err(e) = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid.as_raw()),
-            nix::sys::signal::Signal::SIGSTOP,
-        ) {
-            tracing::error!("Failed to pause process with PID: {pid}: {e}");
-        }
-    }
-
-    Ok(())
-}
-
-fn unpause_processes(pids: &HashSet<Pid>) -> anyhow::Result<()> {
-    for pid in pids {
-        if let Err(e) = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid.as_raw()),
-            nix::sys::signal::Signal::SIGCONT,
-        ) {
-            tracing::error!("Failed to unpause process with PID: {pid}: {e}");
-        }
-    }
-
-    Ok(())
+/// The generator for the pprof profile.
+///
+/// The generator tools have the path to the binary
+/// that will be used to generate the profile.
+/// If the path is `None`, the tool will be searched
+/// in the system's `PATH` using the default name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileGenerator {
+    /// The `bcc` tool for generating profiles.
+    BccProfile(Option<PathBuf>),
+    /// The Linux `perf` tool.
+    Perf(Option<PathBuf>),
 }
 
 /// The options for generating a pprof profile using the `perf` tool.
 #[derive(Debug, Clone)]
 pub struct ProfileGenerationOptions {
+    pub profiler: ProfileGenerator,
     /// If set to `true`, the `perf` command will be run with `sudo`.
     /// This is useful for profiling processes that require elevated
     /// privileges.
     /// If `false`, the command will be run without `sudo`.
     pub run_with_sudo: bool,
-    /// The path to the `perf` binary. If `None`, it defaults to "perf",
-    /// so it will look for `perf` in the system's `PATH`.
-    pub perf_binary_path: Option<PathBuf>,
     /// The PID of the process to profile. This can be the main process
     /// or a child process. For targeting postgres, this should be the
     /// PID of the main postgres process.
-    pub pid: Pid,
+    pub pids: HashSet<Pid>,
     /// If set to `true`, the `perf` command will follow forks.
     /// This means that it will continue to profile child processes
     /// that are created by the main process after it has already
@@ -177,14 +170,28 @@ pub struct ProfileGenerationTaskOptions {
     pub should_stop: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
-async fn profile_single_process_bcc_profile(
-    _perf_binary_path: PathBuf,
-    pids: HashSet<Pid>,
+/// Profiles the processes using the `bcc` framework and `profile.py`
+/// tool and returns the collapsed (folded) stack output as [`Vec<u8>`].
+#[instrument]
+async fn profile_with_bcc_profile(
     options: ProfileGenerationTaskOptions,
 ) -> anyhow::Result<Vec<u8>> {
-    let path = std::env::var("PATH").unwrap_or_else(|_| {
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+    let bcc_profile_binary_path = match options.options.profiler {
+        ProfileGenerator::BccProfile(v) => v,
+        ProfileGenerator::Perf(_) => {
+            return Err(anyhow!(
+                "perf profile generator is not supported for bcc profiling"
+            ));
+        }
+    }
+    .unwrap_or_else(|| {
+        PathBuf::from(
+            std::env::var("BCC_PROFILE_BINARY_PATH")
+                .unwrap_or(BCC_PROFILE_BINARY_DEFAULT_PATH.to_owned()),
+        )
     });
+
+    let path = std::env::var("PATH").unwrap_or_else(|_| STANDARD_PATH_PATHS.to_string());
 
     #[cfg(feature = "testing")]
     let path = path
@@ -201,14 +208,17 @@ async fn profile_single_process_bcc_profile(
         .collect::<Vec<_>>()
         .join(":");
 
-    let cmd = tokio::process::Command::new(SUDO_PATH)
-        .arg("/usr/share/bcc/tools/profile")
+    let result = tokio::process::Command::new(sudo_path())
+        .arg(bcc_profile_binary_path)
         .arg("-f")
         .arg("-F")
         .arg(options.options.sampling_frequency.to_string())
         .arg("-p")
         .arg(
-            pids.iter()
+            options
+                .options
+                .pids
+                .iter()
                 .map(|p| p.as_raw().to_string())
                 .collect::<Vec<_>>()
                 .join(","),
@@ -218,27 +228,53 @@ async fn profile_single_process_bcc_profile(
         .env("PATH", path)
         .output()
         .await
-        .context("failed to run bcc profile command")?;
+        .context("couldn't run bcc profile")?;
 
-    Ok(cmd.stdout)
+    match result.status.success() {
+        true => Ok(result.stdout),
+        false => {
+            return Err(anyhow!(
+                "failed to run bcc profiler, stderr: {}",
+                String::from_utf8_lossy(&result.stderr)
+            ));
+        }
+    }
 }
 
-/// Profiles a single process using the `perf` tool and returns the
-/// output of `perf script` as [`Vec<u8>`].
+/// Profiles the processes using the `perf` tool and returns the
+/// collapsed (folded) stack output as [`Vec<u8>`].
 #[allow(unsafe_code)]
 #[instrument]
-async fn profile_single_process_perf(
-    perf_binary_path: PathBuf,
-    pids: HashSet<Pid>,
-    options: ProfileGenerationTaskOptions,
-) -> anyhow::Result<Vec<u8>> {
+async fn profile_with_perf(options: ProfileGenerationTaskOptions) -> anyhow::Result<Vec<u8>> {
+    let perf_binary_path = match options.options.profiler {
+        ProfileGenerator::BccProfile(_) => {
+            return Err(anyhow!(
+                "bcc profile generator is not supported for perf profiling"
+            ));
+        }
+        ProfileGenerator::Perf(v) => v,
+    }
+    .unwrap_or_else(|| {
+        PathBuf::from(
+            std::env::var("PERF_BINARY_PATH").unwrap_or(PERF_BINARY_DEFAULT_PATH.to_owned()),
+        )
+    });
+
+    check_perf_runs(
+        perf_binary_path
+            .to_str()
+            .context("couldn't reconstruct perf binary path as string.")?,
+        options.options.run_with_sudo,
+    )
+    .context("couldn't check that perf is available and can be run")?;
+
     let temp_file = tempfile::NamedTempFile::new()
         .context("failed to create temporary file for perf output")?;
     let temp_file_path = temp_file.path();
 
     // Step 1: Run perf to collect stack traces
     let mut perf_record_command = if options.options.run_with_sudo {
-        let mut cmd = tokio::process::Command::new(SUDO_PATH);
+        let mut cmd = tokio::process::Command::new(sudo_path());
         cmd.arg(&perf_binary_path);
         cmd
     } else {
@@ -307,8 +343,8 @@ async fn profile_single_process_perf(
     );
 
     tracing::trace!(
-        "Waiting for perf record to finish for pid = {}...",
-        options.options.pid
+        "Waiting for perf record to finish for pids = {:?}...",
+        options.options.pids
     );
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -358,7 +394,10 @@ async fn profile_single_process_perf(
         .arg(temp_file_path)
         .arg(format!(
             "--pid={}",
-            pids.iter()
+            options
+                .options
+                .pids
+                .iter()
                 .map(|p| p.as_raw().to_string())
                 .collect::<Vec<_>>()
                 .join(",")
@@ -377,21 +416,40 @@ async fn profile_single_process_perf(
         ));
     }
 
-    error!(
-        "Reading perf script stdout for pid = {}",
-        options.options.pid
-    );
-
     if perf_script_output.stdout.is_empty() {
         return Err(anyhow!(format!(
-            "Perf script output is empty for pid = {}.\n",
-            options.options.pid
+            "Perf script output is empty for pid = {:?}.\n",
+            options.options.pids
         )));
     }
 
-    error!("Profiling succeeded for pid = {}", options.options.pid);
+    // Step 2: Collapse the stack traces into a folded stack trace
+    let mut folder = {
+        let mut options = inferno::collapse::perf::Options::default();
+        options.annotate_jit = true; // Enable JIT annotation if needed
+        options.annotate_kernel = true; // Enable kernel annotation if needed
+        options.include_addrs = true; // Include addresses in the output
+        options.include_pid = true; // Include PIDs in the output
+        options.include_tid = true; // Include TIDs in the output
+        inferno::collapse::perf::Folder::from(options)
+    };
 
-    Ok(perf_script_output.stdout)
+    let mut collapsed = Vec::new();
+
+    folder
+        .collapse(perf_script_output.stdout.as_slice(), &mut collapsed)
+        .context("couldn't collapse the output of perf script into the folded format")?;
+
+    if collapsed.is_empty() {
+        tracing::error!(
+            "collapsed stack trace is empty for output: {}",
+            String::from_utf8_lossy(&perf_script_output.stdout)
+        );
+
+        return Err(anyhow!("collapsed stack trace is empty"));
+    }
+
+    Ok(collapsed)
 }
 
 /// Run perf against a process with the given name and generate a pprof
@@ -408,146 +466,29 @@ async fn profile_single_process_perf(
 /// If the perf binary path is not provided, it defaults to "perf" in
 /// the system's `PATH`.
 pub async fn generate_pprof_profile(
-    options: ProfileGenerationTaskOptions,
+    mut options: ProfileGenerationTaskOptions,
 ) -> anyhow::Result<PprofData> {
-    let perf_binary_path = options
+    options.options.pids = options
         .options
-        .perf_binary_path
-        .clone()
-        .map_or_else(|| PathBuf::from("perf"), |p| p.to_owned());
-
-    check_perf_runs(
-        perf_binary_path
-            .to_str()
-            .context("couldn't reconstruct perf binary path as string.")?,
-        options.options.run_with_sudo,
-    )
-    .context("couldn't check that perf is available and can be run")?;
-
-    let mut pids = list_children_processes(options.options.pid)
-        .unwrap_or_default()
+        .pids
         .into_iter()
-        .chain(std::iter::once(options.options.pid))
-        .collect::<HashSet<_>>();
-    // let mut pids = HashSet::new();
-    // pids.insert(options.options.pid);
+        .flat_map(list_children_processes)
+        .flatten()
+        .collect::<HashSet<Pid>>();
 
-    pause_processes(&pids).context("couldn't pause the processes for profiling")?;
+    let blocklist_symbols = options.options.blocklist_symbols.clone();
 
-    let mut futures_unordered = FuturesUnordered::new();
-
-    {
-        let options = options.clone();
-        let perf_binary_path = perf_binary_path.clone();
-        let pids = pids.clone();
-
-        let task = tokio::task::spawn(async move {
-            (
-                // profile_single_process_perf(perf_binary_path, pids.clone(), options.clone()).await,
-                profile_single_process_bcc_profile(perf_binary_path, pids.clone(), options.clone())
-                    .await,
-                options.options.pid,
-            )
-        });
-        futures_unordered.push(task);
+    let collapsed = match options.options.profiler {
+        ProfileGenerator::BccProfile(_) => profile_with_bcc_profile(options).await,
+        ProfileGenerator::Perf(_) => profile_with_perf(options).await,
     }
-    // for pid in &pids {
-    //     let mut options = options.clone();
-    //     let pid = *pid;
-    //     options.options.pid = pid;
-    //     let perf_binary_path = perf_binary_path.clone();
-
-    //     let task = tokio::task::spawn(async move {
-    //         (profile_single_process(perf_binary_path, options).await, pid)
-    //     });
-    //     futures_unordered.push(task);
-    // }
-
-    unpause_processes(&pids).context("couldn't pause the processes for profiling")?;
-
-    let collapsed: Vec<u8> = {
-        let mut ret = Vec::new();
-
-        let mut count = 1;
-        let total = futures_unordered.len();
-        // TODO: timeout here as well (tokio::select with timeout)
-        while let Some(result) = futures_unordered.next().await {
-            match result {
-                Ok((Ok(output), pid)) => {
-                    pids.remove(&pid);
-                    error!(
-                        "Per-process profiling task completed successfully {count} / {total} (for pid = {pid})"
-                    );
-                    error!(
-                        "Perf script output for pid {pid}: {}",
-                        String::from_utf8_lossy(&output)
-                    );
-                    ret.push(output);
-                }
-                Ok((Err(e), pid)) => {
-                    pids.remove(&pid);
-                    error!("Per-process profiling task failed {count} / {total} (for pid = {pid})");
-                    tracing::info!("Empty profiling info for a process: {e}");
-                }
-                Err(e) => {
-                    error!("Per-process profiling task failed {count} / {total}");
-                    tracing::error!("Per-process profiling task failed: {e}");
-                }
-            }
-
-            count += 1;
-            error!(
-                "Waiting for next profiling task to complete {count} / {total}, remaining pids: {pids:?}"
-            );
-        }
-
-        error!("Perf script output collected: {count} / {total}");
-
-        ret.into_iter().flatten().collect()
-    };
+    .context("failed to run bcc profile")?;
 
     if collapsed.is_empty() {
-        error!("perf script output is empty, no data collected");
-        return Err(anyhow!("perf script output is empty, no data collected"));
+        return Err(anyhow!("collapsed output is empty, no data collected"));
     }
 
-    // let perf_script_output = futured_unordered
-    //     .await
-    //     .into_iter()
-    //     .collect::<anyhow::Result<Vec<Vec<u8>>>>()
-    //     .context("failed to run perf for all processes")?
-    //     .into_iter()
-    //     .flatten()
-    //     .collect::<Vec<_>>();
-
-    // // Step 2: Collapse the stack traces into a folded stack trace
-    // let mut folder = {
-    //     let mut options = inferno::collapse::perf::Options::default();
-    //     options.annotate_jit = true; // Enable JIT annotation if needed
-    //     options.annotate_kernel = true; // Enable kernel annotation if needed
-    //     options.include_addrs = true; // Include addresses in the output
-    //     options.include_pid = true; // Include PIDs in the output
-    //     options.include_tid = true; // Include TIDs in the output
-    //     inferno::collapse::perf::Folder::from(options)
-    // };
-
-    // let mut collapsed = Vec::new();
-
-    // folder
-    //     .collapse(perf_script_output.as_slice(), &mut collapsed)
-    //     .context("couldn't collapse the output of perf script into the folded format")?;
-
-    // if collapsed.is_empty() {
-    //     error!(
-    //         "collapsed stack trace is empty for output: {}",
-    //         String::from_utf8_lossy(&perf_script_output)
-    //     );
-
-    //     return Err(anyhow!("collapsed stack trace is empty"));
-    // }
-
-    // Step 3: Generate pprof profile from collapsed stack trace
-    generate_pprof_from_collapsed(&collapsed, &options.options.blocklist_symbols, false)
+    generate_pprof_from_collapsed(&collapsed, &blocklist_symbols, false)
 }
 
 fn archive_bytes<W: Write>(bytes: &[u8], output: &mut W) -> anyhow::Result<()> {
