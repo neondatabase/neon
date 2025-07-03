@@ -2,13 +2,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt as _, StreamExt as _};
 use tracing::instrument;
 
 use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
 use crate::retry::Retry;
+use crate::split::GetPageSplitter;
 use compute_api::spec::PageserverProtocol;
-use pageserver_api::key::{Key, rel_block_to_key};
-use pageserver_api::shard::{ShardStripeSize, key_to_shard_number};
+use pageserver_api::shard::ShardStripeSize;
 use pageserver_page_api as page_api;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::{ShardCount, ShardIndex, ShardNumber};
@@ -78,10 +80,11 @@ impl PageserverClient {
             .await
     }
 
-    /// Fetches a page. The `request_id` must be unique across all in-flight requests.
+    /// Fetches pages. The `request_id` must be unique across all in-flight requests. Automatically
+    /// splits requests that straddle shard boundaries, and assembles the responses.
     ///
-    /// Unlike the `page_api::Client`, this client automatically converts `status_code` into
-    /// `tonic::Status` errors. All responses will have `GetPageStatusCode::Ok`.
+    /// Unlike `page_api::Client`, this automatically converts `status_code` into `tonic::Status`
+    /// errors. All responses will have `GetPageStatusCode::Ok`.
     #[instrument(skip_all, fields(
         req_id = %req.request_id,
         rel = %req.rel,
@@ -93,22 +96,55 @@ impl PageserverClient {
         &self,
         req: page_api::GetPageRequest,
     ) -> tonic::Result<page_api::GetPageResponse> {
-        // TODO: this needs to split batch requests across shards and reassemble responses into a
-        // single response. It must also re-split the batch in case the shard map changes. For now,
-        // just use the first page.
-        let key = rel_block_to_key(
-            req.rel,
-            req.block_numbers
-                .first()
-                .copied()
-                .ok_or_else(|| tonic::Status::invalid_argument("no block numbers provided"))?,
-        );
+        // Make sure we have at least one page.
+        if req.block_numbers.is_empty() {
+            return Err(tonic::Status::invalid_argument("no block number"));
+        }
 
-        self.retry
+        // Fast path: request is for a single shard.
+        if let Some(shard_id) =
+            GetPageSplitter::is_single_shard(&req, self.shards.count, self.shards.stripe_size)
+        {
+            return self.get_page_for_shard(shard_id, req).await;
+        }
+
+        // Request spans multiple shards. Split it, dispatch concurrent per-shard requests, and
+        // reassemble the responses.
+        //
+        // TODO: when we support shard map updates, we need to detect when it changes and re-split
+        // the request on errors.
+        let mut splitter = GetPageSplitter::split(req, self.shards.count, self.shards.stripe_size);
+
+        let mut shard_requests: FuturesUnordered<_> = splitter
+            .drain_requests()
+            .map(|(shard_id, shard_req)| {
+                // NB: each request will retry internally.
+                self.get_page_for_shard(shard_id, shard_req)
+                    .map(move |result| result.map(|resp| (shard_id, resp)))
+            })
+            .collect();
+
+        while let Some((shard_id, shard_response)) = shard_requests.next().await.transpose()? {
+            splitter.add_response(shard_id, shard_response)?;
+        }
+
+        splitter.assemble_response()
+    }
+
+    /// Fetches pages that belong to the given shard.
+    #[instrument(skip_all, fields(shard = %shard_id))]
+    async fn get_page_for_shard(
+        &self,
+        shard_id: ShardIndex,
+        req: page_api::GetPageRequest,
+    ) -> tonic::Result<page_api::GetPageResponse> {
+        let resp = self
+            .retry
             .with(async || {
-                let stream = self.shards.get_for_key(key).stream().await;
+                let stream = self.shards.get(shard_id)?.stream().await;
                 let resp = stream.send(req.clone()).await?;
 
+                // Convert per-request errors into a tonic::Status.
                 if resp.status_code != page_api::GetPageStatusCode::Ok {
                     return Err(tonic::Status::new(
                         resp.status_code.into(),
@@ -118,7 +154,18 @@ impl PageserverClient {
 
                 Ok(resp)
             })
-            .await
+            .await?;
+
+        // Make sure we got the right number of pages.
+        // NB: check outside of the retry loop, since we don't want to retry this.
+        let (expected, actual) = (req.block_numbers.len(), resp.page_images.len());
+        if expected != actual {
+            return Err(tonic::Status::internal(format!(
+                "expected {expected} pages for shard {shard_id}, got {actual}",
+            )));
+        }
+
+        Ok(resp)
     }
 
     /// Returns the size of a relation, as # of blocks.
@@ -214,13 +261,6 @@ impl Shards {
         self.map
             .get(&shard_id)
             .ok_or_else(|| tonic::Status::not_found(format!("unknown shard {shard_id}")))
-    }
-
-    /// Looks up the shard that owns the given key.
-    fn get_for_key(&self, key: Key) -> &Shard {
-        let shard_number = key_to_shard_number(self.count, self.stripe_size, &key);
-        self.get(ShardIndex::new(shard_number, self.count))
-            .expect("must exist")
     }
 
     /// Returns shard 0.
