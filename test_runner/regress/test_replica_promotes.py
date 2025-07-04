@@ -77,7 +77,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, method: PromoteMethod):
         primary_cur.execute("show neon.safekeepers")
         safekeepers = primary_cur.fetchall()[0][0]
 
-    if method is PromoteMethod.COMPUTE_CTL:
+    if method == PromoteMethod.COMPUTE_CTL:
         primary.http_client().offload_lfc()
     else:
         wait_replica_caughtup(primary, secondary)
