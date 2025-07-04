@@ -23,10 +23,11 @@ for i in $(seq 1 "${PARALLEL_COMPUTES}"); do
   COMPUTES+=("compute${i}")
 done
 cp docker-compose.yml docker-compose.yml.bak
-trap 'mv docker-compose.yml.bak docker-compose.yml' EXIT
+trap 'mv docker-compose.yml.bak docker-compose.yml; rm -rf ${TMPDIR}' EXIT
 if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
   for i in $(seq 2 "${PARALLEL_COMPUTES}"); do
-    yq  eval -i ".services.compute${i} = ( .services.compute1 | (del .build) | (del .ports))" docker-compose.yml
+    yq  eval -i ".services.compute${i} = .services.compute1" docker-compose.yml
+    yq  eval -i "(del .services.compute${i}.build) | (del .services.compute${i}.ports)" docker-compose.yml
     yq  eval -i ".services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
   done
 fi
@@ -69,7 +70,6 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
 
     if [[ ${pg_version} -ge 16 ]]; then
         TMPDIR=$(mktemp -d)
-        trap 'rm -rf ${TMPDIR}' EXIT
         mkdir "${TMPDIR}"/{pg_hint_plan-src,file_fdw,postgis-src}
         docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${TMPDIR}/postgis-src/test"
         docker compose cp neon-test-extensions:/ext-src/postgis-src/regress/00-regress-install "${TMPDIR}/postgis-src/00-regress-install"
