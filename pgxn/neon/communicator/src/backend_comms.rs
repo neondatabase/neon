@@ -179,9 +179,8 @@ impl NeonIOHandle {
         }
     }
 
+    /// Read the IO request from the slot indicated in the wakeup
     pub fn start_processing_request<'a>(&'a self) -> Option<RequestProcessingGuard<'a>> {
-        // Read the IO request from the slot indicated in the wakeup
-        //
         // XXX: using compare_exchange for this is not strictly necessary, as long as
         // the communicator process has _some_ means of tracking which requests it's
         // already processing. That could be a flag somewhere in communicator's private

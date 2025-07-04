@@ -12,7 +12,7 @@ use crate::neon_request::{NeonIORequest, NeonIOResult};
 pub struct CommunicatorBackendStruct<'t> {
     my_proc_number: i32,
 
-    next_neon_request_idx: u32,
+    next_request_slot_idx: u32,
 
     my_start_idx: u32, // First request slot that belongs to this backend
     my_end_idx: u32,   // end + 1 request slot that belongs to this backend
@@ -46,7 +46,7 @@ pub extern "C" fn rcommunicator_backend_init(
     let bs: &'static mut CommunicatorBackendStruct =
         Box::leak(Box::new(CommunicatorBackendStruct {
             my_proc_number,
-            next_neon_request_idx: start_idx,
+            next_request_slot_idx: start_idx,
             my_start_idx: start_idx,
             my_end_idx: end_idx,
             neon_request_slots: cis.neon_request_slots,
@@ -83,12 +83,12 @@ pub extern "C" fn bcomm_start_io_request(
     }
 
     // Create neon request and submit it
-    let request_idx = bs.start_neon_request(request);
+    let slot_idx = bs.start_neon_io_request(request);
 
     // Tell the communicator about it
-    bs.submit_request(request_idx);
+    bs.submit_request(slot_idx);
 
-    request_idx
+    slot_idx
 }
 
 #[unsafe(no_mangle)]
@@ -124,12 +124,12 @@ pub extern "C" fn bcomm_start_get_page_v_request(
     }
 
     // Create neon request and submit it
-    let request_idx = bs.start_neon_request(request);
+    let slot_idx = bs.start_neon_io_request(request);
 
     // Tell the communicator about it
-    bs.submit_request(request_idx);
+    bs.submit_request(slot_idx);
 
-    request_idx
+    slot_idx
 }
 
 /// Check if a request has completed. Returns:
@@ -139,10 +139,10 @@ pub extern "C" fn bcomm_start_get_page_v_request(
 #[unsafe(no_mangle)]
 pub extern "C" fn bcomm_poll_request_completion(
     bs: &mut CommunicatorBackendStruct,
-    request_idx: u32,
+    request_slot_idx: u32,
     result_p: &mut NeonIOResult,
 ) -> i32 {
-    match bs.neon_request_slots[request_idx as usize].try_get_result() {
+    match bs.neon_request_slots[request_slot_idx as usize].try_get_result() {
         None => -1, // still processing
         Some(result) => {
             *result_p = result;
@@ -188,7 +188,7 @@ pub extern "C" fn bcomm_cache_contains(
 
 impl<'t> CommunicatorBackendStruct<'t> {
     /// Send a wakeup to the communicator process
-    fn submit_request(self: &CommunicatorBackendStruct<'t>, request_idx: i32) {
+    fn submit_request(self: &CommunicatorBackendStruct<'t>, request_slot_idx: i32) {
         // wake up communicator by writing the idx to the submission pipe
         //
         // This can block, if the pipe is full. That should be very rare,
@@ -198,7 +198,7 @@ impl<'t> CommunicatorBackendStruct<'t> {
         // backend.
         //
         // If it does block very briefly, that's not too serious.
-        let idxbuf = request_idx.to_ne_bytes();
+        let idxbuf = request_slot_idx.to_ne_bytes();
 
         let _res = nix::unistd::write(&self.submission_pipe_write_fd, &idxbuf);
         // FIXME: check result, return any errors
@@ -206,15 +206,15 @@ impl<'t> CommunicatorBackendStruct<'t> {
 
     /// Note: there's no guarantee on when the communicator might pick it up. You should ring
     /// the doorbell. But it might pick it up immediately.
-    pub(crate) fn start_neon_request(&mut self, request: &NeonIORequest) -> i32 {
+    pub(crate) fn start_neon_io_request(&mut self, request: &NeonIORequest) -> i32 {
         let my_proc_number = self.my_proc_number;
 
         // Grab next free slot
         // FIXME: any guarantee that there will be any?
-        let idx = self.next_neon_request_idx;
+        let idx = self.next_request_slot_idx;
 
         let next_idx = idx + 1;
-        self.next_neon_request_idx = if next_idx == self.my_end_idx {
+        self.next_request_slot_idx = if next_idx == self.my_end_idx {
             self.my_start_idx
         } else {
             next_idx

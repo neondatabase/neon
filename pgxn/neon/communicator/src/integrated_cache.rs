@@ -626,6 +626,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         None
     }
 
+    /// Resize the local file cache.
     pub fn resize_file_cache(&self, num_blocks: u32) {
         let old_num_blocks = self.block_map.get_num_buckets() as u32;
 
@@ -638,6 +639,8 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     err
                 );
             }
+        } else {
+            // TODO: Shrinking not implemented yet
         }
     }
 

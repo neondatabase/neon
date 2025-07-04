@@ -1,7 +1,7 @@
-//! Glue code to hook up Rust logging, with the `tracing` crate, to the PostgreSQL log
+//! Glue code to hook up Rust logging with the `tracing` crate to the PostgreSQL log
 //!
 //! In the Rust threads, the log messages are written to a mpsc Channel, and the Postgres
-//! process latch is raised. That wakes up the loop in the  main thread. It reads the
+//! process latch is raised. That wakes up the loop in the main thread. It reads the
 //! message from the channel and ereport()s it. This ensures that only one thread, the main
 //! thread, calls the PostgreSQL logging routines at any time.
 
