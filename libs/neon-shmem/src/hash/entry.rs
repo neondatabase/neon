@@ -72,8 +72,9 @@ impl<K, V> OccupiedEntry<'_, '_, K, V> {
             let mut prev = PrevPos::First(dict_idx as u32);
             let mut curr = self.map.dictionary[dict_idx];
             while curr != self.bucket_pos {
-                curr = self.map.buckets[curr as usize].next;
+                assert!(curr != INVALID_POS);
                 prev = PrevPos::Chained(curr);
+                curr = self.map.buckets[curr as usize].next;
             }
             prev
         } else {
