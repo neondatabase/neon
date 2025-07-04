@@ -631,7 +631,7 @@ def test_logical_replication_ondemand_download(neon_simple_env: NeonEnv, vanilla
 
     env.create_branch("publisher")
     endpoint = env.endpoints.create(
-        "publisher", config_lines=["max_slot_wal_keep_size=1MB", "max_wal_size=16MB"]
+        "publisher", config_lines=["max_slot_wal_keep_size=1MB", "max_wal_size=32MB"]
     )
     endpoint.start()
 
