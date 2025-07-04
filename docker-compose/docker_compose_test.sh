@@ -24,6 +24,9 @@ for i in $(seq 1 "${PARALLEL_COMPUTES}"); do
 done
 cp docker-compose.yml docker-compose.yml.bak
 trap 'mv docker-compose.yml.bak docker-compose.yml' EXIT
+# For debug only, please remove before merge
+cat /etc/debian_version
+yq --version
 if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
   for i in $(seq 2 "${PARALLEL_COMPUTES}"); do
     yq -i "
