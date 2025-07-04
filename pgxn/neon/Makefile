@@ -63,7 +63,7 @@ WALPROP_OBJS = \
 
 # libcommunicator.a is built by cargo from the Rust sources under communicator/
 # subdirectory. `cargo build` also generates communicator_bindings.h.
-neon.o: communicator/communicator_bindings.h
+communicator_new.o: communicator/communicator_bindings.h
 
 $(NEON_CARGO_ARTIFACT_TARGET_DIR)/libcommunicator.a communicator/communicator_bindings.h &:
 	(cd $(srcdir)/communicator && cargo build $(CARGO_BUILD_FLAGS) $(CARGO_PROFILE))
