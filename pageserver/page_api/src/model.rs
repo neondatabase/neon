@@ -386,7 +386,7 @@ impl From<GetPageRequest> for proto::GetPageRequest {
 pub type RequestID = u64;
 
 /// A GetPage request class.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, strum_macros::Display)]
 pub enum GetPageClass {
     /// Unknown class. For backwards compatibility: used when an older client version sends a class
     /// that a newer server version has removed.
