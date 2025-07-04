@@ -45,6 +45,8 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
     PG_VERSION=${pg_version} PG_TEST_VERSION=${PG_TEST_VERSION} docker compose build compute1
+    # XXX for debug only, do not merge
+    docker images | grep built-compute
     PG_VERSION=${pg_version} PG_TEST_VERSION=${PG_TEST_VERSION} docker compose up --quiet-pull -d
     echo "wait until the compute is ready. timeout after 60s. "
     cnt=0
