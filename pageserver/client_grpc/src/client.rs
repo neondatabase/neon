@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZero;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -14,6 +15,32 @@ use pageserver_api::shard::ShardStripeSize;
 use pageserver_page_api as page_api;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::{ShardCount, ShardIndex, ShardNumber};
+
+/// Max number of concurrent clients per channel (i.e. TCP connection). New channels will be spun up
+/// when full.
+///
+/// TODO: tune all of these constants, and consider making them configurable.
+/// TODO: consider separate limits for unary and streaming clients, so we don't fill up channels
+/// with only streams.
+const MAX_CLIENTS_PER_CHANNEL: NonZero<usize> = NonZero::new(16).unwrap();
+
+/// Max number of concurrent unary request clients per shard.
+const MAX_UNARY_CLIENTS: NonZero<usize> = NonZero::new(64).unwrap();
+
+/// Max number of concurrent GetPage streams per shard. The max number of concurrent GetPage
+/// requests is given by `MAX_STREAMS * MAX_STREAM_QUEUE_DEPTH`.
+const MAX_STREAMS: NonZero<usize> = NonZero::new(64).unwrap();
+
+/// Max number of pipelined requests per stream.
+const MAX_STREAM_QUEUE_DEPTH: NonZero<usize> = NonZero::new(2).unwrap();
+
+/// Max number of concurrent bulk GetPage streams per shard, used e.g. for prefetches. Because these
+/// are more throughput-oriented, we have a smaller limit but higher queue depth.
+const MAX_BULK_STREAMS: NonZero<usize> = NonZero::new(16).unwrap();
+
+/// Max number of pipelined requests per bulk stream. These are more throughput-oriented and thus
+/// get a larger queue depth.
+const MAX_BULK_STREAM_QUEUE_DEPTH: NonZero<usize> = NonZero::new(4).unwrap();
 
 /// A rich Pageserver gRPC client for a single tenant timeline. This client is more capable than the
 /// basic `page_api::Client` gRPC client, and supports:
@@ -87,6 +114,7 @@ impl PageserverClient {
     /// errors. All responses will have `GetPageStatusCode::Ok`.
     #[instrument(skip_all, fields(
         req_id = %req.request_id,
+        class = %req.request_class,
         rel = %req.rel,
         blkno = %req.block_numbers[0],
         blks = %req.block_numbers.len(),
@@ -141,7 +169,11 @@ impl PageserverClient {
         let resp = self
             .retry
             .with(async || {
-                let stream = self.shards.get(shard_id)?.stream().await;
+                let stream = self
+                    .shards
+                    .get(shard_id)?
+                    .stream(req.request_class.is_bulk())
+                    .await;
                 let resp = stream.send(req.clone()).await?;
 
                 // Convert per-request errors into a tonic::Status.
@@ -270,17 +302,22 @@ impl Shards {
     }
 }
 
-/// A single shard.
+/// A single shard. Uses dedicated resource pools with the following structure:
 ///
-/// TODO: consider separate pools for normal and bulk traffic, with different settings.
+/// * Channel pool: unbounded.
+///   * Unary client pool: MAX_UNARY_CLIENTS.
+///   * Stream client pool: unbounded.
+///     * Stream pool: MAX_STREAMS and MAX_STREAM_QUEUE_DEPTH.
+/// * Bulk channel pool: unbounded.
+///   * Bulk client pool: unbounded.
+///     * Bulk stream pool: MAX_BULK_STREAMS and MAX_BULK_STREAM_QUEUE_DEPTH.
 struct Shard {
-    /// Dedicated channel pool for this shard. Shared by all clients/streams in this shard.
-    _channel_pool: Arc<ChannelPool>,
-    /// Unary gRPC client pool for this shard. Uses the shared channel pool.
+    /// Unary gRPC client pool.
     client_pool: Arc<ClientPool>,
-    /// GetPage stream pool for this shard. Uses a dedicated client pool, but shares the channel
-    /// pool with unary clients.
+    /// GetPage stream pool.
     stream_pool: Arc<StreamPool>,
+    /// GetPage stream pool for bulk requests, e.g. prefetches.
+    bulk_stream_pool: Arc<StreamPool>,
 }
 
 impl Shard {
@@ -297,34 +334,53 @@ impl Shard {
             return Err(anyhow!("invalid shard URL {url}: must use gRPC"));
         }
 
-        // Use a common channel pool for all clients, to multiplex unary and stream requests across
-        // the same TCP connections. The channel pool is unbounded (but client pools are bounded).
-        let channel_pool = ChannelPool::new(url)?;
+        // Common channel pool for unary and stream requests. Bounded by client/stream pools.
+        let channel_pool = ChannelPool::new(url.clone(), MAX_CLIENTS_PER_CHANNEL)?;
 
-        // Dedicated client pool for unary requests.
+        // Client pool for unary requests.
         let client_pool = ClientPool::new(
             channel_pool.clone(),
             tenant_id,
             timeline_id,
             shard_id,
             auth_token.clone(),
+            Some(MAX_UNARY_CLIENTS),
         );
 
-        // Stream pool with dedicated client pool. If this shared a client pool with unary requests,
-        // long-lived streams could fill up the client pool and starve out unary requests. It shares
-        // the same underlying channel pool with unary clients though, which is unbounded.
-        let stream_pool = StreamPool::new(ClientPool::new(
-            channel_pool.clone(),
-            tenant_id,
-            timeline_id,
-            shard_id,
-            auth_token,
-        ));
+        // GetPage stream pool. Uses a dedicated client pool to avoid starving out unary clients,
+        // but shares a channel pool with it (as it's unbounded).
+        let stream_pool = StreamPool::new(
+            ClientPool::new(
+                channel_pool.clone(),
+                tenant_id,
+                timeline_id,
+                shard_id,
+                auth_token.clone(),
+                None, // unbounded, limited by stream pool
+            ),
+            Some(MAX_STREAMS),
+            MAX_STREAM_QUEUE_DEPTH,
+        );
+
+        // Bulk GetPage stream pool, e.g. for prefetches. Uses dedicated channel/client/stream pools
+        // to avoid head-of-line blocking of latency-sensitive requests.
+        let bulk_stream_pool = StreamPool::new(
+            ClientPool::new(
+                ChannelPool::new(url, MAX_CLIENTS_PER_CHANNEL)?,
+                tenant_id,
+                timeline_id,
+                shard_id,
+                auth_token,
+                None, // unbounded, limited by stream pool
+            ),
+            Some(MAX_BULK_STREAMS),
+            MAX_BULK_STREAM_QUEUE_DEPTH,
+        );
 
         Ok(Self {
-            _channel_pool: channel_pool,
             client_pool,
             stream_pool,
+            bulk_stream_pool,
         })
     }
 
@@ -336,8 +392,12 @@ impl Shard {
             .map_err(|err| tonic::Status::internal(format!("failed to get client: {err}")))
     }
 
-    /// Returns a pooled stream for this shard.
-    async fn stream(&self) -> StreamGuard {
-        self.stream_pool.get().await
+    /// Returns a pooled stream for this shard. If `bulk` is `true`, uses the dedicated bulk stream
+    /// pool (e.g. for prefetches).
+    async fn stream(&self, bulk: bool) -> StreamGuard {
+        match bulk {
+            false => self.stream_pool.get().await,
+            true => self.bulk_stream_pool.get().await,
+        }
     }
 }
