@@ -2401,8 +2401,9 @@ LIMIT 100",
     }
 
     fn terminate_extension_stats_task(&self) {
-        let mut task = self.extension_stats_task.lock().unwrap();
-        task.take().map(|h| h.abort());
+        if let Some(h) = self.extension_stats_task.lock().unwrap().take() {
+            h.abort()
+        }
     }
 
     pub fn spawn_lfc_offload_task(self: &Arc<Self>, interval: Duration) {
@@ -2422,8 +2423,9 @@ LIMIT 100",
     }
 
     fn terminate_lfc_offload_task(&self) {
-        let mut task = self.lfc_offload_task.lock().unwrap();
-        task.take().map(|h| h.abort());
+        if let Some(h) = self.lfc_offload_task.lock().unwrap().take() {
+            h.abort()
+        }
     }
 
     fn update_installed_extensions_collection_interval(&self, spec: &ComputeSpec) {
