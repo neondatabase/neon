@@ -2144,11 +2144,17 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Regardless of whether we're going to try_freeze_and_flush
-        // or not, stop ingesting any more data.
-        // This will not immediately shut down everything about the walreceiver:
-        // the walreceiver calls into a lot of places (like the read path)
-        // that are controlled by other cancellation tokens that get cancelled later
-        // (like the global timeline cancellation token).
+        // cancel walreceiver to stop ingesting more data asap.
+        //
+        // Note that we're accepting a race condition here where we may
+        // do the final flush below, before walreceiver observes the
+        // cancellation and exits.
+        // This means we may open a new InMemoryLayer after the final flush below.
+        // Flush loop is also still running for a short while, so, in theory, it
+        // could also make its way into the upload queue.
+        //
+        // This is not trivially solvable by shutting down walreceiver completely
+        // before moving on to the flush. The reason is that...
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
