@@ -190,12 +190,12 @@ services:
   compute_is_ready:
     image: postgres:latest
     environment:
-      - PARALLEL_COMPUTES=${PARALLEL_COMPUTES:-1}
+      - PARALLEL_COMPUTES=1
     entrypoint:
-      - "/bin/bash"
+      - "/bin/sh"
       - "-c"
     command:
-      - "for i in {1..${PARALLEL_COMPUTES}}; do
+      - "for i in $(seq 1 $${PARALLEL_COMPUTES}); do
            until pg_isready -h compute$$i -p 55433 -U cloud_admin ; do
              sleep 1;
            done;
