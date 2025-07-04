@@ -406,7 +406,6 @@ async fn gc_loop(tenant: Arc<TenantShard>, cancel: CancellationToken) {
                     None,
                     gc_horizon,
                     tenant.get_pitr_interval(),
-                    crate::tenant::IgnoreLeaseDeadline::Default,
                     &cancel,
                     &ctx,
                 ))

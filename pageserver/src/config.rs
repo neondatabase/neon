@@ -625,7 +625,7 @@ impl PageServerConf {
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
         let pg_distrib_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
-        let config_toml = pageserver_api::config::ConfigToml {
+        let mut config_toml = pageserver_api::config::ConfigToml {
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             pg_distrib_dir: Some(pg_distrib_dir),
@@ -637,6 +637,15 @@ impl PageServerConf {
             control_plane_api: Some(Url::parse("http://localhost:6666").unwrap()),
             ..Default::default()
         };
+
+        // Test authors tend to forget about the default 10min initial lease deadline
+        // when writing tests, which turns their immediate gc requests via mgmt API
+        // into no-ops. Override the binary default here, such that there is no initial
+        // lease deadline by default in tests. Tests that care can always override it
+        // themselves.
+        // Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
+        config_toml.tenant_config.lsn_lease_length = Duration::from_secs(0);
+
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
     }
 }

@@ -842,8 +842,11 @@ impl TenantManager {
                             // take our fast path and just provide the updated configuration
                             // to the tenant.
                             tenant.set_new_location_config(
-                                AttachedTenantConf::try_from(self.conf, new_location_config.clone())
-                                    .map_err(UpsertLocationError::BadRequest)?,
+                                AttachedTenantConf::try_from(
+                                    self.conf,
+                                    new_location_config.clone(),
+                                )
+                                .map_err(UpsertLocationError::BadRequest)?,
                             );
 
                             Some(FastPathModified::Attached(tenant.clone()))
@@ -2365,14 +2368,7 @@ impl TenantManager {
 
         #[allow(unused_mut)]
         let mut result = tenant
-            .gc_iteration(
-                Some(timeline_id),
-                gc_horizon,
-                pitr,
-                crate::tenant::IgnoreLeaseDeadline::from(gc_req.ignore_lease_deadline),
-                &cancel,
-                &ctx,
-            )
+            .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
             .await;
         // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
         // better once the types support it.
