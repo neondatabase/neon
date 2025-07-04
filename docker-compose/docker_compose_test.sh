@@ -44,7 +44,8 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     echo "clean up containers if exist"
     cleanup
     PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
-    PG_VERSION=${pg_version} PG_TEST_VERSION=${PG_TEST_VERSION} docker compose up --quiet-pull --build -d
+    PG_VERSION=${pg_version} PG_TEST_VERSION=${PG_TEST_VERSION} docker compose build compute1
+    PG_VERSION=${pg_version} PG_TEST_VERSION=${PG_TEST_VERSION} docker compose up --quiet-pull -d
     echo "wait until the compute is ready. timeout after 60s. "
     cnt=0
     while sleep 3; do
