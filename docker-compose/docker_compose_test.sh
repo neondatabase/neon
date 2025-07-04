@@ -26,7 +26,8 @@ cp docker-compose.yml docker-compose.yml.bak
 trap 'mv docker-compose.yml.bak docker-compose.yml' EXIT
 if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
   for i in $(seq 2 "${PARALLEL_COMPUTES}"); do
-    yq -i ".services.compute${i} = ( .services.compute1 | (del .build) | (del .ports)) | .services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
+    yq  eval -i ".services.compute${i} = ( .services.compute1 | (del .build) | (del .ports))" docker-compose.yml
+    yq  eval -i ".services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
   done
 fi
 cd "$(dirname "${0}")"
