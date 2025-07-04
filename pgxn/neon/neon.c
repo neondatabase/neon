@@ -87,6 +87,14 @@ static const struct config_enum_entry running_xacts_overflow_policies[] = {
 	{NULL, 0, false}
 };
 
+static const struct config_enum_entry debug_compare_local_modes[] = {
+	{"none", DEBUG_COMPARE_LOCAL_NONE, false},
+	{"prefetch", DEBUG_COMPARE_LOCAL_PREFETCH, false},
+	{"lfc", DEBUG_COMPARE_LOCAL_LFC, false},
+	{"all", DEBUG_COMPARE_LOCAL_ALL, false},
+	{NULL, 0, false}
+};
+
 /*
  * XXX: These private to procarray.c, but we need them here.
  */
@@ -519,6 +527,16 @@ _PG_init(void)
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
+	DefineCustomEnumVariable(
+							"neon.debug_compare_local",
+							"Debug mode for compaing content of pages in prefetch ring/LFC/PS and local disk",
+							NULL,
+							&debug_compare_local,
+							DEBUG_COMPARE_LOCAL_NONE,
+							debug_compare_local_modes,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
 	/*
 	 * Important: This must happen after other parts of the extension are
 	 * loaded, otherwise any settings to GUCs that were set before the

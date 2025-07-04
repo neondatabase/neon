@@ -78,7 +78,13 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(
         e.kind(),
-        BrokenPipe | ConnectionRefused | ConnectionAborted | ConnectionReset | TimedOut
+        HostUnreachable
+            | NetworkUnreachable
+            | BrokenPipe
+            | ConnectionRefused
+            | ConnectionAborted
+            | ConnectionReset
+            | TimedOut,
     )
 }
 

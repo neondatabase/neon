@@ -3285,6 +3285,7 @@ impl TenantShard {
                     .or_else(|err| match err {
                         // Ignore this, we likely raced with unarchival.
                         OffloadError::NotArchived => Ok(()),
+                        OffloadError::AlreadyInProgress => Ok(()),
                         err => Err(err),
                     })?;
             }

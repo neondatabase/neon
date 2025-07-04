@@ -2438,6 +2438,7 @@ async fn timeline_offload_handler(
             .map_err(|e| {
                 match e {
                     OffloadError::Cancelled => ApiError::ResourceUnavailable("Timeline shutting down".into()),
+                    OffloadError::AlreadyInProgress => ApiError::Conflict("Timeline already being offloaded or deleted".into()),
                     _ => ApiError::InternalServerError(anyhow!(e))
                 }
             })?;

@@ -78,7 +78,7 @@ use utils::rate_limit::RateLimit;
 use utils::seqwait::SeqWait;
 use utils::simple_rcu::{Rcu, RcuReadGuard};
 use utils::sync::gate::{Gate, GateGuard};
-use utils::{completion, critical, fs_ext, pausable_failpoint};
+use utils::{completion, critical_timeline, fs_ext, pausable_failpoint};
 #[cfg(test)]
 use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
@@ -4729,7 +4729,7 @@ impl Timeline {
                 }
 
                 // Fetch the next layer to flush, if any.
-                let (layer, l0_count, frozen_count, frozen_size) = {
+                let (layer, l0_count, frozen_count, frozen_size, open_layer_size) = {
                     let layers = self.layers.read(LayerManagerLockHolder::FlushLoop).await;
                     let Ok(lm) = layers.layer_map() else {
                         info!("dropping out of flush loop for timeline shutdown");
@@ -4742,8 +4742,13 @@ impl Timeline {
                         .iter()
                         .map(|l| l.estimated_in_mem_size())
                         .sum();
+                    let open_layer_size: u64 = lm
+                        .open_layer
+                        .as_ref()
+                        .map(|l| l.estimated_in_mem_size())
+                        .unwrap_or(0);
                     let layer = lm.frozen_layers.front().cloned();
-                    (layer, l0_count, frozen_count, frozen_size)
+                    (layer, l0_count, frozen_count, frozen_size, open_layer_size)
                     // drop 'layers' lock
                 };
                 let Some(layer) = layer else {
@@ -4756,7 +4761,7 @@ impl Timeline {
                     if l0_count >= stall_threshold {
                         warn!(
                             "stalling layer flushes for compaction backpressure at {l0_count} \
-                            L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                            L0 layers ({frozen_count} frozen layers with {frozen_size} bytes, {open_layer_size} bytes in open layer)"
                         );
                         let stall_timer = self
                             .metrics
@@ -4809,7 +4814,7 @@ impl Timeline {
                         let delay = flush_duration.as_secs_f64();
                         info!(
                             "delaying layer flush by {delay:.3}s for compaction backpressure at \
-                            {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                            {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes, {open_layer_size} bytes in open layer)"
                         );
                         let _delay_timer = self
                             .metrics
@@ -6819,7 +6824,11 @@ impl Timeline {
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
                     Err(walredo::Error::Other(err)) => {
                         if fire_critical_error {
-                            critical!("walredo failure during page reconstruction: {err:?}");
+                            critical_timeline!(
+                                self.tenant_shard_id,
+                                self.timeline_id,
+                                "walredo failure during page reconstruction: {err:?}"
+                            );
                         }
                         return Err(PageReconstructError::WalRedo(
                             err.context("reconstruct a page image"),

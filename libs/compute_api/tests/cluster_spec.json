@@ -91,6 +91,11 @@
                 "vartype": "bool"
             },
             {
+                "name": "offload_lfc_interval_seconds",
+                "value": "20",
+                "vartype": "integer"
+            },
+            {
                 "name": "neon.safekeepers",
                 "value": "127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501",
                 "vartype": "string"
