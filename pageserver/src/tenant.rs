@@ -6054,7 +6054,7 @@ pub(crate) mod harness {
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
                 self.conf,
-                AttachedTenantConf::try_from(LocationConf::attached_single(
+                AttachedTenantConf::try_from(self.conf, LocationConf::attached_single(
                     self.tenant_conf.clone(),
                     self.generation,
                     ShardParameters::default(),
