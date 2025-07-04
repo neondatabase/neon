@@ -28,9 +28,11 @@ if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
   # Replace the environment variable PARALLEL_COMPUTES with the actual value
   yq eval -i ".services.compute_is_ready.environment |= map(select(. | test(\"^PARALLEL_COMPUTES=\")) | \"PARALLEL_COMPUTES=${PARALLEL_COMPUTES}\") + map(select(. | test(\"^PARALLEL_COMPUTES=\") | not))" docker-compose.yml
   for i in $(seq 2 "${PARALLEL_COMPUTES}"); do
-    yq  eval -i ".services.compute${i} = .services.compute1" docker-compose.yml
-    yq  eval -i "(del .services.compute${i}.build) | (del .services.compute${i}.ports) | (del.services.compute${i}.networks)" docker-compose.yml
-    yq  eval -i ".services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
+    yq eval -i ".services.compute${i} = .services.compute1" docker-compose.yml
+    yq eval -i "(del .services.compute${i}.build) | (del .services.compute${i}.ports) | (del.services.compute${i}.networks)" docker-compose.yml
+    yq eval -i ".services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
+    yq eval -i ".services.compute${i}.environment += [\"RUN_PARALLEL=true\"]" docker-compose.yml
+    yq eval -i ".services.compute${i}.environment |= map(select(. | startswith(\"TENANT_ID=\") or startswith(\"TIMELINE_ID=\") | not))" docker-compose.yml
   done
 fi
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
