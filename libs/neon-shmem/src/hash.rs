@@ -29,17 +29,24 @@ mod tests;
 use core::{Bucket, CoreHashMap, INVALID_POS};
 use entry::{Entry, OccupiedEntry, PrevPos, VacantEntry};
 
-/// Builder for a [`HashMapAccess`].
+/// This represents a hash table that (possibly) lives in shared memory.
+/// If a new process is launched with fork(), the child process inherits
+/// this struct.
 #[must_use]
 pub struct HashMapInit<'a, K, V, S = rustc_hash::FxBuildHasher> {
     shmem_handle: Option<ShmemHandle>,
-    shared_ptr: *mut RwLock<HashMapShared<'a, K, V>>,
+    shared_ptr: *mut HashMapShared<'a, K, V>,
     shared_size: usize,
     hasher: S,
     num_buckets: u32,
 }
 
-/// Accessor for a hash table.
+/// This is a per-process handle to a hash table that (possibly) lives in shared memory.
+/// If a child process is launched with fork(), the child process should
+/// get its own HashMapAccess by calling HashMapInit::attach_writer/reader().
+///
+/// XXX: We're not making use of it at the moment, but this struct could
+/// hold process-local information in the future.
 pub struct HashMapAccess<'a, K, V, S = rustc_hash::FxBuildHasher> {
     shmem_handle: Option<ShmemHandle>,
     shared_ptr: *mut HashMapShared<'a, K, V>,
@@ -50,6 +57,12 @@ unsafe impl<K: Sync, V: Sync, S> Sync for HashMapAccess<'_, K, V, S> {}
 unsafe impl<K: Send, V: Send, S> Send for HashMapAccess<'_, K, V, S> {}
 
 impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
+    /// Change the 'hasher' used by the hash table.
+    ///
+    /// NOTE: This must be called right after creating the hash table,
+    /// before inserting any entries and before calling attach_writer/reader.
+    /// Otherwise different accessors could be using different hash function,
+    /// with confusing results.
     pub fn with_hasher<T: BuildHasher>(self, hasher: T) -> HashMapInit<'a, K, V, T> {
         HashMapInit {
             hasher,
@@ -66,10 +79,15 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
         CoreHashMap::<K, V>::estimate_size(num_buckets) + size_of::<HashMapShared<K, V>>() + 1000
     }
 
-    /// Initialize a table for writing.
-    pub fn attach_writer(self) -> HashMapAccess<'a, K, V, S> {
-        let mut ptr: *mut u8 = self.shared_ptr.cast();
-        let end_ptr: *mut u8 = unsafe { ptr.add(self.shared_size) };
+    fn new(
+        num_buckets: u32,
+        shmem_handle: Option<ShmemHandle>,
+        area_ptr: *mut u8,
+        area_size: usize,
+        hasher: S,
+    ) -> Self {
+        let mut ptr: *mut u8 = area_ptr;
+        let end_ptr: *mut u8 = unsafe { ptr.add(area_size) };
 
         // carve out area for the One Big Lock (TM) and the HashMapShared.
         ptr = unsafe { ptr.add(ptr.align_offset(align_of::<libc::pthread_rwlock_t>())) };
@@ -82,7 +100,7 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
         // carve out the buckets
         ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<core::Bucket<K, V>>())) };
         let buckets_ptr = ptr;
-        ptr = unsafe { ptr.add(size_of::<core::Bucket<K, V>>() * self.num_buckets as usize) };
+        ptr = unsafe { ptr.add(size_of::<core::Bucket<K, V>>() * num_buckets as usize) };
 
         // use remaining space for the dictionary
         ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<u32>())) };
@@ -91,9 +109,8 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
         let dictionary_size = unsafe { end_ptr.byte_offset_from(ptr) / size_of::<u32>() as isize };
         assert!(dictionary_size > 0);
 
-        let buckets = unsafe {
-            std::slice::from_raw_parts_mut(buckets_ptr.cast(), self.num_buckets as usize)
-        };
+        let buckets =
+            unsafe { std::slice::from_raw_parts_mut(buckets_ptr.cast(), num_buckets as usize) };
         let dictionary = unsafe {
             std::slice::from_raw_parts_mut(dictionary_ptr.cast(), dictionary_size as usize)
         };
@@ -104,9 +121,20 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
             std::ptr::write(shared_ptr, lock);
         }
 
+        Self {
+            num_buckets,
+            shmem_handle,
+            shared_ptr,
+            shared_size: area_size,
+            hasher,
+        }
+    }
+
+    /// Attach to a hash table for writing.
+    pub fn attach_writer(self) -> HashMapAccess<'a, K, V, S> {
         HashMapAccess {
             shmem_handle: self.shmem_handle,
-            shared_ptr,
+            shared_ptr: self.shared_ptr,
             hasher: self.hasher,
         }
     }
@@ -137,13 +165,13 @@ where
 {
     /// Place the hash table within a user-supplied fixed memory area.
     pub fn with_fixed(num_buckets: u32, area: &'a mut [MaybeUninit<u8>]) -> Self {
-        Self {
+        Self::new(
             num_buckets,
-            shmem_handle: None,
-            shared_ptr: area.as_mut_ptr().cast(),
-            shared_size: area.len(),
-            hasher: rustc_hash::FxBuildHasher,
-        }
+            None,
+            area.as_mut_ptr().cast(),
+            area.len(),
+            rustc_hash::FxBuildHasher,
+        )
     }
 
     /// Place a new hash map in the given shared memory area
@@ -155,13 +183,14 @@ where
         shmem
             .set_size(size)
             .expect("could not resize shared memory area");
-        Self {
+        let ptr = shmem.data_ptr.as_ptr().cast();
+        Self::new(
             num_buckets,
-            shared_ptr: shmem.data_ptr.as_ptr().cast(),
-            shmem_handle: Some(shmem),
-            shared_size: size,
-            hasher: rustc_hash::FxBuildHasher,
-        }
+            Some(shmem),
+            ptr,
+            size,
+            rustc_hash::FxBuildHasher,
+        )
     }
 
     /// Make a resizable hash map within a new shared memory area with the given name.
@@ -170,14 +199,15 @@ where
         let max_size = Self::estimate_size(max_buckets);
         let shmem =
             ShmemHandle::new(name, size, max_size).expect("failed to make shared memory area");
+        let ptr = shmem.data_ptr.as_ptr().cast();
 
-        Self {
+        Self::new(
             num_buckets,
-            shared_ptr: shmem.data_ptr.as_ptr().cast(),
-            shmem_handle: Some(shmem),
-            shared_size: size,
-            hasher: rustc_hash::FxBuildHasher,
-        }
+            Some(shmem),
+            ptr,
+            size,
+            rustc_hash::FxBuildHasher,
+        )
     }
 
     /// Make a resizable hash map within a new anonymous shared memory area.
