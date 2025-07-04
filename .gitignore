@@ -26,9 +26,14 @@ docker-compose/docker-compose-parallel.yml
 *.o
 *.so
 *.Po
+*.pid
 
 # pgindent typedef lists
 *.list
 
 # Node
 **/node_modules/
+
+# various files for local testing
+/proxy/.subzero
+local_proxy.json

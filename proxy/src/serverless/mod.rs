@@ -11,6 +11,8 @@ mod http_conn_pool;
 mod http_util;
 mod json;
 mod local_conn_pool;
+#[cfg(feature = "rest_broker")]
+pub mod rest;
 mod sql_over_http;
 mod websocket;
 
@@ -487,6 +489,37 @@ async fn request_handler(
             .body(Empty::new().map_err(|x| match x {}).boxed())
             .map_err(|e| ApiError::InternalServerError(e.into()))
     } else {
-        json_response(StatusCode::BAD_REQUEST, "query is not supported")
+        #[cfg(feature = "rest_broker")]
+        {
+            if config.rest_config.is_rest_broker && {
+                let path_parts: Vec<&str> = request.uri().path().split('/').collect();
+                path_parts.len() >= 3 && path_parts[2].starts_with("rest")
+            } {
+                let ctx =
+                    RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
+                let span = ctx.span();
+
+                let testodrome_id = request
+                    .headers()
+                    .get("X-Neon-Query-ID")
+                    .and_then(|value| value.to_str().ok())
+                    .map(|s| s.to_string());
+
+                if let Some(query_id) = testodrome_id {
+                    info!(parent: &ctx.span(), "testodrome query ID: {query_id}");
+                    ctx.set_testodrome_id(query_id.into());
+                }
+
+                rest::handle(config, ctx, request, backend, http_cancellation_token)
+                    .instrument(span)
+                    .await
+            } else {
+                json_response(StatusCode::BAD_REQUEST, "query is not supported")
+            }
+        }
+        #[cfg(not(feature = "rest_broker"))]
+        {
+            json_response(StatusCode::BAD_REQUEST, "query is not supported")
+        }
     }
 }
