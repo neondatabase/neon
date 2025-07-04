@@ -46,7 +46,7 @@ pub struct ExtensionInstallResponse {
     pub version: ExtVersion,
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+#[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcPrewarmState {
     #[default]
@@ -56,6 +56,17 @@ pub enum LfcPrewarmState {
     Failed {
         error: String,
     },
+}
+
+impl Display for LfcPrewarmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LfcPrewarmState::NotPrewarmed => f.write_str("NotPrewarmed"),
+            LfcPrewarmState::Prewarming => f.write_str("Prewarming"),
+            LfcPrewarmState::Completed => f.write_str("Completed"),
+            LfcPrewarmState::Failed { error } => write!(f, "Error({error})"),
+        }
+    }
 }
 
 #[derive(Serialize, Default, Debug, Clone)]
@@ -68,6 +79,23 @@ pub enum LfcOffloadState {
     Failed {
         error: String,
     },
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+/// Response of /promote
+pub enum PromoteState {
+    NotPromoted,
+    Completed,
+    Failed { error: String },
+}
+
+#[derive(Deserialize, Serialize, Default, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+/// Result of /safekeepers_lsn
+pub struct SafekeepersLsn {
+    pub safekeepers: String,
+    pub wal_flush_lsn: utils::lsn::Lsn,
 }
 
 /// Response of the /status API
