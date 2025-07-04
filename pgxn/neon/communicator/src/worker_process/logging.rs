@@ -39,6 +39,7 @@ pub extern "C" fn configure_logging() -> Box<LoggingState> {
 
     let r = r.with(
         tracing_subscriber::fmt::layer()
+            .with_ansi(false)
             .event_format(SimpleFormatter::new())
             .with_writer(maker)
             // TODO: derive this from log_min_messages?
@@ -90,6 +91,7 @@ pub extern "C" fn pump_logging(
         Level::WARN => 19,  // WARNING
         Level::ERROR => 21, // ERROR
     };
+
     1
 }
 

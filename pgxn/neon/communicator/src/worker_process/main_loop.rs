@@ -25,7 +25,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::callbacks::{get_request_lsn, notify_proc};
 
-use tracing::{error, info, trace};
+use tracing::{error, info, info_span, trace};
 
 use utils::lsn::Lsn;
 
@@ -210,33 +210,46 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             // can be quickly satisfied from the cache, but we expect that to be rare, because the
             // requesting backend would have already checked the cache.
             tokio::spawn(async move {
-                let request_id = slot.get_request().request_id();
-                trace!("spawned task to process request {request_id} at slot {slot_idx}");
+                use tracing::Instrument;
 
-                // FIXME: as a temporary hack, abort request if we don't get a response promptly.
-                // Lots of regression tests are getting stuck and failing at the moment,
-                // this makes them fail a little faster, which it faster to iterate.
-                // This needs to be removed once more regression tests are passing.
-                // See also similar hack in the backend code, in wait_request_completion()
-                let result = tokio::time::timeout(
-                    tokio::time::Duration::from_secs(30),
-                    self.handle_request(slot.get_request()),
-                )
-                .await
-                .unwrap_or_else(|_elapsed| {
-                    info!("request {request_id} timed out");
-                    NeonIOResult::Error(libc::ETIMEDOUT)
-                });
-                trace!("request {request_id} at slot {slot_idx} completed");
+                let request_id = slot.get_request().request_id();
                 let owner_procno = slot.get_owner_procno();
 
-                // Ok, we have completed the IO. Mark the request as completed. After that,
-                // we no longer have ownership of the slot, and must not modify it.
-                slot.completed(result);
+                let span = info_span!(
+                    "processing",
+                    request_id = request_id,
+                    slot_idx = slot_idx,
+                    procno=owner_procno,
+                );
+                async {
+                    // FIXME: as a temporary hack, abort the request if we don't get a response
+                    // promptly.
+                    //
+                    // Lots of regression tests are getting stuck and failing at the moment,
+                    // this makes them fail a little faster, which it faster to iterate.
+                    // This needs to be removed once more regression tests are passing.
+                    // See also similar hack in the backend code, in wait_request_completion()
+                    let result = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(30),
+                        self.handle_request(slot.get_request()),
+                    )
+                        .await
+                        .unwrap_or_else(|_elapsed| {
+                            info!("request {request_id} timed out");
+                            NeonIOResult::Error(libc::ETIMEDOUT)
+                        });
+                    trace!("request {request_id} at slot {slot_idx} completed");
 
-                // Notify the backend about the completion. (Note that the backend might see
-                // the completed status even before this; this is just a wakeup)
-                notify_proc(owner_procno);
+                    // Ok, we have completed the IO. Mark the request as completed. After that,
+                    // we no longer have ownership of the slot, and must not modify it.
+                    slot.completed(result);
+
+                    // Notify the backend about the completion. (Note that the backend might see
+                    // the completed status even before this; this is just a wakeup)
+                    notify_proc(owner_procno);
+                }
+                .instrument(span)
+                .await
             });
         }
     }
