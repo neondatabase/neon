@@ -204,6 +204,10 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
         self.insert_raw_ttl(key, value, ttl, false);
     }
 
+    pub(crate) fn insert(&self, key: K, value: V) {
+        self.insert_raw_ttl(key, value, self.ttl, self.update_ttl_on_retrieval);
+    }
+
     pub(crate) fn insert_unit(&self, key: K, value: V) -> (Option<V>, Cached<&Self, ()>) {
         let (_, old) = self.insert_raw(key.clone(), value);
 
@@ -213,6 +217,28 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
         };
 
         (old, cached)
+    }
+
+    pub(crate) fn flush(&self) {
+        let now = Instant::now();
+        let mut cache = self.cache.lock();
+
+        // Collect keys of expired entries first
+        let expired_keys: Vec<_> = cache
+            .iter()
+            .filter_map(|(key, entry)| {
+                if entry.expires_at <= now {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Remove expired entries
+        for key in expired_keys {
+            cache.remove(&key);
+        }
     }
 }
 
