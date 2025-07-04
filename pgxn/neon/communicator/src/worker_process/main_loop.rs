@@ -3,7 +3,6 @@ use std::os::fd::AsRawFd;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::str::FromStr as _;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend_comms::NeonIOHandle;
 use crate::file_cache::FileCache;
@@ -38,8 +37,6 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     pub(crate) cache: IntegratedCacheWriteAccess<'a>,
 
     submission_pipe_read_fd: OwnedFd,
-
-    next_request_id: AtomicU64,
 
     in_progress_table: RequestInProgressTable,
 
@@ -154,7 +151,6 @@ pub(super) async fn init(
         client,
         cache,
         submission_pipe_read_fd: cis.submission_pipe_read_fd,
-        next_request_id: AtomicU64::new(1),
         in_progress_table: RequestInProgressTable::new(),
 
         // metrics
@@ -515,7 +511,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         match self
             .client
             .get_page(page_api::GetPageRequest {
-                request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
+                request_id: req.request_id,
                 request_class: page_api::GetPageClass::Normal,
                 read_lsn,
                 rel,
@@ -601,7 +597,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         match self
             .client
             .get_page(page_api::GetPageRequest {
-                request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
+                request_id: req.request_id,
                 request_class: page_api::GetPageClass::Prefetch,
                 read_lsn: self.request_lsns(not_modified_since),
                 rel,

@@ -56,6 +56,26 @@ pub enum NeonIOResult {
     WriteOK,
 }
 
+impl NeonIORequest {
+    pub fn request_id(&self) -> u64 {
+        use NeonIORequest::*;
+        match self {
+            Empty => 0,
+            RelExists(req) => req.request_id,
+            RelSize(req) => req.request_id,
+            GetPageV(req) => req.request_id,
+            PrefetchV(req) => req.request_id,
+            DbSize(req) => req.request_id,
+            WritePage(req) => req.request_id,
+            RelExtend(req) => req.request_id,
+            RelZeroExtend(req) => req.request_id,
+            RelCreate(req) => req.request_id,
+            RelTruncate(req) => req.request_id,
+            RelUnlink(req) => req.request_id,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CCachedGetPageVResult {
@@ -118,6 +138,7 @@ impl ShmemBuf {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CRelExistsRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
@@ -127,6 +148,7 @@ pub struct CRelExistsRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CRelSizeRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
@@ -136,6 +158,7 @@ pub struct CRelSizeRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CGetPageVRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
@@ -150,6 +173,7 @@ pub struct CGetPageVRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CPrefetchVRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
@@ -161,6 +185,7 @@ pub struct CPrefetchVRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CDbSizeRequest {
+    pub request_id: u64,
     pub db_oid: COid,
     pub request_lsn: CLsn,
 }
@@ -168,6 +193,7 @@ pub struct CDbSizeRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CWritePageRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
@@ -182,6 +208,7 @@ pub struct CWritePageRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CRelExtendRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
@@ -196,6 +223,7 @@ pub struct CRelExtendRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CRelZeroExtendRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
@@ -208,6 +236,7 @@ pub struct CRelZeroExtendRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CRelCreateRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
@@ -217,6 +246,7 @@ pub struct CRelCreateRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CRelTruncateRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
@@ -227,6 +257,7 @@ pub struct CRelTruncateRequest {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CRelUnlinkRequest {
+    pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
