@@ -1730,29 +1730,11 @@ FROM extensions-${EXTENSIONS} AS neon-pg-ext-build
 # Compile the Neon-specific `compute_ctl`, `fast_import`, and `local_proxy` binaries
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools-plan
-ARG BUILD_TAG
-ENV BUILD_TAG=$BUILD_TAG
-
-WORKDIR /home/nonroot
-USER nonroot
-
-# Copy entire project to get Cargo.* files with proper dependencies for the whole project
-COPY --chown=nonroot . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
+FROM build-deps-with-cargo AS compute-tools
 ARG BUILD_TAG
 ENV BUILD_TAG=$BUILD_TAG
 
 USER nonroot
-
-COPY --from=compute-tools-plan /home/nonroot/recipe.json recipe.json
-RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
-    --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/git \
-    --mount=type=cache,uid=1000,target=/home/nonroot/target \
-    mold -run cargo chef cook --locked --profile release-line-debug-size-lto --recipe-path recipe.json
-
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
 RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \

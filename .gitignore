@@ -32,3 +32,4 @@ compaction-suite-results.*
 
 # various files for local testing
 /proxy/.subzero
+local_proxy.json
