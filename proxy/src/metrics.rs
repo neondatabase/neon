@@ -238,13 +238,6 @@ pub enum Bool {
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]
 #[label(singleton = "outcome")]
-pub enum Outcome {
-    Success,
-    Failed,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "outcome")]
 pub enum CacheOutcome {
     Hit,
     Miss,

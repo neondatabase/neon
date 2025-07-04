@@ -4,11 +4,20 @@ use std::time::Duration;
 
 use anyhow::{Context, Ok, bail, ensure};
 use arc_swap::ArcSwapOption;
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
+use compute_api::spec::LocalProxySpec;
 use remote_storage::RemoteStorageConfig;
+use thiserror::Error;
+use tokio::sync::Notify;
+use tracing::{debug, error, info, warn};
 
 use crate::auth::backend::jwt::JwkCache;
+use crate::auth::backend::local::JWKS_ROLE_MAP;
 use crate::control_plane::locks::ApiLocks;
+use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};
+use crate::ext::TaskExt;
+use crate::intern::RoleNameInt;
 use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig};
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::GlobalConnPoolOptions;
@@ -16,18 +25,7 @@ use crate::serverless::cancel_set::CancelSet;
 #[cfg(feature = "rest_broker")]
 use crate::serverless::rest::DbSchemaCache;
 pub use crate::tls::server_config::{TlsConfig, configure_tls};
-use crate::types::Host;
-
-use crate::auth::backend::local::JWKS_ROLE_MAP;
-use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};
-use crate::ext::TaskExt;
-use crate::intern::RoleNameInt;
-use crate::types::RoleName;
-use camino::{Utf8Path, Utf8PathBuf};
-use compute_api::spec::LocalProxySpec;
-use thiserror::Error;
-use tokio::sync::Notify;
-use tracing::{debug, error, info, warn};
+use crate::types::{Host, RoleName};
 
 pub struct ProxyConfig {
     pub tls_config: ArcSwapOption<TlsConfig>,

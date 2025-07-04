@@ -1,0 +1,1 @@
+ALTER TABLE safekeepers ALTER COLUMN scheduling_policy SET DEFAULT 'pause';

@@ -10,11 +10,15 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::{bail, ensure};
 use arc_swap::ArcSwapOption;
+#[cfg(any(test, feature = "testing"))]
+use camino::Utf8PathBuf;
 use futures::future::Either;
 use itertools::{Itertools, Position};
 use rand::{Rng, thread_rng};
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
+#[cfg(any(test, feature = "testing"))]
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
@@ -51,10 +55,6 @@ use crate::tls::client_config::compute_client_config_with_root_certs;
 #[cfg(any(test, feature = "testing"))]
 use crate::url::ApiUrl;
 use crate::{auth, control_plane, http, serverless, usage_metrics};
-#[cfg(any(test, feature = "testing"))]
-use camino::Utf8PathBuf;
-#[cfg(any(test, feature = "testing"))]
-use tokio::sync::Notify;
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
@@ -537,54 +537,51 @@ pub async fn run() -> anyhow::Result<()> {
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
     }
 
-    #[cfg_attr(not(any(test, feature = "testing")), expect(irrefutable_let_patterns))]
-    if let Either::Left(auth::Backend::ControlPlane(api, ())) = &auth_backend {
-        if let crate::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api {
-            if let Some(client) = redis_client {
-                // project info cache and invalidation of that cache.
-                let cache = api.caches.project_info.clone();
-                maintenance_tasks.spawn(notifications::task_main(client.clone(), cache.clone()));
-                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+    if let Either::Left(auth::Backend::ControlPlane(api, ())) = &auth_backend
+        && let crate::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api
+        && let Some(client) = redis_client
+    {
+        // project info cache and invalidation of that cache.
+        let cache = api.caches.project_info.clone();
+        maintenance_tasks.spawn(notifications::task_main(client.clone(), cache.clone()));
+        maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
 
-                // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
-                // This prevents immediate exit and pod restart,
-                // which can cause hammering of the redis in case of connection issues.
-                // cancellation key management
-                let mut redis_kv_client = RedisKVClient::new(client.clone());
-                for attempt in (0..3).with_position() {
-                    match redis_kv_client.try_connect().await {
-                        Ok(()) => {
-                            info!("Connected to Redis KV client");
-                            cancellation_handler.init_tx(BatchQueue::new(CancellationProcessor {
-                                client: redis_kv_client,
-                                batch_size: args.cancellation_batch_size,
-                            }));
+        // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
+        // This prevents immediate exit and pod restart,
+        // which can cause hammering of the redis in case of connection issues.
+        // cancellation key management
+        let mut redis_kv_client = RedisKVClient::new(client.clone());
+        for attempt in (0..3).with_position() {
+            match redis_kv_client.try_connect().await {
+                Ok(()) => {
+                    info!("Connected to Redis KV client");
+                    cancellation_handler.init_tx(BatchQueue::new(CancellationProcessor {
+                        client: redis_kv_client,
+                        batch_size: args.cancellation_batch_size,
+                    }));
 
-                            break;
-                        }
-                        Err(e) => {
-                            error!("Failed to connect to Redis KV client: {e}");
-                            if matches!(attempt, Position::Last(_)) {
-                                bail!(
-                                    "Failed to connect to Redis KV client after {} attempts",
-                                    attempt.into_inner()
-                                );
-                            }
-                            let jitter = thread_rng().gen_range(0..100);
-                            tokio::time::sleep(Duration::from_millis(1000 + jitter)).await;
-                        }
-                    }
+                    break;
                 }
-
-                // listen for notifications of new projects/endpoints/branches
-                let cache = api.caches.endpoints_cache.clone();
-                let span = tracing::info_span!("endpoints_cache");
-                maintenance_tasks.spawn(
-                    async move { cache.do_read(client, cancellation_token.clone()).await }
-                        .instrument(span),
-                );
+                Err(e) => {
+                    error!("Failed to connect to Redis KV client: {e}");
+                    if matches!(attempt, Position::Last(_)) {
+                        bail!(
+                            "Failed to connect to Redis KV client after {} attempts",
+                            attempt.into_inner()
+                        );
+                    }
+                    let jitter = thread_rng().gen_range(0..100);
+                    tokio::time::sleep(Duration::from_millis(1000 + jitter)).await;
+                }
             }
         }
+
+        // listen for notifications of new projects/endpoints/branches
+        let cache = api.caches.endpoints_cache.clone();
+        let span = tracing::info_span!("endpoints_cache");
+        maintenance_tasks.spawn(
+            async move { cache.do_read(client, cancellation_token.clone()).await }.instrument(span),
+        );
     }
 
     let maintenance = loop {

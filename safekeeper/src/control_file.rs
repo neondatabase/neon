@@ -17,6 +17,7 @@ use utils::crashsafe::durable_rename;
 
 use crate::control_file_upgrade::{downgrade_v10_to_v9, upgrade_control_file};
 use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
+use crate::metrics::WAL_DISK_IO_ERRORS;
 use crate::state::{EvictionState, TimelinePersistentState};
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
@@ -192,11 +193,14 @@ impl TimelinePersistentState {
 impl Storage for FileStorage {
     /// Persists state durably to the underlying storage.
     async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
+        // start timer for metrics
         let _timer = PERSIST_CONTROL_FILE_SECONDS.start_timer();
-
         // write data to safekeeper.control.partial
         let control_partial_path = self.timeline_dir.join(CONTROL_FILE_NAME_PARTIAL);
         let mut control_partial = File::create(&control_partial_path).await.with_context(|| {
+            /* BEGIN_HADRON */
+            WAL_DISK_IO_ERRORS.inc();
+            /*END_HADRON */
             format!(
                 "failed to create partial control file at: {}",
                 &control_partial_path
@@ -206,14 +210,24 @@ impl Storage for FileStorage {
         let buf: Vec<u8> = s.write_to_buf()?;
 
         control_partial.write_all(&buf).await.with_context(|| {
+            /* BEGIN_HADRON */
+            WAL_DISK_IO_ERRORS.inc();
+            /*END_HADRON */
             format!("failed to write safekeeper state into control file at: {control_partial_path}")
         })?;
         control_partial.flush().await.with_context(|| {
+            /* BEGIN_HADRON */
+            WAL_DISK_IO_ERRORS.inc();
+            /*END_HADRON */
             format!("failed to flush safekeeper state into control file at: {control_partial_path}")
         })?;
 
         let control_path = self.timeline_dir.join(CONTROL_FILE_NAME);
-        durable_rename(&control_partial_path, &control_path, !self.no_sync).await?;
+        durable_rename(&control_partial_path, &control_path, !self.no_sync)
+            .await
+            /* BEGIN_HADRON */
+            .inspect_err(|_| WAL_DISK_IO_ERRORS.inc())?;
+        /* END_HADRON */
 
         // update internal state
         self.state = s.clone();

@@ -345,15 +345,13 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                     Err(e) => {
                         // The password could have been changed, so we invalidate the cache.
                         // We should only invalidate the cache if the TTL might have expired.
-                        if e.is_password_failed() {
-                            #[allow(irrefutable_let_patterns)]
-                            if let ControlPlaneClient::ProxyV1(api) = &*api {
-                                if let Some(ep) = &user_info.endpoint_id {
-                                    api.caches
-                                        .project_info
-                                        .maybe_invalidate_role_secret(ep, &user_info.user);
-                                }
-                            }
+                        if e.is_password_failed()
+                            && let ControlPlaneClient::ProxyV1(api) = &*api
+                            && let Some(ep) = &user_info.endpoint_id
+                        {
+                            api.caches
+                                .project_info
+                                .maybe_invalidate_role_secret(ep, &user_info.user);
                         }
 
                         Err(e)
