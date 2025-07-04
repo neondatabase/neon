@@ -18,10 +18,9 @@ from pytest import raises
 def stop_and_check_lsn(ep: Endpoint, expected_lsn: Lsn | None):
     ep.stop(mode="immediate-terminate")
     lsn = ep.terminate_flush_lsn
-    if expected_lsn is not None:
+    assert (lsn is not None) == (expected_lsn is not None), f"{lsn=}, {expected_lsn=}"
+    if lsn is not None:
         assert lsn >= expected_lsn, f"{expected_lsn=} < {lsn=}"
-    else:
-        assert lsn == expected_lsn, f"{expected_lsn=} != {lsn=}"
 
 
 def get_lsn_triple(cur: Cursor) -> tuple[str, str, str]:
@@ -102,13 +101,13 @@ def test_replica_promotes(neon_simple_env: NeonEnv, method: PromoteMethod):
     # Reconnect to the secondary to make sure we get a read-write connection
     promo_conn = secondary.connect()
     promo_cur = promo_conn.cursor()
-    http_client = secondary.http_client()
-    if method is PromoteMethod.COMPUTE_CTL:
-        http_client.prewarm_lfc(primary_endpoint_id)
+    if method == PromoteMethod.COMPUTE_CTL:
+        client = secondary.http_client()
+        client.prewarm_lfc(primary_endpoint_id)
         # control plane knows safekeepers, simulate it by querying primary
         assert (lsn := primary.terminate_flush_lsn)
         safekeepers_lsn = {"safekeepers": safekeepers, "wal_flush_lsn": lsn}
-        assert http_client.promote(safekeepers_lsn)["status"] == "completed"
+        assert client.promote(safekeepers_lsn)["status"] == "completed"
     else:
         promo_cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
         promo_cur.execute("select pg_reload_conf()")
@@ -143,12 +142,18 @@ def test_replica_promotes(neon_simple_env: NeonEnv, method: PromoteMethod):
         new_primary_cur.execute("select payload from t")
         assert new_primary_cur.fetchall() == [(it,) for it in range(1, 201)]
 
-    stop_and_check_lsn(secondary, expected_promoted_lsn)
+    if method == PromoteMethod.COMPUTE_CTL:
+        # compute_ctl's /promote switches replica type to Primary so it syncs
+        # safekeepers on finish
+        stop_and_check_lsn(secondary, expected_promoted_lsn)
+    else:
+        # on testing postgres, we don't update replica type, secondaries don't
+        # sync so lsn should be None
+        stop_and_check_lsn(secondary, None)
 
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary2")
 
-    with primary.connect() as new_primary:
-        new_primary_cur = new_primary.cursor()
+    with primary.connect() as new_primary, new_primary.cursor() as new_primary_cur:
         lsn_triple = get_lsn_triple(new_primary_cur)
         expected_primary_lsn = Lsn(lsn_triple[2])
         log.info(f"New primary: Boot LSN is {lsn_triple}")
@@ -158,5 +163,4 @@ def test_replica_promotes(neon_simple_env: NeonEnv, method: PromoteMethod):
         new_primary_cur.execute("INSERT INTO t (payload) SELECT generate_series(201, 300)")
         new_primary_cur.execute("select count(*) from t")
         assert new_primary_cur.fetchone() == (300,)
-
     stop_and_check_lsn(primary, expected_primary_lsn)

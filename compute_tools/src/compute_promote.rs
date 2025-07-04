@@ -47,9 +47,8 @@ impl ComputeNode {
         task.borrow().clone()
     }
 
-    // Why safekeepers? For second replica we use primary_connection_conninfo instead of safekeepers
-    // TODO(myrrc): suggestion by Muhammet: send new ComputeSpec and apply on secondary
-    //  should there be any disrepancies between primary and secondary
+    // Why do we have to supply safekeepers?
+    // For secondary we use primary_connection_conninfo so safekeepers field is empty
     async fn promote_impl(&self, safekeepers_lsn: SafekeepersLsn) -> Result<()> {
         {
             let state = self.state.lock().unwrap();
@@ -107,10 +106,6 @@ impl ComputeNode {
             .query("SELECT pg_reload_conf()", &[])
             .await
             .context("reloading postgres config")?;
-
-        //PG:2025-06-10 17:35:13.040 GMT [1144217] LOG:  received promote request
-        //PG:2025-06-10 17:35:13.041 GMT [1144218] FATAL:  terminating walreceiver process due to administrator command
-        //PG:2025-06-10 17:35:13.041 GMT [1144217] LOG:  invalid record length at 0/156CF08: expected at least 24, got 0
         let row = client
             .query_one("SELECT * FROM pg_promote()", &[])
             .await
