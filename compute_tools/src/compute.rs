@@ -549,14 +549,6 @@ impl ComputeNode {
 
         // Reap the postgres process
         delay_exit |= this.cleanup_after_postgres_exit()?;
-        let sleep_secs = if delay_exit {
-            30
-        } else {
-            // /terminate returns LSN. If we don't sleep before exiting, connection will
-            // error out "connection closed before message completed", and we won't get
-            // LSN
-            1
-        };
 
         // /terminate returns LSN. If we don't sleep at all, connection will break and we
         // won't get result. If we sleep too much, tests will take significantly longer

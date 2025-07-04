@@ -3,12 +3,10 @@ File with secondary->primary promotion testing.
 
 This far, only contains a test that we don't break and that the data is persisted.
 """
-
 from typing import cast
 import psycopg2
 from fixtures.common_types import Lsn
 from enum import Enum
-import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import Endpoint, NeonEnv, wait_replica_caughtup
@@ -18,15 +16,6 @@ from pytest import raises
 
 def stop_and_check_lsn(ep: Endpoint, expected_lsn: Lsn | None):
     ep.stop(mode="immediate-terminate")
-    lsn = ep.terminate_flush_lsn
-    if expected_lsn is not None:
-        assert lsn >= expected_lsn, f"{expected_lsn=} < {lsn=}"
-    else:
-        assert lsn == expected_lsn, f"{expected_lsn=} != {lsn=}"
-
-
-def test_replica_promotes(neon_simple_env: NeonEnv, pg_version: PgVersion):
-    ep.stop(mode="immediate")
     lsn = ep.terminate_flush_lsn
     if expected_lsn is not None:
         assert lsn >= expected_lsn, f"{expected_lsn=} < {lsn=}"
@@ -50,7 +39,6 @@ QUERY_OPTIONS = PromoteMethod.POSTGRES, PromoteMethod.COMPUTE_CTL
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 @pytest.mark.parametrize("query", QUERY_OPTIONS, ids=["postgres", "compute-ctl"])
 def test_replica_promotes(neon_simple_env: NeonEnv, query: PromoteMethod):
->>>>>>> 2f1f94d17 (promotion in compute_ctl)
     """
     Test that a replica safely promotes, and can commit data updates which
     show up when the primary boots up after the promoted secondary endpoint
@@ -66,8 +54,7 @@ def test_replica_promotes(neon_simple_env: NeonEnv, query: PromoteMethod):
     with primary.connect() as primary_conn:
         primary_cur = primary_conn.cursor()
         if query is PromoteMethod.COMPUTE_CTL:
-            # TODO(myrrc): remove version
-            primary_cur.execute("create extension neon version '1.6'")
+            primary_cur.execute("create extension neon")
 
         primary_cur.execute(
             "create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)"
