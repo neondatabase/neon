@@ -152,7 +152,7 @@ assign_request_id(void)
 
 	counter = communicator_shmem_ptr->backends[MyProcNumber].request_counter++;
 	result = (((uint64) MyProcNumber) << PROCNUMBER_BITS) | (counter & REQUEST_COUNTER_MASK);
-	elog(LOG, "assigned request id " UINT64_FORMAT " (counter " UINT64_FORMAT ", procno %d)", result, counter, (int) MyProcNumber);
+	elog(DEBUG5, "assigned request id " UINT64_FORMAT " (counter " UINT64_FORMAT ", procno %d)", result, counter, (int) MyProcNumber);
 
 	return result;
 }
@@ -568,7 +568,7 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 	if (request_idx == -1)
 	{
 		/* -1 means the request was satisfied immediately. */
-		elog(LOG, "communicator request %lu was satisfied immediately", request->rel_exists.request_id);
+		elog(DEBUG4, "communicator request %lu was satisfied immediately", request->rel_exists.request_id);
 		return -1;
 	}
 	elog(LOG, "started communicator request %lu at slot %d", request->rel_exists.request_id, request_idx);
