@@ -179,7 +179,7 @@ services:
       - pageserver
 
   neon-test-extensions:
-    profiles: ["test-extensions", "parallel-test-extensions"]
+    profiles: ["test-extensions"]
     image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-${PG_VERSION:-16}}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
     environment:
       - PGUSER=${PGUSER:-cloud_admin}
