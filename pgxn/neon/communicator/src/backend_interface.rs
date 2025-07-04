@@ -31,6 +31,13 @@ pub extern "C" fn rcommunicator_backend_init(
     cis: Box<CommunicatorInitStruct>,
     my_proc_number: i32,
 ) -> &'static mut CommunicatorBackendStruct<'static> {
+    if my_proc_number < 0 || my_proc_number as u32 >= cis.max_procs {
+        panic!(
+            "cannot attach to communicator shared memory with procnumber {} (max_procs {})",
+            my_proc_number, cis.max_procs,
+        );
+    }
+
     let start_idx = my_proc_number as u32 * cis.num_neon_request_slots_per_backend;
     let end_idx = start_idx + cis.num_neon_request_slots_per_backend;
 

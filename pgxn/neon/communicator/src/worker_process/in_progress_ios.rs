@@ -74,7 +74,7 @@ where
                 Entry::Occupied(e) => {
                     let e = e.get();
                     (e.0, Arc::clone(&e.1))
-                },
+                }
                 Entry::Vacant(e) => {
                     e.insert((val, Arc::clone(&my_mutex)));
                     break;

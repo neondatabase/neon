@@ -109,8 +109,6 @@ static CommunicatorShmemData *communicator_shmem_ptr;
 
 #define MyIOCompletionLatch (&communicator_shmem_ptr->backends[MyProcNumber].io_completion_latch)
 
-static slock_t in_elog;
-
 #define MAX_INFLIGHT_ASYNC_REQUESTS 5
 
 /* request indexes of (prefetch) requests that have been started */
@@ -185,8 +183,6 @@ pg_init_communicator_new(void)
 	bgw.bgw_main_arg = (Datum) 0;
 
 	RegisterBackgroundWorker(&bgw);
-
-	SpinLockInit(&in_elog);
 }
 
 static size_t
@@ -437,6 +433,7 @@ communicator_new_init(void)
 		return;
 	}
 
+	/* The communicator process performs different initialization */
 	if (MyBgworkerEntry && strcmp(MyBgworkerEntry->bgw_function_name, "communicator_new_bgworker_main") == 0)
 		return;
 
@@ -696,7 +693,14 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 	elog(DEBUG5, "getpagev called for rel %u/%u/%u.%u block %u (%u blocks)",
 		 RelFileInfoFmt(rinfo), forkNum, blockno, nblocks);
 
-	/* Fill in the destination buffers in the request */
+	/*
+	 * Fill in the destination buffer pointers in the request. If the
+	 * destination is a buffer in shared memory, the communicator process can
+	 * write the result directly to the buffer. Otherwise, we need to use a
+	 * "bounce buffer". We only have one bounce buffer, so if bouncing is
+	 * needed and multiple pages were requested, we need to serially perform a
+	 * separate request for each page. Hopefully that is rare.
+	 */
 	if (nblocks == 1)
 	{
 		if (bounce_needed(buffers[0]))
