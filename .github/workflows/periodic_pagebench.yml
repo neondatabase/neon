@@ -1,4 +1,4 @@
-name: Periodic pagebench performance test on unit-perf hetzner runner
+name: Periodic pagebench performance test on unit-perf-aws-arm runners
 
 on:
   schedule:
@@ -40,7 +40,7 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [ self-hosted, unit-perf ]
+    runs-on: [ self-hosted, unit-perf-aws-arm ]
     container:
       image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:

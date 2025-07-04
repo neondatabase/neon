@@ -1,4 +1,4 @@
-name: Periodic proxy performance test on unit-perf hetzner runner
+name: Periodic proxy performance test on unit-perf-aws-arm runners
 
 on:
   push: # TODO: remove after testing
@@ -32,7 +32,7 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [self-hosted, unit-perf]
+    runs-on: [self-hosted, unit-perf-aws-arm]
     timeout-minutes: 60  # 1h timeout
     container:
       image: ghcr.io/neondatabase/build-tools:pinned-bookworm
