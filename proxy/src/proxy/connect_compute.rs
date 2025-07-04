@@ -112,7 +112,7 @@ where
     let node_info = if !node_info.cached() || !err.should_retry_wake_compute() {
         // If we just recieved this from cplane and didn't get it from cache, we shouldn't retry.
         // Do not need to retrieve a new node_info, just return the old one.
-        if should_retry(&err, num_retries, compute.retry) {
+        if !should_retry(&err, num_retries, compute.retry) {
             Metrics::get().proxy.retries_metric.observe(
                 RetriesMetricGroup {
                     outcome: ConnectOutcome::Failed,

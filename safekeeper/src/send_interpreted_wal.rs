@@ -16,7 +16,7 @@ use tokio::sync::mpsc::error::SendError;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::{Instrument, error, info, info_span};
-use utils::critical;
+use utils::critical_timeline;
 use utils::lsn::Lsn;
 use utils::postgres_client::{Compression, InterpretedFormat};
 use wal_decoder::models::{InterpretedWalRecord, InterpretedWalRecords};
@@ -268,6 +268,8 @@ impl InterpretedWalReader {
 
         let (shard_notification_tx, shard_notification_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        let ttid = wal_stream.ttid;
+
         let reader = InterpretedWalReader {
             wal_stream,
             shard_senders: HashMap::from([(
@@ -300,7 +302,11 @@ impl InterpretedWalReader {
                     .inspect_err(|err| match err {
                         // TODO: we may want to differentiate these errors further.
                         InterpretedWalReaderError::Decode(_) => {
-                            critical!("failed to decode WAL record: {err:?}");
+                            critical_timeline!(
+                                ttid.tenant_id,
+                                ttid.timeline_id,
+                                "failed to read WAL record: {err:?}"
+                            );
                         }
                         err => error!("failed to read WAL record: {err}"),
                     })
@@ -363,9 +369,14 @@ impl InterpretedWalReader {
             metric.dec();
         }
 
+        let ttid = self.wal_stream.ttid;
         match self.run_impl(start_pos).await {
             Err(err @ InterpretedWalReaderError::Decode(_)) => {
-                critical!("failed to decode WAL record: {err:?}");
+                critical_timeline!(
+                    ttid.tenant_id,
+                    ttid.timeline_id,
+                    "failed to decode WAL record: {err:?}"
+                );
             }
             Err(err) => error!("failed to read WAL record: {err}"),
             Ok(()) => info!("interpreted wal reader exiting"),

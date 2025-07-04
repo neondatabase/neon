@@ -31,7 +31,8 @@ use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
 
 use crate::metrics::{
-    REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS, WalStorageMetrics, time_io_closure,
+    REMOVED_WAL_SEGMENTS, WAL_DISK_IO_ERRORS, WAL_STORAGE_OPERATION_SECONDS, WalStorageMetrics,
+    time_io_closure,
 };
 use crate::state::TimelinePersistentState;
 use crate::wal_backup::{WalBackup, read_object, remote_timeline_path};
@@ -154,8 +155,8 @@ pub struct PhysicalStorage {
     ///     record
     ///
     /// Partial segment 002 has no WAL records, and it will be removed by the
-    /// next truncate_wal(). This flag will be set to true after the first
-    /// truncate_wal() call.
+    /// next truncate_wal(). This flag will be set to false after the first
+    /// successful truncate_wal() call.
     ///
     /// [`write_lsn`]: Self::write_lsn
     pending_wal_truncation: bool,
@@ -202,6 +203,8 @@ impl PhysicalStorage {
             ttid.timeline_id, flush_lsn, state.commit_lsn, state.peer_horizon_lsn,
         );
         if flush_lsn < state.commit_lsn {
+            // note: can never happen. find_end_of_wal returns provided start_lsn
+            // (state.commit_lsn in our case) if it doesn't find anything.
             bail!(
                 "timeline {} potential data loss: flush_lsn {} by find_end_of_wal is less than commit_lsn  {} from control file",
                 ttid.timeline_id,
@@ -291,9 +294,12 @@ impl PhysicalStorage {
             // half initialized segment, first bake it under tmp filename and
             // then rename.
             let tmp_path = self.timeline_dir.join("waltmp");
-            let file = File::create(&tmp_path)
-                .await
-                .with_context(|| format!("Failed to open tmp wal file {:?}", &tmp_path))?;
+            let file: File = File::create(&tmp_path).await.with_context(|| {
+                /* BEGIN_HADRON */
+                WAL_DISK_IO_ERRORS.inc();
+                /* END_HADRON */
+                format!("Failed to open tmp wal file {:?}", &tmp_path)
+            })?;
 
             fail::fail_point!("sk-zero-segment", |_| {
                 info!("sk-zero-segment failpoint hit");
@@ -380,7 +386,11 @@ impl PhysicalStorage {
 
             let flushed = self
                 .write_in_segment(segno, xlogoff, &buf[..bytes_write])
-                .await?;
+                .await
+                /* BEGIN_HADRON */
+                .inspect_err(|_| WAL_DISK_IO_ERRORS.inc())?;
+            /* END_HADRON */
+
             self.write_lsn += bytes_write as u64;
             if flushed {
                 self.flush_lsn = self.write_lsn;
@@ -489,7 +499,11 @@ impl Storage for PhysicalStorage {
         }
 
         if let Some(unflushed_file) = self.file.take() {
-            self.fdatasync_file(&unflushed_file).await?;
+            self.fdatasync_file(&unflushed_file)
+                .await
+                /* BEGIN_HADRON */
+                .inspect_err(|_| WAL_DISK_IO_ERRORS.inc())?;
+            /* END_HADRON */
             self.file = Some(unflushed_file);
         } else {
             // We have unflushed data (write_lsn != flush_lsn), but no file. This

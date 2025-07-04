@@ -37,6 +37,7 @@ use std::hash::{Hash, Hasher};
 pub use ::utils::shard::*;
 use postgres_ffi_types::forknum::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
+use utils::critical;
 
 use crate::key::Key;
 use crate::models::ShardParameters;
@@ -179,12 +180,23 @@ impl ShardIdentity {
 
     /// For use when creating ShardIdentity instances for new shards, where a creation request
     /// specifies the ShardParameters that apply to all shards.
-    pub fn from_params(number: ShardNumber, params: &ShardParameters) -> Self {
+    pub fn from_params(number: ShardNumber, params: ShardParameters) -> Self {
         Self {
             number,
             count: params.count,
             layout: LAYOUT_V1,
             stripe_size: params.stripe_size,
+        }
+    }
+
+    /// Asserts that the given shard identities are equal. Changes to shard parameters will likely
+    /// result in data corruption.
+    pub fn assert_equal(&self, other: ShardIdentity) {
+        if self != &other {
+            // TODO: for now, we're conservative and just log errors in production. Turn this into a
+            // real assertion when we're confident it doesn't misfire, and also reject requests that
+            // attempt to change it with an error response.
+            critical!("shard identity mismatch: {self:?} != {other:?}");
         }
     }
 

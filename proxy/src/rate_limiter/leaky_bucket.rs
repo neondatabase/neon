@@ -39,7 +39,11 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
 
         let config = config.map_or(self.default_config, Into::into);
 
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
+        if self
+            .access_count
+            .fetch_add(1, Ordering::AcqRel)
+            .is_multiple_of(2048)
+        {
             self.do_gc(now);
         }
 

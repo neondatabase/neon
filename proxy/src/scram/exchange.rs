@@ -107,7 +107,7 @@ pub(crate) async fn exchange(
     secret: &ServerSecret,
     password: &[u8],
 ) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
-    let salt = BASE64_STANDARD.decode(&secret.salt_base64)?;
+    let salt = BASE64_STANDARD.decode(&*secret.salt_base64)?;
     let client_key = derive_client_key(pool, endpoint, password, &salt, secret.iterations).await;
 
     if secret.is_password_invalid(&client_key).into() {

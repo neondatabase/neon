@@ -17,14 +17,17 @@ use tracing::*;
 use utils::backoff::exponential_backoff_duration;
 use utils::completion::Barrier;
 use utils::pausable_failpoint;
+use utils::sync::gate::GateError;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
 use crate::task_mgr::{self, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS, TaskKind};
+use crate::tenant::blob_io::WriteBlobError;
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::{TenantShard, TenantState};
+use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
 
 /// Semaphore limiting concurrent background tasks (across all tenants).
 ///
@@ -313,7 +316,20 @@ pub(crate) fn log_compaction_error(
             let timeline = root_cause
                 .downcast_ref::<PageReconstructError>()
                 .is_some_and(|e| e.is_stopping());
-            let is_stopping = upload_queue || timeline;
+            let buffered_writer_flush_task_canelled = root_cause
+                .downcast_ref::<FlushTaskError>()
+                .is_some_and(|e| e.is_cancel());
+            let write_blob_cancelled = root_cause
+                .downcast_ref::<WriteBlobError>()
+                .is_some_and(|e| e.is_cancel());
+            let gate_closed = root_cause
+                .downcast_ref::<GateError>()
+                .is_some_and(|e| e.is_cancel());
+            let is_stopping = upload_queue
+                || timeline
+                || buffered_writer_flush_task_canelled
+                || write_blob_cancelled
+                || gate_closed;
 
             if is_stopping {
                 Level::INFO

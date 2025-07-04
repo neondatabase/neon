@@ -16,9 +16,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::requests::ComputeClaimsScope;
-use compute_api::spec::ComputeMode;
+use compute_api::spec::{ComputeMode, PageserverProtocol};
 use control_plane::broker::StorageBroker;
-use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode, PageserverProtocol};
+use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode};
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env;
 use control_plane::local_env::{
@@ -64,7 +64,9 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
+#[allow(dead_code)]
 const DEFAULT_PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
+const DEFAULT_PG_VERSION_NUM: &str = "17";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
@@ -167,7 +169,7 @@ struct TenantCreateCmdArgs {
     #[clap(short = 'c')]
     config: Vec<String>,
 
-    #[arg(default_value_t = DEFAULT_PG_VERSION)]
+    #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
     #[clap(long, help = "Postgres version to use for the initial timeline")]
     pg_version: PgMajorVersion,
 
@@ -290,7 +292,7 @@ struct TimelineCreateCmdArgs {
     #[clap(long, help = "Human-readable alias for the new timeline")]
     branch_name: String,
 
-    #[arg(default_value_t = DEFAULT_PG_VERSION)]
+    #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
     #[clap(long, help = "Postgres version")]
     pg_version: PgMajorVersion,
 }
@@ -322,7 +324,7 @@ struct TimelineImportCmdArgs {
     #[clap(long, help = "Lsn the basebackup ends at")]
     end_lsn: Option<Lsn>,
 
-    #[arg(default_value_t = DEFAULT_PG_VERSION)]
+    #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
     #[clap(long, help = "Postgres version of the backup being imported")]
     pg_version: PgMajorVersion,
 }
@@ -601,7 +603,7 @@ struct EndpointCreateCmdArgs {
     )]
     config_only: bool,
 
-    #[arg(default_value_t = DEFAULT_PG_VERSION)]
+    #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
     #[clap(long, help = "Postgres version")]
     pg_version: PgMajorVersion,
 
@@ -1649,7 +1651,9 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = parse_safekeepers(&args.safekeepers)?;
-            endpoint.reconfigure(pageservers, None, safekeepers).await?;
+            endpoint
+                .reconfigure(Some(pageservers), None, safekeepers, None)
+                .await?;
         }
         EndpointCmd::Stop(args) => {
             let endpoint_id = &args.endpoint_id;

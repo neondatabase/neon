@@ -14,7 +14,7 @@ pub(crate) struct ServerSecret {
     /// Number of iterations for `PBKDF2` function.
     pub(crate) iterations: u32,
     /// Salt used to hash user's password.
-    pub(crate) salt_base64: String,
+    pub(crate) salt_base64: Box<str>,
     /// Hashed `ClientKey`.
     pub(crate) stored_key: ScramKey,
     /// Used by client to verify server's signature.
@@ -35,7 +35,7 @@ impl ServerSecret {
 
         let secret = ServerSecret {
             iterations: iterations.parse().ok()?,
-            salt_base64: salt.to_owned(),
+            salt_base64: salt.into(),
             stored_key: base64_decode_array(stored_key)?.into(),
             server_key: base64_decode_array(server_key)?.into(),
             doomed: false,
@@ -58,7 +58,7 @@ impl ServerSecret {
             // iteration count 1 for our generated passwords going forward.
             // PG16 users can set iteration count=1 already today.
             iterations: 1,
-            salt_base64: BASE64_STANDARD.encode(nonce),
+            salt_base64: BASE64_STANDARD.encode(nonce).into_boxed_str(),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),
             doomed: true,
@@ -88,7 +88,7 @@ mod tests {
 
         let parsed = ServerSecret::parse(&secret).unwrap();
         assert_eq!(parsed.iterations, iterations);
-        assert_eq!(parsed.salt_base64, salt);
+        assert_eq!(&*parsed.salt_base64, salt);
 
         assert_eq!(BASE64_STANDARD.encode(parsed.stored_key), stored_key);
         assert_eq!(BASE64_STANDARD.encode(parsed.server_key), server_key);

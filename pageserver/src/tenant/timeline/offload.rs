@@ -19,6 +19,8 @@ pub(crate) enum OffloadError {
     NotArchived,
     #[error(transparent)]
     RemoteStorage(anyhow::Error),
+    #[error("Offload or deletion already in progress")]
+    AlreadyInProgress,
     #[error("Unexpected offload error: {0}")]
     Other(anyhow::Error),
 }
@@ -44,20 +46,26 @@ pub(crate) async fn offload_timeline(
         timeline.timeline_id,
         TimelineDeleteGuardKind::Offload,
     );
-    if let Err(DeleteTimelineError::HasChildren(children)) = delete_guard_res {
-        let is_archived = timeline.is_archived();
-        if is_archived == Some(true) {
-            tracing::error!("timeline is archived but has non-archived children: {children:?}");
+    let (timeline, guard) = match delete_guard_res {
+        Ok(timeline_and_guard) => timeline_and_guard,
+        Err(DeleteTimelineError::HasChildren(children)) => {
+            let is_archived = timeline.is_archived();
+            if is_archived == Some(true) {
+                tracing::error!("timeline is archived but has non-archived children: {children:?}");
+                return Err(OffloadError::NotArchived);
+            }
+            tracing::info!(
+                ?is_archived,
+                "timeline is not archived and has unarchived children"
+            );
             return Err(OffloadError::NotArchived);
         }
-        tracing::info!(
-            ?is_archived,
-            "timeline is not archived and has unarchived children"
-        );
-        return Err(OffloadError::NotArchived);
+        Err(DeleteTimelineError::AlreadyInProgress(_)) => {
+            tracing::info!("timeline offload or deletion already in progress");
+            return Err(OffloadError::AlreadyInProgress);
+        }
+        Err(e) => return Err(OffloadError::Other(anyhow::anyhow!(e))),
     };
-    let (timeline, guard) =
-        delete_guard_res.map_err(|e| OffloadError::Other(anyhow::anyhow!(e)))?;
 
     let TimelineOrOffloaded::Timeline(timeline) = timeline else {
         tracing::error!("timeline already offloaded, but given timeline object");

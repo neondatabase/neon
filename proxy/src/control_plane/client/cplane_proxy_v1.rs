@@ -250,10 +250,8 @@ impl NeonControlPlaneClient {
             info!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<WakeCompute>(response.status(), response.bytes().await?)?;
 
-            // Unfortunately, ownership won't let us use `Option::ok_or` here.
-            let (host, port) = match parse_host_port(&body.address) {
-                None => return Err(WakeComputeError::BadComputeAddress(body.address)),
-                Some(x) => x,
+            let Some((host, port)) = parse_host_port(&body.address) else {
+                return Err(WakeComputeError::BadComputeAddress(body.address));
             };
 
             let host_addr = IpAddr::from_str(host).ok();

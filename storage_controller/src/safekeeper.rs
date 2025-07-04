@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use pageserver_api::controller_api::{SafekeeperDescribeResponse, SkSchedulingPolicy};
 use reqwest::StatusCode;
+use safekeeper_api::membership::SafekeeperId;
 use safekeeper_client::mgmt_api;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
@@ -91,6 +92,13 @@ impl Safekeeper {
     }
     pub(crate) fn has_https_port(&self) -> bool {
         self.listen_https_port.is_some()
+    }
+    pub(crate) fn get_safekeeper_id(&self) -> SafekeeperId {
+        SafekeeperId {
+            id: self.id,
+            host: self.skp.host.clone(),
+            pg_port: self.skp.port as u16,
+        }
     }
     /// Perform an operation (which is given a [`SafekeeperClient`]) with retries
     #[allow(clippy::too_many_arguments)]

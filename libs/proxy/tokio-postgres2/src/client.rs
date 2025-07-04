@@ -90,7 +90,7 @@ pub struct InnerClient {
 }
 
 impl InnerClient {
-    pub fn start(&mut self) -> Result<PartialQuery, Error> {
+    pub fn start(&mut self) -> Result<PartialQuery<'_>, Error> {
         self.responses.waiting += 1;
         Ok(PartialQuery(Some(self)))
     }
@@ -227,7 +227,7 @@ impl Client {
         &mut self,
         statement: &str,
         params: I,
-    ) -> Result<RowStream, Error>
+    ) -> Result<RowStream<'_>, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,
@@ -262,7 +262,7 @@ impl Client {
     pub(crate) async fn simple_query_raw(
         &mut self,
         query: &str,
-    ) -> Result<SimpleQueryStream, Error> {
+    ) -> Result<SimpleQueryStream<'_>, Error> {
         simple_query::simple_query(self.inner_mut(), query).await
     }
 

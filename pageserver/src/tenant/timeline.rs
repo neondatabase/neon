@@ -78,7 +78,7 @@ use utils::rate_limit::RateLimit;
 use utils::seqwait::SeqWait;
 use utils::simple_rcu::{Rcu, RcuReadGuard};
 use utils::sync::gate::{Gate, GateGuard};
-use utils::{completion, critical, fs_ext, pausable_failpoint};
+use utils::{completion, critical_timeline, fs_ext, pausable_failpoint};
 #[cfg(test)]
 use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
@@ -106,7 +106,7 @@ use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
-use crate::feature_resolver::FeatureResolver;
+use crate::feature_resolver::TenantFeatureResolver;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
@@ -202,7 +202,7 @@ pub struct TimelineResources {
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
     pub basebackup_cache: Arc<BasebackupCache>,
-    pub feature_resolver: FeatureResolver,
+    pub feature_resolver: TenantFeatureResolver,
 }
 
 pub struct Timeline {
@@ -450,7 +450,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
-    feature_resolver: FeatureResolver,
+    feature_resolver: TenantFeatureResolver,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -763,7 +763,7 @@ pub(crate) enum CreateImageLayersError {
     PageReconstructError(#[source] PageReconstructError),
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl From<layer_manager::Shutdown> for CreateImageLayersError {
@@ -4729,7 +4729,7 @@ impl Timeline {
                 }
 
                 // Fetch the next layer to flush, if any.
-                let (layer, l0_count, frozen_count, frozen_size) = {
+                let (layer, l0_count, frozen_count, frozen_size, open_layer_size) = {
                     let layers = self.layers.read(LayerManagerLockHolder::FlushLoop).await;
                     let Ok(lm) = layers.layer_map() else {
                         info!("dropping out of flush loop for timeline shutdown");
@@ -4742,8 +4742,13 @@ impl Timeline {
                         .iter()
                         .map(|l| l.estimated_in_mem_size())
                         .sum();
+                    let open_layer_size: u64 = lm
+                        .open_layer
+                        .as_ref()
+                        .map(|l| l.estimated_in_mem_size())
+                        .unwrap_or(0);
                     let layer = lm.frozen_layers.front().cloned();
-                    (layer, l0_count, frozen_count, frozen_size)
+                    (layer, l0_count, frozen_count, frozen_size, open_layer_size)
                     // drop 'layers' lock
                 };
                 let Some(layer) = layer else {
@@ -4756,7 +4761,7 @@ impl Timeline {
                     if l0_count >= stall_threshold {
                         warn!(
                             "stalling layer flushes for compaction backpressure at {l0_count} \
-                            L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                            L0 layers ({frozen_count} frozen layers with {frozen_size} bytes, {open_layer_size} bytes in open layer)"
                         );
                         let stall_timer = self
                             .metrics
@@ -4809,7 +4814,7 @@ impl Timeline {
                         let delay = flush_duration.as_secs_f64();
                         info!(
                             "delaying layer flush by {delay:.3}s for compaction backpressure at \
-                            {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                            {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes, {open_layer_size} bytes in open layer)"
                         );
                         let _delay_timer = self
                             .metrics
@@ -5308,6 +5313,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         io_concurrency: IoConcurrency,
+        progress: Option<(usize, usize)>,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         let mut wrote_keys = false;
 
@@ -5384,11 +5390,15 @@ impl Timeline {
             }
         }
 
+        let progress_report = progress
+            .map(|(idx, total)| format!("({idx}/{total}) "))
+            .unwrap_or_default();
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
             info!(
-                "produced image layer for rel {}",
+                "{} produced image layer for rel {}",
+                progress_report,
                 ImageLayerName {
                     key_range: img_range.clone(),
                     lsn
@@ -5398,7 +5408,12 @@ impl Timeline {
                 unfinished_image_layer: image_layer_writer,
             })
         } else {
-            tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
+            tracing::debug!(
+                "{} no data in range {}-{}",
+                progress_report,
+                img_range.start,
+                img_range.end
+            );
             Ok(ImageLayerCreationOutcome::Empty)
         }
     }
@@ -5590,7 +5605,7 @@ impl Timeline {
                 self.should_check_if_image_layers_required(lsn)
             };
 
-        let mut batch_image_writer = BatchLayerWriter::new(self.conf).await?;
+        let mut batch_image_writer = BatchLayerWriter::new(self.conf);
 
         let mut all_generated = true;
 
@@ -5633,7 +5648,8 @@ impl Timeline {
             }
         }
 
-        for partition in partition_parts.iter() {
+        let total = partition_parts.len();
+        for (idx, partition) in partition_parts.iter().enumerate() {
             if self.cancel.is_cancelled() {
                 return Err(CreateImageLayersError::Cancelled);
             }
@@ -5694,7 +5710,8 @@ impl Timeline {
                 self.cancel.clone(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
             fail_point!("image-layer-writer-fail-before-finish", |_| {
                 Err(CreateImageLayersError::Other(anyhow::anyhow!(
@@ -5717,6 +5734,7 @@ impl Timeline {
                     ctx,
                     img_range.clone(),
                     io_concurrency,
+                    Some((idx, total)),
                 )
                 .await?
             } else {
@@ -5789,7 +5807,10 @@ impl Timeline {
             }
         }
 
-        let image_layers = batch_image_writer.finish(self, ctx).await?;
+        let image_layers = batch_image_writer
+            .finish(self, ctx)
+            .await
+            .map_err(CreateImageLayersError::Other)?;
 
         let mut guard = self.layers.write(LayerManagerLockHolder::Compaction).await;
 
@@ -6803,7 +6824,11 @@ impl Timeline {
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
                     Err(walredo::Error::Other(err)) => {
                         if fire_critical_error {
-                            critical!("walredo failure during page reconstruction: {err:?}");
+                            critical_timeline!(
+                                self.tenant_shard_id,
+                                self.timeline_id,
+                                "walredo failure during page reconstruction: {err:?}"
+                            );
                         }
                         return Err(PageReconstructError::WalRedo(
                             err.context("reconstruct a page image"),

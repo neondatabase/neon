@@ -40,7 +40,7 @@ use tracing::*;
 use utils::bin_ser::{DeserializeError, SerializeError};
 use utils::lsn::Lsn;
 use utils::rate_limit::RateLimit;
-use utils::{critical, failpoint_support};
+use utils::{critical_timeline, failpoint_support};
 use wal_decoder::models::record::NeonWalRecord;
 use wal_decoder::models::*;
 
@@ -418,18 +418,30 @@ impl WalIngest {
         // as there has historically been cases where PostgreSQL has cleared spurious VM pages. See:
         // https://github.com/neondatabase/neon/pull/10634.
         let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
-            critical!("clear_vm_bits for unknown VM relation {vm_rel}");
+            critical_timeline!(
+                modification.tline.tenant_shard_id,
+                modification.tline.timeline_id,
+                "clear_vm_bits for unknown VM relation {vm_rel}"
+            );
             return Ok(());
         };
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
-                critical!("new_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
+                critical_timeline!(
+                    modification.tline.tenant_shard_id,
+                    modification.tline.timeline_id,
+                    "new_vm_blk {blknum} not in {vm_rel} of size {vm_size}"
+                );
                 new_vm_blk = None;
             }
         }
         if let Some(blknum) = old_vm_blk {
             if blknum >= vm_size {
-                critical!("old_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
+                critical_timeline!(
+                    modification.tline.tenant_shard_id,
+                    modification.tline.timeline_id,
+                    "old_vm_blk {blknum} not in {vm_rel} of size {vm_size}"
+                );
                 old_vm_blk = None;
             }
         }

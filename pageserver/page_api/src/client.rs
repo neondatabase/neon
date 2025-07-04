@@ -1,8 +1,7 @@
-use std::convert::TryInto;
-
-use bytes::Bytes;
-use futures::TryStreamExt;
-use futures::{Stream, StreamExt};
+use anyhow::Result;
+use futures::{Stream, StreamExt as _, TryStreamExt as _};
+use tokio::io::AsyncRead;
+use tokio_util::io::StreamReader;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::metadata::errors::InvalidMetadataValue;
 use tonic::transport::Channel;
@@ -11,8 +10,6 @@ use tonic::{Request, Streaming};
 use utils::id::TenantId;
 use utils::id::TimelineId;
 use utils::shard::ShardIndex;
-
-use anyhow::Result;
 
 use crate::model;
 use crate::proto;
@@ -69,6 +66,7 @@ impl tonic::service::Interceptor for AuthInterceptor {
         Ok(req)
     }
 }
+
 #[derive(Clone)]
 pub struct Client {
     client: proto::PageServiceClient<
@@ -120,22 +118,15 @@ impl Client {
     pub async fn get_base_backup(
         &mut self,
         req: model::GetBaseBackupRequest,
-    ) -> Result<impl Stream<Item = Result<Bytes, tonic::Status>> + 'static, tonic::Status> {
-        let proto_req = proto::GetBaseBackupRequest::from(req);
-
-        let response_stream: Streaming<proto::GetBaseBackupResponseChunk> =
-            self.client.get_base_backup(proto_req).await?.into_inner();
-
-        // TODO: Consider dechunking internally
-        let domain_stream = response_stream.map(|chunk_res| {
-            chunk_res.and_then(|proto_chunk| {
-                proto_chunk.try_into().map_err(|e| {
-                    tonic::Status::internal(format!("Failed to convert response chunk: {e}"))
-                })
-            })
-        });
-
-        Ok(domain_stream)
+    ) -> Result<impl AsyncRead + use<>, tonic::Status> {
+        let req = proto::GetBaseBackupRequest::from(req);
+        let chunks = self.client.get_base_backup(req).await?.into_inner();
+        let reader = StreamReader::new(
+            chunks
+                .map_ok(|resp| resp.chunk)
+                .map_err(std::io::Error::other),
+        );
+        Ok(reader)
     }
 
     /// Returns the total size of a database, as # of bytes.
@@ -195,5 +186,18 @@ impl Client {
         let proto_req = proto::GetSlruSegmentRequest::from(req);
         let response = self.client.get_slru_segment(proto_req).await?;
         Ok(response.into_inner().try_into()?)
+    }
+
+    /// Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't
+    /// garbage collect the LSN until the lease expires. Must be acquired on all relevant shards.
+    ///
+    /// Returns the lease expiration time, or a FailedPrecondition status if the lease could not be
+    /// acquired because the LSN has already been garbage collected.
+    pub async fn lease_lsn(
+        &mut self,
+        req: model::LeaseLsnRequest,
+    ) -> Result<model::LeaseLsnResponse, tonic::Status> {
+        let req = proto::LeaseLsnRequest::from(req);
+        Ok(self.client.lease_lsn(req).await?.into_inner().try_into()?)
     }
 }

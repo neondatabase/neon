@@ -58,6 +58,25 @@ pub static FLUSH_WAL_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_flush_wal_seconds histogram")
 });
+/* BEGIN_HADRON */
+pub static WAL_DISK_IO_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_wal_disk_io_errors",
+        "Number of disk I/O errors when creating and flushing WALs and control files"
+    )
+    .expect("Failed to register safekeeper_wal_disk_io_errors counter")
+});
+pub static WAL_STORAGE_LIMIT_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_wal_storage_limit_errors",
+        concat!(
+            "Number of errors due to timeline WAL storage utilization exceeding configured limit. ",
+            "An increase in this metric indicates issues backing up or removing WALs."
+        )
+    )
+    .expect("Failed to register safekeeper_wal_storage_limit_errors counter")
+});
+/* END_HADRON */
 pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_persist_control_file_seconds",
@@ -138,6 +157,15 @@ pub static BACKUP_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_backup_errors_total counter")
 });
+/* BEGIN_HADRON */
+pub static BACKUP_REELECT_LEADER_COUNT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backup_reelect_leader_total",
+        "Number of times the backup leader was reelected"
+    )
+    .expect("Failed to register safekeeper_backup_reelect_leader_total counter")
+});
+/* END_HADRON */
 pub static BROKER_PUSH_ALL_UPDATES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_broker_push_update_seconds",

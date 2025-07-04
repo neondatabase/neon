@@ -182,6 +182,7 @@ pub(crate) async fn generate_tombstone_image_layer(
     detached: &Arc<Timeline>,
     ancestor: &Arc<Timeline>,
     ancestor_lsn: Lsn,
+    historic_layers_to_copy: &Vec<Layer>,
     ctx: &RequestContext,
 ) -> Result<Option<ResidentLayer>, Error> {
     tracing::info!(
@@ -199,6 +200,20 @@ pub(crate) async fn generate_tombstone_image_layer(
     let image_lsn = ancestor_lsn;
 
     {
+        for layer in historic_layers_to_copy {
+            let desc = layer.layer_desc();
+            if !desc.is_delta
+                && desc.lsn_range.start == image_lsn
+                && overlaps_with(&key_range, &desc.key_range)
+            {
+                tracing::info!(
+                    layer=%layer, "will copy tombstone from ancestor instead of creating a new one"
+                );
+
+                return Ok(None);
+            }
+        }
+
         let layers = detached
             .layers
             .read(LayerManagerLockHolder::DetachAncestor)
@@ -450,7 +465,8 @@ pub(super) async fn prepare(
         Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len() + 1);
 
     if let Some(tombstone_layer) =
-        generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, ctx).await?
+        generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, &rest_of_historic, ctx)
+            .await?
     {
         new_layers.push(tombstone_layer.into());
     }

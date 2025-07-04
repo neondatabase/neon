@@ -199,27 +199,27 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
 
         let probe_msg;
         let mut msg = &*msg;
-        if let Some(ctx) = ctx {
-            if ctx.get_testodrome_id().is_some() {
-                let tag = match error_kind {
-                    ErrorKind::User => "client",
-                    ErrorKind::ClientDisconnect => "client",
-                    ErrorKind::RateLimit => "proxy",
-                    ErrorKind::ServiceRateLimit => "proxy",
-                    ErrorKind::Quota => "proxy",
-                    ErrorKind::Service => "proxy",
-                    ErrorKind::ControlPlane => "controlplane",
-                    ErrorKind::Postgres => "other",
-                    ErrorKind::Compute => "compute",
-                };
-                probe_msg = typed_json::json!({
-                    "tag": tag,
-                    "msg": msg,
-                    "cold_start_info": ctx.cold_start_info(),
-                })
-                .to_string();
-                msg = &probe_msg;
-            }
+        if let Some(ctx) = ctx
+            && ctx.get_testodrome_id().is_some()
+        {
+            let tag = match error_kind {
+                ErrorKind::User => "client",
+                ErrorKind::ClientDisconnect => "client",
+                ErrorKind::RateLimit => "proxy",
+                ErrorKind::ServiceRateLimit => "proxy",
+                ErrorKind::Quota => "proxy",
+                ErrorKind::Service => "proxy",
+                ErrorKind::ControlPlane => "controlplane",
+                ErrorKind::Postgres => "other",
+                ErrorKind::Compute => "compute",
+            };
+            probe_msg = typed_json::json!({
+                "tag": tag,
+                "msg": msg,
+                "cold_start_info": ctx.cold_start_info(),
+            })
+            .to_string();
+            msg = &probe_msg;
         }
 
         // TODO: either preserve the error code from postgres, or assign error codes to proxy errors.

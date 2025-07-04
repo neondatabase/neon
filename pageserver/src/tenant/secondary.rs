@@ -101,7 +101,7 @@ pub(crate) struct SecondaryTenant {
     // Secondary mode does not need the full shard identity or the pageserver_api::models::TenantConfig.  However,
     // storing these enables us to report our full LocationConf, enabling convenient reconciliation
     // by the control plane (see [`Self::get_location_conf`])
-    shard_identity: ShardIdentity,
+    pub(crate) shard_identity: ShardIdentity,
     tenant_conf: std::sync::Mutex<pageserver_api::models::TenantConfig>,
 
     // Internal state used by the Downloader.

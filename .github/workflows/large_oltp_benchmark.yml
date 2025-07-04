@@ -153,7 +153,7 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
     - name: Benchmark database maintenance
-      if: ${{ matrix.test_maintenance == 'true' }}
+      if: ${{ matrix.test_maintenance }}
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}

@@ -29,6 +29,7 @@ use pageserver_api::shard::{
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring;
+use safekeeper_api::membership::SafekeeperGeneration;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
@@ -94,6 +95,8 @@ pub(crate) enum DatabaseError {
     Logical(String),
     #[error("Migration error: {0}")]
     Migration(String),
+    #[error("CAS error: {0}")]
+    Cas(String),
 }
 
 #[derive(measured::FixedCardinalityLabel, Copy, Clone)]
@@ -126,6 +129,7 @@ pub(crate) enum DatabaseOperation {
     UpdateLeader,
     SetPreferredAzs,
     InsertTimeline,
+    UpdateTimelineMembership,
     GetTimeline,
     InsertTimelineReconcile,
     RemoveTimelineReconcile,
@@ -1384,6 +1388,48 @@ impl Persistence {
         .await
     }
 
+    /// Activate the given safekeeper, ensuring that there is no TOCTOU.
+    /// Returns `Some` if the safekeeper has indeed been activating (or already active). Other states return `None`.
+    pub(crate) async fn activate_safekeeper(&self, id_: i64) -> Result<Option<()>, DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| {
+            Box::pin(async move {
+                #[derive(Insertable, AsChangeset)]
+                #[diesel(table_name = crate::schema::safekeepers)]
+                struct UpdateSkSchedulingPolicy<'a> {
+                    id: i64,
+                    scheduling_policy: &'a str,
+                }
+                let scheduling_policy_active = String::from(SkSchedulingPolicy::Active);
+                let scheduling_policy_activating = String::from(SkSchedulingPolicy::Activating);
+
+                let rows_affected = diesel::update(
+                    safekeepers.filter(id.eq(id_)).filter(
+                        scheduling_policy
+                            .eq(scheduling_policy_activating)
+                            .or(scheduling_policy.eq(&scheduling_policy_active)),
+                    ),
+                )
+                .set(scheduling_policy.eq(&scheduling_policy_active))
+                .execute(conn)
+                .await?;
+
+                if rows_affected == 0 {
+                    return Ok(Some(()));
+                }
+                if rows_affected != 1 {
+                    return Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({rows_affected})",
+                    )));
+                }
+
+                Ok(Some(()))
+            })
+        })
+        .await
+    }
+
     /// Persist timeline. Returns if the timeline was newly inserted. If it wasn't, we haven't done any writes.
     pub(crate) async fn insert_timeline(&self, entry: TimelinePersistence) -> DatabaseResult<bool> {
         use crate::schema::timelines;
@@ -1403,6 +1449,56 @@ impl Persistence {
                     1 => Ok(true),
                     _ => Err(DatabaseError::Logical(format!(
                         "unexpected number of rows ({inserted_updated})"
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Update timeline membership configuration in the database.
+    /// Perform a compare-and-swap (CAS) operation on the timeline's generation.
+    /// The `new_generation` must be the next (+1) generation after the one in the database.
+    pub(crate) async fn update_timeline_membership(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        new_generation: SafekeeperGeneration,
+        sk_set: &[NodeId],
+        new_sk_set: Option<&[NodeId]>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let prev_generation = new_generation.previous().unwrap();
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::UpdateTimelineMembership, move |conn| {
+            Box::pin(async move {
+                let updated = diesel::update(dsl::timelines)
+                    .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                    .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                    .filter(dsl::generation.eq(prev_generation.into_inner() as i32))
+                    .set((
+                        dsl::generation.eq(new_generation.into_inner() as i32),
+                        dsl::sk_set.eq(sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>()),
+                        dsl::new_sk_set.eq(new_sk_set
+                            .map(|set| set.iter().map(|id| id.0 as i64).collect::<Vec<_>>())),
+                    ))
+                    .execute(conn)
+                    .await?;
+
+                match updated {
+                    0 => {
+                        // TODO(diko): It makes sense to select the current generation
+                        // and include it in the error message for better debuggability.
+                        Err(DatabaseError::Cas(
+                            "Failed to update membership configuration".to_string(),
+                        ))
+                    }
+                    1 => Ok(()),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({updated})"
                     ))),
                 }
             })

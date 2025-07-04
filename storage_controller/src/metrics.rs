@@ -76,6 +76,9 @@ pub(crate) struct StorageControllerMetricGroup {
     /// How many shards would like to reconcile but were blocked by concurrency limits
     pub(crate) storage_controller_pending_reconciles: measured::Gauge,
 
+    /// How many shards are keep-failing and will be ignored when considering to run optimizations
+    pub(crate) storage_controller_keep_failing_reconciles: measured::Gauge,
+
     /// HTTP request status counters for handled requests
     pub(crate) storage_controller_http_request_status:
         measured::CounterVec<HttpRequestStatusLabelGroupSet>,
@@ -333,6 +336,7 @@ pub(crate) enum DatabaseErrorLabel {
     ConnectionPool,
     Logical,
     Migration,
+    Cas,
 }
 
 impl DatabaseError {
@@ -343,6 +347,7 @@ impl DatabaseError {
             Self::ConnectionPool(_) => DatabaseErrorLabel::ConnectionPool,
             Self::Logical(_) => DatabaseErrorLabel::Logical,
             Self::Migration(_) => DatabaseErrorLabel::Migration,
+            Self::Cas(_) => DatabaseErrorLabel::Cas,
         }
     }
 }

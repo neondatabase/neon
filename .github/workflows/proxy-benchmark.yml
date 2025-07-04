@@ -60,22 +60,23 @@ jobs:
         } >> "$GITHUB_ENV"
 
     - name: Run proxy-bench
-      run: ./${PROXY_BENCH_PATH}/run.sh
+      run: ${PROXY_BENCH_PATH}/run.sh
 
     - name: Ingest Bench Results # neon repo script
-      if: success()
+      if: always()
       run: |
         mkdir -p $TEST_OUTPUT
         python $NEON_DIR/scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
 
     - name: Push Metrics to Proxy perf database
-      if: success()
+      if: always()
       env:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PROXY_TEST_RESULT_CONNSTR }}"
         REPORT_FROM: $TEST_OUTPUT
       run: $NEON_DIR/scripts/generate_and_push_perf_report.sh
 
     - name: Docker cleanup
+      if: always()
       run: docker compose down
 
     - name: Notify Failure

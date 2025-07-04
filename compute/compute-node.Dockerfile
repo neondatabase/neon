@@ -115,6 +115,9 @@ ARG EXTENSIONS=all
 FROM $BASE_IMAGE_SHA AS build-deps
 ARG DEBIAN_VERSION
 
+# Keep in sync with build-tools.Dockerfile
+ENV PROTOC_VERSION=25.1
+
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
@@ -149,8 +152,14 @@ RUN case $DEBIAN_VERSION in \
     libclang-dev \
     jsonnet \
     $VERSION_INSTALLS \
-    && apt clean && rm -rf /var/lib/apt/lists/* && \
-    useradd -ms /bin/bash nonroot -b /home
+    && apt clean && rm -rf /var/lib/apt/lists/* \
+    && useradd -ms /bin/bash nonroot -b /home \
+    # Install protoc from binary release, since Debian's versions are too old.
+    && curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \
+    && unzip -q protoc.zip -d protoc \
+    && mv protoc/bin/protoc /usr/local/bin/protoc \
+    && mv protoc/include/google /usr/local/include/google \
+    && rm -rf protoc.zip protoc
 
 #########################################################################################
 #
@@ -1170,7 +1179,7 @@ COPY --from=pgrag-src /ext-src/ /ext-src/
 # Install it using virtual environment, because Python 3.11 (the default version on Debian 12 (Bookworm)) complains otherwise
 WORKDIR /ext-src/onnxruntime-src
 RUN apt update && apt install --no-install-recommends --no-install-suggests -y \
-    python3 python3-pip python3-venv protobuf-compiler && \
+    python3 python3-pip python3-venv && \
     apt clean && rm -rf /var/lib/apt/lists/* && \
     python3 -m venv venv && \
     . venv/bin/activate && \
@@ -1563,6 +1572,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pgaudit-src
 ARG PG_VERSION
 WORKDIR /ext-src
+COPY "compute/patches/pgaudit-parallel_workers-${PG_VERSION}.patch" .
 RUN case "${PG_VERSION}" in \
     "v14") \
     export PGAUDIT_VERSION=1.6.3 \
@@ -1585,7 +1595,8 @@ RUN case "${PG_VERSION}" in \
     esac && \
     wget https://github.com/pgaudit/pgaudit/archive/refs/tags/${PGAUDIT_VERSION}.tar.gz -O pgaudit.tar.gz && \
     echo "${PGAUDIT_CHECKSUM} pgaudit.tar.gz" | sha256sum --check && \
-    mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C .
+    mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C . && \
+    patch -p1 < "/ext-src/pgaudit-parallel_workers-${PG_VERSION}.patch"
 
 FROM pg-build AS pgaudit-build
 COPY --from=pgaudit-src /ext-src/ /ext-src/
@@ -1974,7 +1985,7 @@ RUN apt update && \
         locales \
         lsof \
         procps \
-        rsyslog \
+        rsyslog-gnutls \
         screen \
         tcpdump \
         $VERSION_INSTALLS && \

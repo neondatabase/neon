@@ -14,6 +14,7 @@ use std::{io, str};
 
 use anyhow::{Context as _, bail};
 use bytes::{Buf as _, BufMut as _, BytesMut};
+use chrono::Utc;
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use itertools::Itertools;
@@ -3759,6 +3760,36 @@ impl proto::PageService for GrpcPageServiceHandler {
             PageServerHandler::handle_get_slru_segment_request(&timeline, &req, &ctx).await?;
         let resp: page_api::GetSlruSegmentResponse = resp.segment;
         Ok(tonic::Response::new(resp.into()))
+    }
+
+    #[instrument(skip_all, fields(lsn))]
+    async fn lease_lsn(
+        &self,
+        req: tonic::Request<proto::LeaseLsnRequest>,
+    ) -> Result<tonic::Response<proto::LeaseLsnResponse>, tonic::Status> {
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_timeline(&timeline);
+
+        // Validate and convert the request, and decorate the span.
+        let req: page_api::LeaseLsnRequest = req.into_inner().try_into()?;
+
+        span_record!(lsn=%req.lsn);
+
+        // Attempt to acquire a lease. Return FailedPrecondition if the lease could not be granted.
+        let lease_length = timeline.get_lsn_lease_length();
+        let expires = match timeline.renew_lsn_lease(req.lsn, lease_length, &ctx) {
+            Ok(lease) => lease.valid_until,
+            Err(err) => return Err(tonic::Status::failed_precondition(format!("{err}"))),
+        };
+
+        // TODO: is this spammy? Move it compute-side?
+        info!(
+            "acquired lease for {} until {}",
+            req.lsn,
+            chrono::DateTime::<Utc>::from(expires).to_rfc3339()
+        );
+
+        Ok(tonic::Response::new(expires.into()))
     }
 }
 
