@@ -4,7 +4,6 @@ i numeric;
 BEGIN
   create role somebody;
   FOR i IN 1..1000000 LOOP
-    RAISE NOTICE 'Iteration';
     BEGIN
 	  IF i % 1000 = 0 THEN
 	    alter role somebody password 'welcome';
