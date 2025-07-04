@@ -6129,7 +6129,7 @@ mod tests {
     use pageserver_api::keyspace::KeySpace;
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
-    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
+    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings, LsnLease};
     use pageserver_compaction::helpers::overlaps_with;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
@@ -9391,6 +9391,14 @@ mod tests {
             .unwrap()
             .load()
             .await;
+        // set a non-zero lease length to test the feature
+        tenant
+            .update_tenant_config(|mut conf| {
+                conf.lsn_lease_length = Some(LsnLease::DEFAULT_LENGTH);
+                Ok(conf)
+            })
+            .unwrap();
+
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);
