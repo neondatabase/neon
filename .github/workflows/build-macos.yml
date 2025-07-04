@@ -38,7 +38,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
-    timeout-minutes: 30
+    timeout-minutes: 60
     runs-on: macos-15
     env:
       # Use release build only, to have less debug info around
