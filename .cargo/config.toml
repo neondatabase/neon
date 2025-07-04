@@ -15,4 +15,4 @@ rustflags = ["-Cforce-frame-pointers=yes"]
 
 [alias]
 build_testing = ["build", "--features", "testing"]
-neon = ["run", "--bin", "neon_local"]
+neon = ["run", "--bin", "neon_local", "--features", "storage_controller/testing"]
