@@ -2153,8 +2153,15 @@ impl Timeline {
         // Flush loop is also still running for a short while, so, in theory, it
         // could also make its way into the upload queue.
         //
-        // This is not trivially solvable by shutting down walreceiver completely
-        // before moving on to the flush. The reason is that...
+        // If we wait for the shutdown of the walreceiver before moving on to the
+        // flush, then that would be avoided. But we don't do it because the
+        // walreceiver entertains reads internally, which means that it possibly
+        // depends on the download of layers. Layer download is only sensitive to
+        // the cancellation of the entire timeline, so cancelling the walreceiver
+        // will have no effect on the individual get requests.
+        // This would cause problems when there is a lot of ongoing downloads or
+        // there is S3 unavailabilities, i.e. detach, deletion, etc would hang,
+        // and we can't deallocate resources of the timeline, etc.
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
