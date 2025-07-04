@@ -66,6 +66,9 @@ int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 int			safekeeper_proto_version = 3;
 char	   *safekeeper_conninfo_options = "";
+/* BEGIN_HADRON */
+int         databricks_max_wal_mb_per_second = -1;
+/* END_HADRON */
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
@@ -252,6 +255,18 @@ nwp_register_gucs(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+    /* BEGIN_HADRON */
+    DefineCustomIntVariable(
+                            "databricks.max_wal_mb_per_second",
+                            "The maximum WAL MB per second allowed. If breached, sending WAL hit the backpressure. Setting to -1 disables the limit.",
+                            NULL,
+                            &databricks_max_wal_mb_per_second,
+                            -1, -1, INT_MAX,
+                            PGC_SUSET,
+                            GUC_UNIT_MB,
+                            NULL, NULL, NULL);
+    /* END_HADRON */
 }
 
 
@@ -393,6 +408,7 @@ assign_neon_safekeepers(const char *newval, void *extra)
 static uint64
 backpressure_lag_impl(void)
 {
+	struct WalproposerShmemState* state = NULL;
 	if (max_replication_apply_lag > 0 || max_replication_flush_lag > 0 || max_replication_write_lag > 0)
 	{
 		XLogRecPtr	writePtr;
@@ -426,6 +442,18 @@ backpressure_lag_impl(void)
 			return (myFlushLsn - applyPtr - max_replication_apply_lag * MB);
 		}
 	}
+
+	/* BEGIN_HADRON */
+	if (databricks_max_wal_mb_per_second == -1) {
+		return 0;
+	}
+
+	state = GetWalpropShmemState();
+	if (state != NULL && pg_atomic_read_u32(&state->wal_rate_limiter.should_limit) == 1)
+	{
+		return 1;
+	}
+	/* END_HADRON */
 	return 0;
 }
 
@@ -472,6 +500,9 @@ WalproposerShmemInit(void)
 		pg_atomic_init_u64(&walprop_shared->mineLastElectedTerm, 0);
 		pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
 		pg_atomic_init_u64(&walprop_shared->currentClusterSize, 0);
+		/* BEGIN_HADRON */
+		pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.should_limit, 0);
+		/* END_HADRON */
 	}
 	LWLockRelease(AddinShmemInitLock);
 
@@ -487,6 +518,9 @@ WalproposerShmemInit_SyncSafekeeper(void)
 	pg_atomic_init_u64(&walprop_shared->propEpochStartLsn, 0);
 	pg_atomic_init_u64(&walprop_shared->mineLastElectedTerm, 0);
 	pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
+	/* BEGIN_HADRON */
+	pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.should_limit, 0);
+	/* END_HADRON */
 }
 
 #define BACK_PRESSURE_DELAY 10000L // 0.01 sec
@@ -520,7 +554,6 @@ backpressure_throttling_impl(void)
 	lag = backpressure_lag_impl();
 	if (lag == 0)
 		return retry;
-
 
 	old_status = get_ps_display(&len);
 	new_status = (char *) palloc(len + 64 + 1);
@@ -1458,6 +1491,8 @@ XLogBroadcastWalProposer(WalProposer *wp)
 {
 	XLogRecPtr	startptr;
 	XLogRecPtr	endptr;
+	struct WalproposerShmemState *state = NULL;
+	TimestampTz now = 0;
 
 	/* Start from the last sent position */
 	startptr = sentPtr;
@@ -1502,12 +1537,35 @@ XLogBroadcastWalProposer(WalProposer *wp)
 	 * that arbitrary LSN is eventually reported as written, flushed and
 	 * applied, so that it can measure the elapsed time.
 	 */
-	LagTrackerWrite(endptr, GetCurrentTimestamp());
+	now = GetCurrentTimestamp();
+	LagTrackerWrite(endptr, now);
 
 	/* Do we have any work to do? */
 	Assert(startptr <= endptr);
 	if (endptr <= startptr)
 		return;
+
+	/* BEGIN_HADRON */
+	state = GetWalpropShmemState();
+	if (databricks_max_wal_mb_per_second != -1 && state != NULL)
+	{
+		uint64 max_wal_bytes = (uint64) databricks_max_wal_mb_per_second * 1024 * 1024;
+		struct WalRateLimiter *limiter = &state->wal_rate_limiter;
+
+		if (now - limiter->last_recorded_time_us > USECS_PER_SEC)
+		{
+			/* Reset the rate limiter */
+			limiter->last_recorded_time_us = now;
+			limiter->sent_bytes = 0;
+			pg_atomic_exchange_u32(&limiter->should_limit, 0);
+		}
+		limiter->sent_bytes += (endptr - startptr);
+		if (limiter->sent_bytes > max_wal_bytes)
+		{
+			pg_atomic_exchange_u32(&limiter->should_limit, 1);
+		}
+	}
+	/* END_HADRON */
 
 	WalProposerBroadcast(wp, startptr, endptr);
 	sentPtr = endptr;
