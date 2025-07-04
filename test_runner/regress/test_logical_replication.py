@@ -630,13 +630,12 @@ def test_logical_replication_ondemand_download(neon_simple_env: NeonEnv, vanilla
     env = neon_simple_env
 
     env.create_branch("publisher")
-    endpoint = env.endpoints.create("publisher", config_lines=["max_slot_wal_keep_size=1MB"])
+    endpoint = env.endpoints.create("publisher", config_lines=["max_slot_wal_keep_size=1MB", "max_wal_size=16MB"])
     endpoint.start()
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
-    # create table 8Gb table
     cur.execute(
         "create table t(x integer primary key, fillter text default repeat(' ', 1000)) with (fillfactor=10)"
     )
@@ -655,17 +654,17 @@ def test_logical_replication_ondemand_download(neon_simple_env: NeonEnv, vanilla
     # Stop subscriber...
     vanilla_pg.stop()
 
-    # ... and insert some data which should be delivered to subscriber after restart
-    cur.execute("insert into t values (generate_series(1,1000000))")  # 8Gb
+    # ... and insert 800Mb data which should be delivered to subscriber after restart
+    cur.execute("insert into t values (generate_series(1,100000))")
 
     # Check that WAL is truncated
-    assert endpoint.get_pg_wal_size() < 8 * 1024
+    assert endpoint.get_pg_wal_size() < 800
 
     # Start subscriber...
     vanilla_pg.start()
 
     # Check that subscribers receives all data
     def check_that_changes_propagated():
-        assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == 1000000
+        assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == 100000
 
     wait_until(check_that_changes_propagated, timeout=200.0, interval=10.0)
