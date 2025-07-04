@@ -2371,7 +2371,7 @@ pub fn make_router(
             named_request_span(
                 r,
                 handle_safekeeper_scheduling_policy,
-                RequestName("v1_safekeeper_status"),
+                RequestName("v1_safekeeper_scheduling_policy"),
             )
         })
         // Tenant Shard operations
