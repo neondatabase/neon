@@ -630,7 +630,9 @@ def test_logical_replication_ondemand_download(neon_simple_env: NeonEnv, vanilla
     env = neon_simple_env
 
     env.create_branch("publisher")
-    endpoint = env.endpoints.create("publisher", config_lines=["max_slot_wal_keep_size=1MB", "max_wal_size=16MB"])
+    endpoint = env.endpoints.create(
+        "publisher", config_lines=["max_slot_wal_keep_size=1MB", "max_wal_size=16MB"]
+    )
     endpoint.start()
 
     pg_conn = endpoint.connect()
@@ -642,6 +644,7 @@ def test_logical_replication_ondemand_download(neon_simple_env: NeonEnv, vanilla
     cur.execute("create publication pub1 for table t")
 
     # now start subscriber
+    vanilla_pg.configure(["wal_level=logical"])
     vanilla_pg.start()
     vanilla_pg.safe_psql(
         "create table t(x integer primary key, fillter text default repeat(' ', 1000)) with (fillfactor=10)"
