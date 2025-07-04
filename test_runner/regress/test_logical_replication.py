@@ -636,7 +636,7 @@ def test_logical_replication_ondemand_download(neon_simple_env: NeonEnv, vanilla
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
-    # create table...
+    # create table 8Gb table
     cur.execute(
         "create table t(x integer primary key, fillter text default repeat(' ', 1000)) with (fillfactor=10)"
     )
@@ -658,7 +658,10 @@ def test_logical_replication_ondemand_download(neon_simple_env: NeonEnv, vanilla
     # ... and insert some data which should be delivered to subscriber after restart
     cur.execute("insert into t values (generate_series(1,1000000))")  # 8Gb
 
-    # Stop subscriber...
+    # Check that WAL is truncated
+    assert endpoint.get_pg_wal_size() < 8 * 1024
+
+    # Start subscriber...
     vanilla_pg.start()
 
     # Check that subscribers receives all data
