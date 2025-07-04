@@ -281,7 +281,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let rel = req.reltag();
 
                 let _in_progress_guard =
-                    self.in_progress_table.lock(RequestInProgressKey::Rel(rel));
+                    self.in_progress_table.lock(RequestInProgressKey::Rel(rel)).await;
 
                 let not_modified_since = match self.cache.get_rel_exists(&rel) {
                     CacheResult::Found(exists) => return NeonIOResult::RelExists(exists),
@@ -309,7 +309,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let rel = req.reltag();
 
                 let _in_progress_guard =
-                    self.in_progress_table.lock(RequestInProgressKey::Rel(rel));
+                    self.in_progress_table.lock(RequestInProgressKey::Rel(rel)).await;
 
                 // Check the cache first
                 let not_modified_since = match self.cache.get_rel_size(&rel) {
@@ -360,7 +360,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.request_db_size_counter.inc();
                 let _in_progress_guard = self
                     .in_progress_table
-                    .lock(RequestInProgressKey::Db(req.db_oid));
+                    .lock(RequestInProgressKey::Db(req.db_oid))
+                    .await;
 
                 // Check the cache first
                 let not_modified_since = match self.cache.get_db_size(req.db_oid) {
@@ -395,7 +396,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let rel = req.reltag();
                 let _in_progress_guard = self
                     .in_progress_table
-                    .lock(RequestInProgressKey::Block(rel, req.block_number));
+                    .lock(RequestInProgressKey::Block(rel, req.block_number))
+                    .await;
                 self.cache
                     .remember_page(&rel, req.block_number, req.src, Lsn(req.lsn), true)
                     .await;
@@ -407,7 +409,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let rel = req.reltag();
                 let _in_progress_guard = self
                     .in_progress_table
-                    .lock(RequestInProgressKey::Block(rel, req.block_number));
+                    .lock(RequestInProgressKey::Block(rel, req.block_number))
+                    .await;
                 self.cache
                     .remember_page(&rel, req.block_number, req.src, Lsn(req.lsn), true)
                     .await;
