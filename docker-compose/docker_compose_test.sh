@@ -30,7 +30,6 @@ if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
     yq  eval -i ".services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
   done
 fi
-cd "$(dirname "${0}")"
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
 
 function cleanup() {
