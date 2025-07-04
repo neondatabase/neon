@@ -88,6 +88,7 @@ pub struct AuthenticationConfig {
 pub struct RestConfig {
     pub is_rest_broker: bool,
     pub db_schema_cache: Option<DbSchemaCache>,
+    pub max_schema_size: usize,
 }
 
 #[derive(Debug)]
