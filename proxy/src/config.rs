@@ -22,6 +22,8 @@ use crate::rate_limiter::{RateLimitAlgorithm, RateLimiterConfig};
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
+#[cfg(feature = "rest_broker")]
+use crate::serverless::rest::DbSchemaCache;
 pub use crate::tls::server_config::{TlsConfig, configure_tls};
 use crate::types::{Host, RoleName};
 
@@ -30,6 +32,8 @@ pub struct ProxyConfig {
     pub metric_collection: Option<MetricCollectionConfig>,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
+    #[cfg(feature = "rest_broker")]
+    pub rest_config: RestConfig,
     pub proxy_protocol_v2: ProxyProtocolV2,
     pub handshake_timeout: Duration,
     pub wake_compute_retry_config: RetryConfig,
@@ -78,6 +82,12 @@ pub struct AuthenticationConfig {
     pub is_auth_broker: bool,
     pub accept_jwts: bool,
     pub console_redirect_confirmation_timeout: tokio::time::Duration,
+}
+
+#[cfg(feature = "rest_broker")]
+pub struct RestConfig {
+    pub is_rest_broker: bool,
+    pub db_schema_cache: Option<DbSchemaCache>,
 }
 
 #[derive(Debug)]
