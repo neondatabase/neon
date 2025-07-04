@@ -5,9 +5,9 @@ edition = "2024"
 license.workspace = true
 
 [features]
-default = ["subzero"]
+default = ["rest_broker"]
 testing = ["dep:tokio-postgres"]
-subzero = ["subzero-core", "jsonpath_lib", "ouroboros"]
+rest_broker = ["subzero-core", "jsonpath_lib", "ouroboros"]
 
 [dependencies]
 ahash.workspace = true

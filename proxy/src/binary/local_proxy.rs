@@ -22,9 +22,11 @@ use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::local::LocalBackend;
 use crate::auth::{self};
 use crate::cancellation::CancellationHandler;
+#[cfg(feature = "rest_broker")]
+use crate::config::RestConfig;
 use crate::config::refresh_config_loop;
 use crate::config::{
-    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RestConfig, RetryConfig,
+    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
 };
 use crate::control_plane::locks::ApiLocks;
 use crate::http::health_server::AppMetrics;
@@ -278,6 +280,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             accept_jwts: true,
             console_redirect_confirmation_timeout: Duration::ZERO,
         },
+        #[cfg(feature = "rest_broker")]
         rest_config: RestConfig {
             is_rest_broker: false,
             db_schema_cache: None,

@@ -170,8 +170,8 @@ Create a configuration file called `local_proxy.json` in the root of the repo (u
 
 Start the local proxy:
 ```sh
-cargo run --bin local_proxy -- \
-  --disable_pg_session_jwt true \
+cargo run --bin local_proxy --features testing -- \
+  --disable-pg-session-jwt \
   --http 0.0.0.0:7432
 ```
 
@@ -197,4 +197,10 @@ curl -k "https://foo.local.neon.build:8080/sql" \
   -H "Authorization: Bearer $NEON_JWT" \
   -H "neon-connection-string: postgresql://authenticator@foo.local.neon.build/database" \
   -d '{"query":"select 1","params":[]}'
+```
+
+Make a rest request against the auth broker (rest broker):
+```sh
+curl -k "https://foo.local.neon.build:8080/database/rest/v1/items?select=id,name&id=eq.1" \
+-H "Authorization: Bearer $NEON_JWT"
 ```

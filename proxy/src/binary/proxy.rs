@@ -27,11 +27,13 @@ use crate::auth::backend::local::LocalBackend;
 use crate::auth::backend::{ConsoleRedirectBackend, MaybeOwned};
 use crate::batch::BatchQueue;
 use crate::cancellation::{CancellationHandler, CancellationProcessor};
+#[cfg(feature = "rest_broker")]
+use crate::config::RestConfig;
 #[cfg(any(test, feature = "testing"))]
 use crate::config::refresh_config_loop;
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
-    ProxyConfig, ProxyProtocolV2, RestConfig, remote_storage_from_toml,
+    ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
@@ -43,6 +45,7 @@ use crate::redis::{elasticache, notifications};
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
+#[cfg(feature = "rest_broker")]
 use crate::serverless::rest::DbSchemaCache;
 use crate::tls::client_config::compute_client_config_with_root_certs;
 #[cfg(any(test, feature = "testing"))]
@@ -245,10 +248,12 @@ struct ProxyCliArgs {
 
     /// if this is not local proxy, this toggles whether we accept Postgres REST requests
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    #[cfg(feature = "rest_broker")]
     is_rest_broker: bool,
 
     /// cache for `db_schema_cache` introspection (use `size=0` to disable)
     #[clap(long, default_value = "size=1000,ttl=1h")]
+    #[cfg(feature = "rest_broker")]
     db_schema_cache: String,
 }
 
@@ -517,6 +522,7 @@ pub async fn run() -> anyhow::Result<()> {
     maintenance_tasks.spawn(control_plane::mgmt::task_main(mgmt_listener));
 
     // add a task to flush the db_schema cache every 10 minutes
+    #[cfg(feature = "rest_broker")]
     if let Some(db_schema_cache) = &config.rest_config.db_schema_cache {
         maintenance_tasks.spawn(async move {
             loop {
@@ -696,22 +702,26 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         timeout: Duration::from_secs(2),
     };
 
-    let db_schema_cache_config: CacheOptions = args.db_schema_cache.parse()?;
-    info!("Using DbSchemaCache with options={db_schema_cache_config:?}");
+    #[cfg(feature = "rest_broker")]
+    let rest_config = {
+        let db_schema_cache_config: CacheOptions = args.db_schema_cache.parse()?;
+        info!("Using DbSchemaCache with options={db_schema_cache_config:?}");
 
-    let db_schema_cache = if args.is_rest_broker {
-        Some(DbSchemaCache::new(
-            "db_schema_cache",
-            db_schema_cache_config.size,
-            db_schema_cache_config.ttl,
-            true,
-        ))
-    } else {
-        None
-    };
-    let rest_config = RestConfig {
-        is_rest_broker: args.is_rest_broker,
-        db_schema_cache,
+        let db_schema_cache = if args.is_rest_broker {
+            Some(DbSchemaCache::new(
+                "db_schema_cache",
+                db_schema_cache_config.size,
+                db_schema_cache_config.ttl,
+                true,
+            ))
+        } else {
+            None
+        };
+
+        RestConfig {
+            is_rest_broker: args.is_rest_broker,
+            db_schema_cache,
+        }
     };
 
     let config = ProxyConfig {
@@ -726,6 +736,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         connect_to_compute: compute_config,
         #[cfg(feature = "testing")]
         disable_pg_session_jwt: false,
+        #[cfg(feature = "rest_broker")]
         rest_config,
     };
 

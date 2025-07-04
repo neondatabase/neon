@@ -55,7 +55,7 @@ use subzero_core::{
     },
     parser::postgrest::parse,
     permissions::check_safe_functions,
-    schema::{DbSchema, POSTGRESQL_CONFIGURATION_SQL, POSTGRESQL_INTROSPECTION_SQL},
+    schema::{DbSchema, POSTGRESQL_INTROSPECTION_SQL, get_postgresql_configuration_query},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -66,7 +66,6 @@ static MAX_SCHEMA_SIZE: usize = 1024 * 1024 * 5; // 5MB
 static MAX_HTTP_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
 static EMPTY_JSON_SCHEMA: &str = r#"{"schemas":[]}"#;
 const INTROSPECTION_SQL: &str = POSTGRESQL_INTROSPECTION_SQL;
-const CONFIGURATION_SQL: &str = POSTGRESQL_CONFIGURATION_SQL;
 
 // A wrapper around the DbSchema that allows for self-referencing
 #[self_referencing]
@@ -174,7 +173,8 @@ impl DbSchemaCache {
             (&RAW_TEXT_OUTPUT, HeaderValue::from_str("true").unwrap()),
         ];
 
-        let body = serde_json::json!({"query": CONFIGURATION_SQL});
+        let query = get_postgresql_configuration_query(Some("pgrst.pre_config"));
+        let body = serde_json::json!({"query": query});
         let (response_status, mut response_json) =
             make_local_proxy_request(client, headers, body).await?;
 
@@ -641,19 +641,22 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    let endpoint_id = request
-        .uri()
-        .host()
-        .unwrap_or("")
-        .split('.')
-        .next()
-        .unwrap_or("");
+    let host = request.uri().host().unwrap_or("");
+    let path_parts: Vec<&str> = request.uri().path().split('/').collect();
+    // a valid path is /database/rest/v1/... so parts should be ["", "database", "rest", "v1", ...]
+    let database_name = if path_parts.len() >= 3 && path_parts[1].len() > 0 {
+        Ok(path_parts[1])
+    } else {
+        Err(RestError::SubzeroCore(NotFound {
+            target: request.uri().path().to_string(),
+        }))
+    }?;
 
     // we always use the authenticator role to connect to the database
     let autheticator_role = "authenticator";
     let connection_string = format!(
-        "postgresql://{}@{}.local.neon.build/database", //FIXME: how do we get the database name knowing only the endpoint id?
-        autheticator_role, endpoint_id
+        "postgresql://{}@{}/{}",
+        autheticator_role, host, database_name
     );
 
     let conn_info = get_conn_info(
@@ -669,9 +672,11 @@ async fn handle_inner(
 
     match conn_info.auth {
         AuthData::Jwt(jwt) if config.authentication_config.is_auth_broker => {
+            let api_prefix = format!("/{}/rest/v1/", database_name);
             handle_rest_inner(
                 config,
                 ctx,
+                &api_prefix,
                 request,
                 &connection_string,
                 conn_info.conn_info,
@@ -689,6 +694,7 @@ async fn handle_inner(
 async fn handle_rest_inner(
     config: &'static ProxyConfig,
     ctx: &RequestContext,
+    api_prefix: &str,
     request: Request<Incoming>,
     connection_string: &str,
     conn_info: ConnInfo,
@@ -710,8 +716,6 @@ async fn handle_rest_inner(
         }
     };
     // hardcoded values for now, these should come from a config per tenant
-
-    let api_prefix = "/rest/v1/";
 
     let endpoint_cache_key = conn_info.endpoint_cache_key().unwrap();
     let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
