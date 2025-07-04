@@ -58,7 +58,7 @@ pub enum LfcPrewarmState {
     },
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+#[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcOffloadState {
     #[default]
