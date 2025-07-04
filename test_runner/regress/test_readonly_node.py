@@ -203,9 +203,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             layers_guarded_before_gc = get_layers_protected_by_lease(
                 client, shard, env.initial_timeline, lease_lsn=lease_lsn
             )
-            gc_result = client.timeline_gc(
-                shard, env.initial_timeline, 0, ignore_lease_deadline=False
-            )
+            gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
             layers_guarded_after_gc = get_layers_protected_by_lease(
                 client, shard, env.initial_timeline, lease_lsn=lease_lsn
             )
