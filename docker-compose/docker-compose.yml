@@ -167,6 +167,11 @@ services:
       - 3080:3080 # http endpoints
     entrypoint:
       - "/shell/compute.sh"
+    # Ad an alias for compute1 for compatibility
+    networks:
+      default:
+        aliases:
+            - compute
     depends_on:
       - safekeeper1
       - safekeeper2
