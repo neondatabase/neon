@@ -571,9 +571,10 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 	if (request_idx == -1)
 	{
 		/* -1 means the request was satisfied immediately. */
+		elog(LOG, "communicator request %lu was satisfied immediately", request->rel_exists.request_id);
 		return -1;
 	}
-	elog(DEBUG5, "sent request with idx %d: tag %d", request_idx, request->tag);
+	elog(LOG, "started communicator request %lu at slot %d", request->rel_exists.request_id, request_idx);
 	return request_idx;
 }
 
@@ -611,9 +612,9 @@ wait_request_completion(int request_idx, struct NeonIOResult *result_p)
 			 * This needs to be removed once more regression tests are passing.
 			 */
 			now = GetCurrentTimestamp();
-			if (now - start_time > 30 * 1000 * 1000)
+			if (now - start_time > 60 * 1000 * 1000)
 			{
-				elog(PANIC, "timed out waiting for response from communicator process");
+				elog(PANIC, "timed out waiting for response from communicator process at slot %d", request_idx);
 			}
 
 			(void) WaitLatch(MyIOCompletionLatch,

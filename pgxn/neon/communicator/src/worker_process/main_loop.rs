@@ -214,8 +214,23 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             // Spawn a separate task for every request. That's a little excessive for requests that
             // can be quickly satisfied from the cache, but we expect that to be rare, because the
             // requesting backend would have already checked the cache.
-            tokio::spawn(async {
-                let result = self.handle_request(slot.get_request()).await;
+            tokio::spawn(async move {
+                let request_id = slot.get_request().request_id();
+                trace!("spawned task to process request {request_id} at slot {request_idx}");
+
+		// FIXME: as a temporary hack, abort request if we don't get a response promptly.
+		// Lots of regression tests are getting stuck and failing at the moment,
+		// this makes them fail a little faster, which it faster to iterate.
+		// This needs to be removed once more regression tests are passing.
+                // See also similar hack in the backend code, in wait_request_completion()
+                let result = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(30),
+                    self.handle_request(slot.get_request())
+                ).await.unwrap_or_else(|_elapsed| {
+                    info!("request {request_id} timed out");
+                    NeonIOResult::Error(libc::ETIMEDOUT)
+                });
+                trace!("request {request_id} at slot {request_idx} completed");
                 let owner_procno = slot.get_owner_procno();
 
                 // Ok, we have completed the IO. Mark the request as completed. After that,
