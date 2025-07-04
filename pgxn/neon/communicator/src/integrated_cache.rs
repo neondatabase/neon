@@ -102,10 +102,8 @@ impl<'t> IntegratedCacheInitStruct<'t> {
         // Initialize the block map in a separate resizable shared memory area
         let shmem_handle = ShmemHandle::new("block mapping", 0, max_bytes).unwrap();
 
-        let block_map_handle = neon_shmem::hash::HashMapInit::with_shmem(
-            initial_file_cache_size as u32,
-            shmem_handle,
-        );
+        let block_map_handle =
+            neon_shmem::hash::HashMapInit::with_shmem(initial_file_cache_size as u32, shmem_handle);
         IntegratedCacheInitStruct {
             relsize_cache_handle,
             block_map_handle,
@@ -343,18 +341,20 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
         match self.relsize_cache.entry(RelKey::from(rel)) {
-			Entry::Vacant(e) => {
-				tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
-				// FIXME: what to do if we run out of memory? Evict other relation entries?
-                _ = e.insert(RelEntry {
-                    nblocks: AtomicU32::new(nblocks),
-                }).expect("out of memory");									
-			},
-			Entry::Occupied(e) => {
-                tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
-				e.get().nblocks.store(nblocks, Ordering::Relaxed);
+            Entry::Vacant(e) => {
+                tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
+                // FIXME: what to do if we run out of memory? Evict other relation entries?
+                _ = e
+                    .insert(RelEntry {
+                        nblocks: AtomicU32::new(nblocks),
+                    })
+                    .expect("out of memory");
             }
-		};        
+            Entry::Occupied(e) => {
+                tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
+                e.get().nblocks.store(nblocks, Ordering::Relaxed);
+            }
+        };
     }
 
     /// Remember the given page contents in the cache.
@@ -380,12 +380,12 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             let mut old_cache_block = None;
             let mut found_existing = false;
 
-			// NOTE(quantumish): honoring original semantics here (used to be update_with_fn)
-			// but I don't see any reason why this has to take a write lock.
+            // NOTE(quantumish): honoring original semantics here (used to be update_with_fn)
+            // but I don't see any reason why this has to take a write lock.
             if let Entry::Occupied(e) = self.block_map.entry(key.clone()) {
-				let block_entry = e.get();
+                let block_entry = e.get();
                 found_existing = true;
-				
+
                 // Prevent this entry from being evicted
                 let pin_count = block_entry.pinned.fetch_add(1, Ordering::Relaxed);
                 if pin_count > 0 {
@@ -395,7 +395,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     // buffer is held locked. TODO: check these conditions and tidy this up a little. Seems fragile to just panic.
                     panic!("block entry was unexpectedly pinned");
                 }
-				
+
                 let cache_block = block_entry.cache_block.load(Ordering::Relaxed);
                 old_cache_block = if cache_block != INVALID_CACHE_BLOCK {
                     Some(cache_block)
@@ -425,11 +425,11 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             // FIXME: unpin the block entry on error
 
             // Update the block entry
-			let entry = self.block_map.entry(key);
-			assert_eq!(found_existing, matches!(entry, Entry::Occupied(_)));
+            let entry = self.block_map.entry(key);
+            assert_eq!(found_existing, matches!(entry, Entry::Occupied(_)));
             match entry {
-				Entry::Occupied(e) => {
-					let block_entry = e.get();
+                Entry::Occupied(e) => {
+                    let block_entry = e.get();
                     // Update the cache block
                     let old_blk = block_entry.cache_block.compare_exchange(
                         INVALID_CACHE_BLOCK,
@@ -445,18 +445,20 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
                     let pin_count = block_entry.pinned.fetch_sub(1, Ordering::Relaxed);
                     assert!(pin_count > 0);
-				}
-				Entry::Vacant(e) => {
-					// FIXME: what to do if we run out of memory? Evict other relation entries? Remove
-					// block entries first?
-                    _ = e.insert(BlockEntry {
-                        lw_lsn: AtomicLsn::new(lw_lsn.0),
-                        cache_block: AtomicU64::new(cache_block),
-                        pinned: AtomicU64::new(0),
-                        referenced: AtomicBool::new(true),
-                    }).expect("out of memory");
                 }
-			}
+                Entry::Vacant(e) => {
+                    // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
+                    // block entries first?
+                    _ = e
+                        .insert(BlockEntry {
+                            lw_lsn: AtomicLsn::new(lw_lsn.0),
+                            cache_block: AtomicU64::new(cache_block),
+                            pinned: AtomicU64::new(0),
+                            referenced: AtomicBool::new(true),
+                        })
+                        .expect("out of memory");
+                }
+            }
         } else {
             // !is_write
             //
@@ -483,26 +485,31 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 .expect("error writing to cache");
             // FIXME: handle errors gracefully.
 
-			match self.block_map.entry(key) { 
-				Entry::Occupied(e) => {
-					let block_entry = e.get();
-					// FIXME: could there be concurrent readers?
+            match self.block_map.entry(key) {
+                Entry::Occupied(e) => {
+                    let block_entry = e.get();
+                    // FIXME: could there be concurrent readers?
                     assert!(block_entry.pinned.load(Ordering::Relaxed) == 0);
 
-                    let old_cache_block = block_entry.cache_block.swap(cache_block, Ordering::Relaxed);
+                    let old_cache_block =
+                        block_entry.cache_block.swap(cache_block, Ordering::Relaxed);
                     if old_cache_block != INVALID_CACHE_BLOCK {
-                        panic!("remember_page called in !is_write mode, but page is already cached at blk {old_cache_block}");
+                        panic!(
+                            "remember_page called in !is_write mode, but page is already cached at blk {old_cache_block}"
+                        );
                     }
-                },
-				Entry::Vacant(e) => {
-					// FIXME: what to do if we run out of memory? Evict other relation entries? Remove
-					// block entries first?
-					_ = e.insert(BlockEntry {
-                        lw_lsn: AtomicLsn::new(lw_lsn.0),
-                        cache_block: AtomicU64::new(cache_block),
-                        pinned: AtomicU64::new(0),
-                        referenced: AtomicBool::new(true),
-                    }).expect("out of memory");
+                }
+                Entry::Vacant(e) => {
+                    // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
+                    // block entries first?
+                    _ = e
+                        .insert(BlockEntry {
+                            lw_lsn: AtomicLsn::new(lw_lsn.0),
+                            cache_block: AtomicU64::new(cache_block),
+                            pinned: AtomicU64::new(0),
+                            referenced: AtomicBool::new(true),
+                        })
+                        .expect("out of memory");
                 }
             }
         }
@@ -591,23 +598,22 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 // grab the write lock
                 let mut evicted_cache_block = None;
                 if let Some(e) = self.block_map.entry_at_bucket(*clock_hand % num_buckets) {
-					let old = e.get();
-					// note: all the accesses to 'pinned' currently happen
+                    let old = e.get();
+                    // note: all the accesses to 'pinned' currently happen
                     // within update_with_fn(), or while holding ValueReadGuard, which protects from concurrent
                     // updates. Otherwise, another thread could set the 'pinned'
                     // flag just after we have checked it here.
                     if old.pinned.load(Ordering::Relaxed) == 0 {
-						let _ = self
-							.global_lw_lsn
-							.fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
-						let cache_block = old
-							.cache_block
-							.swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
-						if cache_block != INVALID_CACHE_BLOCK {
-							evicted_cache_block = Some(cache_block);
-						}
-						e.remove();
-					}
+                        let _ = self
+                            .global_lw_lsn
+                            .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
+                        let cache_block =
+                            old.cache_block.swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+                        if cache_block != INVALID_CACHE_BLOCK {
+                            evicted_cache_block = Some(cache_block);
+                        }
+                        e.remove();
+                    }
                 }
 
                 if evicted_cache_block.is_some() {

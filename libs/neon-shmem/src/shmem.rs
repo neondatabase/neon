@@ -76,19 +76,15 @@ impl ShmemHandle {
         Self::new_with_fd(fd, initial_size, max_size)
     }
 
-    fn new_with_fd(
-        fd: OwnedFd,
-        initial_size: usize,
-        max_size: usize,
-    ) -> Result<Self, Error> {
+    fn new_with_fd(fd: OwnedFd, initial_size: usize, max_size: usize) -> Result<Self, Error> {
         // We reserve the high-order bit for the `RESIZE_IN_PROGRESS` flag, and the actual size
         // is a little larger than this because of the SharedStruct header. Make the upper limit
         // somewhat smaller than that, because with anything close to that, you'll run out of
         // memory anyway.
         assert!(max_size < 1 << 48, "max size {max_size} too large");
-        
+
         assert!(
-			initial_size <= max_size,
+            initial_size <= max_size,
             "initial size {initial_size} larger than max size {max_size}"
         );
 
@@ -150,12 +146,12 @@ impl ShmemHandle {
         let shared = self.shared();
 
         assert!(
-			new_size <= self.max_size,
+            new_size <= self.max_size,
             "new size ({new_size}) is greater than max size ({})",
-			self.max_size
+            self.max_size
         );
 
-		assert_eq!(self.max_size, shared.max_size);
+        assert_eq!(self.max_size, shared.max_size);
 
         // Lock the area by setting the bit in `current_size`
         //
@@ -187,9 +183,8 @@ impl ShmemHandle {
         let result = {
             use std::cmp::Ordering::{Equal, Greater, Less};
             match new_size.cmp(&old_size) {
-                Less => nix_ftruncate(&self.fd, new_size as i64).map_err(|e| {
-                    Error::new("could not shrink shmem segment, ftruncate failed", e)
-                }),
+                Less => nix_ftruncate(&self.fd, new_size as i64)
+                    .map_err(|e| Error::new("could not shrink shmem segment, ftruncate failed", e)),
                 Equal => Ok(()),
                 Greater => enlarge_file(self.fd.as_fd(), new_size as u64),
             }
@@ -207,7 +202,7 @@ impl ShmemHandle {
     /// Returns the current user-visible size of the shared memory segment.
     ///
     /// NOTE: a concurrent [`ShmemHandle::set_size()`] call can change the size at any time.
-	/// It is the caller's responsibility not to access the area beyond the current size.
+    /// It is the caller's responsibility not to access the area beyond the current size.
     pub fn current_size(&self) -> usize {
         let total_current_size =
             self.shared().current_size.load(Ordering::Relaxed) & !RESIZE_IN_PROGRESS;
@@ -253,12 +248,8 @@ fn enlarge_file(fd: BorrowedFd, size: u64) -> Result<(), Error> {
     // we don't get a segfault later when trying to actually use it.
     #[cfg(not(target_os = "macos"))]
     {
-        nix::fcntl::posix_fallocate(fd, 0, size as i64).map_err(|e| {
-            Error::new(
-                "could not grow shmem segment, posix_fallocate failed",
-                e,
-            )
-        })
+        nix::fcntl::posix_fallocate(fd, 0, size as i64)
+            .map_err(|e| Error::new("could not grow shmem segment, posix_fallocate failed", e))
     }
     // As a fallback on macos, which doesn't have posix_fallocate, use plain 'fallocate'
     #[cfg(target_os = "macos")]
