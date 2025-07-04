@@ -22,8 +22,9 @@ COMPUTES=()
 for i in $(seq 1 "${PARALLEL_COMPUTES}"); do
   COMPUTES+=("compute${i}")
 done
+CURRENT_TMPDIR=$(mktemp -d)
 cp docker-compose.yml docker-compose.yml.bak
-trap 'mv docker-compose.yml.bak docker-compose.yml; rm -rf ${TMPDIR}' EXIT
+trap 'mv docker-compose.yml.bak docker-compose.yml; rm -rf ${CURRENT_TMPDIR}' EXIT
 if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
   # Replace the environment variable PARALLEL_COMPUTES with the actual value
   yq eval -i ".services.compute_is_ready.environment |= map(select(. | test(\"^PARALLEL_COMPUTES=\")) | \"PARALLEL_COMPUTES=${PARALLEL_COMPUTES}\") + map(select(. | test(\"^PARALLEL_COMPUTES=\") | not))" docker-compose.yml
@@ -31,8 +32,9 @@ if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
     yq eval -i ".services.compute${i} = .services.compute1" docker-compose.yml
     yq eval -i "(del .services.compute${i}.build) | (del .services.compute${i}.ports) | (del.services.compute${i}.networks)" docker-compose.yml
     yq eval -i ".services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
+    # Set RUN_PARALLEL=true for compute2. They will generate tenant_id and timeline_id to avoid using the same as other computes
     yq eval -i ".services.compute${i}.environment += [\"RUN_PARALLEL=true\"]" docker-compose.yml
-    yq eval -i ".services.compute${i}.environment |= map(select(. | startswith(\"TENANT_ID=\") or startswith(\"TIMELINE_ID=\") | not))" docker-compose.yml
+    yq eval -i ".services.compute${i}.environment |= map(select(. | (test(\"^TENANT_ID=\") or test(\"^TIMELINE_ID=\")) | not))" docker-compose.yml
   done
 fi
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
@@ -73,12 +75,11 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
     done
 
     if [[ ${pg_version} -ge 16 ]]; then
-        TMPDIR=$(mktemp -d)
-        mkdir "${TMPDIR}"/{pg_hint_plan-src,file_fdw,postgis-src}
-        docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${TMPDIR}/postgis-src/test"
-        docker compose cp neon-test-extensions:/ext-src/postgis-src/regress/00-regress-install "${TMPDIR}/postgis-src/00-regress-install"
-        docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data "${TMPDIR}/pg_hint_plan-src/data"
-        docker compose cp neon-test-extensions:/postgres/contrib/file_fdw/data "${TMPDIR}/file_fdw/data"
+        mkdir "${CURRENT_TMPDIR}"/{pg_hint_plan-src,file_fdw,postgis-src}
+        docker compose cp neon-test-extensions:/ext-src/postgis-src/raster/test "${CURRENT_TMPDIR}/postgis-src/test"
+        docker compose cp neon-test-extensions:/ext-src/postgis-src/regress/00-regress-install "${CURRENT_TMPDIR}/postgis-src/00-regress-install"
+        docker compose cp neon-test-extensions:/ext-src/pg_hint_plan-src/data "${CURRENT_TMPDIR}/pg_hint_plan-src/data"
+        docker compose cp neon-test-extensions:/postgres/contrib/file_fdw/data "${CURRENT_TMPDIR}/file_fdw/data"
 
         for compute in "${COMPUTES[@]}"; do
           # This is required for the pg_hint_plan test, to prevent flaky log message causing the test to fail
@@ -87,12 +88,12 @@ for pg_version in ${TEST_VERSION_ONLY-14 15 16 17}; do
           docker compose exec "${compute}" touch /var/db/postgres/compute/compute_ctl_temp_override.conf
           # Prepare for the PostGIS test
           docker compose exec "${compute}" mkdir -p /tmp/pgis_reg/pgis_reg_tmp /ext-src/postgis-src/raster /ext-src/postgis-src/regress /ext-src/postgis-src/regress/00-regress-install
-          docker compose cp "${TMPDIR}/postgis-src/test" "${compute}":/ext-src/postgis-src/raster/test
-          docker compose cp "${TMPDIR}/postgis-src/00-regress-install" "${compute}":/ext-src/postgis-src/regress
+          docker compose cp "${CURRENT_TMPDIR}/postgis-src/test" "${compute}":/ext-src/postgis-src/raster/test
+          docker compose cp "${CURRENT_TMPDIR}/postgis-src/00-regress-install" "${compute}":/ext-src/postgis-src/regress
           # The following block copies the files for the pg_hintplan test to the compute node for the extension test in an isolated docker-compose environment
-          docker compose cp "${TMPDIR}/pg_hint_plan-src/data" "${compute}":/ext-src/pg_hint_plan-src/
+          docker compose cp "${CURRENT_TMPDIR}/pg_hint_plan-src/data" "${compute}":/ext-src/pg_hint_plan-src/
           # The following block does the same for the contrib/file_fdw test
-          docker compose cp "${TMPDIR}/file_fdw/data" "${compute}":/postgres/contrib/file_fdw/data
+          docker compose cp "${CURRENT_TMPDIR}/file_fdw/data" "${compute}":/postgres/contrib/file_fdw/data
         done
         # Apply patches
         docker compose exec -T neon-test-extensions bash -c "(cd /postgres && patch -p1)" <"../compute/patches/contrib_pg${pg_version}.patch"
