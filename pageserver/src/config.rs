@@ -28,6 +28,7 @@ use reqwest::Url;
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
+use utils::serde_percent::Percent;
 
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -459,7 +460,16 @@ impl PageServerConf {
             metric_collection_endpoint,
             metric_collection_bucket,
             synthetic_size_calculation_interval,
-            disk_usage_based_eviction,
+            disk_usage_based_eviction: Some(disk_usage_based_eviction.unwrap_or(
+                DiskUsageEvictionTaskConfig {
+                    max_usage_pct: Percent::new(80).unwrap(),
+                    min_avail_bytes: 2_000_000_000,
+                    period: Duration::from_secs(60),
+                    #[cfg(feature = "testing")]
+                    mock_statvfs: None,
+                    eviction_order: Default::default(),
+                },
+            )),
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
@@ -697,6 +707,8 @@ impl ConfigurableSemaphore {
 #[cfg(test)]
 mod tests {
 
+    use std::time::Duration;
+
     use camino::Utf8PathBuf;
     use rstest::rstest;
     use utils::id::NodeId;
@@ -797,5 +809,21 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_config_disk_usage_based_eviction_is_valid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("disk_usage_based_eviction is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        let config = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir).unwrap();
+        let disk_usage_based_eviction = config.disk_usage_based_eviction.unwrap();
+        assert_eq!(disk_usage_based_eviction.max_usage_pct.get(), 80);
+        assert_eq!(disk_usage_based_eviction.min_avail_bytes, 2_000_000_000);
+        assert_eq!(disk_usage_based_eviction.period, Duration::from_secs(60));
+        assert_eq!(disk_usage_based_eviction.eviction_order, Default::default());
     }
 }
