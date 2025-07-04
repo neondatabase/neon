@@ -32,15 +32,19 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [self-hosted, unit-perf]
+    runs-on: [ self-hosted, unit-perf ]
     timeout-minutes: 60  # 1h timeout
-    container:
-      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init
     steps:
+    - name: Checkout only needed scripts
+      uses: actions/checkout@v4
+      with:
+        sparse-checkout: |
+          scripts/proxy_bench_results_ingest.py
+          scripts/ingest_perf_test_result.py
+          scripts/generate_and_push_perf_report.sh
+          scripts/pysync
+        sparse-checkout-cone-mode: false
+
     - name: Checkout proxy-bench Repo
       uses: actions/checkout@v4
       with:
@@ -54,31 +58,63 @@ jobs:
         PROXY_BENCH_PATH=$(realpath ./proxy-bench)
         {
           echo "PROXY_BENCH_PATH=$PROXY_BENCH_PATH"
-          echo "NEON_DIR=${RUNNER_TEMP}/neon"
+          echo "NEON_DIR=$(pwd)"
           echo "TEST_OUTPUT=${PROXY_BENCH_PATH}/test_output"
+          echo "DOCKER_COMPOSE_FILE=${PROXY_BENCH_PATH}/docker-compose.yml"
           echo ""
         } >> "$GITHUB_ENV"
 
+    - name: Cache poetry deps
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pypoetry/virtualenvs
+        key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
+
+    - name: Install Python deps
+      shell: bash -euxo pipefail {0}
+      run: ./scripts/pysync
+
     - name: Run proxy-bench
-      run: ${PROXY_BENCH_PATH}/run.sh
+      env:
+        DOCKER_COMPOSE_FILE: ${{ env.DOCKER_COMPOSE_FILE }}
+      working-directory: ${{ env.PROXY_BENCH_PATH }}
+      run: ./run.sh
 
     - name: Ingest Bench Results # neon repo script
       if: always()
+      working-directory: ${{ env.NEON_DIR }}
       run: |
         mkdir -p $TEST_OUTPUT
-        python $NEON_DIR/scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
+        ./scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
 
     - name: Push Metrics to Proxy perf database
       if: always()
       env:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PROXY_TEST_RESULT_CONNSTR }}"
         REPORT_FROM: $TEST_OUTPUT
-      run: $NEON_DIR/scripts/generate_and_push_perf_report.sh
+      working-directory: ${{ env.NEON_DIR }}
+      run: |
+        ./scripts/generate_and_push_perf_report.sh
 
     - name: Docker cleanup
       if: always()
-      run: docker compose down
+      run: docker compose -f "$DOCKER_COMPOSE_FILE" down
 
     - name: Notify Failure
       if: failure()
       run: echo "Proxy bench job failed" && exit 1
+
+    - name: Cleanup Test Resources
+      if: always()
+      shell: bash -euxo pipefail {0}
+      run: |
+        # Cleanup the test resources
+        if [[ -d "${TEST_OUTPUT}" ]]; then
+          rm -rf ${TEST_OUTPUT}
+        fi
+        if [[ -d "${PROXY_BENCH_PATH}/test_output" ]]; then
+          rm -rf ${PROXY_BENCH_PATH}/test_output
+        fi
+        if [[ -d "./scripts" ]]; then
+          rm -rf ./scripts
+        fi
