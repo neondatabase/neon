@@ -62,7 +62,6 @@ use tracing::{error, info};
 use typed_json::json;
 use url::form_urlencoded;
 
-static MAX_SCHEMA_SIZE: usize = 1024 * 1024 * 5; // 5MB
 static MAX_HTTP_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
 static EMPTY_JSON_SCHEMA: &str = r#"{"schemas":[]}"#;
 const INTROSPECTION_SQL: &str = POSTGRESQL_INTROSPECTION_SQL;
@@ -113,13 +112,14 @@ impl DbSchemaCache {
         connection_string: &str,
         client: &mut http_conn_pool::Client<Send>,
         ctx: &RequestContext,
+        config: &'static ProxyConfig,
     ) -> Result<Arc<(ApiConfig, DbSchemaOwned)>, RestError> {
         match self.get(endpoint_id) {
             Some(entry) => Ok(entry.value),
             None => {
                 info!("db_schema cache miss for endpoint: {:?}", endpoint_id);
                 let remote_value = self
-                    .get_remote(auth_header, connection_string, client, ctx)
+                    .get_remote(auth_header, connection_string, client, ctx, config)
                     .await;
                 let (api_config, schema_owned) = match remote_value {
                     Ok((api_config, schema_owned)) => (api_config, schema_owned),
@@ -158,6 +158,7 @@ impl DbSchemaCache {
         connection_string: &str,
         client: &mut http_conn_pool::Client<Send>,
         ctx: &RequestContext,
+        config: &'static ProxyConfig,
     ) -> Result<(ApiConfig, DbSchemaOwned), RestError> {
         let headers = vec![
             (&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id())),
@@ -253,8 +254,8 @@ impl DbSchemaCache {
         let json_schema = extract_string(&mut row, "json_schema").unwrap_or_default();
         let string_size = json_schema.len();
 
-        if string_size > MAX_SCHEMA_SIZE {
-            return Err(RestError::SchemaTooLarge(MAX_SCHEMA_SIZE, string_size));
+        if string_size > config.rest_config.max_schema_size {
+            return Err(RestError::SchemaTooLarge(config.rest_config.max_schema_size, string_size));
         }
 
         let schema_owned = DbSchemaOwned::new(json_schema, |s| {
@@ -729,6 +730,7 @@ async fn handle_rest_inner(
             &connection_string,
             &mut client,
             &ctx,
+            config,
         )
         .await?;
     let (api_config, db_schema_owned) = entry.as_ref();
