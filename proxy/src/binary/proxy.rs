@@ -257,6 +257,11 @@ struct ProxyCliArgs {
     #[clap(long, default_value = "size=1000,ttl=1h")]
     #[cfg(feature = "rest_broker")]
     db_schema_cache: String,
+
+    /// Maximum size allowed for schema in bytes
+    #[clap(long, default_value_t = 5 * 1024 * 1024)] // 5MB
+    #[cfg(feature = "rest_broker")]
+    max_schema_size: usize,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -715,6 +720,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         RestConfig {
             is_rest_broker: args.is_rest_broker,
             db_schema_cache,
+            max_schema_size: args.max_schema_size,
         }
     };
 
