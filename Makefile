@@ -109,7 +109,7 @@ all: neon postgres-install neon-pg-ext
 
 ### Neon Rust bits
 #
-# The 'postgres_ffi' depends on the Postgres headers.
+# The 'postgres_ffi' crate depends on the Postgres headers.
 .PHONY: neon
 neon: postgres-headers-install walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
@@ -122,7 +122,7 @@ cargo-target-dir:
 	test -e target/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > target/CACHEDIR.TAG
 
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-install-%
+neon-pg-ext-%: postgres-install-% cargo-target-dir
 	+@echo "Compiling neon-specific Postgres extensions for $*"
 	mkdir -p $(BUILD_DIR)/pgxn-$*
 	$(MAKE) PG_CONFIG="$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config" COPT='$(COPT)' \

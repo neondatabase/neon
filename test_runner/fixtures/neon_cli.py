@@ -567,6 +567,8 @@ class NeonLocalCli(AbstractNeonCli):
         basebackup_request_tries: int | None = None,
         timeout: str | None = None,
         env: dict[str, str] | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -592,6 +594,10 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--create-test-user"])
         if timeout is not None:
             args.extend(["--start-timeout", str(timeout)])
+        if autoprewarm:
+            args.extend(["--autoprewarm"])
+        if offload_lfc_interval_seconds is not None:
+            args.extend(["--offload-lfc-interval-seconds", str(offload_lfc_interval_seconds)])
 
         res = self.raw_cli(args, extra_env_vars)
         res.check_returncode()

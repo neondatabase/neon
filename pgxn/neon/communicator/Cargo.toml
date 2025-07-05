@@ -1,9 +1,11 @@
 [package]
 name = "communicator"
-version = "0.1.0"
-edition = "2024"
+license.workspace = true
+edition.workspace = true
 
 [features]
+# 'testing' feature is currently unused in the communicator, but we accept it for convenience of
+# calling build scripts, so that you can pass the same feature to all packages.
 testing = []
 
 [lib]
@@ -35,6 +37,7 @@ pageserver_page_api.workspace = true
 
 neon-shmem.workspace = true
 utils.workspace = true
+workspace_hack = { version = "0.1", path = "../../../workspace_hack" }
 
 [build-dependencies]
 cbindgen.workspace = true
