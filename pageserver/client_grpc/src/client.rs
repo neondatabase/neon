@@ -6,6 +6,7 @@ use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
+use tonic::codec::CompressionEncoding;
 use tracing::instrument;
 
 use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
@@ -62,6 +63,8 @@ pub struct PageserverClient {
     timeline_id: TimelineId,
     /// The JWT auth token for this tenant, if any.
     auth_token: Option<String>,
+    /// The compression to use, if any.
+    compression: Option<CompressionEncoding>,
     /// The shards for this tenant.
     shards: ArcSwap<Shards>,
     /// The retry configuration.
@@ -76,12 +79,20 @@ impl PageserverClient {
         timeline_id: TimelineId,
         shard_spec: ShardSpec,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
     ) -> anyhow::Result<Self> {
-        let shards = Shards::new(tenant_id, timeline_id, shard_spec, auth_token.clone())?;
+        let shards = Shards::new(
+            tenant_id,
+            timeline_id,
+            shard_spec,
+            auth_token.clone(),
+            compression,
+        )?;
         Ok(Self {
             tenant_id,
             timeline_id,
             auth_token,
+            compression,
             shards: ArcSwap::new(Arc::new(shards)),
             retry: Retry,
         })
@@ -119,6 +130,7 @@ impl PageserverClient {
             self.timeline_id,
             shard_spec,
             self.auth_token.clone(),
+            self.compression,
         )?;
         self.shards.store(Arc::new(shards));
         Ok(())
@@ -364,13 +376,21 @@ impl Shards {
         timeline_id: TimelineId,
         shard_spec: ShardSpec,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
     ) -> anyhow::Result<Self> {
         // NB: the shard spec has already been validated when constructed.
         let mut shards = HashMap::with_capacity(shard_spec.urls.len());
         for (shard_id, url) in shard_spec.urls {
             shards.insert(
                 shard_id,
-                Shard::new(url, tenant_id, timeline_id, shard_id, auth_token.clone())?,
+                Shard::new(
+                    url,
+                    tenant_id,
+                    timeline_id,
+                    shard_id,
+                    auth_token.clone(),
+                    compression,
+                )?,
             );
         }
 
@@ -422,6 +442,7 @@ impl Shard {
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
     ) -> anyhow::Result<Self> {
         // Common channel pool for unary and stream requests. Bounded by client/stream pools.
         let channel_pool = ChannelPool::new(url.clone(), MAX_CLIENTS_PER_CHANNEL)?;
@@ -433,6 +454,7 @@ impl Shard {
             timeline_id,
             shard_id,
             auth_token.clone(),
+            compression,
             Some(MAX_UNARY_CLIENTS),
         );
 
@@ -445,6 +467,7 @@ impl Shard {
                 timeline_id,
                 shard_id,
                 auth_token.clone(),
+                compression,
                 None, // unbounded, limited by stream pool
             ),
             Some(MAX_STREAMS),
@@ -460,6 +483,7 @@ impl Shard {
                 timeline_id,
                 shard_id,
                 auth_token,
+                compression,
                 None, // unbounded, limited by stream pool
             ),
             Some(MAX_BULK_STREAMS),
