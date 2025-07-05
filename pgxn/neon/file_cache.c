@@ -230,6 +230,8 @@ lfc_switch_off(void)
 {
 	int			fd;
 
+	Assert(!neon_enable_new_communicator);
+
 	if (LFC_ENABLED())
 	{
 		HASH_SEQ_STATUS status;
@@ -295,6 +297,8 @@ lfc_maybe_disabled(void)
 static bool
 lfc_ensure_opened(void)
 {
+	Assert(!neon_enable_new_communicator);
+
 	if (lfc_generation != lfc_ctl->generation)
 	{
 		lfc_close_file();
@@ -319,6 +323,8 @@ lfc_shmem_startup(void)
 {
 	bool		found;
 	static HASHCTL info;
+
+	Assert(!neon_enable_new_communicator);
 
 	if (prev_shmem_startup_hook)
 	{
@@ -616,6 +622,9 @@ lfc_init(void)
 							NULL);
 
 	if (lfc_max_size == 0)
+		return;
+
+	if (neon_enable_new_communicator)
 		return;
 
 	prev_shmem_startup_hook = shmem_startup_hook;
