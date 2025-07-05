@@ -192,7 +192,7 @@ fn acquire_lsn_lease_grpc(
     lsn: Lsn,
 ) -> Result<Option<SystemTime>> {
     tokio::runtime::Handle::current().block_on(async move {
-        let mut client = page_api::Client::new(
+        let mut client = page_api::Client::connect(
             connstring.to_string(),
             tenant_shard_id.tenant_id,
             timeline_id,

@@ -1057,7 +1057,7 @@ impl ComputeNode {
         };
 
         let (reader, connected) = tokio::runtime::Handle::current().block_on(async move {
-            let mut client = page_api::Client::new(
+            let mut client = page_api::Client::connect(
                 shard0_connstr,
                 spec.tenant_id,
                 spec.timeline_id,
