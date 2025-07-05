@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import socket
 from contextlib import closing
+from itertools import cycle
 
 from fixtures.log_helper import log
 
@@ -34,15 +35,23 @@ def can_bind(host: str, port: int) -> bool:
 
 class PortDistributor:
     def __init__(self, base_port: int, port_number: int):
-        self.iterator = iter(range(base_port, base_port + port_number))
+        self.base_port = base_port
+        self.port_number = port_number
+        self.cycle = cycle(range(base_port, base_port + port_number))
         self.port_map: dict[int, int] = {}
 
     def get_port(self) -> int:
-        for port in self.iterator:
+        checked = 0
+        for port in self.cycle:
             if can_bind("localhost", port):
                 return port
+            elif checked < self.port_number:
+                checked += 1
+            else:
+                break
+
         raise RuntimeError(
-            "port range configured for test is exhausted, consider enlarging the range"
+            f"port range ({self.base_port}..{self.base_port + self.port_number}) configured for test is exhausted, consider enlarging the range"
         )
 
     def replace_with_new_port(self, value: int | str) -> int | str:
