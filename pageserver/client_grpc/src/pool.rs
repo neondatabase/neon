@@ -40,6 +40,7 @@ use futures::StreamExt as _;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{error, warn};
 
@@ -242,6 +243,8 @@ pub struct ClientPool {
     shard_id: ShardIndex,
     /// Authentication token, if any.
     auth_token: Option<String>,
+    /// Compression to use.
+    compression: Option<CompressionEncoding>,
     /// Channel pool to acquire channels from.
     channel_pool: Arc<ChannelPool>,
     /// Limits the max number of concurrent clients for this pool. None if the pool is unbounded.
@@ -281,6 +284,7 @@ impl ClientPool {
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
         max_clients: Option<NonZero<usize>>,
     ) -> Arc<Self> {
         let pool = Arc::new(Self {
@@ -288,6 +292,7 @@ impl ClientPool {
             timeline_id,
             shard_id,
             auth_token,
+            compression,
             channel_pool,
             idle: Mutex::default(),
             idle_reaper: Reaper::new(REAP_IDLE_THRESHOLD, REAP_IDLE_INTERVAL),
@@ -331,7 +336,7 @@ impl ClientPool {
             self.timeline_id,
             self.shard_id,
             self.auth_token.clone(),
-            None,
+            self.compression,
         )?;
 
         Ok(ClientGuard {
