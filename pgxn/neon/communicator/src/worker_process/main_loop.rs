@@ -219,7 +219,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     "processing",
                     request_id = request_id,
                     slot_idx = slot_idx,
-                    procno=owner_procno,
+                    procno = owner_procno,
                 );
                 async {
                     // FIXME: as a temporary hack, abort the request if we don't get a response
@@ -233,11 +233,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         tokio::time::Duration::from_secs(30),
                         self.handle_request(slot.get_request()),
                     )
-                        .await
-                        .unwrap_or_else(|_elapsed| {
-                            info!("request {request_id} timed out");
-                            NeonIOResult::Error(libc::ETIMEDOUT)
-                        });
+                    .await
+                    .unwrap_or_else(|_elapsed| {
+                        info!("request {request_id} timed out");
+                        NeonIOResult::Error(libc::ETIMEDOUT)
+                    });
                     trace!("request {request_id} at slot {slot_idx} completed");
 
                     // Ok, we have completed the IO. Mark the request as completed. After that,
