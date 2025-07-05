@@ -13,6 +13,8 @@ use utils::backoff::retry;
 pub fn app(state: Arc<Storage>) -> Router<()> {
     use axum::routing::{delete as _delete, get as _get};
     let delete_prefix = _delete(delete_prefix);
+    // NB: On any changes do not forget to update the OpenAPI spec
+    // in /endpoint_storage/src/openapi_spec.yml.
     Router::new()
         .route(
             "/{tenant_id}/{timeline_id}/{endpoint_id}/{*path}",
