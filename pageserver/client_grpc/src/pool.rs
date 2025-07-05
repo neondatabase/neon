@@ -48,6 +48,13 @@ use utils::id::{TenantId, TimelineId};
 use utils::shard::ShardIndex;
 
 /// Reap channels/clients/streams that have been idle for this long.
+///
+/// TODO: this is per-pool. For nested pools, it can take up to 3x as long for a TCP connection to
+/// be reaped. First, we must wait for an idle stream to be reaped, which marks its client as idle.
+/// Then, we must wait for the idle client to be reaped, which marks its channel as idle. Then, we
+/// must wait for the idle channel to be reaped. Is that a problem? Maybe not, we just have to
+/// account for it when setting the reap threshold. Alternatively, we can immediately reap empty
+/// channels, and/or stream pool clients.
 const REAP_IDLE_THRESHOLD: Duration = match cfg!(any(test, feature = "testing")) {
     false => Duration::from_secs(180),
     true => Duration::from_secs(1), // exercise reaping in tests
