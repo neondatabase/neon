@@ -332,7 +332,11 @@ fn hash_combine(mut a: u32, mut b: u32) -> u32 {
 ///
 /// The mapping of key to shard is not stable across changes to ShardCount: this is intentional
 /// and will be handled at higher levels when shards are split.
-fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Key) -> ShardNumber {
+pub fn key_to_shard_number(
+    count: ShardCount,
+    stripe_size: ShardStripeSize,
+    key: &Key,
+) -> ShardNumber {
     // Fast path for un-sharded tenants or broadcast keys
     if count < ShardCount(2) || key_is_shard0(key) {
         return ShardNumber(0);

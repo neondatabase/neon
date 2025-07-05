@@ -6,7 +6,9 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+compute_api.workspace = true
 futures.workspace = true
+pageserver_api.workspace = true
 pageserver_page_api.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
