@@ -4506,6 +4506,7 @@ dependencies = [
  "pageserver_page_api",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic 0.13.1",
  "tracing",
  "utils",
