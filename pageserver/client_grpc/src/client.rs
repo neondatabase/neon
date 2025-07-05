@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
+use tonic::codec::CompressionEncoding;
 use tracing::instrument;
 
 use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
@@ -69,8 +70,16 @@ impl PageserverClient {
         shard_map: HashMap<ShardIndex, String>,
         stripe_size: ShardStripeSize,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
     ) -> anyhow::Result<Self> {
-        let shards = Shards::new(tenant_id, timeline_id, shard_map, stripe_size, auth_token)?;
+        let shards = Shards::new(
+            tenant_id,
+            timeline_id,
+            shard_map,
+            stripe_size,
+            auth_token,
+            compression,
+        )?;
         Ok(Self {
             shards,
             retry: Retry,
@@ -256,6 +265,7 @@ impl Shards {
         shard_map: HashMap<ShardIndex, String>,
         stripe_size: ShardStripeSize,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
     ) -> anyhow::Result<Self> {
         let count = match shard_map.len() {
             0 => return Err(anyhow!("no shards provided")),
@@ -276,7 +286,14 @@ impl Shards {
             }
             // The above conditions guarantee that we have all shards 0..count: len() matches count,
             // shard number < count, and numbers are unique (via hashmap).
-            let shard = Shard::new(url, tenant_id, timeline_id, shard_id, auth_token.clone())?;
+            let shard = Shard::new(
+                url,
+                tenant_id,
+                timeline_id,
+                shard_id,
+                auth_token.clone(),
+                compression,
+            )?;
             map.insert(shard_id, shard);
         }
 
@@ -328,6 +345,7 @@ impl Shard {
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
     ) -> anyhow::Result<Self> {
         // Sanity-check that the URL uses gRPC.
         if PageserverProtocol::from_connstring(&url)? != PageserverProtocol::Grpc {
@@ -344,6 +362,7 @@ impl Shard {
             timeline_id,
             shard_id,
             auth_token.clone(),
+            compression,
             Some(MAX_UNARY_CLIENTS),
         );
 
@@ -356,6 +375,7 @@ impl Shard {
                 timeline_id,
                 shard_id,
                 auth_token.clone(),
+                compression,
                 None, // unbounded, limited by stream pool
             ),
             Some(MAX_STREAMS),
@@ -371,6 +391,7 @@ impl Shard {
                 timeline_id,
                 shard_id,
                 auth_token,
+                compression,
                 None, // unbounded, limited by stream pool
             ),
             Some(MAX_BULK_STREAMS),
