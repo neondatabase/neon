@@ -119,7 +119,7 @@ jobs:
             curl -s -X DELETE "$BASE_URL/projects/$project_id" \
               --header "Accept: application/json" \
               --header "Content-Type: application/json" \
-              --header "Authorization: Bearer ${API_KEY}" 
+              --header "Authorization: Bearer ${API_KEY}"
           done
         else
           echo "Dry run enabled — no projects were deleted."
@@ -149,9 +149,9 @@ jobs:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
       PG_VERSION: ${{ matrix.PG_VERSION }}
-      TEST_OUTPUT: /tmp/test_output
+      TEST_OUTPUT: /__w/_temp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
@@ -183,7 +183,7 @@ jobs:
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
+        path: /__w/_temp/neon/
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
@@ -257,9 +257,9 @@ jobs:
       statuses: write
       id-token: write # aws-actions/configure-aws-credentials
     env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
       DEFAULT_PG_VERSION: 17
-      TEST_OUTPUT: /tmp/test_output
+      TEST_OUTPUT: /__w/_temp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: "neon-staging"
@@ -291,7 +291,7 @@ jobs:
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
+        path: /__w/_temp/neon/
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
@@ -317,9 +317,9 @@ jobs:
       statuses: write
       id-token: write # aws-actions/configure-aws-credentials
     env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
       DEFAULT_PG_VERSION: 16
-      TEST_OUTPUT: /tmp/test_output
+      TEST_OUTPUT: /__w/_temp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: "neon-staging"
@@ -351,7 +351,7 @@ jobs:
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
+        path: /__w/_temp/neon/
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
@@ -537,9 +537,9 @@ jobs:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
       PG_VERSION: ${{ matrix.pg_version }}
-      TEST_OUTPUT: /tmp/test_output
+      TEST_OUTPUT: /__w/_temp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
@@ -574,7 +574,7 @@ jobs:
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
+        path: /__w/_temp/neon/
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
@@ -728,9 +728,9 @@ jobs:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
       TEST_PG_BENCH_SCALES_MATRIX: "1"
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
       PG_VERSION: ${{ matrix.postgres_version }}
-      TEST_OUTPUT: /tmp/test_output
+      TEST_OUTPUT: /__w/_temp/test_output
       BUILD_TYPE: remote
 
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
@@ -763,7 +763,7 @@ jobs:
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
+        path: /__w/_temp/neon/
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
@@ -857,9 +857,9 @@ jobs:
       matrix: ${{ fromJSON(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
       PG_VERSION: ${{ matrix.pg_version }}
-      TEST_OUTPUT: /tmp/test_output
+      TEST_OUTPUT: /__w/_temp/test_output
       TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
       TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
       BUILD_TYPE: remote
@@ -897,7 +897,7 @@ jobs:
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
+        path: /__w/_temp/neon/
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
@@ -989,9 +989,9 @@ jobs:
       matrix: ${{ fromJSON(needs.generate-matrices.outputs.tpch-compare-matrix) }}
 
     env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
       PG_VERSION: ${{ matrix.pg_version }}
-      TEST_OUTPUT: /tmp/test_output
+      TEST_OUTPUT: /__w/_temp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
@@ -1023,7 +1023,7 @@ jobs:
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
+        path: /__w/_temp/neon/
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
@@ -1113,9 +1113,9 @@ jobs:
       matrix: ${{ fromJSON(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
       PG_VERSION: ${{ matrix.pg_version }}
-      TEST_OUTPUT: /tmp/test_output
+      TEST_OUTPUT: /__w/_temp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
@@ -1147,7 +1147,7 @@ jobs:
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
+        path: /__w/_temp/neon/
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 

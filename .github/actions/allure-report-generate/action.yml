@@ -54,7 +54,7 @@ runs:
 
         LOCK_FILE=reports/${BRANCH_OR_PR}/lock.txt
 
-        WORKDIR=/tmp/${BRANCH_OR_PR}-$(date +%s)
+        WORKDIR=/__w/_temp/${BRANCH_OR_PR}-$(date +%s)
         mkdir -p ${WORKDIR}
 
         echo "BRANCH_OR_PR=${BRANCH_OR_PR}" >> $GITHUB_ENV
@@ -70,7 +70,7 @@ runs:
 
     - name: Install Allure
       shell: bash -euxo pipefail {0}
-      working-directory: /tmp
+      working-directory: /__w/_temp
       run: |
         if ! which allure; then
           ALLURE_ZIP=allure-${ALLURE_VERSION}.zip

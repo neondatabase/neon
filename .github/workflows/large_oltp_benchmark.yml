@@ -53,9 +53,9 @@ jobs:
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "1h" # todo update to > 1 h
       TEST_PGBENCH_CUSTOM_SCRIPTS: ${{ matrix.custom_scripts }}
-      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      POSTGRES_DISTRIB_DIR: /__w/_temp/neon/pg_install
       PG_VERSION: 16 # pre-determined by pre-determined project
-      TEST_OUTPUT: /tmp/test_output
+      TEST_OUTPUT: /__w/_temp/test_output
       BUILD_TYPE: remote
       PLATFORM: ${{ matrix.target }}
 
@@ -91,7 +91,7 @@ jobs:
       uses: ./.github/actions/download
       with:
         name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
+        path: /__w/_temp/neon/
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
@@ -128,9 +128,9 @@ jobs:
       if: ${{ matrix.target == 'reuse_branch' }}
       env:
           BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr_without_pooler }}
-          PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
-          PSQL: /tmp/neon/pg_install/v16/bin/psql
-          PG_16_LIB_PATH: /tmp/neon/pg_install/v16/lib
+          PG_CONFIG: /__w/_temp/neon/pg_install/v16/bin/pg_config
+          PSQL: /__w/_temp/neon/pg_install/v16/bin/psql
+          PG_16_LIB_PATH: /__w/_temp/neon/pg_install/v16/lib
       run: |
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Deleting rows in table webhook.incoming_webhooks from prior runs"
         export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
