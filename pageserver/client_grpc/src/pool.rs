@@ -16,14 +16,13 @@
 //!   single caller at a time, and is returned to the pool when dropped. Idle clients may be removed
 //!   from the pool after some time, to free up the channel.
 //!
-//! * StreamPool: manages bidirectional gRPC GetPage streams. Each stream acquires a client from
-//!   the ClientPool for the stream's lifetime. Internal streams are not exposed to callers;
-//!   instead, it returns a guard can be used to send a single request, to properly enforce queue
-//!   depth and route responses. Internally, the pool will reuse or spin up a suitable stream for
-//!   the request, possibly pipelining multiple requests from multiple callers on the same stream
-//!   (up to some queue depth). Idle streams may be removed from the pool after some time, to free
-//!   up the client.
-//!   
+//! * StreamPool: manages bidirectional gRPC GetPage streams. Each stream acquires a client from the
+//!   ClientPool for the stream's lifetime. Internal streams are not exposed to callers; instead, it
+//!   returns a guard that can be used to send a single request, to properly enforce queue depth and
+//!   route responses. Internally, the pool will reuse or spin up a suitable stream for the request,
+//!   possibly pipelining multiple requests from multiple callers on the same stream (up to some
+//!   queue depth). Idle streams may be removed from the pool after a while to free up the client.
+//!
 //! Each channel corresponds to one TCP connection. Each client unary request and each stream
 //! corresponds to one HTTP/2 stream and server task.
 //!
@@ -45,8 +44,6 @@ use tracing::{error, warn};
 use pageserver_page_api as page_api;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::ShardIndex;
-
-// TODO: tune these constants, and make them configurable.
 
 /// A gRPC channel pool, for a single Pageserver. A channel is shared by many clients (via HTTP/2
 /// stream multiplexing), up to `clients_per_channel` -- a new channel will be spun up beyond this.
@@ -104,9 +101,9 @@ impl ChannelPool {
     /// client requires an owned `Channel` and we don't have access to the channel's internal
     /// refcount.
     ///
-    /// NB: this is not performance-sensitive. It is only called when creating a new client, and
-    /// clients are pooled and reused by `ClientPool`. The total number of channels will also be
-    /// small. O(n) performance is therefore okay.
+    /// This is not performance-sensitive. It is only called when creating a new client, and clients
+    /// are pooled and reused by `ClientPool`. The total number of channels will also be small. O(n)
+    /// performance is therefore okay.
     pub fn get(self: &Arc<Self>) -> ChannelGuard {
         let mut channels = self.channels.lock().unwrap();
 
@@ -245,9 +242,9 @@ impl ClientPool {
     /// lazily and do not block, but this call can block if the pool is at `max_clients`. The client
     /// is returned to the pool when the guard is dropped.
     ///
-    /// This is moderately performance-sensitive. It is called for every unary request, but recall
-    /// that these establish a new gRPC stream per request so they're already expensive. GetPage
-    /// requests use the `StreamPool` instead.
+    /// This is moderately performance-sensitive. It is called for every unary request, but these
+    /// establish a new gRPC stream per request so they're already expensive. GetPage requests use
+    /// the `StreamPool` instead.
     pub async fn get(self: &Arc<Self>) -> anyhow::Result<ClientGuard> {
         // Acquire a permit if the pool is bounded.
         let mut permit = None;
@@ -314,7 +311,7 @@ impl DerefMut for ClientGuard {
     }
 }
 
-// Returns the client to the pool.
+/// Returns the client to the pool.
 impl Drop for ClientGuard {
     fn drop(&mut self) {
         let Some(pool) = self.pool.upgrade() else {
@@ -406,6 +403,7 @@ impl StreamPool {
     /// This is very performance-sensitive, as it is on the GetPage hot path.
     ///
     /// TODO: this must do something more sophisticated for performance. We want:
+    ///
     /// * Cheap, concurrent access in the common case where we can use a pooled stream.
     /// * Quick acquisition of pooled streams with available capacity.
     /// * Prefer streams that belong to lower-numbered channels, to reap idle channels.
@@ -561,7 +559,7 @@ impl StreamGuard {
     /// valid for a single request (to enforce queue depth). This also drops the guard on return and
     /// returns the queue depth quota to the pool.
     ///
-    /// The `GetPageRequest::request_id` must be unique across in-flight request.
+    /// The `GetPageRequest::request_id` must be unique across in-flight requests.
     ///
     /// NB: errors are often returned as `GetPageResponse::status_code` instead of `tonic::Status`
     /// to avoid tearing down the stream for per-request errors. Callers must check this.
