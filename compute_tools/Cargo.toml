@@ -49,6 +49,7 @@ serde_with.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 tar.workspace = true
+tempfile.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
@@ -78,3 +79,8 @@ zstd = "0.13"
 bytes = "1.0"
 rust-ini = "0.20.0"
 rlimit = "0.10.1"
+
+inferno = { version = "0.12", default-features = false, features = ["multithreaded", "nameattr"] }
+pprof = { version = "0.15", features = ["protobuf-codec", "flamegraph"] }
+prost = "0.12"
+procfs = "0.17"
