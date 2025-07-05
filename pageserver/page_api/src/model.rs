@@ -399,6 +399,19 @@ pub enum GetPageClass {
     Background,
 }
 
+impl GetPageClass {
+    /// Returns true if this is considered a bulk request (i.e. more throughput-oriented rather than
+    /// latency-sensitive).
+    pub fn is_bulk(&self) -> bool {
+        match self {
+            Self::Unknown => false,
+            Self::Normal => false,
+            Self::Prefetch => true,
+            Self::Background => true,
+        }
+    }
+}
+
 impl From<proto::GetPageClass> for GetPageClass {
     fn from(pb: proto::GetPageClass) -> Self {
         match pb {
