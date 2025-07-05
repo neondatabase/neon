@@ -5874,6 +5874,7 @@ def generate_uploads_and_deletions(
     data: str | None = None,
     pageserver: NeonPageserver,
     wait_until_uploaded: bool = True,
+    config_lines: list[str] | None = None,
 ):
     """
     Using the environment's default tenant + timeline, generate a load pattern
@@ -5891,7 +5892,7 @@ def generate_uploads_and_deletions(
     ps_http = pageserver.http_client()
 
     with env.endpoints.create_start(
-        "main", tenant_id=tenant_id, pageserver_id=pageserver.id
+        "main", tenant_id=tenant_id, pageserver_id=pageserver.id, config_lines=config_lines
     ) as endpoint:
         if init:
             endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
