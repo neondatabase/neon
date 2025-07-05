@@ -96,50 +96,13 @@ impl HotStandbyFeedback {
     }
 }
 
-/// Standby status update
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct StandbyReply {
-    pub write_lsn: Lsn, // The location of the last WAL byte + 1 received and written to disk in the standby.
-    pub flush_lsn: Lsn, // The location of the last WAL byte + 1 flushed to disk in the standby.
-    pub apply_lsn: Lsn, // The location of the last WAL byte + 1 applied in the standby.
-    pub reply_ts: TimestampTz, // The client's system clock at the time of transmission, as microseconds since midnight on 2000-01-01.
-    pub reply_requested: bool,
-}
-
-impl StandbyReply {
-    pub fn empty() -> Self {
-        StandbyReply {
-            write_lsn: Lsn::INVALID,
-            flush_lsn: Lsn::INVALID,
-            apply_lsn: Lsn::INVALID,
-            reply_ts: 0,
-            reply_requested: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct StandbyFeedback {
-    pub reply: StandbyReply,
-    pub hs_feedback: HotStandbyFeedback,
-}
-
-impl StandbyFeedback {
-    pub fn empty() -> Self {
-        StandbyFeedback {
-            reply: StandbyReply::empty(),
-            hs_feedback: HotStandbyFeedback::empty(),
-        }
-    }
-}
-
 /// Receiver is either pageserver or regular standby, which have different
 /// feedbacks.
 /// Used as both model and internally.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ReplicationFeedback {
     Pageserver(PageserverFeedback),
-    Standby(StandbyFeedback),
+    Standby(HotStandbyFeedback),
 }
 
 /// Uniquely identifies a WAL service connection. Logged in spans for
@@ -266,9 +229,6 @@ pub struct SkTimelineInfo {
     pub http_connstr: Option<String>,
     #[serde(default)]
     pub https_connstr: Option<String>,
-    // Minimum of all active RO replicas flush LSN
-    #[serde(default = "lsn_invalid")]
-    pub standby_horizon: Lsn,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

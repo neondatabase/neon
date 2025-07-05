@@ -201,11 +201,11 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         for shard, ps in tenant_get_shards(env, env.initial_tenant):
             client = ps.http_client()
             layers_guarded_before_gc = get_layers_protected_by_lease(
-                client, shard, env.initial_timeline, lease_lsn=lsn
+                client, shard, env.initial_timeline, lease_lsn=lease_lsn
             )
             gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
             layers_guarded_after_gc = get_layers_protected_by_lease(
-                client, shard, env.initial_timeline, lease_lsn=lsn
+                client, shard, env.initial_timeline, lease_lsn=lease_lsn
             )
 
             # Note: cannot assert on `layers_removed` here because it could be layers
