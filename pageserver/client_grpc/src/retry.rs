@@ -40,7 +40,11 @@ impl Retry {
         loop {
             // Set up a future to wait for the backoff (if any) and run the request with a timeout.
             let backoff_and_try = async {
-                tokio::time::sleep(Self::backoff_duration(retries)).await;
+                // NB: sleep() always sleeps 1ms, even when given a 0 argument. See:
+                // https://github.com/tokio-rs/tokio/issues/6866
+                if let Some(backoff) = Self::backoff_duration(retries) {
+                    tokio::time::sleep(backoff).await;
+                }
 
                 let request_started = Instant::now();
                 tokio::time::timeout(Self::REQUEST_TIMEOUT, f())
@@ -108,13 +112,14 @@ impl Retry {
         }
     }
 
-    /// Returns the backoff duration for the given retry attempt.
-    fn backoff_duration(retry: usize) -> Duration {
-        exponential_backoff_duration(
+    /// Returns the backoff duration for the given retry attempt, or None for no backoff.
+    fn backoff_duration(retry: usize) -> Option<Duration> {
+        let backoff = exponential_backoff_duration(
             retry as u32,
             Self::BASE_BACKOFF.as_secs_f64(),
             Self::MAX_BACKOFF.as_secs_f64(),
-        )
+        );
+        (!backoff.is_zero()).then_some(backoff)
     }
 
     /// Returns true if the given status code should be retries.
