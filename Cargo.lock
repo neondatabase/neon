@@ -4285,6 +4285,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "pageserver_page_api",
+ "pprof",
  "rand 0.8.5",
  "reqwest",
  "serde",
