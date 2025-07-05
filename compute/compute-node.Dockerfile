@@ -1915,10 +1915,10 @@ RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /e
 
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN echo /usr/local/pgsql/lib > /etc/ld.so.conf.d/00-neon.conf && /sbin/ldconfig
-RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl jq \
+RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl jq parallel \
    && apt clean && rm -rf /ext-src/*.tar.gz /ext-src/*.patch /var/lib/apt/lists/*
 ENV PATH=/usr/local/pgsql/bin:$PATH
-ENV PGHOST=compute
+ENV PGHOST=compute1
 ENV PGPORT=55433
 ENV PGUSER=cloud_admin
 ENV PGDATABASE=postgres
