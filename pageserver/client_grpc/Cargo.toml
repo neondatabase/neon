@@ -3,6 +3,9 @@ name = "pageserver_client_grpc"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+testing = ["pageserver_api/testing"]
+
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
