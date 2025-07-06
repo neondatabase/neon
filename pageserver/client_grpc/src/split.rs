@@ -97,40 +97,36 @@ impl GetPageSplitter {
         self.requests.drain()
     }
 
-    /// Adds a response from the given shard.
-    #[allow(clippy::result_large_err)]
-    pub fn add_response(
-        &mut self,
-        shard_id: ShardIndex,
-        response: page_api::GetPageResponse,
-    ) -> tonic::Result<()> {
-        // The caller should already have converted status codes into tonic::Status.
-        assert_eq!(response.status_code, page_api::GetPageStatusCode::Ok);
+    /// Adds a response from the given shard. The response must match the request ID and have an OK
+    /// status code. A response must not already exist for the given shard ID.
+    pub fn add_response(&mut self, shard_id: ShardIndex, response: page_api::GetPageResponse) {
+        // NB: this is called below a `Retry::with()`, so unrecoverable errors should not use a
+        // retryable status code (e.g. `Internal`).
 
-        // Make sure the response matches the request ID.
-        if response.request_id != self.request_id {
-            return Err(tonic::Status::internal(format!(
-                "response ID {} does not match request ID {}",
-                response.request_id, self.request_id
-            )));
-        }
+        // The caller should already have converted status codes into tonic::Status.
+        assert_eq!(
+            response.status_code,
+            page_api::GetPageStatusCode::Ok,
+            "non-OK response"
+        );
+
+        // The stream pool ensures the response matches the request ID.
+        assert_eq!(response.request_id, self.request_id, "response ID mismatch");
 
         // Add the response data to the map.
         let old = self.responses.insert(shard_id, response.page_images);
 
-        if old.is_some() {
-            return Err(tonic::Status::internal(format!(
-                "duplicate response for shard {shard_id}",
-            )));
-        }
-
-        Ok(())
+        // We only dispatch one request per shard.
+        assert!(old.is_none(), "duplicate response for shard {shard_id}");
     }
 
     /// Assembles the shard responses into a single response. Responses must be present for all
     /// relevant shards, and the total number of pages must match the original request.
     #[allow(clippy::result_large_err)]
     pub fn assemble_response(self) -> tonic::Result<page_api::GetPageResponse> {
+        // NB: this is called below a `Retry::with()`, so unrecoverable errors should not use a
+        // retryable status code (e.g. `Internal`).
+
         let mut response = page_api::GetPageResponse {
             request_id: self.request_id,
             status_code: page_api::GetPageStatusCode::Ok,
@@ -149,11 +145,11 @@ impl GetPageSplitter {
             let page = shard_responses
                 .get_mut(shard_id)
                 .ok_or_else(|| {
-                    tonic::Status::internal(format!("missing response for shard {shard_id}"))
+                    tonic::Status::data_loss(format!("missing response for shard {shard_id}"))
                 })?
                 .next()
                 .ok_or_else(|| {
-                    tonic::Status::internal(format!("missing page from shard {shard_id}"))
+                    tonic::Status::data_loss(format!("missing page from shard {shard_id}"))
                 })?;
             response.page_images.push(page);
         }
@@ -161,7 +157,7 @@ impl GetPageSplitter {
         // Make sure there are no additional pages.
         for (shard_id, mut pages) in shard_responses {
             if pages.next().is_some() {
-                return Err(tonic::Status::internal(format!(
+                return Err(tonic::Status::out_of_range(format!(
                     "extra pages returned from shard {shard_id}"
                 )));
             }
