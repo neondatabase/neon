@@ -12,7 +12,7 @@ use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
-use pageserver_client_grpc::{PageserverClient, ShardMap};
+use pageserver_client_grpc::{PageserverClient, ShardSpec};
 use pageserver_page_api as page_api;
 
 use metrics::{IntCounter, IntCounterVec};
@@ -94,8 +94,8 @@ pub(super) async fn init(
     // TODO: plumb through the stripe size.
     let tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
     let timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
-    let shard_map = ShardMap::new(shard_map, None).expect("invalid shard map");
-    let client = PageserverClient::new(tenant_id, timeline_id, shard_map, auth_token)
+    let shard_spec = ShardSpec::new(shard_map, None).expect("invalid shard spec");
+    let client = PageserverClient::new(tenant_id, timeline_id, shard_spec, auth_token)
         .expect("could not create client");
 
     let request_counters = IntCounterVec::new(

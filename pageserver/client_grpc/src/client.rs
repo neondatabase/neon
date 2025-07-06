@@ -70,14 +70,14 @@ pub struct PageserverClient {
 
 impl PageserverClient {
     /// Creates a new Pageserver client for a given tenant and timeline. Uses the Pageservers given
-    /// in the shard map, which must be complete and must use gRPC URLs.
+    /// in the shard spec, which must be complete and must use gRPC URLs.
     pub fn new(
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        shard_map: ShardMap,
+        shard_spec: ShardSpec,
         auth_token: Option<String>,
     ) -> anyhow::Result<Self> {
-        let shards = Shards::new(tenant_id, timeline_id, shard_map, auth_token.clone())?;
+        let shards = Shards::new(tenant_id, timeline_id, shard_spec, auth_token.clone())?;
         Ok(Self {
             tenant_id,
             timeline_id,
@@ -87,16 +87,16 @@ impl PageserverClient {
         })
     }
 
-    /// Updates the shard map. In-flight requests will complete using the existing shard map, but
-    /// may retry with the new shard map if they fail.
+    /// Updates the shards from the given shard spec. In-flight requests will complete using the
+    /// existing shards, but may retry with the new shards if they fail.
     ///
-    /// TODO: make sure in-flight requests are allowed to complete, and that the old pools are
+    /// TODO: verify that in-flight requests are allowed to complete, and that the old pools are
     /// properly spun down and dropped afterwards.
-    pub fn update_shards(&self, shard_map: ShardMap) -> anyhow::Result<()> {
+    pub fn update_shards(&self, shard_spec: ShardSpec) -> anyhow::Result<()> {
         let shards = Shards::new(
             self.tenant_id,
             self.timeline_id,
-            shard_map,
+            shard_spec,
             self.auth_token.clone(),
         )?;
         self.shards.store(Arc::new(shards));
@@ -155,11 +155,11 @@ impl PageserverClient {
             return Err(tonic::Status::invalid_argument("no block number"));
         }
 
-        // The shard map may change while we're fetching pages. We execute the request using a
-        // stable view of the shards (especially important for requests that span shards), but retry
-        // the top-level (pre-split) request to pick up shard map changes. This can lead to
-        // unnecessary retries and re-splits in some cases where requests span shards, but these are
-        // expected to be rare.
+        // The shards may change while we're fetching pages. We execute the request using a stable
+        // view of the shards (especially important for requests that span shards), but retry the
+        // top-level (pre-split) request to pick up shard changes. This can lead to unnecessary
+        // retries and re-splits in some cases where requests span shards, but these are expected to
+        // be rare.
         //
         // TODO: the gRPC server and client doesn't yet properly support shard splits. Revisit this
         // once we figure out how to handle these.
@@ -169,7 +169,7 @@ impl PageserverClient {
     }
 
     /// Fetches pages using the given shards. This uses a stable view of the shards, regardless of
-    /// concurrent shard map updates. Does not retry internally, but is retried by `get_page()`.
+    /// concurrent shard updates. Does not retry internally, but is retried by `get_page()`.
     async fn get_page_with_shards(
         req: page_api::GetPageRequest,
         shards: &Shards,
@@ -259,7 +259,7 @@ impl PageserverClient {
 }
 
 /// Shard specification for a PageserverClient.
-pub struct ShardMap {
+pub struct ShardSpec {
     /// Maps shard indices to gRPC URLs.
     ///
     /// INVARIANT: every shard 0..count is present, and shard 0 is always present.
@@ -269,12 +269,12 @@ pub struct ShardMap {
     ///
     /// NB: this is 0 for unsharded tenants, following `ShardIndex::unsharded()` convention.
     count: ShardCount,
-    /// The stripe size for this shard map.
+    /// The stripe size for these shards.
     stripe_size: ShardStripeSize,
 }
 
-impl ShardMap {
-    /// Creates a new shard map with the given URLs and stripe size. All shards must be given.
+impl ShardSpec {
+    /// Creates a new shard spec with the given URLs and stripe size. All shards must be given.
     /// The stripe size may be omitted for unsharded tenants.
     pub fn new(
         urls: HashMap<ShardIndex, String>,
@@ -294,7 +294,7 @@ impl ShardMap {
         }
         let stripe_size = stripe_size.unwrap_or_default();
 
-        // Validate the shard map.
+        // Validate the shard spec.
         for (shard_id, url) in &urls {
             // The shard index must match the computed shard count, even for unsharded tenants.
             if shard_id.shard_count != count {
@@ -337,16 +337,16 @@ struct Shards {
 }
 
 impl Shards {
-    /// Creates a new set of shards based on a shard map.
+    /// Creates a new set of shards based on a shard spec.
     fn new(
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        shard_map: ShardMap,
+        shard_spec: ShardSpec,
         auth_token: Option<String>,
     ) -> anyhow::Result<Self> {
-        // NB: the shard map has already been validated when constructed.
-        let mut shards = HashMap::with_capacity(shard_map.urls.len());
-        for (shard_id, url) in shard_map.urls {
+        // NB: the shard spec has already been validated when constructed.
+        let mut shards = HashMap::with_capacity(shard_spec.urls.len());
+        for (shard_id, url) in shard_spec.urls {
             shards.insert(
                 shard_id,
                 Shard::new(url, tenant_id, timeline_id, shard_id, auth_token.clone())?,
@@ -354,9 +354,9 @@ impl Shards {
         }
 
         Ok(Self {
-            count: shard_map.count,
-            stripe_size: shard_map.stripe_size,
             by_index: shards,
+            count: shard_spec.count,
+            stripe_size: shard_spec.stripe_size,
         })
     }
 
