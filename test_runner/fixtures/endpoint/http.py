@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, final
 import requests
 from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
+from requests.exceptions import ReadTimeout
 from typing_extensions import override
 
 from fixtures.log_helper import log
@@ -102,8 +103,14 @@ class EndpointHttpClient(requests.Session):
 
         wait_until(offloaded)
 
-    def promote(self, safekeepers_lsn: dict[str, Any]):
-        res = self.post(f"http://localhost:{self.external_port}/promote", data=safekeepers_lsn)
+    def promote(self, safekeepers_lsn: dict[str, Any], disconnect: bool = False):
+        url = f"http://localhost:{self.external_port}/promote"
+        if disconnect:
+            try:  # send first request to start promote and disconnect
+                self.post(url, data=safekeepers_lsn, timeout=0.001)
+            except ReadTimeout:
+                pass  # wait on second request which returns on promotion finish
+        res = self.post(url, data=safekeepers_lsn)
         res.raise_for_status()
         json: dict[str, str] = res.json()
         return json

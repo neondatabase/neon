@@ -42,15 +42,10 @@ class PromoteMethod(StrEnum):
 METHOD_OPTIONS = [e for e in PromoteMethod]
 METHOD_IDS = [e.value for e in PromoteMethod]
 
-# test two primaries
-# test promote failed
-# test promote handler disconnects
-# test prewarm fails before promotion -> promotion should not be impacted
-
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 @pytest.mark.parametrize("method", METHOD_OPTIONS, ids=METHOD_IDS)
-def test_replica_promotes(neon_simple_env: NeonEnv, method: PromoteMethod):
+def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
     """
     Test that a replica safely promotes, and can commit data updates which
     show up when the primary boots up after the promoted secondary endpoint
@@ -164,3 +159,79 @@ def test_replica_promotes(neon_simple_env: NeonEnv, method: PromoteMethod):
         new_primary_cur.execute("select count(*) from t")
         assert new_primary_cur.fetchone() == (300,)
     stop_and_check_lsn(primary, expected_primary_lsn)
+
+
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+def test_replica_promote_handler_disconnects(neon_simple_env: NeonEnv):
+    """
+    Test that if a handler disconnects from /promote route of compute_ctl, promotion still happens
+    once, and no error is thrown
+    """
+    env: NeonEnv = neon_simple_env
+    primary: Endpoint = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
+    secondary: Endpoint = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
+
+    with primary.connect() as conn, conn.cursor() as cur:
+        cur.execute("create extension neon")
+        cur.execute("create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)")
+        cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
+        cur.execute("show neon.safekeepers")
+        safekeepers = cur.fetchall()[0][0]
+
+    primary.http_client().offload_lfc()
+    primary_endpoint_id = primary.endpoint_id
+    primary.stop(mode="immediate-terminate")
+    assert (lsn := primary.terminate_flush_lsn)
+
+    client = secondary.http_client()
+    client.prewarm_lfc(primary_endpoint_id)
+    safekeepers_lsn = {"safekeepers": safekeepers, "wal_flush_lsn": lsn}
+    assert client.promote(safekeepers_lsn, disconnect=True)["status"] == "completed"
+
+    with secondary.connect() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (100,)
+        cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload")
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (200,)
+
+
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+def test_replica_promote_fails(neon_simple_env: NeonEnv):
+    """
+    Test that if promoting secondary fails, restarting primary still works
+    """
+    env: NeonEnv = neon_simple_env
+    primary: Endpoint = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
+    secondary: Endpoint = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
+
+    with primary.connect() as conn, conn.cursor() as cur:
+        cur.execute("create extension neon")
+        cur.execute("create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)")
+        cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
+        cur.execute("show neon.safekeepers")
+        safekeepers = cur.fetchall()[0][0]
+
+    primary.http_client().offload_lfc()
+    primary_endpoint_id = primary.endpoint_id
+    primary.stop(mode="immediate-terminate")
+    assert (lsn := primary.terminate_flush_lsn)
+
+    client = secondary.http_client()
+    client.prewarm_lfc(primary_endpoint_id)
+    safekeepers_lsn = {"safekeepers": safekeepers, "wal_flush_lsn": lsn}
+    conn = secondary.connect()
+    cur = conn.cursor()
+    cur.execute("alter system set restore_command = 'exit 1'")
+    cur.execute("SELECT pg_wal_replay_pause()")
+    conn.close()
+    assert client.promote(safekeepers_lsn)["status"] == "failed"
+    secondary.stop()
+
+    primary.start()
+    with primary.connect() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (100,)
+        cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload")
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (200,)
