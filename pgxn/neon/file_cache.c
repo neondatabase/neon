@@ -21,6 +21,7 @@
 #include "access/xlog.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "common/file_utils.h"
 #include "common/hashfn.h"
 #include "pgstat.h"
 #include "port/pg_iovec.h"
@@ -64,7 +65,7 @@
  *
  * Cache is always reconstructed at node startup, so we do not need to save mapping somewhere and worry about
  * its consistency.
-
+ *
  *
  * ## Holes
  *
@@ -76,13 +77,15 @@
  * fallocate(FALLOC_FL_PUNCH_HOLE) call. The nominal size of the file doesn't
  * shrink, but the disk space it uses does.
  *
- * Each hole is tracked by a dummy FileCacheEntry, which are kept in the
- * 'holes' linked list. They are entered into the chunk hash table, with a
- * special key where the blockNumber is used to store the 'offset' of the
- * hole, and all other fields are zero. Holes are never looked up in the hash
- * table, we only enter them there to have a FileCacheEntry that we can keep
- * in the linked list. If the soft limit is raised again, we reuse the holes
- * before extending the nominal size of the file.
+ * Each hole is tracked in a freelist. The freelist consists of two parts: a
+ * fixed-size array in shared memory, and a linked chain of on-disk
+ * blocks. When the in-memory array fills up, it's flushed to a new on-disk
+ * chunk. If the soft limit is raised again, we reuse the holes before
+ * extending the nominal size of the file.
+ *
+ * The in-memory freelist array is protected by 'lfc_lock', while the on-disk
+ * chain is protected by a separate 'lfc_freelist_lock'.  Locking rule to
+ * avoid deadlocks: always acquire lfc_freelist_lock first, then lfc_lock.
  */
 
 /* Local file storage allocation chunk.
@@ -99,6 +102,8 @@
 
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ >> lfc_chunk_size_log))
 #define BLOCK_TO_CHUNK_OFF(blkno) ((blkno) & (lfc_blocks_per_chunk-1))
+
+#define INVALID_OFFSET (0xffffffff)
 
 /*
  * Blocks are read or written to LFC file outside LFC critical section.
@@ -123,11 +128,11 @@ typedef struct FileCacheEntry
 	uint32		hash;
 	uint32		offset;
 	uint32		access_count;
-	dlist_node	list_node;		/* LRU/holes list node */
+	dlist_node	list_node;		/* LRU list node */
 	uint32		state[FLEXIBLE_ARRAY_MEMBER]; /* two bits per block */
 } FileCacheEntry;
 
-#define FILE_CACHE_ENRTY_SIZE MAXALIGN(offsetof(FileCacheEntry, state) + (lfc_blocks_per_chunk*2+31)/32*4)
+#define FILE_CACHE_ENTRY_SIZE MAXALIGN(offsetof(FileCacheEntry, state) + (lfc_blocks_per_chunk*2+31)/32*4)
 #define GET_STATE(entry, i) (((entry)->state[(i) / 16] >> ((i) % 16 * 2)) & 3)
 #define SET_STATE(entry, i, new_state) (entry)->state[(i) / 16] = ((entry)->state[(i) / 16] & ~(3 << ((i) % 16 * 2))) | ((new_state) << ((i) % 16 * 2))
 
@@ -161,7 +166,6 @@ typedef struct FileCacheControl
 	uint64		evicted_pages;	/* number of evicted pages */
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
-	dlist_head  holes;          /* double linked list of punched holes */
 	HyperLogLogState wss_estimation; /* estimation of working set size */
 	ConditionVariable cv[N_COND_VARS]; /* turnstile of condition variables */
 	PrewarmWorkerState prewarm_workers[MAX_PREWARM_WORKERS];
@@ -172,7 +176,22 @@ typedef struct FileCacheControl
 	bool   prewarm_active;
 	bool   prewarm_canceled;
 	dsm_handle prewarm_lfc_state_handle;
+
+	/*
+	 * Free list. This is large enough to hold one chunks worth of entries.
+	 */
+	uint32		freelist_size;
+	uint32		freelist_head;
+	uint32		num_free_pages;
+	uint32		free_pages[FLEXIBLE_ARRAY_MEMBER];
 } FileCacheControl;
+
+typedef struct FreeListChunk
+{
+	uint32		next;
+	uint32		num_free_pages;
+	uint32		free_pages[FLEXIBLE_ARRAY_MEMBER];
+} FreeListChunk;
 
 #define FILE_CACHE_STATE_MAGIC 0xfcfcfcfc
 
@@ -180,9 +199,12 @@ typedef struct FileCacheControl
 #define FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_chunks)	(sizeof(FileCacheState) + (n_chunks)*sizeof(BufferTag) + (((n_chunks) * lfc_blocks_per_chunk)+7)/8)
 #define FILE_CACHE_STATE_SIZE(fcs)		(sizeof(FileCacheState) + (fcs->n_chunks)*sizeof(BufferTag) + (((fcs->n_chunks) << fcs->chunk_size_log)+7)/8)
 
+#define FREELIST_ENTRIES_PER_CHUNK(c) ((c) * BLCKSZ / sizeof(uint32) - 2)
+
 static HTAB *lfc_hash;
 static int	lfc_desc = -1;
 static LWLockId lfc_lock;
+static LWLockId lfc_freelist_lock;
 static int	lfc_max_size;
 static int	lfc_size_limit;
 static int	lfc_prewarm_limit;
@@ -204,6 +226,11 @@ bool lfc_prewarm_update_ws_estimation;
 bool AmPrewarmWorker;
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
+
+static bool freelist_push(uint32 offset);
+static bool freelist_prepare_pop(void);
+static uint32 freelist_pop(void);
+static bool freelist_is_empty(void);
 
 /*
  * Close LFC file if opened.
@@ -248,7 +275,9 @@ lfc_switch_off(void)
 		lfc_ctl->used_pages = 0;
 		lfc_ctl->limit = 0;
 		dlist_init(&lfc_ctl->lru);
-		dlist_init(&lfc_ctl->holes);
+
+		lfc_ctl->freelist_head = INVALID_OFFSET;
+		lfc_ctl->num_free_pages = 0;
 
 		/*
 		 * We need to use unlink to to avoid races in LFC write, because it is not
@@ -317,6 +346,7 @@ lfc_ensure_opened(void)
 static void
 lfc_shmem_startup(void)
 {
+	size_t		size;
 	bool		found;
 	static HASHCTL info;
 
@@ -327,15 +357,19 @@ lfc_shmem_startup(void)
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
-	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
+	size = offsetof(FileCacheControl, free_pages);
+	size += FREELIST_ENTRIES_PER_CHUNK(lfc_blocks_per_chunk) * sizeof(uint32);
+
+	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", size, &found);
 	if (!found)
 	{
 		int			fd;
 		uint32		n_chunks = SIZE_MB_TO_CHUNKS(lfc_max_size);
 
 		lfc_lock = (LWLockId) GetNamedLWLockTranche("lfc_lock");
+		lfc_freelist_lock = (LWLockId) GetNamedLWLockTranche("lfc_freelist_lock");
 		info.keysize = sizeof(BufferTag);
-		info.entrysize = FILE_CACHE_ENRTY_SIZE;
+		info.entrysize = FILE_CACHE_ENTRY_SIZE;
 
 		/*
 		 * n_chunks+1 because we add new element to hash table before eviction
@@ -345,9 +379,12 @@ lfc_shmem_startup(void)
 								 n_chunks + 1, n_chunks + 1,
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
-		memset(lfc_ctl, 0, sizeof(FileCacheControl));
+		memset(lfc_ctl, 0, offsetof(FileCacheControl, free_pages));
 		dlist_init(&lfc_ctl->lru);
-		dlist_init(&lfc_ctl->holes);
+
+		lfc_ctl->freelist_size = FREELIST_ENTRIES_PER_CHUNK(lfc_blocks_per_chunk);
+		lfc_ctl->freelist_head = INVALID_OFFSET;
+		lfc_ctl->num_free_pages = 0;
 
 		/* Initialize hyper-log-log structure for estimating working set size */
 		initSHLL(&lfc_ctl->wss_estimation);
@@ -376,13 +413,20 @@ lfc_shmem_startup(void)
 static void
 lfc_shmem_request(void)
 {
+	size_t		size;
+
 #if PG_VERSION_NUM>=150000
 	if (prev_shmem_request_hook)
 		prev_shmem_request_hook();
 #endif
 
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
+	size = offsetof(FileCacheControl, free_pages);
+	size += FREELIST_ENTRIES_PER_CHUNK(lfc_blocks_per_chunk) * sizeof(uint32);
+	size += hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENTRY_SIZE);
+
+	RequestAddinShmemSpace(size);
 	RequestNamedLWLockTranche("lfc_lock", 1);
+	RequestNamedLWLockTranche("lfc_freelist_lock", 2);
 }
 
 static bool
@@ -435,12 +479,14 @@ lfc_change_limit_hook(int newval, void *extra)
 	if (!lfc_ctl || !is_normal_backend())
 		return;
 
+	LWLockAcquire(lfc_freelist_lock, LW_EXCLUSIVE);
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
 	/* Open LFC file only if LFC was enabled or we are going to reenable it */
 	if (newval == 0 && !LFC_ENABLED())
 	{
 		LWLockRelease(lfc_lock);
+		LWLockRelease(lfc_freelist_lock);
 		/* File should be reopened if LFC is reenabled */
 		lfc_close_file();
 		return;
@@ -449,6 +495,7 @@ lfc_change_limit_hook(int newval, void *extra)
 	if (!lfc_ensure_opened())
 	{
 		LWLockRelease(lfc_lock);
+		LWLockRelease(lfc_freelist_lock);
 		return;
 	}
 
@@ -464,18 +511,14 @@ lfc_change_limit_hook(int newval, void *extra)
 		 * returning their space to file system
 		 */
 		FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
-		FileCacheEntry *hole;
 		uint32		offset = victim->offset;
-		uint32		hash;
-		bool		found;
-		BufferTag	holetag;
 
 		CriticalAssert(victim->access_count == 0);
 #ifdef FALLOC_FL_PUNCH_HOLE
 		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) victim->offset * lfc_blocks_per_chunk * BLCKSZ, lfc_blocks_per_chunk * BLCKSZ) < 0)
 			neon_log(LOG, "Failed to punch hole in file: %m");
 #endif
-		/* We remove the old entry, and re-enter a hole to the hash table */
+		/* We remove the entry, and enter a hole to the freelist */
 		for (int i = 0; i < lfc_blocks_per_chunk; i++)
 		{
 			bool is_page_cached = GET_STATE(victim, i) == AVAILABLE;
@@ -484,15 +527,14 @@ lfc_change_limit_hook(int newval, void *extra)
 		}
 		hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 
-		memset(&holetag, 0, sizeof(holetag));
-		holetag.blockNum = offset;
-		hash = get_hash_value(lfc_hash, &holetag);
-		hole = hash_search_with_hash_value(lfc_hash, &holetag, hash, HASH_ENTER, &found);
-		hole->hash = hash;
-		hole->offset = offset;
-		hole->access_count = 0;
-		CriticalAssert(!found);
-		dlist_push_tail(&lfc_ctl->holes, &hole->list_node);
+		if (!freelist_push(offset))
+		{
+			/* freelist_push already logged the error */
+			lfc_switch_off();
+			LWLockRelease(lfc_lock);
+			LWLockRelease(lfc_freelist_lock);
+			return;
+		}
 
 		lfc_ctl->used -= 1;
 	}
@@ -504,6 +546,7 @@ lfc_change_limit_hook(int newval, void *extra)
 	neon_log(DEBUG1, "set local file cache limit to %d", new_size);
 
 	LWLockRelease(lfc_lock);
+	LWLockRelease(lfc_freelist_lock);
 }
 
 void
@@ -1380,7 +1423,7 @@ lfc_init_new_entry(FileCacheEntry* entry, uint32 hash)
 	 * options, in order of preference:
 	 *
 	 * Unless there is no space available, we can:
-	 *  1. Use an entry from the `holes` list, and
+	 *  1. Use an entry from the freelist, and
 	 *  2. Create a new entry.
 	 * We can always, regardless of space in the LFC:
 	 *  3. evict an entry from LRU, and
@@ -1388,17 +1431,10 @@ lfc_init_new_entry(FileCacheEntry* entry, uint32 hash)
 	 */
 	if (lfc_ctl->used < lfc_ctl->limit)
 	{
-		if (!dlist_is_empty(&lfc_ctl->holes))
+		if (!freelist_is_empty())
 		{
 			/* We can reuse a hole that was left behind when the LFC was shrunk previously */
-			FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node,
-												   dlist_pop_head_node(&lfc_ctl->holes));
-			uint32 offset = hole->offset;
-			bool hole_found;
-
-			hash_search_with_hash_value(lfc_hash, &hole->key,
-										hole->hash, HASH_REMOVE, &hole_found);
-			CriticalAssert(hole_found);
+			uint32 offset = freelist_pop();
 
 			lfc_ctl->used += 1;
 			entry->offset = offset;			/* reuse the hole */
@@ -1512,6 +1548,7 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 	hash = get_hash_value(lfc_hash, &tag);
 	cv = &lfc_ctl->cv[hash % N_COND_VARS];
 
+ retry:
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
 	if (!LFC_ENABLED() || !lfc_ensure_opened())
@@ -1519,6 +1556,9 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		LWLockRelease(lfc_lock);
 		return false;
 	}
+
+	if (!freelist_prepare_pop())
+		goto retry;
 
 	lwlsn = neon_get_lwlsn(rinfo, forknum, blkno);
 
@@ -1653,6 +1693,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
+ retry:
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
 	if (!LFC_ENABLED() || !lfc_ensure_opened())
@@ -1661,6 +1702,9 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		return;
 	}
 	generation = lfc_ctl->generation;
+
+	if (!freelist_prepare_pop())
+		goto retry;
 
 	/*
 	 * For every chunk that has blocks we're interested in, we
@@ -1821,6 +1865,140 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		nblocks -= blocks_in_chunk;
 	}
 	LWLockRelease(lfc_lock);
+}
+
+/**** freelist management ****/
+
+
+/*
+ * Prerequisites:
+ * - The caller is holding 'lfc_lock'. XXX
+ */
+static bool
+freelist_prepare_pop(void)
+{
+	/*
+	 * If the in-memory freelist is empty, but there are more blocks available, load them.
+	 *
+	 * TODO: if there
+	 */
+	if (lfc_ctl->num_free_pages == 0 && lfc_ctl->freelist_head != INVALID_OFFSET)
+	{
+		uint32		freelist_head;
+		FreeListChunk *freelist_chunk;
+		size_t		bytes_read;
+
+		LWLockRelease(lfc_lock);
+		LWLockAcquire(lfc_freelist_lock, LW_EXCLUSIVE);
+
+		if (!(lfc_ctl->num_free_pages == 0 && lfc_ctl->freelist_head != INVALID_OFFSET))
+		{
+			/* someone else did the work for us while we were not holding the lock */
+			LWLockRelease(lfc_freelist_lock);
+			return false;
+		}
+
+		freelist_head = lfc_ctl->freelist_head;
+		freelist_chunk = palloc(lfc_blocks_per_chunk * BLCKSZ);
+
+		bytes_read = 0;
+		while (bytes_read < lfc_blocks_per_chunk * BLCKSZ)
+		{
+			ssize_t		rc;
+
+			rc = pread(lfc_desc, freelist_chunk, lfc_blocks_per_chunk * BLCKSZ - bytes_read, (off_t) freelist_head * lfc_blocks_per_chunk * BLCKSZ + bytes_read);
+			if (rc < 0)
+			{
+				lfc_disable("read freelist page");
+				return false;
+			}
+			bytes_read += rc;
+		}
+
+		LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+		if (lfc_generation != lfc_ctl->generation)
+		{
+			LWLockRelease(lfc_lock);
+			return false;
+		}
+
+		Assert(lfc_ctl->freelist_head == freelist_head);
+		Assert(lfc_ctl->num_free_pages == 0);
+		lfc_ctl->freelist_head = freelist_chunk->next;
+		lfc_ctl->num_free_pages = freelist_chunk->num_free_pages;
+		memcpy(lfc_ctl->free_pages, freelist_chunk->free_pages, lfc_ctl->num_free_pages * sizeof(uint32));
+		pfree(freelist_chunk);
+
+		LWLockRelease(lfc_lock);
+		LWLockRelease(lfc_freelist_lock);
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * Prerequisites:
+ * - The caller is holding 'lfc_lock' and 'lfc_freelist_lock'.
+ *
+ * Returns 'false' on error.
+ */
+static bool
+freelist_push(uint32 offset)
+{
+	Assert(lfc_ctl->freelist_size == FREELIST_ENTRIES_PER_CHUNK(lfc_blocks_per_chunk));
+	if (lfc_ctl->num_free_pages == lfc_ctl->freelist_size)
+	{
+		FreeListChunk *freelist_chunk;
+		struct iovec iov;
+		ssize_t		rc;
+
+		freelist_chunk = palloc(lfc_blocks_per_chunk * BLCKSZ);
+
+		/* write the existing entries to the chunk on disk */
+		freelist_chunk->next = lfc_ctl->freelist_head;
+		freelist_chunk->num_free_pages = lfc_ctl->num_free_pages;
+		memcpy(freelist_chunk->free_pages, lfc_ctl->free_pages, lfc_ctl->num_free_pages * sizeof(uint32));
+
+		/* Use the passed-in offset to hold the freelist chunk itself */
+		iov.iov_base = freelist_chunk;
+		iov.iov_len = lfc_blocks_per_chunk * BLCKSZ;
+		rc = pg_pwritev_with_retry(lfc_desc, &iov, 1, (off_t) offset * lfc_blocks_per_chunk * BLCKSZ);
+
+		pfree(freelist_chunk);
+
+		if (rc < 0)
+			return false;
+
+		lfc_ctl->freelist_head = offset;
+		lfc_ctl->num_free_pages = 0;
+	}
+	else
+	{
+		lfc_ctl->free_pages[lfc_ctl->num_free_pages] = offset;
+		lfc_ctl->num_free_pages++;
+	}
+	return true;
+}
+
+static uint32
+freelist_pop(void)
+{
+	uint32		result;
+
+	/* The caller should've checked that the list is not empty */
+	Assert(lfc_ctl->num_free_pages > 0);
+
+	result = lfc_ctl->free_pages[lfc_ctl->num_free_pages - 1];
+	lfc_ctl->num_free_pages--;
+
+	return result;
+}
+
+static bool
+freelist_is_empty(void)
+{
+	return lfc_ctl->num_free_pages == 0;
 }
 
 typedef struct
@@ -2049,12 +2227,8 @@ local_cache_pages(PG_FUNCTION_ARGS)
 				hash_seq_init(&status, lfc_hash);
 				while ((entry = hash_seq_search(&status)) != NULL)
 				{
-					/* Skip hole tags */
-					if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
-					{
-						for (int i = 0; i < lfc_blocks_per_chunk; i++)
-							n_pages += GET_STATE(entry, i) == AVAILABLE;
-					}
+					for (int i = 0; i < lfc_blocks_per_chunk; i++)
+						n_pages += GET_STATE(entry, i) == AVAILABLE;
 				}
 			}
 		}
@@ -2082,19 +2256,16 @@ local_cache_pages(PG_FUNCTION_ARGS)
 			{
 				for (int i = 0; i < lfc_blocks_per_chunk; i++)
 				{
-					if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
+					if (GET_STATE(entry, i) == AVAILABLE)
 					{
-						if (GET_STATE(entry, i) == AVAILABLE)
-						{
-							fctx->record[n].pageoffs = entry->offset * lfc_blocks_per_chunk + i;
-							fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
-							fctx->record[n].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
-							fctx->record[n].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
-							fctx->record[n].forknum = entry->key.forkNum;
-							fctx->record[n].blocknum = entry->key.blockNum + i;
-							fctx->record[n].accesscount = entry->access_count;
-							n += 1;
-						}
+						fctx->record[n].pageoffs = entry->offset * lfc_blocks_per_chunk + i;
+						fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
+						fctx->record[n].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
+						fctx->record[n].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
+						fctx->record[n].forknum = entry->key.forkNum;
+						fctx->record[n].blocknum = entry->key.blockNum + i;
+						fctx->record[n].accesscount = entry->access_count;
+						n += 1;
 					}
 				}
 			}
