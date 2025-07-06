@@ -8,6 +8,7 @@ testing = ["pageserver_api/testing"]
 
 [dependencies]
 anyhow.workspace = true
+arc-swap.workspace = true
 bytes.workspace = true
 futures.workspace = true
 http.workspace = true

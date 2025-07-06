@@ -8,6 +8,7 @@ use utils::backoff::exponential_backoff_duration;
 /// A retry handler for Pageserver gRPC requests.
 ///
 /// This is used instead of backoff::retry for better control and observability.
+#[derive(Clone, Copy)]
 pub struct Retry;
 
 impl Retry {
