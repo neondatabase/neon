@@ -2463,7 +2463,7 @@ pub async fn installed_extensions(conf: tokio_postgres::Config) -> Result<()> {
                 serde_json::to_string(&extensions).expect("failed to serialize extensions list")
             );
         }
-        Err(err) => error!("could not get installed extensions: {err:?}"),
+        Err(err) => error!("could not get installed extensions: {err}"),
     }
     Ok(())
 }
