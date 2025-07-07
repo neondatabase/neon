@@ -50,6 +50,7 @@ impl UnreliableWrapper {
             GenericRemoteStorage::Unreliable(_s) => {
                 panic!("Can't wrap unreliable wrapper unreliably")
             }
+            GenericRemoteStorage::GCS(_) => todo!(),
         };
         UnreliableWrapper {
             inner,
