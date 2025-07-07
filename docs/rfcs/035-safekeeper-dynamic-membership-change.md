@@ -538,7 +538,7 @@ Timeline migration.
 4) Finish the migration. The final membership configuration is committed to the DB at this stage.
    So, the migration can not be aborted anymore. But it can still be retried if the migration fails
    past stage 3. To finish the migration we need to send the new membership configuration to
-   a quorum of safekeepers, notify cplane with the new safekeeper list and schedule the `exclude`
+   a new quorum of safekeepers, notify cplane with the new safekeeper list and schedule the `exclude`
    requests to in-memory queue for safekeeper reconciler. If the algrorithm is retried, it's
    possible that we have already committed `exclude` requests to DB, but didn't send them to
    the in-memory queue. In this case we need to read them from `safekeeper_timeline_pending_ops`
