@@ -1,4 +1,4 @@
-//! A JSON serialization lib, designed for more flexibility than serde_json offers.
+//! A JSON serialization lib, designed for more flexibility than `serde_json` offers.
 //!
 //! Features:
 //!
@@ -6,7 +6,7 @@
 //!
 //! Sometimes you have dynamic values you want to serialize, that are not already in a serde-aware model like a struct or a Vec etc.
 //! To achieve this with serde, you need to implement a lot of different traits on a lot of different new-types.
-//! Because of this, it's often easier to give-in and pull all the data into a serde-aware model (serde_json::Value or some intermediate struct),
+//! Because of this, it's often easier to give-in and pull all the data into a serde-aware model (`serde_json::Value` or some intermediate struct),
 //! but that is often not very efficient.
 //!
 //! This crate allows full control over the JSON encoding without needing to implement any extra traits. Just call the
@@ -163,7 +163,7 @@ impl<'buf> ObjectSer<'buf> {
 
     /// Start a new object entry with the given string key, returning a [`ValueSer`] for the associated value.
     #[inline]
-    pub fn key(&mut self, key: impl KeyEncoder) -> ValueSer {
+    pub fn key(&mut self, key: impl KeyEncoder) -> ValueSer<'_> {
         key.write_key(self)
     }
 
@@ -174,8 +174,8 @@ impl<'buf> ObjectSer<'buf> {
     }
 
     #[inline]
-    fn entry_inner(&mut self, f: impl FnOnce(&mut Vec<u8>)) -> ValueSer {
-        // track before the separator, so we can rollback the separate as well.
+    fn entry_inner(&mut self, f: impl FnOnce(&mut Vec<u8>)) -> ValueSer<'_> {
+        // track before the separator so we the value is rolled back it also removes the separator.
         let start = self.value.buf.len();
 
         // push separator if necessary
@@ -244,8 +244,8 @@ impl<'buf> ListSer<'buf> {
 
     /// Start a new value entry in this list.
     #[inline]
-    pub fn entry(&mut self) -> ValueSer {
-        // track before the separator, so we can rollback the separate as well.
+    pub fn entry(&mut self) -> ValueSer<'_> {
+        // track before the separator so we the value is rolled back it also removes the separator.
         let start = self.value.buf.len();
 
         // push separator if necessary
@@ -355,20 +355,41 @@ mod tests {
     }
 
     #[test]
-    fn rollback() {
-        let res = crate::value_to_string!(|list| {
-            crate::value_as_list!(|list| {
-                let list_entry = list.entry();
-                list_entry.value(1_i32);
+    fn rollback_object() {
+        let res = crate::value_to_string!(|obj| {
+            crate::value_as_object!(|obj| {
+                let entry = obj.key("1");
+                entry.value(1_i32);
 
-                let list_entry = list.entry();
-                let list_entry = {
-                    let mut nested_obj = list_entry.object();
+                let entry = obj.key("2");
+                let entry = {
+                    let mut nested_obj = entry.object();
                     nested_obj.entry("foo", "bar");
                     nested_obj.rollback()
                 };
 
-                list_entry.value(2_i32);
+                entry.value(2_i32);
+            })
+        });
+
+        assert_eq!(res, r#"{"1":1,"2":2}"#);
+    }
+
+    #[test]
+    fn rollback_list() {
+        let res = crate::value_to_string!(|list| {
+            crate::value_as_list!(|list| {
+                let entry = list.entry();
+                entry.value(1_i32);
+
+                let entry = list.entry();
+                let entry = {
+                    let mut nested_list = entry.list();
+                    nested_list.push("foo");
+                    nested_list.rollback()
+                };
+
+                entry.value(2_i32);
             })
         });
 

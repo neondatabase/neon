@@ -6,7 +6,7 @@ use crate::{KeyEncoder, ObjectSer, ValueSer, value_as_list, value_as_object};
 
 /// Write a value to the underlying json representation.
 pub trait ValueEncoder {
-    fn encode(self, v: ValueSer);
+    fn encode(self, v: ValueSer<'_>);
 }
 
 pub(crate) fn write_int(x: impl itoa::Integer, b: &mut Vec<u8>) {
@@ -19,14 +19,14 @@ pub(crate) fn write_float(x: impl ryu::Float, b: &mut Vec<u8>) {
 
 impl<T: Copy + ValueEncoder> ValueEncoder for &T {
     #[inline]
-    fn encode(self, v: ValueSer) {
+    fn encode(self, v: ValueSer<'_>) {
         T::encode(*self, v);
     }
 }
 
 impl ValueEncoder for &str {
     #[inline]
-    fn encode(self, v: ValueSer) {
+    fn encode(self, v: ValueSer<'_>) {
         format_escaped_str(v.buf, self);
         v.finish();
     }
@@ -34,7 +34,7 @@ impl ValueEncoder for &str {
 
 impl ValueEncoder for fmt::Arguments<'_> {
     #[inline]
-    fn encode(self, v: ValueSer) {
+    fn encode(self, v: ValueSer<'_>) {
         if let Some(s) = self.as_str() {
             format_escaped_str(v.buf, s);
         } else {
@@ -49,7 +49,7 @@ macro_rules! int {
         $(
             impl ValueEncoder for $t {
                 #[inline]
-                fn encode(self, v: ValueSer) {
+                fn encode(self, v: ValueSer<'_>) {
                     write_int(self, v.buf);
                     v.finish();
                 }
@@ -66,7 +66,7 @@ macro_rules! float {
         $(
             impl ValueEncoder for $t {
                 #[inline]
-                fn encode(self, v: ValueSer) {
+                fn encode(self, v: ValueSer<'_>) {
                     write_float(self, v.buf);
                     v.finish();
                 }
@@ -79,14 +79,14 @@ float![f32, f64];
 
 impl ValueEncoder for bool {
     #[inline]
-    fn encode(self, v: ValueSer) {
+    fn encode(self, v: ValueSer<'_>) {
         v.write_raw_json(if self { b"true" } else { b"false" });
     }
 }
 
 impl<T: ValueEncoder> ValueEncoder for Option<T> {
     #[inline]
-    fn encode(self, v: ValueSer) {
+    fn encode(self, v: ValueSer<'_>) {
         match self {
             Some(value) => value.encode(v),
             None => Null.encode(v),
@@ -118,51 +118,51 @@ pub struct Null;
 
 impl ValueEncoder for Null {
     #[inline]
-    fn encode(self, v: ValueSer) {
+    fn encode(self, v: ValueSer<'_>) {
         v.write_raw_json(b"null");
     }
 }
 
 impl<T: ValueEncoder> ValueEncoder for Vec<T> {
     #[inline]
-    fn encode(self, v: ValueSer) {
+    fn encode(self, v: ValueSer<'_>) {
         value_as_list!(|v| {
             for t in self {
                 v.entry().value(t);
             }
-        })
+        });
     }
 }
 
 impl<T: Copy + ValueEncoder> ValueEncoder for &[T] {
     #[inline]
-    fn encode(self, v: ValueSer) {
+    fn encode(self, v: ValueSer<'_>) {
         value_as_list!(|v| {
             for t in self {
                 v.entry().value(t);
             }
-        })
+        });
     }
 }
 
 impl<K: KeyEncoder, V: ValueEncoder, S> ValueEncoder for HashMap<K, V, S> {
     #[inline]
-    fn encode(self, o: ValueSer) {
+    fn encode(self, o: ValueSer<'_>) {
         value_as_object!(|o| {
             for (k, v) in self {
                 o.entry(k, v);
             }
-        })
+        });
     }
 }
 
 impl<K: KeyEncoder, V: ValueEncoder> ValueEncoder for BTreeMap<K, V> {
     #[inline]
-    fn encode(self, o: ValueSer) {
+    fn encode(self, o: ValueSer<'_>) {
         value_as_object!(|o| {
             for (k, v) in self {
                 o.entry(k, v);
             }
-        })
+        });
     }
 }
