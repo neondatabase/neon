@@ -11,6 +11,8 @@ on:
         description: "Json array of architectures to run on"
         type: string
 
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 defaults:
   run:
@@ -46,6 +48,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
+          token: ${{ secrets.CI_ACCESS_TOKEN }}
 
       - name: Cache cargo deps
         uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
