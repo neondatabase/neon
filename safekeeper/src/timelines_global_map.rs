@@ -288,6 +288,8 @@ impl GlobalTimelines {
         start_lsn: Lsn,
         commit_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
+        let generation = Some(mconf.generation);
+
         let (conf, _, _, _) = {
             let state = self.state.lock().unwrap();
             if let Ok(timeline) = state.get(&ttid) {
@@ -295,7 +297,7 @@ impl GlobalTimelines {
                 return Ok(timeline);
             }
 
-            if state.has_tombstone(&ttid, Some(mconf.generation)) {
+            if state.has_tombstone(&ttid, generation) {
                 anyhow::bail!("Timeline {ttid} is deleted, refusing to recreate");
             }
 
@@ -312,7 +314,7 @@ impl GlobalTimelines {
         let state = TimelinePersistentState::new(&ttid, mconf, server_info, start_lsn, commit_lsn)?;
         control_file::FileStorage::create_new(&tmp_dir_path, state, conf.no_sync).await?;
         let timeline = self
-            .load_temp_timeline(ttid, &tmp_dir_path, Some(INITIAL_GENERATION))
+            .load_temp_timeline(ttid, &tmp_dir_path, generation)
             .await?;
         Ok(timeline)
     }
