@@ -828,9 +828,7 @@ def insert_with_action(
         log.info(f"initial size: {initial_size}")
 
         with ep.cursor() as cur:
-            cur.execute(
-                "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)"
-            )
+            cur.execute("CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
         last_flush_lsn = wait_for_last_flush_lsn(env, ep, tenant, timeline)
 
         if action == "lease":
@@ -845,15 +843,9 @@ def insert_with_action(
             raise AssertionError("Invalid action type, only `lease` and `branch`are accepted")
 
         with ep.cursor() as cur:
-            cur.execute(
-                "CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)"
-            )
-            cur.execute(
-                "CREATE TABLE t2 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)"
-            )
-            cur.execute(
-                "CREATE TABLE t3 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)"
-            )
+            cur.execute("CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
+            cur.execute("CREATE TABLE t2 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
+            cur.execute("CREATE TABLE t3 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
 
         last_flush_lsn = wait_for_last_flush_lsn(env, ep, tenant, timeline)
 
