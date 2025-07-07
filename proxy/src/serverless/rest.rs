@@ -62,7 +62,6 @@ use tracing::{error, info};
 use typed_json::json;
 use url::form_urlencoded;
 
-static MAX_HTTP_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
 static EMPTY_JSON_SCHEMA: &str = r#"{"schemas":[]}"#;
 const INTROSPECTION_SQL: &str = POSTGRESQL_INTROSPECTION_SQL;
 
@@ -74,12 +73,25 @@ pub struct DbSchemaOwned {
     #[borrows(schema_string)]
     schema: Result<DbSchema<'this>, SubzeroCoreError>,
 }
+
+fn split_comma_separated(s: &str) -> Vec<String> {
+    s.split(',').map(|s| s.trim().to_string()).collect()
+}
+
 fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    Ok(s.split(',').map(|s| s.trim().to_string()).collect())
+    Ok(split_comma_separated(&s))
+}
+
+fn deserialize_comma_separated_option<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    Ok(opt.map(|s| split_comma_separated(&s)))
 }
 
 // The ApiConfig is the configuration for the API per endpoint
@@ -99,7 +111,8 @@ pub struct ApiConfig {
     //pub db_pre_request: Option<(String, String)>,
     #[serde(default = "role_claim_key")]
     pub role_claim_key: String,
-    pub db_extra_search_path: Option<String>,
+    #[serde(deserialize_with = "deserialize_comma_separated_option")]
+    pub db_extra_search_path: Option<Vec<String>>,
 }
 
 // The DbSchemaCache is a cache of the ApiConfig and DbSchemaOwned for each endpoint
@@ -672,7 +685,7 @@ async fn handle_inner(
     );
 
     match conn_info.auth {
-        AuthData::Jwt(jwt) if config.authentication_config.is_auth_broker => {
+        AuthData::Jwt(jwt) if config.rest_config.is_rest_broker => {
             let api_prefix = format!("/{}/rest/v1/", database_name);
             handle_rest_inner(
                 config,
@@ -716,9 +729,12 @@ async fn handle_rest_inner(
             }));
         }
     };
-    // hardcoded values for now, these should come from a config per tenant
 
-    let endpoint_cache_key = conn_info.endpoint_cache_key().unwrap();
+    let endpoint_cache_key = conn_info.endpoint_cache_key().ok_or_else(|| {
+        RestError::SubzeroCore(InternalError {
+            message: "Failed to get endpoint cache key".to_string(),
+        })
+    })?;
     let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
     let (parts, originial_body) = request.into_parts();
     let headers_map = parts.headers;
@@ -741,21 +757,16 @@ async fn handle_rest_inner(
     })?;
 
     let db_schemas = &api_config.db_schemas; // list of schemas available for the api
-    //let db_schema = &*DB_SCHEMA; // use the global static schema
-
-    //let db_extra_search_path = "public, extensions".to_string();
     let db_extra_search_path = &api_config.db_extra_search_path;
     let role_claim_key = &api_config.role_claim_key;
     let role_claim_path = format!("${}", role_claim_key);
     let db_anon_role = &api_config.db_anon_role;
-    //let max_rows = Some("1000".to_string());
     let max_rows = api_config.db_max_rows.as_ref().map(|s| s.as_str());
     let db_allowed_select_functions = api_config
         .db_allowed_select_functions
         .iter()
         .map(|s| s.as_str())
         .collect::<Vec<_>>();
-    // end hardcoded values
 
     // extract the jwt claims (we'll need them later to set the role and env)
     let jwt_claims = match jwt_parsed.keys {
@@ -791,7 +802,6 @@ async fn handle_rest_inner(
     }
 
     // start deconstructing the request because subzero core mostly works with &str
-
     let method = parts.method;
     let method_str = method.to_string();
     let path = parts
@@ -834,7 +844,7 @@ async fn handle_rest_inner(
     let cookies = HashMap::new(); // TODO: add cookies
 
     // Read the request body
-    let body_bytes = read_body_with_limit(originial_body, MAX_HTTP_BODY_SIZE)
+    let body_bytes = read_body_with_limit(originial_body, config.http_config.max_request_size_bytes)
         .await
         .map_err(ReadPayloadError::from)?;
     let body_as_string: Option<String> = if body_bytes.is_empty() {
@@ -848,7 +858,7 @@ async fn handle_rest_inner(
         schema_name,
         root,
         db_schema,
-        method_str.as_str(),
+        &method_str,
         path,
         get,
         body_as_string.as_deref(),
@@ -858,17 +868,16 @@ async fn handle_rest_inner(
     )
     .map_err(RestError::SubzeroCore)?;
 
-    // in case when the role is not set (but authenticated through jwt) the query will be executed with the privileges
-    // of the "authenticator" role unless the DbSchema has internal privileges set
-
     // replace "*" with the list of columns the user has access to
     // so that he does not encounter permission errors
+    // this only works if the schema intropsection includes the database permissions (which for now it does not)
     // replace_select_star(db_schema, schema_name, role, &mut api_request.query)?;
 
     let role_str = match role {
         Some(r) => r,
         None => "",
     };
+
     // this is not relevant when acting as PostgREST
     // if !disable_internal_permissions {
     //     check_privileges(db_schema, schema_name, role_str, &api_request)?;
@@ -881,13 +890,6 @@ async fn handle_rest_inner(
     //     insert_policy_conditions(db_schema, schema_name, role_str, &mut api_request.query)?;
     // }
 
-    // when using internal privileges not switch "current_role"
-    // TODO: why do we need this?
-    // let env_role = if !disable_internal_permissions && db_schema.use_internal_permissions {
-    //     None
-    // } else {
-    //     Some(role_str)
-    // };
     let env_role = Some(role_str);
 
     // construct the env (passed in to the sql context as GUCs)
@@ -904,22 +906,24 @@ async fn handle_rest_inner(
         } else {
             empty_json.clone()
         });
+    let mut search_path = vec![api_request.schema_name];
+    if let Some(extra) = &db_extra_search_path {
+        search_path.extend(extra.iter().map(|s| s.as_str()));
+    }
+    let search_path_str = search_path.join(",");
     let mut env: HashMap<&str, &str> = HashMap::from([
         ("request.method", api_request.method),
         ("request.path", api_request.path),
-        //("search_path", &db_extra_search_path),
         ("request.headers", &headers_env),
         ("request.cookies", &cookies_env),
         ("request.get", &get_env),
         ("request.jwt.claims", &jwt_claims_env),
+        ("search_path", &search_path_str),
     ]);
     if let Some(r) = env_role {
         env.insert("role", r.into());
     }
 
-    if let Some(search_path) = db_extra_search_path {
-        env.insert("search_path", search_path);
-    }
     // generate the sql statements
     let (env_statement, env_parameters, _) = generate(fmt_env_query(&env));
     let (main_statement, main_parameters, _) = generate(fmt_main_query(
@@ -1146,8 +1150,7 @@ async fn handle_rest_inner(
     }
 
     // check if the SQL env set some response status (happens when we called a rpc function)
-    let response_status: Option<String> = api_response.response_status;
-    if let Some(response_status_str) = response_status {
+    if let Some(response_status_str) = api_response.response_status {
         status = response_status_str
             .parse::<u16>()
             .map_err(|_| RestError::SubzeroCore(GucStatusError))?;
@@ -1178,6 +1181,7 @@ async fn handle_rest_inner(
         response = response.header(header_name, header_value);
     }
 
+    // add the body and return the response
     Ok(response.body(response_body).map_err(|_| {
         RestError::SubzeroCore(InternalError {
             message: "Failed to build response".to_string(),
