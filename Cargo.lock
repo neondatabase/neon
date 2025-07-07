@@ -3458,6 +3458,7 @@ dependencies = [
 name = "json"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "itoa",
  "ryu",
 ]

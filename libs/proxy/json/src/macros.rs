@@ -1,3 +1,26 @@
+//! # Examples
+//!
+//! ```
+//! use futures::{StreamExt, TryStream, TryStreamExt};
+//!
+//! async fn stream_to_json_list<S, T, E>(mut s: S) -> Result<String, E>
+//! where
+//!     S: TryStream<Ok = T, Error = E> + Unpin,
+//!     T: json::ValueEncoder
+//! {
+//!     Ok(json::value_to_string!(|val| json::value_as_list!(|val| {
+//!         // note how we can use `.await` and `?` in here.
+//!         while let Some(value) = s.try_next().await? {
+//!             val.push(value);
+//!         }
+//!     })))
+//! }
+//!
+//! let stream = futures::stream::iter([1, 2, 3]).map(Ok::<i32, ()>);
+//! let json_string = futures::executor::block_on(stream_to_json_list(stream)).unwrap();
+//! assert_eq!(json_string, "[1,2,3]");
+//! ```
+
 /// A helper to create a new JSON vec.
 ///
 /// Implemented as a macro to preserve all control flow.
