@@ -484,21 +484,6 @@ jobs:
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
-      - name: Build coverage report
-        env:
-          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          scripts/coverage --dir=/tmp/coverage \
-            report \
-            --input-objects=/tmp/coverage/binaries.list \
-            --commit-url=${COMMIT_URL} \
-            --format=github
-
-          scripts/coverage --dir=/tmp/coverage \
-            report \
-            --input-objects=/tmp/coverage/binaries.list \
-            --format=lcov
-
       - name: Build coverage report NEW
         id: upload-coverage-report-new
         env:
@@ -510,6 +495,13 @@ jobs:
         run: |
           CURRENT="${COMMIT_SHA}"
           BASELINE="$(git merge-base $BASE_SHA $CURRENT)"
+
+          mkdir /tmp/coverage/report
+
+          scripts/coverage --dir=/tmp/coverage \
+            report \
+            --input-objects=/tmp/coverage/binaries.list \
+            --format=lcov
 
           cp /tmp/coverage/report/lcov.info ./${CURRENT}.info
 
