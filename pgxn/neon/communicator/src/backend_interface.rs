@@ -12,11 +12,6 @@ use crate::neon_request::{NeonIORequest, NeonIOResult};
 pub struct CommunicatorBackendStruct<'t> {
     my_proc_number: i32,
 
-    next_request_slot_idx: u32,
-
-    my_start_idx: u32, // First request slot that belongs to this backend
-    my_end_idx: u32,   // end + 1 request slot that belongs to this backend
-
     neon_request_slots: &'t [NeonIOHandle],
 
     submission_pipe_write_fd: OwnedFd,
@@ -31,24 +26,18 @@ pub extern "C" fn rcommunicator_backend_init(
     cis: Box<CommunicatorInitStruct>,
     my_proc_number: i32,
 ) -> &'static mut CommunicatorBackendStruct<'static> {
-    if my_proc_number < 0 || my_proc_number as u32 >= cis.max_procs {
+    if my_proc_number < 0 {
         panic!(
-            "cannot attach to communicator shared memory with procnumber {} (max_procs {})",
-            my_proc_number, cis.max_procs,
+            "cannot attach to communicator shared memory with procnumber {}",
+            my_proc_number,
         );
     }
-
-    let start_idx = my_proc_number as u32 * cis.num_neon_request_slots_per_backend;
-    let end_idx = start_idx + cis.num_neon_request_slots_per_backend;
 
     let integrated_cache = Box::leak(Box::new(cis.integrated_cache_init_struct.backend_init()));
 
     let bs: &'static mut CommunicatorBackendStruct =
         Box::leak(Box::new(CommunicatorBackendStruct {
             my_proc_number,
-            next_request_slot_idx: start_idx,
-            my_start_idx: start_idx,
-            my_end_idx: end_idx,
             neon_request_slots: cis.neon_request_slots,
 
             submission_pipe_write_fd: cis.submission_pipe_write_fd,
@@ -66,9 +55,11 @@ pub extern "C" fn rcommunicator_backend_init(
 /// latch is set.
 ///
 /// Safety: The C caller must ensure that the references are valid.
+/// The requested slot must be free, or this panics.
 #[unsafe(no_mangle)]
 pub extern "C" fn bcomm_start_io_request(
     bs: &'_ mut CommunicatorBackendStruct,
+    slot_idx: i32,
     request: &NeonIORequest,
     immediate_result_ptr: &mut NeonIOResult,
 ) -> i32 {
@@ -83,7 +74,7 @@ pub extern "C" fn bcomm_start_io_request(
     }
 
     // Create neon request and submit it
-    let slot_idx = bs.start_neon_io_request(request);
+    bs.start_neon_io_request(slot_idx, request);
 
     // Tell the communicator about it
     bs.submit_request(slot_idx);
@@ -94,6 +85,7 @@ pub extern "C" fn bcomm_start_io_request(
 #[unsafe(no_mangle)]
 pub extern "C" fn bcomm_start_get_page_v_request(
     bs: &mut CommunicatorBackendStruct,
+    slot_idx: i32,
     request: &NeonIORequest,
     immediate_result_ptr: &mut CCachedGetPageVResult,
 ) -> i32 {
@@ -124,7 +116,7 @@ pub extern "C" fn bcomm_start_get_page_v_request(
     }
 
     // Create neon request and submit it
-    let slot_idx = bs.start_neon_io_request(request);
+    bs.start_neon_io_request(slot_idx, request);
 
     // Tell the communicator about it
     bs.submit_request(slot_idx);
@@ -148,6 +140,32 @@ pub extern "C" fn bcomm_poll_request_completion(
             *result_p = result;
             0
         }
+    }
+}
+
+/// Check if a request has completed. Returns:
+///
+/// 'false' if the slot is Idle. The backend process has ownership.
+/// 'true' if the slot is busy, and should be polled for result.
+#[unsafe(no_mangle)]
+pub extern "C" fn bcomm_get_request_slot_status(
+    bs: &mut CommunicatorBackendStruct,
+    request_slot_idx: u32,
+) -> bool {
+    use crate::backend_comms::NeonIOHandleState;
+    match bs.neon_request_slots[request_slot_idx as usize].get_state() {
+        NeonIOHandleState::Idle => false,
+        NeonIOHandleState::Filling => {
+            // 'false' would be the right result here. However, this
+            // is a very transient state. The C code should never
+            // leave a slot in this state, so if it sees that,
+            // something's gone wrong and it's not clear what to do
+            // with it.
+            panic!("unexpected Filling state in request slot {}", request_slot_idx);
+        },
+        NeonIOHandleState::Submitted => true,
+        NeonIOHandleState::Processing => true,
+        NeonIOHandleState::Completed => true,
     }
 }
 
@@ -206,22 +224,11 @@ impl<'t> CommunicatorBackendStruct<'t> {
 
     /// Note: there's no guarantee on when the communicator might pick it up. You should ring
     /// the doorbell. But it might pick it up immediately.
-    pub(crate) fn start_neon_io_request(&mut self, request: &NeonIORequest) -> i32 {
+    ///
+    /// The slot must be free, or this panics.
+    pub(crate) fn start_neon_io_request(&mut self, request_slot_idx: i32, request: &NeonIORequest) {
         let my_proc_number = self.my_proc_number;
 
-        // Grab next free slot
-        // FIXME: any guarantee that there will be any?
-        let idx = self.next_request_slot_idx;
-
-        let next_idx = idx + 1;
-        self.next_request_slot_idx = if next_idx == self.my_end_idx {
-            self.my_start_idx
-        } else {
-            next_idx
-        };
-
-        self.neon_request_slots[idx as usize].fill_request(request, my_proc_number);
-
-        idx as i32
+        self.neon_request_slots[request_slot_idx as usize].fill_request(request, my_proc_number);
     }
 }

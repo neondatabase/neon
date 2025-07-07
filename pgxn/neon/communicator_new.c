@@ -115,6 +115,10 @@ static CommunicatorShmemData *communicator_shmem_ptr;
 static int	inflight_requests[MAX_INFLIGHT_ASYNC_REQUESTS];
 static int	num_inflight_requests = 0;
 
+static int	my_start_slot_idx;
+static int	my_end_slot_idx;
+static int	my_next_slot_idx;
+
 static int	start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p);
 static void wait_request_completion(int request_idx, struct NeonIOResult *result_p);
 static void perform_request(NeonIORequest *request, struct NeonIOResult *result_p);
@@ -189,14 +193,17 @@ static size_t
 communicator_new_shmem_size(void)
 {
 	size_t		size = 0;
+	int			num_request_slots;
 
 	size += MAXALIGN(
 					 offsetof(CommunicatorShmemData, backends) +
 					 MaxProcs * sizeof(CommunicatorShmemPerBackendData)
 		);
 
+	num_request_slots = MaxProcs * MAX_INFLIGHT_ASYNC_REQUESTS;
+
 	/* space needed by the rust code */
-	size += rcommunicator_shmem_size(MaxProcs);
+	size += rcommunicator_shmem_size(num_request_slots);
 
 	return size;
 }
@@ -256,7 +263,7 @@ communicator_new_shmem_startup(void)
 		max_file_cache_size = 100;
 
 	/* Initialize the rust-managed parts */
-	cis = rcommunicator_shmem_init(pipefd[0], pipefd[1], MaxProcs, shmem_ptr, shmem_size,
+	cis = rcommunicator_shmem_init(pipefd[0], pipefd[1], MaxProcs * MAX_INFLIGHT_ASYNC_REQUESTS, shmem_ptr, shmem_size,
 								   initial_file_cache_size, max_file_cache_size);
 }
 
@@ -443,6 +450,28 @@ communicator_new_init(void)
 	cis = NULL;
 
 	/*
+	 * Check the status of all the request slots. A previous backend with the
+	 * same proc number might've left behind some prefetch requests or aborted
+	 * requests
+	 */
+	my_start_slot_idx = MyProcNumber * MAX_INFLIGHT_ASYNC_REQUESTS;
+	my_end_slot_idx = my_start_slot_idx + MAX_INFLIGHT_ASYNC_REQUESTS;
+	my_next_slot_idx = my_start_slot_idx;
+
+	for (int idx = my_start_slot_idx; idx < my_end_slot_idx; idx++)
+	{
+		struct NeonIOResult result;
+
+		if (bcomm_get_request_slot_status(my_bs, idx))
+		{
+			elog(LOG, "processing leftover IO request from previous session at slot %d", idx);
+			wait_request_completion(idx, &result);
+
+			/* FIXME: log the result if it was an error */
+		}
+	}
+
+	/*
 	 * Arrange to clean up at backend exit.
 	 */
 	on_shmem_exit(communicator_new_backend_exit, 0);
@@ -572,13 +601,17 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 
 	Assert(num_inflight_requests < MAX_INFLIGHT_ASYNC_REQUESTS);
 
-	request_idx = bcomm_start_io_request(my_bs, request, immediate_result_p);
+	request_idx = bcomm_start_io_request(my_bs, my_next_slot_idx, request, immediate_result_p);
 	if (request_idx == -1)
 	{
 		/* -1 means the request was satisfied immediately. */
 		elog(DEBUG4, "communicator request %lu was satisfied immediately", request->rel_exists.request_id);
 		return -1;
 	}
+	Assert(request_idx == my_next_slot_idx);
+	my_next_slot_idx++;
+	if (my_next_slot_idx == my_end_slot_idx)
+		my_next_slot_idx = my_start_slot_idx;
 	inflight_requests[num_inflight_requests] = request_idx;
 	num_inflight_requests++;
 
@@ -749,7 +782,7 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 	process_inflight_requests();
 
 retry:
-	request_idx = bcomm_start_get_page_v_request(my_bs, &request, &cached_result);
+	request_idx = bcomm_start_get_page_v_request(my_bs, my_next_slot_idx, &request, &cached_result);
 	if (request_idx == -1)
 	{
 		bool		completed;
@@ -801,8 +834,17 @@ retry:
 		}
 		return;
 	}
+	Assert(request_idx == my_next_slot_idx);
+	my_next_slot_idx++;
+	if (my_next_slot_idx == my_end_slot_idx)
+		my_next_slot_idx = my_start_slot_idx;
+	inflight_requests[num_inflight_requests] = request_idx;
+	num_inflight_requests++;
 
 	wait_request_completion(request_idx, &result);
+	Assert(num_inflight_requests == 1);
+	Assert(inflight_requests[0] == request_idx);
+	num_inflight_requests = 0;
 	switch (result.tag)
 	{
 		case NeonIOResult_GetPageV:

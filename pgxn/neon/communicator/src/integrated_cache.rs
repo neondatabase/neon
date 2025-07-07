@@ -78,7 +78,7 @@ pub struct IntegratedCacheReadAccess<'t> {
 impl<'t> IntegratedCacheInitStruct<'t> {
     /// Return the desired size in bytes of the fixed-size shared memory area to reserve for the
     /// integrated cache.
-    pub fn shmem_size(_max_procs: u32) -> usize {
+    pub fn shmem_size() -> usize {
         // The relsize cache is fixed-size. The block map is allocated in a separate resizable
         // area.
         HashMapInit::<RelKey, RelEntry>::estimate_size(RELSIZE_CACHE_SIZE)
@@ -87,7 +87,6 @@ impl<'t> IntegratedCacheInitStruct<'t> {
     /// Initialize the shared memory segment. This runs once in postmaster. Returns a struct which
     /// will be inherited by all processes through fork.
     pub fn shmem_init(
-        _max_procs: u32,
         shmem_area: &'t mut [MaybeUninit<u8>],
         initial_file_cache_size: u64,
         max_file_cache_size: u64,

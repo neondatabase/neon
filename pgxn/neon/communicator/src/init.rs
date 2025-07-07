@@ -26,20 +26,15 @@ use std::os::fd::OwnedFd;
 use crate::backend_comms::NeonIOHandle;
 use crate::integrated_cache::IntegratedCacheInitStruct;
 
-const NUM_NEON_REQUEST_SLOTS_PER_BACKEND: u32 = 5;
-
 /// This struct is created in the postmaster process, and inherited to
 /// the communicator process and all backend processes through fork()
 #[repr(C)]
 pub struct CommunicatorInitStruct {
-    #[allow(dead_code)]
-    pub max_procs: u32,
-
     pub submission_pipe_read_fd: OwnedFd,
     pub submission_pipe_write_fd: OwnedFd,
 
     // Shared memory data structures
-    pub num_neon_request_slots_per_backend: u32,
+    pub num_neon_request_slots: u32,
 
     pub neon_request_slots: &'static [NeonIOHandle],
 
@@ -49,12 +44,11 @@ pub struct CommunicatorInitStruct {
 impl std::fmt::Debug for CommunicatorInitStruct {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("CommunicatorInitStruct")
-            .field("max_procs", &self.max_procs)
             .field("submission_pipe_read_fd", &self.submission_pipe_read_fd)
             .field("submission_pipe_write_fd", &self.submission_pipe_write_fd)
             .field(
-                "num_neon_request_slots_per_backend",
-                &self.num_neon_request_slots_per_backend,
+                "num_neon_request_slots",
+                &self.num_neon_request_slots,
             )
             .field("neon_request_slots length", &self.neon_request_slots.len())
             .finish()
@@ -62,14 +56,13 @@ impl std::fmt::Debug for CommunicatorInitStruct {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rcommunicator_shmem_size(max_procs: u32) -> u64 {
+pub extern "C" fn rcommunicator_shmem_size(num_neon_request_slots: u32) -> u64 {
     let mut size = 0;
 
-    let num_neon_request_slots = max_procs * NUM_NEON_REQUEST_SLOTS_PER_BACKEND;
     size += mem::size_of::<NeonIOHandle>() * num_neon_request_slots as usize;
 
     // For integrated_cache's Allocator. TODO: make this adjustable
-    size += IntegratedCacheInitStruct::shmem_size(max_procs);
+    size += IntegratedCacheInitStruct::shmem_size();
 
     size as u64
 }
@@ -80,7 +73,7 @@ pub extern "C" fn rcommunicator_shmem_size(max_procs: u32) -> u64 {
 pub extern "C" fn rcommunicator_shmem_init(
     submission_pipe_read_fd: c_int,
     submission_pipe_write_fd: c_int,
-    max_procs: u32,
+    num_neon_request_slots: u32,
     shmem_area_ptr: *mut MaybeUninit<u8>,
     shmem_area_len: u64,
     initial_file_cache_size: u64,
@@ -89,12 +82,8 @@ pub extern "C" fn rcommunicator_shmem_init(
     let shmem_area: &'static mut [MaybeUninit<u8>] =
         unsafe { std::slice::from_raw_parts_mut(shmem_area_ptr, shmem_area_len as usize) };
 
-    // Carve out the request slots from the shmem area and initialize them
-    let num_neon_request_slots_per_backend = NUM_NEON_REQUEST_SLOTS_PER_BACKEND as usize;
-    let num_neon_request_slots = max_procs as usize * num_neon_request_slots_per_backend;
-
     let (neon_request_slots, remaining_area) =
-        alloc_array_from_slice::<NeonIOHandle>(shmem_area, num_neon_request_slots);
+        alloc_array_from_slice::<NeonIOHandle>(shmem_area, num_neon_request_slots as usize);
 
     for slot in neon_request_slots.iter_mut() {
         slot.write(NeonIOHandle::default());
@@ -110,7 +99,6 @@ pub extern "C" fn rcommunicator_shmem_init(
 
     // Give the rest of the area to the integrated cache
     let integrated_cache_init_struct = IntegratedCacheInitStruct::shmem_init(
-        max_procs,
         remaining_area,
         initial_file_cache_size,
         max_file_cache_size,
@@ -125,11 +113,10 @@ pub extern "C" fn rcommunicator_shmem_init(
     };
 
     let cis: &'static mut CommunicatorInitStruct = Box::leak(Box::new(CommunicatorInitStruct {
-        max_procs,
         submission_pipe_read_fd,
         submission_pipe_write_fd,
 
-        num_neon_request_slots_per_backend: NUM_NEON_REQUEST_SLOTS_PER_BACKEND,
+        num_neon_request_slots,
         neon_request_slots,
 
         integrated_cache_init_struct,

@@ -165,6 +165,10 @@ impl NeonIOHandle {
             .store(NeonIOHandleState::Submitted, Ordering::Release);
     }
 
+    pub fn get_state(&self) -> NeonIOHandleState {
+        self.state.load(Ordering::Relaxed)
+    }
+
     pub fn try_get_result(&self) -> Option<NeonIOResult> {
         // FIXME: ordering?
         let state = self.state.load(Ordering::Relaxed);
