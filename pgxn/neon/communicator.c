@@ -1100,6 +1100,7 @@ communicator_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumbe
 			{
 				continue;
 			}
+			Assert(slot->response->tag == T_NeonGetPageResponse); /* checked by check_getpage_response when response was assigned to the slot */
 			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
 
 
