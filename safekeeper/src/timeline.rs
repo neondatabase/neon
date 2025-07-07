@@ -587,7 +587,7 @@ impl Timeline {
 
     /// Cancel the timeline, requesting background activity to stop. Closing
     /// the `self.gate` waits for that.
-    pub async fn cancel(&self) {
+    pub fn cancel(&self) {
         info!("timeline {} shutting down", self.ttid);
         self.cancel.cancel();
     }
@@ -907,6 +907,11 @@ impl Timeline {
         to: Configuration,
     ) -> Result<TimelineMembershipSwitchResponse> {
         let mut state = self.write_shared_state().await;
+        // Ensure we never race with exclude/delete requests
+        // because they could have been started with an older generation.
+        if self.is_cancelled() {
+            bail!(TimelineError::Cancelled(self.ttid));
+        }
         state.sk.membership_switch(to).await
     }
 

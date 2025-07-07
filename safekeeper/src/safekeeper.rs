@@ -1013,6 +1013,13 @@ where
             self.state.finish_change(&state).await?;
         }
 
+        if msg.mconf.generation != INVALID_GENERATION && !msg.mconf.contains(self.node_id) {
+            bail!(
+                "refused to switch into {}, node {} is not a member of it",
+                msg.mconf,
+                self.node_id,
+            );
+        }
         // Switch into conf given by proposer conf if it is higher.
         self.state.membership_switch(msg.mconf.clone()).await?;
 

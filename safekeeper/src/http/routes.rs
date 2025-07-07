@@ -330,7 +330,7 @@ async fn timeline_exclude_handler(mut request: Request<Body>) -> Result<Response
     // instead.
     if data.mconf.contains(my_id) {
         return Err(ApiError::Forbidden(format!(
-            "refused to switch into {}, node {} is member of it",
+            "refused to exclude timeline with {}, node {} is member of it",
             data.mconf, my_id
         )));
     }

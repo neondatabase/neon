@@ -301,7 +301,12 @@ pub struct PullTimelineRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub http_hosts: Vec<String>,
-    pub ignore_tombstone: Option<bool>,
+    /// Membership configuration to switch to after pull.
+    /// It guarantees that if pull_timeline returns successful, the timeline will
+    /// not be deleted by request with an older generation.
+    /// Storage controller always sets this field.
+    /// Might be None only for manual pull_timeline requests.
+    pub mconf: Option<Configuration>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
