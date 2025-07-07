@@ -685,67 +685,69 @@ impl QueryData {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
-        let json_output = json::value_to_string!(|value| {
-            match select(
-                pin!(query_to_json(
-                    config,
-                    &mut *inner,
-                    self,
-                    value,
-                    parsed_headers
-                )),
-                pin!(cancel.cancelled()),
-            )
-            .await
-            {
-                // The query successfully completed.
-                Either::Left((Ok(status), __not_yet_cancelled)) => {
-                    discard.check_idle(status);
-                }
-                // The query failed with an error
-                Either::Left((Err(e), __not_yet_cancelled)) => {
-                    discard.discard();
-                    return Err(e);
-                }
-                // The query was cancelled.
-                Either::Right((_cancelled, query)) => {
-                    tracing::info!("cancelling query");
-                    if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                        tracing::warn!(?err, "could not cancel query");
-                    }
-                    // wait for the query cancellation
-                    match time::timeout(time::Duration::from_millis(100), query).await {
-                        // query successed before it was cancelled.
-                        Ok(Ok(status)) => {
-                            discard.check_idle(status);
-                        }
-                        // query failed or was cancelled.
-                        Ok(Err(error)) => {
-                            let db_error = match &error {
-                                SqlOverHttpError::ConnectCompute(
-                                    HttpConnError::PostgresConnectionError(e),
-                                )
-                                | SqlOverHttpError::Postgres(e) => e.as_db_error(),
-                                _ => None,
-                            };
+        let mut json_buf = vec![];
 
-                            // if errored for some other reason, it might not be safe to return
-                            if !db_error.is_some_and(|e| *e.code() == SqlState::QUERY_CANCELED) {
-                                discard.discard();
-                            }
+        let batch_result = match select(
+            pin!(query_to_json(
+                config,
+                &mut *inner,
+                self,
+                json::ValueSer::new(&mut json_buf),
+                parsed_headers
+            )),
+            pin!(cancel.cancelled()),
+        )
+        .await
+        {
+            Either::Left((res, __not_yet_cancelled)) => res,
+            Either::Right((_cancelled, query)) => {
+                tracing::info!("cancelling query");
+                if let Err(err) = cancel_token.cancel_query(NoTls).await {
+                    tracing::warn!(?err, "could not cancel query");
+                }
+                // wait for the query cancellation
+                match time::timeout(time::Duration::from_millis(100), query).await {
+                    // query successed before it was cancelled.
+                    Ok(Ok(status)) => Ok(status),
+                    // query failed or was cancelled.
+                    Ok(Err(error)) => {
+                        let db_error = match &error {
+                            SqlOverHttpError::ConnectCompute(
+                                HttpConnError::PostgresConnectionError(e),
+                            )
+                            | SqlOverHttpError::Postgres(e) => e.as_db_error(),
+                            _ => None,
+                        };
 
-                            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
-                        }
-                        Err(_timeout) => {
+                        // if errored for some other reason, it might not be safe to return
+                        if !db_error.is_some_and(|e| *e.code() == SqlState::QUERY_CANCELED) {
                             discard.discard();
-                            return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
                         }
+
+                        return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+                    }
+                    Err(_timeout) => {
+                        discard.discard();
+                        return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
                     }
                 }
             }
-        });
+        };
 
-        Ok(json_output)
+        match batch_result {
+            // The query successfully completed.
+            Ok(status) => {
+                discard.check_idle(status);
+
+                let json_output = String::from_utf8(json_buf).expect("json should be valid utf8");
+                Ok(json_output)
+            }
+            // The query failed with an error
+            Err(e) => {
+                discard.discard();
+                Err(e)
+            }
+        }
     }
 }
 
@@ -771,40 +773,47 @@ impl BatchQueryData {
             builder = builder.deferrable(true);
         }
 
-        let mut tx = match builder.start().await {
-            Ok(tx) => tx,
-            Err(e) => {
+        let mut transaction = builder
+            .start()
+            .await
+            .inspect_err(|_| {
                 // if we cannot start a transaction, we should return immediately
                 // and not return to the pool. connection is clearly broken
                 discard.discard();
-                return Err(SqlOverHttpError::Postgres(e));
+            })
+            .map_err(SqlOverHttpError::Postgres)?;
+
+        let json_output = match query_batch(
+            config,
+            cancel.child_token(),
+            &mut transaction,
+            self,
+            parsed_headers,
+        )
+        .await
+        {
+            Ok(json_output) => {
+                info!("commit");
+                discard.commit(transaction).await?;
+                json_output
+            }
+            Err(SqlOverHttpError::Cancelled(_)) => {
+                if let Err(err) = cancel_token.cancel_query(NoTls).await {
+                    tracing::warn!(?err, "could not cancel query");
+                }
+                // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
+                discard.discard();
+
+                return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+            }
+            Err(err) => {
+                info!("rollback");
+                if let Err(error) = discard.rollback(transaction).await {
+                    tracing::warn!(?error, "could not rollback transaction");
+                }
+                return Err(err);
             }
         };
-
-        let json_output =
-            match query_batch(config, cancel.child_token(), &mut tx, self, parsed_headers).await {
-                Ok(json_output) => {
-                    info!("commit");
-                    discard.commit(tx).await?;
-                    json_output
-                }
-                Err(SqlOverHttpError::Cancelled(_)) => {
-                    if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                        tracing::warn!(?err, "could not cancel query");
-                    }
-                    // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
-                    discard.discard();
-
-                    return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
-                }
-                Err(err) => {
-                    info!("rollback");
-                    if let Err(error) = discard.rollback(tx).await {
-                        tracing::warn!(?error, "could not rollback transaction");
-                    }
-                    return Err(err);
-                }
-            };
 
         Ok(json_output)
     }
