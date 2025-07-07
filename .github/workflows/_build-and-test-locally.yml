@@ -51,7 +51,6 @@ defaults:
 env:
   RUST_BACKTRACE: 1
   COPT: '-Werror'
-  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 permissions:
   contents: read
@@ -86,6 +85,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
+
+      - uses: ./.github/actions/prepare-for-subzero
+        with:
           token: ${{ secrets.CI_ACCESS_TOKEN }}
 
       - name: Set pg 14 revision for caching
