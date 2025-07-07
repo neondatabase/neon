@@ -36,8 +36,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use subzero_core::{
     api::{
-        ApiResponse, ContentType::*, ListVal, Payload, Preferences, QueryNode::*, Representation,
-        Resolution::*, SingleVal,
+        ApiResponse, ContentType::{SingularJSON, TextCSV, ApplicationJSON, Other}, ListVal, Payload, Preferences, QueryNode::{Insert, Delete, Update, FunctionCall}, Representation,
+        Resolution::{MergeDuplicates, IgnoreDuplicates}, SingleVal,
     },
     config::{db_allowed_select_functions, db_schemas, role_claim_key /*to_tuple*/},
     content_range_header, content_range_status,
@@ -49,7 +49,7 @@ use subzero_core::{
     error::pg_error_to_status_code,
     formatter::{
         Param,
-        Param::*,
+        Param::{SV, Str, StrOwned, PL, LV},
         Snippet, SqlParam,
         postgresql::{fmt_main_query, generate},
     },
@@ -150,7 +150,7 @@ impl DbSchemaCache {
                             db_anon_role: None,
                             db_max_rows: None,
                             db_allowed_select_functions: vec![],
-                            role_claim_key: "".to_string(),
+                            role_claim_key: String::new(),
                             db_extra_search_path: None,
                         };
                         let value = Arc::new((api_config, schema_owned));
@@ -179,14 +179,14 @@ impl DbSchemaCache {
             (&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id())),
             (
                 &CONN_STRING,
-                HeaderValue::from_str(connection_string).unwrap(),
+                HeaderValue::from_str(connection_string).expect("invalid connection string"),
             ),
             (
                 &TXN_ISOLATION_LEVEL,
-                HeaderValue::from_str("ReadCommitted").unwrap(),
+                HeaderValue::from_str("ReadCommitted").expect("invalid transaction isolation level"),
             ),
             (&AUTHORIZATION, auth_header.clone()),
-            (&RAW_TEXT_OUTPUT, HeaderValue::from_str("true").unwrap()),
+            (&RAW_TEXT_OUTPUT, HeaderValue::from_str("true").expect("invalid raw text output")),
         ];
 
         let query = get_postgresql_configuration_query(Some("pgrst.pre_config"));
@@ -213,8 +213,8 @@ impl DbSchemaCache {
         }
 
         // Extract columns from the first (and only) row
-        let mut row = &mut rows[0];
-        let config_string = extract_string(&mut row, "config").unwrap_or_default();
+        let row = &mut rows[0];
+        let config_string = extract_string(row, "config").unwrap_or_default();
 
         // Parse the configuration response
         let api_config: ApiConfig = serde_json::from_str(&config_string)
@@ -225,14 +225,14 @@ impl DbSchemaCache {
             (&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id())),
             (
                 &CONN_STRING,
-                HeaderValue::from_str(connection_string).unwrap(),
+                HeaderValue::from_str(connection_string).expect("invalid connection string"),
             ),
             (
                 &TXN_ISOLATION_LEVEL,
-                HeaderValue::from_str("ReadCommitted").unwrap(),
+                HeaderValue::from_str("ReadCommitted").expect("invalid transaction isolation level"),
             ),
             (&AUTHORIZATION, auth_header.clone()),
-            (&RAW_TEXT_OUTPUT, HeaderValue::from_str("true").unwrap()),
+            (&RAW_TEXT_OUTPUT, HeaderValue::from_str("true").expect("invalid raw text output")),
         ];
 
         let body = serde_json::json!({
@@ -265,8 +265,8 @@ impl DbSchemaCache {
         }
 
         // Extract columns from the first (and only) row
-        let mut row = &mut rows[0];
-        let json_schema = extract_string(&mut row, "json_schema").unwrap_or_default();
+        let row = &mut rows[0];
+        let json_schema = extract_string(row, "json_schema").unwrap_or_default();
         let string_size = json_schema.len();
 
         if string_size > config.rest_config.max_schema_size {
@@ -372,13 +372,13 @@ impl UserFacingError for RestError {
                 // TODO: this is a hack to get the message from the json body
                 let json = s.json_body();
                 let default_message = "Unknown error".to_string();
-                let message = json
+                
+                json
                     .get("message")
                     .map_or(default_message.clone(), |m| match m {
                         JsonValue::String(s) => s.clone(),
                         _ => default_message,
-                    });
-                message
+                    })
             }
         }
     }
@@ -427,11 +427,13 @@ fn fmt_env_query<'a>(env: &'a HashMap<&'a str, &'a str>) -> Snippet<'a> {
 fn to_sql_param(p: &Param) -> JsonValue {
     match p {
         SV(SingleVal(v, ..)) => JsonValue::String(v.to_string()),
-        Str(v) => JsonValue::String(v.to_string()),
+        Str(v) => JsonValue::String((*v).to_string()),
         StrOwned(v) => JsonValue::String((*v).clone()),
         PL(Payload(v, ..)) => JsonValue::String(v.clone().into_owned()),
         LV(ListVal(v, ..)) => {
-            if !v.is_empty() {
+            if v.is_empty() {
+                JsonValue::String(r"{}".to_string())
+            } else {
                 JsonValue::String(format!(
                     "{{\"{}\"}}",
                     v.iter()
@@ -439,8 +441,6 @@ fn to_sql_param(p: &Param) -> JsonValue {
                         .collect::<Vec<_>>()
                         .join("\",\"")
                 ))
-            } else {
-                JsonValue::String(r#"{}"#.to_string())
             }
         }
     }
@@ -460,9 +460,9 @@ async fn make_local_proxy_request(
 ) -> Result<(StatusCode, JsonValue), RestError> {
     let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
     let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
-    let req_headers = req.headers_mut().unwrap();
+    let req_headers = req.headers_mut().expect("failed to get headers");
     // Add all provided headers to the request
-    for (header_name, header_value) in headers.into_iter() {
+    for (header_name, header_value) in headers {
         req_headers.insert(header_name, header_value);
     }
 
@@ -588,11 +588,9 @@ pub(crate) async fn handle(
                 msg="subzero core error",
                 "forwarding error to user"
             );
-            let subzero_err = match e {
-                RestError::SubzeroCore(e) => e,
-                _ => panic!("expected subzero core error"),
-            };
-
+            
+            let RestError::SubzeroCore(subzero_err) = e else { panic!("expected subzero core error") };
+            
             let json_body = subzero_err.json_body();
             let status_code = StatusCode::from_u16(subzero_err.status_code())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -663,7 +661,7 @@ async fn handle_inner(
     let host = request.uri().host().unwrap_or("");
     let path_parts: Vec<&str> = request.uri().path().split('/').collect();
     // a valid path is /database/rest/v1/... so parts should be ["", "database", "rest", "v1", ...]
-    let database_name = if path_parts.len() >= 3 && path_parts[1].len() > 0 {
+    let database_name = if path_parts.len() >= 3 && !path_parts[1].is_empty() {
         Ok(path_parts[1])
     } else {
         Err(RestError::SubzeroCore(NotFound {
@@ -674,8 +672,7 @@ async fn handle_inner(
     // we always use the authenticator role to connect to the database
     let autheticator_role = "authenticator";
     let connection_string = format!(
-        "postgresql://{}@{}/{}",
-        autheticator_role, host, database_name
+        "postgresql://{autheticator_role}@{host}/{database_name}"
     );
 
     let conn_info = get_conn_info(
@@ -691,7 +688,7 @@ async fn handle_inner(
 
     match conn_info.auth {
         AuthData::Jwt(jwt) if config.rest_config.is_rest_broker => {
-            let api_prefix = format!("/{}/rest/v1/", database_name);
+            let api_prefix = format!("/{database_name}/rest/v1/");
             handle_rest_inner(
                 config,
                 ctx,
@@ -710,6 +707,7 @@ async fn handle_inner(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_rest_inner(
     config: &'static ProxyConfig,
     ctx: &RequestContext,
@@ -726,31 +724,27 @@ async fn handle_rest_inner(
         .await
         .map_err(HttpConnError::from)?;
 
-    let db_schema_cache = match config.rest_config.db_schema_cache.as_ref() {
-        Some(cache) => cache,
-        None => {
-            return Err(RestError::SubzeroCore(InternalError {
-                message: "DB schema cache is not configured".to_string(),
-            }));
-        }
-    };
+    let db_schema_cache = config.rest_config.db_schema_cache.as_ref().ok_or(RestError::SubzeroCore(InternalError {
+        message: "DB schema cache is not configured".to_string(),
+    }))?;
 
-    let endpoint_cache_key = conn_info.endpoint_cache_key().ok_or_else(|| {
-        RestError::SubzeroCore(InternalError {
-            message: "Failed to get endpoint cache key".to_string(),
-        })
-    })?;
+    let endpoint_cache_key = conn_info.endpoint_cache_key().ok_or(RestError::SubzeroCore(InternalError {
+        message: "Failed to get endpoint cache key".to_string(),
+    }))?;
+
     let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
     let (parts, originial_body) = request.into_parts();
     let headers_map = parts.headers;
-    let auth_header = headers_map.get(AUTHORIZATION).unwrap();
+    let auth_header = headers_map.get(AUTHORIZATION).ok_or(RestError::SubzeroCore(InternalError {
+        message: "Authorization header is required".to_string(),
+    }))?;
     let entry = db_schema_cache
         .get_cached_or_remote(
             &endpoint_cache_key,
             auth_header,
-            &connection_string,
+            connection_string,
             &mut client,
-            &ctx,
+            ctx,
             config,
         )
         .await?;
@@ -764,9 +758,9 @@ async fn handle_rest_inner(
     let db_schemas = &api_config.db_schemas; // list of schemas available for the api
     let db_extra_search_path = &api_config.db_extra_search_path;
     let role_claim_key = &api_config.role_claim_key;
-    let role_claim_path = format!("${}", role_claim_key);
+    let role_claim_path = format!("${role_claim_key}");
     let db_anon_role = &api_config.db_anon_role;
-    let max_rows = api_config.db_max_rows.as_ref().map(|s| s.as_str());
+    let max_rows = api_config.db_max_rows.as_deref();
     let db_allowed_select_functions = api_config
         .db_allowed_select_functions
         .iter()
@@ -782,7 +776,7 @@ async fn handle_rest_inner(
                 .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
             Some(payload)
         }
-        _ => None,
+        ComputeCredentialKeys::AuthKeys(_) => None,
     };
     //TODO: check if the token is properly cached in the backend (should we cache the parsed claims?)
     // read the role from the jwt claims (and set it to the "anon" role if not present)
@@ -812,8 +806,7 @@ async fn handle_rest_inner(
     let path = parts
         .uri
         .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
+        .map_or("/", |pq| pq.as_str());
 
     // this is actually the table name (or rpc/function_name)
     // TODO: rename this to something more descriptive
@@ -830,7 +823,7 @@ async fn handle_rest_inner(
     // add the content-profile header to the response
     let mut response_headers = vec![];
     if db_schemas.len() > 1 {
-        response_headers.push(("Content-Profile".to_string(), schema_name.to_string()));
+        response_headers.push(("Content-Profile".to_string(), schema_name.clone()));
     }
 
     // parse the query string into a Vec<(&str, &str)>
@@ -927,7 +920,7 @@ async fn handle_rest_inner(
         ("search_path", &search_path_str),
     ]);
     if let Some(r) = env_role {
-        env.insert("role", r.into());
+        env.insert("role", r);
     }
 
     // generate the sql statements
@@ -943,18 +936,18 @@ async fn handle_rest_inner(
         (&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id())),
         (
             &CONN_STRING,
-            HeaderValue::from_str(connection_string).unwrap(),
+            HeaderValue::from_str(connection_string).expect("invalid connection string"),
         ),
         (&AUTHORIZATION, auth_header.clone()),
         (
             &TXN_ISOLATION_LEVEL,
-            HeaderValue::from_str("ReadCommitted").unwrap(),
+            HeaderValue::from_str("ReadCommitted").expect("invalid transaction isolation level"),
         ),
-        (&ALLOW_POOL, HeaderValue::from_str("true").unwrap()),
+        (&ALLOW_POOL, HeaderValue::from_str("true").expect("invalid allow pool")),
     ];
 
     if api_request.read_only {
-        headers.push((&TXN_READ_ONLY, HeaderValue::from_str("true").unwrap()));
+        headers.push((&TXN_READ_ONLY, HeaderValue::from_str("true").expect("invalid read only")));
     }
 
     // convert the parameters from subzero core representation to a Vec<JsonValue>
@@ -1027,20 +1020,19 @@ async fn handle_rest_inner(
     }
 
     // Extract columns from the first (and only) row
-    let mut row = &mut rows[0];
-    let body_string = extract_string(&mut row, "body").unwrap_or_default();
-    let page_total = extract_string(&mut row, "page_total");
-    let total_result_set = extract_string(&mut row, "total_result_set");
+    let row = &mut rows[0];
+    let body_string = extract_string(row, "body").unwrap_or_default();
+    let page_total = extract_string(row, "page_total");
+    let total_result_set = extract_string(row, "total_result_set");
     // constraints_satisfied is relevant only when using internal permissions
     // let constraints_satisfied = extract_string(&mut row, "constraints_satisfied");
-    let response_headers_json = extract_string(&mut row, "response_headers");
-    let response_status = extract_string(&mut row, "response_status");
+    let response_headers_json = extract_string(row, "response_headers");
+    let response_status = extract_string(row, "response_status");
 
     // build the intermediate response object
     let api_response = ApiResponse {
         page_total: page_total
-            .map(|v| v.parse::<u64>().unwrap_or(0))
-            .unwrap_or(0),
+            .map_or(0, |v| v.parse::<u64>().unwrap_or(0)),
         total_result_set: total_result_set.map(|v| v.parse::<u64>().unwrap_or(0)),
         top_level_offset: 0, // FIXME: check why this is 0
         response_headers: response_headers_json,
@@ -1095,24 +1087,24 @@ async fn handle_rest_inner(
                 for h in headers_json {
                     match h {
                         JsonValue::Object(o) => {
-                            for (k, v) in o.into_iter() {
+                            for (k, v) in o {
                                 match v {
                                     JsonValue::String(s) => {
                                         response_headers.push((k, s));
                                         Ok(())
                                     }
                                     _ => Err(RestError::SubzeroCore(GucHeadersError)),
-                                }?
+                                }?;
                             }
                             Ok(())
                         }
                         _ => Err(RestError::SubzeroCore(GucHeadersError)),
-                    }?
+                    }?;
                 }
                 Ok(())
             }
             _ => Err(RestError::SubzeroCore(GucHeadersError)),
-        }?
+        }?;
     }
 
     // calculate and set the content range header
@@ -1188,11 +1180,11 @@ async fn handle_rest_inner(
     }
 
     // add the body and return the response
-    Ok(response.body(response_body).map_err(|_| {
+    response.body(response_body).map_err(|_| {
         RestError::SubzeroCore(InternalError {
             message: "Failed to build response".to_string(),
         })
-    })?)
+    })
 }
 
 #[cfg(test)]
