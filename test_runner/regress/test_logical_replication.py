@@ -626,6 +626,8 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg: Van
     assert sub.safe_psql_scalar("SELECT count(*) FROM t") == 1000
 
 
+# Test that we can use max_slot_wal_keep_size to restrict WAL size on the local disk but
+# do not invalidate obsolete (unacked) slot relying on on-demand WAL download feature.
 def test_logical_replication_ondemand_download(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
