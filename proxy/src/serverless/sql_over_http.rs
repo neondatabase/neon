@@ -783,7 +783,7 @@ impl BatchQueryData {
             })
             .map_err(SqlOverHttpError::Postgres)?;
 
-        let json_output = match query_batch(
+        let json_output = match query_batch_to_json(
             config,
             cancel.child_token(),
             &mut transaction,
@@ -825,31 +825,44 @@ async fn query_batch(
     transaction: &mut Transaction<'_>,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
+    results: &mut json::ListSer<'_>,
+) -> Result<(), SqlOverHttpError> {
+    for stmt in queries.queries {
+        let query = pin!(query_to_json(
+            config,
+            transaction,
+            stmt,
+            results.entry(),
+            parsed_headers,
+        ));
+        let cancelled = pin!(cancel.cancelled());
+        let res = select(query, cancelled).await;
+        match res {
+            // TODO: maybe we should check that the transaction bit is set here
+            Either::Left((Ok(_), _cancelled)) => {}
+            Either::Left((Err(e), _cancelled)) => {
+                return Err(e);
+            }
+            Either::Right((_cancelled, _)) => {
+                return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn query_batch_to_json(
+    config: &'static HttpConfig,
+    cancel: CancellationToken,
+    tx: &mut Transaction<'_>,
+    queries: BatchQueryData,
+    headers: HttpHeaders,
 ) -> Result<String, SqlOverHttpError> {
     let json_output = json::value_to_string!(|obj| json::value_as_object!(|obj| {
         let results = obj.key("results");
         json::value_as_list!(|results| {
-            for stmt in queries.queries {
-                let query = pin!(query_to_json(
-                    config,
-                    transaction,
-                    stmt,
-                    results.entry(),
-                    parsed_headers,
-                ));
-                let cancelled = pin!(cancel.cancelled());
-                let res = select(query, cancelled).await;
-                match res {
-                    // TODO: maybe we should check that the transaction bit is set here
-                    Either::Left((Ok(_), _cancelled)) => {}
-                    Either::Left((Err(e), _cancelled)) => {
-                        return Err(e);
-                    }
-                    Either::Right((_cancelled, _)) => {
-                        return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
-                    }
-                }
-            }
+            query_batch(config, cancel, tx, queries, headers, results).await?;
         });
     }));
 
