@@ -2164,6 +2164,9 @@ PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
 Datum
 approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
 {
+	if (neon_enable_new_communicator)
+		elog(ERROR, "TODO: not implemented");
+
 	if (lfc_size_limit != 0)
 	{
 		int32 dc;
@@ -2181,6 +2184,9 @@ PG_FUNCTION_INFO_V1(approximate_working_set_size);
 Datum
 approximate_working_set_size(PG_FUNCTION_ARGS)
 {
+	if (neon_enable_new_communicator)
+		elog(ERROR, "TODO: not implemented");
+
 	if (lfc_size_limit != 0)
 	{
 		int32 dc;
@@ -2201,7 +2207,13 @@ Datum
 get_local_cache_state(PG_FUNCTION_ARGS)
 {
 	size_t max_entries = PG_ARGISNULL(0) ? lfc_prewarm_limit : PG_GETARG_INT32(0);
-	FileCacheState* fcs = lfc_get_state(max_entries);
+	FileCacheState* fcs;
+
+	if (neon_enable_new_communicator)
+		elog(ERROR, "TODO: not implemented");
+
+	fcs = lfc_get_state(max_entries);
+
 	if (fcs != NULL)
 		PG_RETURN_BYTEA_P((bytea*)fcs);
 	else
@@ -2215,8 +2227,12 @@ prewarm_local_cache(PG_FUNCTION_ARGS)
 {
 	bytea* state = PG_GETARG_BYTEA_PP(0);
 	uint32 n_workers =  PG_GETARG_INT32(1);
-	FileCacheState* fcs = (FileCacheState*)state;
+	FileCacheState* fcs;
 
+	if (neon_enable_new_communicator)
+		elog(ERROR, "TODO: not implemented");
+
+	fcs = (FileCacheState*)state;
 	lfc_prewarm(fcs, n_workers);
 
 	PG_RETURN_NULL();
@@ -2235,6 +2251,9 @@ get_prewarm_info(PG_FUNCTION_ARGS)
 	uint32 active_workers = 0;
 	uint32 total_pages;
 	size_t n_workers;
+
+	if (neon_enable_new_communicator)
+		elog(ERROR, "TODO: not implemented");
 
 	if (lfc_size_limit == 0)
 		PG_RETURN_NULL();
