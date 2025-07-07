@@ -159,13 +159,6 @@ impl NeonControlPlaneClient {
         ctx: &RequestContext,
         endpoint: &EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
-        if !self
-            .caches
-            .endpoints_cache
-            .is_valid(ctx, &endpoint.normalize())
-        {
-            return Err(GetEndpointJwksError::EndpointNotFound);
-        }
         let request_id = ctx.session_id().to_string();
         async {
             let request = self
@@ -300,11 +293,6 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             return Ok(secret);
         }
 
-        if !self.caches.endpoints_cache.is_valid(ctx, normalized_ep) {
-            info!("endpoint is not valid, skipping the request");
-            return Err(GetAuthInfoError::UnknownEndpoint);
-        }
-
         let auth_info = self.do_get_auth_req(ctx, endpoint, role).await?;
 
         let control = EndpointAccessControl {
@@ -344,11 +332,6 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         let normalized_ep = &endpoint.normalize();
         if let Some(control) = self.caches.project_info.get_endpoint_access(normalized_ep) {
             return Ok(control);
-        }
-
-        if !self.caches.endpoints_cache.is_valid(ctx, normalized_ep) {
-            info!("endpoint is not valid, skipping the request");
-            return Err(GetAuthInfoError::UnknownEndpoint);
         }
 
         let auth_info = self.do_get_auth_req(ctx, endpoint, role).await?;
