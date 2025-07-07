@@ -178,20 +178,6 @@ services:
       - safekeeper3
       - pageserver
 
-  neon-test-extensions:
-    profiles: ["test-extensions"]
-    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-${PG_VERSION:-16}}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
-    environment:
-      - PGUSER=${PGUSER:-cloud_admin}
-      - PGPASSWORD=${PGPASSWORD:-cloud_admin}
-    entrypoint:
-      - "/bin/bash"
-      - "-c"
-    command:
-      - sleep 3600
-    depends_on:
-      - compute1
-
   compute_is_ready:
     image: postgres:latest
     environment:
@@ -206,5 +192,19 @@ services:
            done;
          done;
          echo All computes are started"
+    depends_on:
+      - compute1
+
+  neon-test-extensions:
+    profiles: ["test-extensions"]
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-${PG_VERSION:-16}}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
+    environment:
+      - PGUSER=${PGUSER:-cloud_admin}
+      - PGPASSWORD=${PGPASSWORD:-cloud_admin}
+    entrypoint:
+      - "/bin/bash"
+      - "-c"
+    command:
+      - sleep 3600
     depends_on:
       - compute1
