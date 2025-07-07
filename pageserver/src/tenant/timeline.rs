@@ -118,7 +118,6 @@ use crate::pgdatadir_mapping::{
     MAX_AUX_FILE_V2_DELTAS, MetricsUpdate,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::AttachmentMode;
 use crate::tenant::gc_result::GcResult;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::metadata::TimelineMetadata;
@@ -1790,14 +1789,12 @@ impl Timeline {
 
                     // Do not allow initial lease creation to be below the planned gc cutoff. The client (compute_ctl) determines
                     // whether it is a initial lease creation or a renewal.
-                    if init || validate {
-                        if lsn < planned_cutoff {
-                            bail!(
-                                "tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}",
-                                lsn,
-                                planned_cutoff
-                            );
-                        }
+                    if (init || validate) && lsn < planned_cutoff {
+                        bail!(
+                            "tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}",
+                            lsn,
+                            planned_cutoff
+                        );
                     }
 
                     let dt: DateTime<Utc> = valid_until.into();
