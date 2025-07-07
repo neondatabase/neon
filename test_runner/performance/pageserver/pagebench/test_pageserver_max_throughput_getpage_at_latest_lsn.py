@@ -105,7 +105,7 @@ def setup_and_run_pagebench_benchmark(
     page_cache_size = 16384
     max_file_descriptors = 500000
     neon_env_builder.pageserver_config_override = (
-        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
+        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}; disk_usage_based_eviction={{max_usage_pct=99, min_avail_bytes=0, period = '999y'}}"
     )
 
     tracing_config = PageserverTracingConfig(
