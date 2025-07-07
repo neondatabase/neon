@@ -86,7 +86,9 @@ where
     Ok(split_comma_separated(&s))
 }
 
-fn deserialize_comma_separated_option<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+fn deserialize_comma_separated_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -268,7 +270,10 @@ impl DbSchemaCache {
         let string_size = json_schema.len();
 
         if string_size > config.rest_config.max_schema_size {
-            return Err(RestError::SchemaTooLarge(config.rest_config.max_schema_size, string_size));
+            return Err(RestError::SchemaTooLarge(
+                config.rest_config.max_schema_size,
+                string_size,
+            ));
         }
 
         let schema_owned = DbSchemaOwned::new(json_schema, |s| {
@@ -844,9 +849,10 @@ async fn handle_rest_inner(
     let cookies = HashMap::new(); // TODO: add cookies
 
     // Read the request body
-    let body_bytes = read_body_with_limit(originial_body, config.http_config.max_request_size_bytes)
-        .await
-        .map_err(ReadPayloadError::from)?;
+    let body_bytes =
+        read_body_with_limit(originial_body, config.http_config.max_request_size_bytes)
+            .await
+            .map_err(ReadPayloadError::from)?;
     let body_as_string: Option<String> = if body_bytes.is_empty() {
         None
     } else {
