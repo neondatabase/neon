@@ -1997,13 +1997,13 @@ impl Service {
             tracing::error!(
                 timeline_safekeeper_count = config.timeline_safekeeper_count,
                 timelines_onto_safekeepers = config.timelines_onto_safekeepers,
-                "Configured with --timelines-onto-safekeepers but no available set of safekeepers for new timelines: {e}"
+                "viability test: configured with --timelines-onto-safekeepers but no available set of safekeepers for new timelines: {e}"
             );
         } else {
             tracing::info!(
                 timeline_safekeeper_count = config.timeline_safekeeper_count,
                 timelines_onto_safekeepers = config.timelines_onto_safekeepers,
-                "Test timeline creation result: {test_sk_res:?}",
+                "viability test result (test timeline creation on safekeepers): {test_sk_res:?}",
             )
         }
 
