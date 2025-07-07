@@ -13,7 +13,6 @@ use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode, header};
 use indexmap::IndexMap;
-use json::ValueSer;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use serde_json::Value;
@@ -873,7 +872,7 @@ async fn query_to_json<T: GenericClient>(
     config: &'static HttpConfig,
     client: &mut T,
     data: QueryData,
-    output: ValueSer<'_>,
+    output: json::ValueSer<'_>,
     parsed_headers: HttpHeaders,
 ) -> Result<ReadyForQueryStatus, SqlOverHttpError> {
     let query_start = Instant::now();
@@ -882,96 +881,73 @@ async fn query_to_json<T: GenericClient>(
     let raw_output = parsed_headers.raw_output;
     let max_bytes = config.max_response_size_bytes;
 
-    json::value_as_object!(|output| {
-        let mut rows = client
-            .query_raw_txt(&data.query, data.params)
-            .await
-            .map_err(SqlOverHttpError::Postgres)?;
-        let query_acknowledged = Instant::now();
+    let mut output = json::ObjectSer::new(output);
+    let mut rows = client
+        .query_raw_txt(&data.query, data.params)
+        .await
+        .map_err(SqlOverHttpError::Postgres)?;
+    let query_acknowledged = Instant::now();
 
-        output.entry("rowAsArray", array_mode);
-        write_fields(output.key("fields"), rows.statement.columns());
+    output.entry("rowAsArray", array_mode);
 
-        let row_count = write_json_rows(
-            output.key("rows"),
-            &mut rows,
-            raw_output,
-            array_mode,
-            max_bytes,
-        )
-        .await?;
+    let mut json_fields = output.key("fields").list();
+    for c in rows.statement.columns() {
+        let json_field = json_fields.entry();
+        json::value_as_object!(|json_field| {
+            json_field.entry("name", c.name());
+            json_field.entry("dataTypeID", c.type_().oid());
+            json_field.entry("tableID", c.table_oid());
+            json_field.entry("columnID", c.column_id());
+            json_field.entry("dataTypeSize", c.type_size());
+            json_field.entry("dataTypeModifier", c.type_modifier());
+            json_field.entry("format", "text");
+        });
+    }
+    json_fields.finish();
 
-        let query_resp_end = Instant::now();
+    let mut row_count = 0;
+    let mut json_rows = output.key("rows").list();
+    while let Some(row) = rows.next().await {
+        let row = row.map_err(SqlOverHttpError::Postgres)?;
 
-        let ready = rows.status;
-        let command_tag = rows.command_tag.unwrap_or_default();
+        pg_text_row_to_json(json_rows.entry(), &row, raw_output, array_mode)?;
 
-        info!(
-            rows = row_count,
-            ?ready,
-            command_tag,
-            acknowledgement = ?(query_acknowledged - query_start),
-            response = ?(query_resp_end - query_start),
-            "finished executing query"
-        );
+        // assumption: parsing pg text and converting to json takes CPU time.
+        // let's assume it is slightly expensive, so we should consume some cooperative budget.
+        // Especially considering that `RowStream::next` might be pulling from a batch
+        // of rows and never hit the tokio mpsc for a long time (although unlikely).
+        tokio::task::consume_budget().await;
 
-        // grab the command tag and number of rows affected
-        let (command_tag_name, command_tag_count) = parse_command_tag(&command_tag);
-        output.entry("command", command_tag_name);
-        output.entry("rowCount", command_tag_count);
-
-        Ok(ready)
-    })
-}
-
-fn write_fields(json_fields: ValueSer<'_>, columns: &[postgres_client::Column]) {
-    json::value_as_list!(|json_fields| {
-        for c in columns {
-            let json_field = json_fields.entry();
-            json::value_as_object!(|json_field| {
-                json_field.entry("name", c.name());
-                json_field.entry("dataTypeID", c.type_().oid());
-                json_field.entry("tableID", c.table_oid());
-                json_field.entry("columnID", c.column_id());
-                json_field.entry("dataTypeSize", c.type_size());
-                json_field.entry("dataTypeModifier", c.type_modifier());
-                json_field.entry("format", "text");
-            });
-        }
-    });
-}
-
-async fn write_json_rows(
-    json_rows: ValueSer<'_>,
-    row_stream: &mut postgres_client::RowStream<'_>,
-    raw_output: bool,
-    array_mode: bool,
-    max: usize,
-) -> Result<usize, SqlOverHttpError> {
-    json::value_as_list!(|json_rows| {
-        let mut rows = 0;
-        while let Some(row) = row_stream.next().await {
-            let row = row.map_err(SqlOverHttpError::Postgres)?;
-
-            pg_text_row_to_json(json_rows.entry(), &row, raw_output, array_mode)?;
-
-            // assumption: parsing pg text and converting to json takes CPU time.
-            // let's assume it is slightly expensive, so we should consume some cooperative budget.
-            // Especially considering that `RowStream::next` might be pulling from a batch
-            // of rows and never hit the tokio mpsc for a long time (although unlikely).
-            tokio::task::consume_budget().await;
-
-            // we don't have a streaming response support yet so this is to prevent OOM
-            // from a malicious query (eg a cross join)
-            if json_rows.as_buffer().len() > max {
-                return Err(SqlOverHttpError::ResponseTooLarge(max));
-            }
-
-            rows += 1;
+        // we don't have a streaming response support yet so this is to prevent OOM
+        // from a malicious query (eg a cross join)
+        if json_rows.as_buffer().len() > max_bytes {
+            return Err(SqlOverHttpError::ResponseTooLarge(max_bytes));
         }
 
-        Ok(rows)
-    })
+        row_count += 1;
+    }
+    json_rows.finish();
+
+    let query_resp_end = Instant::now();
+
+    let ready = rows.status;
+    let command_tag = rows.command_tag.unwrap_or_default();
+
+    info!(
+        rows = row_count,
+        ?ready,
+        command_tag,
+        acknowledgement = ?(query_acknowledged - query_start),
+        response = ?(query_resp_end - query_start),
+        "finished executing query"
+    );
+
+    let (command_tag_name, command_tag_count) = parse_command_tag(&command_tag);
+    output.entry("command", command_tag_name);
+    output.entry("rowCount", command_tag_count);
+
+    output.finish();
+    Ok(ready)
 }
 
 fn parse_command_tag(command_tag: &str) -> (&str, Option<i64>) {
