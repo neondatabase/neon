@@ -23,7 +23,6 @@ env:
   COPT: '-Werror'
   # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
   E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
-  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
   check-permissions:
@@ -599,7 +598,6 @@ jobs:
         with:
           submodules: true
           ref: ${{ needs.meta.outputs.sha }}
-          token: ${{ secrets.CI_ACCESS_TOKEN }}
 
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
