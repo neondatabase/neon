@@ -60,8 +60,6 @@ struct BatchQueryData {
     queries: Vec<QueryData>,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
 enum Payload {
     Single(QueryData),
     Batch(BatchQueryData),
@@ -499,7 +497,14 @@ async fn handle_db_inner(
                 .observe(HttpDirection::Request, body.len() as f64);
 
             debug!(length = body.len(), "request payload read");
-            let payload: Payload = serde_json::from_slice(&body)?;
+
+            // try batched, then try unbatched.
+            let payload = if let Ok(batch) = serde_json::from_slice(&body) {
+                Payload::Batch(batch)
+            } else {
+                Payload::Single(serde_json::from_slice(&body)?)
+            };
+
             Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
         }
         .map_err(SqlOverHttpError::from),
@@ -1033,55 +1038,38 @@ mod tests {
     #[test]
     fn test_payload() {
         let payload = "{\"query\":\"SELECT * FROM users WHERE name = ?\",\"params\":[\"test\"],\"arrayMode\":true}";
-        let deserialized_payload: Payload = serde_json::from_str(payload).unwrap();
+        let QueryData {
+            query,
+            params,
+            array_mode,
+        } = serde_json::from_str(payload).unwrap();
 
-        match deserialized_payload {
-            Payload::Single(QueryData {
-                query,
-                params,
-                array_mode,
-            }) => {
-                assert_eq!(query, "SELECT * FROM users WHERE name = ?");
-                assert_eq!(params, vec![Some(String::from("test"))]);
-                assert!(array_mode.unwrap());
-            }
-            Payload::Batch(_) => {
-                panic!("deserialization failed: case with single query, one param, and array mode")
-            }
-        }
+        assert_eq!(query, "SELECT * FROM users WHERE name = ?");
+        assert_eq!(params, vec![Some(String::from("test"))]);
+        assert!(array_mode.unwrap());
 
         let payload = "{\"queries\":[{\"query\":\"SELECT * FROM users0 WHERE name = ?\",\"params\":[\"test0\"], \"arrayMode\":false},{\"query\":\"SELECT * FROM users1 WHERE name = ?\",\"params\":[\"test1\"],\"arrayMode\":true}]}";
-        let deserialized_payload: Payload = serde_json::from_str(payload).unwrap();
+        let BatchQueryData { queries } = serde_json::from_str(payload).unwrap();
 
-        match deserialized_payload {
-            Payload::Batch(BatchQueryData { queries }) => {
-                assert_eq!(queries.len(), 2);
-                for (i, query) in queries.into_iter().enumerate() {
-                    assert_eq!(
-                        query.query,
-                        format!("SELECT * FROM users{i} WHERE name = ?")
-                    );
-                    assert_eq!(query.params, vec![Some(format!("test{i}"))]);
-                    assert_eq!(query.array_mode.unwrap(), i > 0);
-                }
-            }
-            Payload::Single(_) => panic!("deserialization failed: case with multiple queries"),
+        assert_eq!(queries.len(), 2);
+        for (i, query) in queries.into_iter().enumerate() {
+            assert_eq!(
+                query.query,
+                format!("SELECT * FROM users{i} WHERE name = ?")
+            );
+            assert_eq!(query.params, vec![Some(format!("test{i}"))]);
+            assert_eq!(query.array_mode.unwrap(), i > 0);
         }
 
         let payload = "{\"query\":\"SELECT 1\"}";
-        let deserialized_payload: Payload = serde_json::from_str(payload).unwrap();
+        let QueryData {
+            query,
+            params,
+            array_mode,
+        } = serde_json::from_str(payload).unwrap();
 
-        match deserialized_payload {
-            Payload::Single(QueryData {
-                query,
-                params,
-                array_mode,
-            }) => {
-                assert_eq!(query, "SELECT 1");
-                assert_eq!(params, vec![]);
-                assert!(array_mode.is_none());
-            }
-            Payload::Batch(_) => panic!("deserialization failed: case with only one query"),
-        }
+        assert_eq!(query, "SELECT 1");
+        assert_eq!(params, vec![]);
+        assert!(array_mode.is_none());
     }
 }
