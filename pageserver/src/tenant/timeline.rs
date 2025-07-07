@@ -2144,14 +2144,31 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Regardless of whether we're going to try_freeze_and_flush
-        // or not, stop ingesting any more data.
+        // cancel walreceiver to stop ingesting more data asap.
+        //
+        // Note that we're accepting a race condition here where we may
+        // do the final flush below, before walreceiver observes the
+        // cancellation and exits.
+        // This means we may open a new InMemoryLayer after the final flush below.
+        // Flush loop is also still running for a short while, so, in theory, it
+        // could also make its way into the upload queue.
+        //
+        // If we wait for the shutdown of the walreceiver before moving on to the
+        // flush, then that would be avoided. But we don't do it because the
+        // walreceiver entertains reads internally, which means that it possibly
+        // depends on the download of layers. Layer download is only sensitive to
+        // the cancellation of the entire timeline, so cancelling the walreceiver
+        // will have no effect on the individual get requests.
+        // This would cause problems when there is a lot of ongoing downloads or
+        // there is S3 unavailabilities, i.e. detach, deletion, etc would hang,
+        // and we can't deallocate resources of the timeline, etc.
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
-            walreceiver.shutdown().await;
+            walreceiver.cancel().await;
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();

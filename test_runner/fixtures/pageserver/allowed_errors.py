@@ -119,6 +119,7 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Fail to resolve tenant shard in attempt.*",
     # Expected warnings when pageserver has not refreshed GC info yet
     ".*pitr LSN/interval not found, skipping force image creation LSN calculation.*",
+    ".*No broker updates received for a while.*",
     *(
         [
             r".*your platform is not a supported production platform, ignoing request for O_DIRECT; this could hide alignment bugs.*"
