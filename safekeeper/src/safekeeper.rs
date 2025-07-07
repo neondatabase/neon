@@ -1013,7 +1013,7 @@ where
             self.state.finish_change(&state).await?;
         }
 
-        if msg.mconf.generation != INVALID_GENERATION && !msg.mconf.contains(self.node_id) {
+        if msg.mconf.generation > self.state.mconf.generation && !msg.mconf.contains(self.node_id) {
             bail!(
                 "refused to switch into {}, node {} is not a member of it",
                 msg.mconf,

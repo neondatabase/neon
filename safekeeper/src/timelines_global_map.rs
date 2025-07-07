@@ -79,7 +79,7 @@ impl GlobalTimelinesState {
                 Err(TimelineError::CreationInProgress(*ttid))
             }
             None => {
-                if self.timeline_tombstones.contains_key(ttid) {
+                if self.has_tombstone(ttid, None) {
                     Err(TimelineError::Deleted(*ttid))
                 } else {
                     Err(TimelineError::NotFound(*ttid))
@@ -106,6 +106,9 @@ impl GlobalTimelinesState {
         self.tenant_tombstones.contains_key(tenant_id)
     }
 
+    /// Check if the state has a tenant or a timeline tombstone.
+    /// If `generation` is provided, check only for tombsotnes with same or higher generation.
+    /// If `generation` is `None`, check for any tombstone.
     fn has_tombstone(
         &self,
         ttid: &TenantTimelineId,
@@ -723,7 +726,10 @@ pub async fn validate_temp_timeline(
 
     if let Some(generation) = generation {
         if control_store.mconf.generation > generation {
-            bail!("generation is higher");
+            bail!(
+                "tmp timeline generation {} is higher than expected {generation}",
+                control_store.mconf.generation
+            );
         }
     }
 

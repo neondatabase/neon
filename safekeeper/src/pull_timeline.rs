@@ -676,7 +676,7 @@ async fn pull_timeline(
         // Switch to provided mconf to guarantee that the timeline will not
         // be deleted by request with older generation.
         // The generation might already be higer than the one in mconf, e.g.
-        // if another membership_switch request was executed between `load_temp_timelin`
+        // if another membership_switch request was executed between `load_temp_timeline`
         // and `membership_switch`, but that's totaly fine. `membership_switch` will
         // ignore switch to older generation.
         timeline.membership_switch(mconf).await?;
