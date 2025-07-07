@@ -129,7 +129,6 @@ pub(crate) static LFC_OFFLOAD_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-
 pub fn collect() -> Vec<MetricFamily> {
     let mut metrics = COMPUTE_CTL_UP.collect();
     metrics.extend(INSTALLED_EXTENSIONS.collect());
