@@ -23,23 +23,24 @@ for i in $(seq 1 "${PARALLEL_COMPUTES}"); do
   COMPUTES+=("compute${i}")
 done
 CURRENT_TMPDIR=$(mktemp -d)
-cp docker-compose.yml docker-compose.yml.bak
-trap 'mv docker-compose.yml.bak docker-compose.yml; rm -rf ${CURRENT_TMPDIR}' EXIT
+trap 'rm -rf ${CURRENT_TMPDIR} docker-compose-parallel.yml' EXIT
 if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
+  export COMPOSE_FILE=docker-compose-parallel.yml
+  cp docker-compose.yml docker-compose-parallel.yml
   # Replace the environment variable PARALLEL_COMPUTES with the actual value
-  yq eval -i ".services.compute_is_ready.environment |=  map(select(. | test(\"^PARALLEL_COMPUTES=\") | not)) + [\"PARALLEL_COMPUTES=${PARALLEL_COMPUTES}\"]" docker-compose.yml
+  yq eval -i ".services.compute_is_ready.environment |=  map(select(. | test(\"^PARALLEL_COMPUTES=\") | not)) + [\"PARALLEL_COMPUTES=${PARALLEL_COMPUTES}\"]" ${COMPOSE_FILE}
   for i in $(seq 2 "${PARALLEL_COMPUTES}"); do
     # Duplicate compute1 as compute${i} for parallel execution
-    yq eval -i ".services.compute${i} = .services.compute1" docker-compose.yml
+    yq eval -i ".services.compute${i} = .services.compute1" ${COMPOSE_FILE}
     # We don't need these sections, so delete them
-    yq eval -i "(del .services.compute${i}.build) | (del .services.compute${i}.ports) | (del .services.compute${i}.networks)" docker-compose.yml
+    yq eval -i "(del .services.compute${i}.build) | (del .services.compute${i}.ports) | (del .services.compute${i}.networks)" ${COMPOSE_FILE}
     # Let the compute 1 be the only dependence
-    yq eval -i ".services.compute${i}.depends_on = [\"compute1\"]" docker-compose.yml
+    yq eval -i ".services.compute${i}.depends_on = [\"compute1\"]" ${COMPOSE_FILE}
     # Set RUN_PARALLEL=true for compute2. They will generate tenant_id and timeline_id to avoid using the same as other computes
-    yq eval -i ".services.compute${i}.environment += [\"RUN_PARALLEL=true\"]" docker-compose.yml
+    yq eval -i ".services.compute${i}.environment += [\"RUN_PARALLEL=true\"]" ${COMPOSE_FILE}
     # Remove TENANT_ID and TIMELINE_ID from the environment variables of the generated computes
     # They will create new TENANT_ID and TIMELINE_ID anyway.
-    yq eval -i ".services.compute${i}.environment |= map(select(. | (test(\"^TENANT_ID=\") or test(\"^TIMELINE_ID=\")) | not))" docker-compose.yml
+    yq eval -i ".services.compute${i}.environment |= map(select(. | (test(\"^TENANT_ID=\") or test(\"^TIMELINE_ID=\")) | not))" ${COMPOSE_FILE}
   done
 fi
 PSQL_OPTION="-h localhost -U cloud_admin -p 55433 -d postgres"
