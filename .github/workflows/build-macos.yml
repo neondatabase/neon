@@ -22,6 +22,7 @@ on:
 env:
   RUST_BACKTRACE: 1
   COPT: '-Werror'
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 # TODO: move `check-*` and `files-changed` jobs to the "Caller" Workflow
 # We should care about that as Github has limitations:

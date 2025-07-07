@@ -23,6 +23,7 @@ env:
   COPT: '-Werror'
   # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
   E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
   check-permissions:
