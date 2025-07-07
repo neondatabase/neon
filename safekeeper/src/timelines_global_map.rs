@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
 use camino_tempfile::Utf8TempDir;
-use safekeeper_api::membership::{Configuration, INITIAL_GENERATION, SafekeeperGeneration};
+use safekeeper_api::membership::{Configuration, SafekeeperGeneration};
 use safekeeper_api::models::{SafekeeperUtilization, TimelineDeleteResult};
 use safekeeper_api::{ServerInfo, membership};
 use tokio::fs;
