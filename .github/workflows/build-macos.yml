@@ -99,7 +99,9 @@ jobs:
       # toes, ensure that the toolchain is up-to-date beforehand.
       - name: Update rust toolchain
         run: |
-          rustup update
+          rustup --version &&
+          rustup update &&
+          rustup show
 
       - name: Cache cargo deps
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
