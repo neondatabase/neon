@@ -196,7 +196,12 @@ impl<'buf> ObjectSer<'buf> {
 
     /// Reset the buffer back to before this object was started.
     #[inline]
-    pub fn rollback(self) {}
+    pub fn rollback(self) -> ValueSer<'buf> {
+        // Do not fully reset the value, only reset it to before the `{`.
+        // This ensures any `,` before this value are not clobbered.
+        self.value.buf.truncate(self.start - 1);
+        self.value
+    }
 
     /// Finish the object ser.
     #[inline]
@@ -257,7 +262,12 @@ impl<'buf> ListSer<'buf> {
 
     /// Reset the buffer back to before this object was started.
     #[inline]
-    pub fn rollback(self) {}
+    pub fn rollback(self) -> ValueSer<'buf> {
+        // Do not fully reset the value, only reset it to before the `[`.
+        // This ensures any `,` before this value are not clobbered.
+        self.value.buf.truncate(self.start - 1);
+        self.value
+    }
 
     /// Finish the object ser.
     #[inline]
@@ -318,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback() {
+    fn rollback_on_drop() {
         let res = crate::value_to_string!(|list| {
             crate::value_as_list!(|list| {
                 list.entry().value("bar");
@@ -342,6 +352,27 @@ mod tests {
         });
 
         assert_eq!(res, r#"["bar",null]"#);
+    }
+
+    #[test]
+    fn rollback() {
+        let res = crate::value_to_string!(|list| {
+            crate::value_as_list!(|list| {
+                let list_entry = list.entry();
+                list_entry.value(1_i32);
+
+                let list_entry = list.entry();
+                let list_entry = {
+                    let mut nested_obj = list_entry.object();
+                    nested_obj.entry("foo", "bar");
+                    nested_obj.rollback()
+                };
+
+                list_entry.value(2_i32);
+            })
+        });
+
+        assert_eq!(res, r#"[1,2]"#);
     }
 
     #[test]
