@@ -54,7 +54,7 @@ else
     printf '%s\n' "${result}" | jq .
   fi
 
-  if [[ ${RUN_PARALLEL:-false} != true ]]; then
+  if [[ "${RUN_PARALLEL:-false}" != "true" ]]; then
     echo "Check if a timeline present"
     PARAMS=(
          -X GET
