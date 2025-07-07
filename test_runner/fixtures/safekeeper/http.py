@@ -112,18 +112,12 @@ class TimelineCreateRequest:
 class TimelineMembershipSwitchResponse:
     previous_conf: MembershipConfiguration
     current_conf: MembershipConfiguration
-    last_log_term: int
-    flush_lsn: Lsn
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> TimelineMembershipSwitchResponse:
         previous_conf = MembershipConfiguration.from_json(d["previous_conf"])
         current_conf = MembershipConfiguration.from_json(d["current_conf"])
-        last_log_term = d["last_log_term"]
-        flush_lsn = Lsn(d["flush_lsn"])
-        return TimelineMembershipSwitchResponse(
-            previous_conf, current_conf, last_log_term, flush_lsn
-        )
+        return TimelineMembershipSwitchResponse(previous_conf, current_conf)
 
 
 class SafekeeperHttpClient(requests.Session, MetricsGetter):

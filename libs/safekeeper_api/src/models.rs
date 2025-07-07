@@ -221,7 +221,7 @@ pub struct TimelineMembershipSwitchRequest {
 pub struct TimelineMembershipSwitchResponse {
     pub previous_conf: Configuration,
     pub current_conf: Configuration,
-    pub last_log_term: Term,
+    pub term: Term,
     pub flush_lsn: Lsn,
 }
 
