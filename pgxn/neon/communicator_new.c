@@ -131,6 +131,8 @@ static void *bounce_write_if_needed(void *buffer);
 PGDLLEXPORT void communicator_new_bgworker_main(Datum main_arg);
 static void communicator_new_backend_exit(int code, Datum arg);
 
+static char *print_neon_io_request(NeonIORequest *request);
+
 /*
  * Request ID assignment.
  *
@@ -605,7 +607,7 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 	if (request_idx == -1)
 	{
 		/* -1 means the request was satisfied immediately. */
-		elog(DEBUG4, "communicator request %lu was satisfied immediately", request->rel_exists.request_id);
+		elog(DEBUG4, "communicator request %s was satisfied immediately", print_neon_io_request(request));
 		return -1;
 	}
 	Assert(request_idx == my_next_slot_idx);
@@ -615,7 +617,8 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 	inflight_requests[num_inflight_requests] = request_idx;
 	num_inflight_requests++;
 
-	elog(LOG, "started communicator request %lu at slot %d", request->rel_exists.request_id, request_idx);
+	elog(LOG, "started communicator request %s at slot %d", print_neon_io_request(request), request_idx);
+
 	return request_idx;
 }
 
@@ -1153,6 +1156,121 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum)
 			break;
 	}
 }
+
+
+/* Debugging functions */
+
+static char *
+print_neon_io_request(NeonIORequest *request)
+{
+	switch (request->tag)
+	{
+		case NeonIORequest_Empty:
+			return pstrdup("Empty");
+			break;
+		case NeonIORequest_RelExists:
+			{
+				CRelExistsRequest *r = &request->rel_exists;
+
+				return psprintf("RelExists: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+			}
+		case NeonIORequest_RelSize:
+			{
+				CRelSizeRequest *r = &request->rel_size;
+
+				return psprintf("RelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+			}
+		case NeonIORequest_GetPageV:
+			{
+				CGetPageVRequest *r = &request->get_page_v;
+
+				return psprintf("GetPageV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+			}
+		case NeonIORequest_PrefetchV:
+			{
+				CPrefetchVRequest *r = &request->prefetch_v;
+
+				return psprintf("PrefetchV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+			}
+		case NeonIORequest_DbSize:
+			{
+				CDbSizeRequest *r = &request->db_size;
+
+				return psprintf("PrefetchV: req " UINT64_FORMAT " db %u",
+								r->request_id, r->db_oid);
+			}
+		case NeonIORequest_WritePage:
+			{
+				CWritePageRequest *r = &request->write_page;
+
+				return psprintf("WritePage: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+								LSN_FORMAT_ARGS(r->lsn));
+			}
+		case NeonIORequest_RelExtend:
+			{
+				CRelExtendRequest *r = &request->rel_extend;
+
+				return psprintf("RelExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+								LSN_FORMAT_ARGS(r->lsn));
+			}
+		case NeonIORequest_RelZeroExtend:
+			{
+				CRelZeroExtendRequest *r = &request->rel_zero_extend;
+
+				return psprintf("RelZeroExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u-%u lsn %X/%X",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks,
+								LSN_FORMAT_ARGS(r->lsn));
+			}
+		case NeonIORequest_RelCreate:
+			{
+				CRelCreateRequest *r = &request->rel_create;
+
+				return psprintf("RelCreate: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+			}
+		case NeonIORequest_RelTruncate:
+			{
+				CRelTruncateRequest *r = &request->rel_truncate;
+
+				return psprintf("RelTruncate: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->nblocks);
+			}
+		case NeonIORequest_RelUnlink:
+			{
+				CRelUnlinkRequest *r = &request->rel_unlink;
+
+				return psprintf("RelUnlink: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+			}
+		case NeonIORequest_ForgetCache:
+			{
+				CForgetCacheRequest *r = &request->forget_cache;
+
+				return psprintf("ForgetCache: req " UINT64_FORMAT " rel %u/%u/%u.%u blocks: %u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number,
+					r->nblocks);
+			}
+	}
+	return psprintf("Unknown request type %u", request->tag);
+}
+
 
 /*
  * The worker process can read / write shared buffers directly. But if smgrread() or
