@@ -371,9 +371,28 @@ paths:
       summary: Terminate Postgres and wait for it to exit
       description: ""
       operationId: terminate
+      parameters:
+        - name: mode
+          in: query
+          description: "Terminate mode: fast (wait 30s before returning) and immediate"
+          required: false
+          schema:
+            type: string
+            enum: ["fast", "immediate"]
+            default: fast
       responses:
         200:
           description: Result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TerminateResponse"
+        201:
+          description: Result if compute is already terminated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TerminateResponse"
         412:
           description: "wrong state"
           content:
@@ -659,6 +678,17 @@ components:
           type: string
           description: Role name.
           example: "neon"
+
+    TerminateResponse:
+      type: object
+      required:
+        - lsn
+      properties:
+        lsn:
+          type: string
+          nullable: true
+          description: "last WAL flush LSN"
+          example: "0/028F10D8"
 
     SetRoleGrantsResponse:
       type: object

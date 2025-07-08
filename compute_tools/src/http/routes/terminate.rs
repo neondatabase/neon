@@ -24,7 +24,10 @@ pub(in crate::http) async fn terminate(
     {
         let mut state = compute.state.lock().unwrap();
         if state.status == ComputeStatus::Terminated {
-            return JsonResponse::success(StatusCode::CREATED, state.terminate_flush_lsn);
+            let response = TerminateResponse {
+                lsn: state.terminate_flush_lsn,
+            };
+            return JsonResponse::success(StatusCode::CREATED, response);
         }
 
         if !matches!(state.status, ComputeStatus::Empty | ComputeStatus::Running) {

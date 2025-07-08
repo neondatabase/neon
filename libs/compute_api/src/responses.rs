@@ -121,9 +121,9 @@ pub enum TerminateMode {
     Immediate,
 }
 
-impl Into<ComputeStatus> for TerminateMode {
-    fn into(self) -> ComputeStatus {
-        match self {
+impl From<TerminateMode> for ComputeStatus {
+    fn from(mode: TerminateMode) -> Self {
+        match mode {
             TerminateMode::Fast => ComputeStatus::TerminationPendingFast,
             TerminateMode::Immediate => ComputeStatus::TerminationPendingImmediate,
         }
