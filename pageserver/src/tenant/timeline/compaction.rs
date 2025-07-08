@@ -2530,7 +2530,10 @@ impl Timeline {
             return Err(CompactionError::ShuttingDown);
         }
 
-        let (dense_ks, _sparse_ks) = self.collect_keyspace(end_lsn, ctx).await?;
+        let (dense_ks, _sparse_ks) = self
+            .collect_keyspace(end_lsn, ctx)
+            .await
+            .map_err(CompactionError::from_collect_keyspace)?;
         // TODO(chi): ignore sparse_keyspace for now, compact it in the future.
         let mut adaptor = TimelineAdaptor::new(self, (end_lsn, dense_ks));
 
