@@ -18,7 +18,6 @@ use postgres_client::{
     GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, RowStream, Transaction,
 };
 use serde::Serialize;
-use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
@@ -48,9 +47,8 @@ use crate::util::run_until_cancelled;
 #[serde(rename_all = "camelCase")]
 struct QueryData {
     query: String,
-    #[serde(deserialize_with = "bytes_to_pg_text")]
     #[serde(default)]
-    params: Vec<Option<String>>,
+    params: Vec<Box<RawValue>>,
     #[serde(default)]
     array_mode: Option<bool>,
 }
@@ -60,23 +58,12 @@ struct BatchQueryData {
     queries: Vec<QueryData>,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
 enum Payload {
     Single(QueryData),
     Batch(BatchQueryData),
 }
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
-
-fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    // TODO: consider avoiding the allocation here.
-    let json: Vec<Value> = serde::de::Deserialize::deserialize(deserializer)?;
-    Ok(json_to_pg_text(json))
-}
 
 pub(crate) async fn handle(
     config: &'static ProxyConfig,
@@ -499,7 +486,14 @@ async fn handle_db_inner(
                 .observe(HttpDirection::Request, body.len() as f64);
 
             debug!(length = body.len(), "request payload read");
-            let payload: Payload = serde_json::from_slice(&body)?;
+
+            // try unbatched, then try batched.
+            let payload = if let Ok(batch) = serde_json::from_slice(&body) {
+                Payload::Batch(batch)
+            } else {
+                Payload::Single(serde_json::from_slice(&body)?)
+            };
+
             Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
         }
         .map_err(SqlOverHttpError::from),
@@ -887,7 +881,8 @@ async fn query_to_json<T: GenericClient>(
 ) -> Result<(ReadyForQueryStatus, impl Serialize + use<T>), SqlOverHttpError> {
     let query_start = Instant::now();
 
-    let query_params = data.params;
+    let query_params = json_to_pg_text(data.params);
+
     let mut row_stream = client
         .query_raw_txt(&data.query, query_params)
         .await
@@ -1033,55 +1028,38 @@ mod tests {
     #[test]
     fn test_payload() {
         let payload = "{\"query\":\"SELECT * FROM users WHERE name = ?\",\"params\":[\"test\"],\"arrayMode\":true}";
-        let deserialized_payload: Payload = serde_json::from_str(payload).unwrap();
+        let QueryData {
+            query,
+            params,
+            array_mode,
+        } = serde_json::from_str(payload).unwrap();
 
-        match deserialized_payload {
-            Payload::Single(QueryData {
-                query,
-                params,
-                array_mode,
-            }) => {
-                assert_eq!(query, "SELECT * FROM users WHERE name = ?");
-                assert_eq!(params, vec![Some(String::from("test"))]);
-                assert!(array_mode.unwrap());
-            }
-            Payload::Batch(_) => {
-                panic!("deserialization failed: case with single query, one param, and array mode")
-            }
-        }
+        assert_eq!(query, "SELECT * FROM users WHERE name = ?");
+        assert_eq!(params[0].get(), "\"test\"");
+        assert!(array_mode.unwrap());
 
         let payload = "{\"queries\":[{\"query\":\"SELECT * FROM users0 WHERE name = ?\",\"params\":[\"test0\"], \"arrayMode\":false},{\"query\":\"SELECT * FROM users1 WHERE name = ?\",\"params\":[\"test1\"],\"arrayMode\":true}]}";
-        let deserialized_payload: Payload = serde_json::from_str(payload).unwrap();
+        let BatchQueryData { queries } = serde_json::from_str(payload).unwrap();
 
-        match deserialized_payload {
-            Payload::Batch(BatchQueryData { queries }) => {
-                assert_eq!(queries.len(), 2);
-                for (i, query) in queries.into_iter().enumerate() {
-                    assert_eq!(
-                        query.query,
-                        format!("SELECT * FROM users{i} WHERE name = ?")
-                    );
-                    assert_eq!(query.params, vec![Some(format!("test{i}"))]);
-                    assert_eq!(query.array_mode.unwrap(), i > 0);
-                }
-            }
-            Payload::Single(_) => panic!("deserialization failed: case with multiple queries"),
+        assert_eq!(queries.len(), 2);
+        for (i, query) in queries.into_iter().enumerate() {
+            assert_eq!(
+                query.query,
+                format!("SELECT * FROM users{i} WHERE name = ?")
+            );
+            assert_eq!(query.params[0].get(), &format!("\"test{i}\""));
+            assert_eq!(query.array_mode.unwrap(), i > 0);
         }
 
         let payload = "{\"query\":\"SELECT 1\"}";
-        let deserialized_payload: Payload = serde_json::from_str(payload).unwrap();
+        let QueryData {
+            query,
+            params,
+            array_mode,
+        } = serde_json::from_str(payload).unwrap();
 
-        match deserialized_payload {
-            Payload::Single(QueryData {
-                query,
-                params,
-                array_mode,
-            }) => {
-                assert_eq!(query, "SELECT 1");
-                assert_eq!(params, vec![]);
-                assert!(array_mode.is_none());
-            }
-            Payload::Batch(_) => panic!("deserialization failed: case with only one query"),
-        }
+        assert_eq!(query, "SELECT 1");
+        assert!(params.is_empty());
+        assert!(array_mode.is_none());
     }
 }
