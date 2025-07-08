@@ -549,11 +549,14 @@ components:
       type: string
       enum:
         - empty
-        - init
-        - failed
-        - running
         - configuration_pending
+        - init
+        - running
         - configuration
+        - failed
+        - termination_pending_fast
+        - termination_pending_immediate
+        - terminated
       example: running
 
     ExtensionInstallRequest:
