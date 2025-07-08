@@ -586,6 +586,28 @@ pub(crate) enum PageReconstructError {
     MissingKey(Box<MissingKeyError>),
 }
 
+impl PageReconstructError {
+    pub(crate) fn is_cancel(&self) -> bool {
+        match self {
+            PageReconstructError::Other(_) => false,
+            PageReconstructError::AncestorLsnTimeout(e) => e.is_cancel(),
+            PageReconstructError::Cancelled => true,
+            PageReconstructError::WalRedo(_) => false,
+            PageReconstructError::MissingKey(_) => false,
+        }
+    }
+    #[allow(dead_code)] // we use the is_cancel + into_anyhow pattern in quite a few places, this one will follow soon enough
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            PageReconstructError::Other(e) => e,
+            PageReconstructError::AncestorLsnTimeout(e) => e.into_anyhow(),
+            PageReconstructError::Cancelled => anyhow::Error::new(self),
+            PageReconstructError::WalRedo(e) => e,
+            PageReconstructError::MissingKey(_) => anyhow::Error::new(self),
+        }
+    }
+}
+
 impl From<anyhow::Error> for PageReconstructError {
     fn from(value: anyhow::Error) -> Self {
         // with walingest.rs many PageReconstructError are wrapped in as anyhow::Error
@@ -736,17 +758,6 @@ impl std::fmt::Display for MissingKeyError {
         }
 
         Ok(())
-    }
-}
-
-impl PageReconstructError {
-    /// Returns true if this error indicates a tenant/timeline shutdown alike situation
-    pub(crate) fn is_stopping(&self) -> bool {
-        use PageReconstructError::*;
-        match self {
-            Cancelled => true,
-            Other(_) | AncestorLsnTimeout(_) | WalRedo(_) | MissingKey(_) => false,
-        }
     }
 }
 
@@ -952,13 +963,35 @@ pub enum WaitLsnError {
     Timeout(String),
 }
 
+impl WaitLsnError {
+    pub(crate) fn is_cancel(&self) -> bool {
+        match self {
+            WaitLsnError::Shutdown => true,
+            WaitLsnError::BadState(timeline_state) => match timeline_state {
+                TimelineState::Loading => false,
+                TimelineState::Active => false,
+                TimelineState::Stopping => true,
+                TimelineState::Broken { .. } => false,
+            },
+            WaitLsnError::Timeout(_) => false,
+        }
+    }
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            WaitLsnError::Shutdown => anyhow::Error::new(self),
+            WaitLsnError::BadState(_) => anyhow::Error::new(self),
+            WaitLsnError::Timeout(_) => anyhow::Error::new(self),
+        }
+    }
+}
+
 impl From<WaitLsnError> for tonic::Status {
     fn from(err: WaitLsnError) -> Self {
         use tonic::Code;
-        let code = match &err {
-            WaitLsnError::Timeout(_) => Code::Internal,
-            WaitLsnError::BadState(_) => Code::Internal,
-            WaitLsnError::Shutdown => Code::Unavailable,
+        let code = if err.is_cancel() {
+            Code::Unavailable
+        } else {
+            Code::Internal
         };
         tonic::Status::new(code, err.to_string())
     }
@@ -2068,10 +2101,6 @@ impl Timeline {
                 // Covered by the `Err(e) if e.is_cancel()` branch.
             }
             Err(CompactionError::Other(_)) => {
-                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
-            }
-            Err(CompactionError::CollectKeySpaceError(_)) => {
-                // Cancelled errors are covered by the `Err(e) if e.is_cancel()` branch.
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
         };
@@ -5245,7 +5274,26 @@ impl Timeline {
             ));
         }
 
-        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
+        let (dense_ks, sparse_ks) = self
+            .collect_keyspace(lsn, ctx)
+            .await
+            .inspect_err(|e| {
+                if matches!(
+                    e,
+                    CollectKeySpaceError::Decode(_)
+                        | CollectKeySpaceError::PageRead(
+                            PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                        )
+                ) {
+                    // Alert on critical errors that indicate data corruption.
+                    critical_timeline!(
+                        self.tenant_shard_id,
+                        self.timeline_id,
+                        "could not compact, repartitioning keyspace failed: {e:?}"
+                    );
+                }
+            })
+            .map_err(CompactionError::from_collect_keyspace)?;
         let dense_partitioning = dense_ks.partition(
             &self.shard_identity,
             partition_size,
@@ -6010,9 +6058,6 @@ impl Drop for Timeline {
 pub(crate) enum CompactionError {
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
-    /// Compaction cannot be done right now; page reconstruction and so on.
-    #[error("Failed to collect keyspace: {0}")]
-    CollectKeySpaceError(#[from] CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
 }
@@ -6020,27 +6065,15 @@ pub(crate) enum CompactionError {
 impl CompactionError {
     /// Errors that can be ignored, i.e., cancel and shutdown.
     pub fn is_cancel(&self) -> bool {
-        matches!(
-            self,
-            Self::ShuttingDown
-                | Self::CollectKeySpaceError(CollectKeySpaceError::Cancelled)
-                | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
-                    PageReconstructError::Cancelled
-                ))
-        )
+        matches!(self, Self::ShuttingDown)
     }
 
-    /// Critical errors that indicate data corruption.
-    pub fn is_critical(&self) -> bool {
-        matches!(
-            self,
-            Self::CollectKeySpaceError(
-                CollectKeySpaceError::Decode(_)
-                    | CollectKeySpaceError::PageRead(
-                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
-                    )
-            )
-        )
+    pub fn from_collect_keyspace(err: CollectKeySpaceError) -> Self {
+        if err.is_cancel() {
+            Self::ShuttingDown
+        } else {
+            Self::Other(err.into_anyhow())
+        }
     }
 }
 
