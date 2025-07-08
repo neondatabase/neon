@@ -49,8 +49,9 @@ extern void communicator_new_rel_extend(NRelFileInfo rinfo, ForkNumber forkNum, 
 extern void communicator_new_rel_zeroextend(NRelFileInfo rinfo, ForkNumber forkNum,
 											BlockNumber blockno, BlockNumber nblocks,
 											XLogRecPtr lsn);
-extern void communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum);
-extern void communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks);
-extern void communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum);
+extern void communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr lsn);
+extern void communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks, XLogRecPtr lsn);
+extern void communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr lsn);
+extern void communicator_new_forget_cache(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks, XLogRecPtr lsn);
 
 #endif							/* COMMUNICATOR_NEW_H */

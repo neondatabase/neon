@@ -28,6 +28,9 @@ pub enum NeonIORequest {
     RelCreate(CRelCreateRequest),
     RelTruncate(CRelTruncateRequest),
     RelUnlink(CRelUnlinkRequest),
+
+    // Other requests
+    ForgetCache(CForgetCacheRequest),
 }
 
 #[repr(C)]
@@ -72,6 +75,7 @@ impl NeonIORequest {
             RelCreate(req) => req.request_id,
             RelTruncate(req) => req.request_id,
             RelUnlink(req) => req.request_id,
+            ForgetCache(req) => req.request_id,
         }
     }
 }
@@ -187,7 +191,6 @@ pub struct CPrefetchVRequest {
 pub struct CDbSizeRequest {
     pub request_id: u64,
     pub db_oid: COid,
-    pub request_lsn: CLsn,
 }
 
 #[repr(C)]
@@ -241,6 +244,7 @@ pub struct CRelCreateRequest {
     pub db_oid: COid,
     pub rel_number: u32,
     pub fork_number: u8,
+    pub lsn: CLsn,
 }
 
 #[repr(C)]
@@ -252,6 +256,7 @@ pub struct CRelTruncateRequest {
     pub rel_number: u32,
     pub fork_number: u8,
     pub nblocks: u32,
+    pub lsn: CLsn,
 }
 
 #[repr(C)]
@@ -262,8 +267,7 @@ pub struct CRelUnlinkRequest {
     pub db_oid: COid,
     pub rel_number: u32,
     pub fork_number: u8,
-    pub block_number: u32,
-    pub nblocks: u32,
+    pub lsn: CLsn,
 }
 
 impl CRelExistsRequest {
@@ -366,6 +370,30 @@ impl CRelTruncateRequest {
 }
 
 impl CRelUnlinkRequest {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
+            spcnode: self.spc_oid,
+            dbnode: self.db_oid,
+            relnode: self.rel_number,
+            forknum: self.fork_number,
+        }
+    }
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CForgetCacheRequest {
+    pub request_id: u64,
+    pub spc_oid: COid,
+    pub db_oid: COid,
+    pub rel_number: u32,
+    pub fork_number: u8,
+    pub nblocks: u32,
+    pub lsn: CLsn,
+}
+
+impl CForgetCacheRequest {
     pub fn reltag(&self) -> page_api::RelTag {
         page_api::RelTag {
             spcnode: self.spc_oid,

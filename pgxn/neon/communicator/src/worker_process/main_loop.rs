@@ -359,8 +359,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 {
                     Ok(nblocks) => {
                         // update the cache
-                        tracing::info!("updated relsize for {:?} in cache: {}", rel, nblocks);
-                        self.cache.remember_rel_size(&rel, nblocks);
+                        tracing::info!("updated relsize for {:?} in cache: {}, lsn {}", rel, nblocks, read_lsn);
+                        self.cache.remember_rel_size(&rel, nblocks, not_modified_since);
 
                         NeonIOResult::RelSize(nblocks)
                     }
@@ -457,7 +457,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     .remember_page(&rel, req.block_number, req.src, Lsn(req.lsn), true)
                     .await;
                 self.cache
-                    .remember_rel_size(&req.reltag(), req.block_number + 1);
+                    .remember_rel_size(&req.reltag(), req.block_number + 1, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelZeroExtend(req) => {
@@ -466,31 +466,37 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     .inc_by(req.nblocks as u64);
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                // TODO: I think we should put the empty pages to the cache, or at least
-                // update the last-written LSN.
+                // TODO: We could put the empty pages to the cache. Maybe have
+                // a marker on the block entries for all-zero pages, instead of
+                // actually storing the empty pages.
                 self.cache
-                    .remember_rel_size(&req.reltag(), req.block_number + req.nblocks);
+                    .remember_rel_size(&req.reltag(), req.block_number + req.nblocks, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelCreate(req) => {
                 self.request_rel_create_counter.inc();
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                self.cache.remember_rel_size(&req.reltag(), 0);
+                self.cache.remember_rel_size(&req.reltag(), 0, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelTruncate(req) => {
                 self.request_rel_truncate_counter.inc();
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                self.cache.remember_rel_size(&req.reltag(), req.nblocks);
+                self.cache.remember_rel_size(&req.reltag(), req.nblocks, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelUnlink(req) => {
                 self.request_rel_unlink_counter.inc();
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                self.cache.forget_rel(&req.reltag());
+                self.cache.forget_rel(&req.reltag(), None, Lsn(req.lsn));
+                NeonIOResult::WriteOK
+            }
+            NeonIORequest::ForgetCache(req) => {
+                // TODO: need to grab an io-in-progress lock for this? I guess not
+                self.cache.forget_rel(&req.reltag(), Some(req.nblocks), Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
         }

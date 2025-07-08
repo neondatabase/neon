@@ -292,6 +292,7 @@ extern int64 neon_dbsize(Oid dbNode);
 extern void neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
 								  BlockNumber blkno, neon_request_lsns *output,
 								  BlockNumber nblocks);
+extern XLogRecPtr neon_get_write_lsn(void);
 
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);

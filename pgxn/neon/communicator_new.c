@@ -1061,7 +1061,7 @@ communicator_new_rel_zeroextend(NRelFileInfo rinfo, ForkNumber forkNum, BlockNum
 }
 
 void
-communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum)
+communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr lsn)
 {
 	NeonIORequest request = {
 		.tag = NeonIORequest_RelCreate,
@@ -1071,6 +1071,7 @@ communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum)
 			.db_oid = NInfoGetDbOid(rinfo),
 			.rel_number = NInfoGetRelNumber(rinfo),
 			.fork_number = forkNum,
+			.lsn = lsn,
 		}
 	};
 	NeonIOResult result;
@@ -1093,7 +1094,7 @@ communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum)
 }
 
 void
-communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks)
+communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks, XLogRecPtr lsn)
 {
 	NeonIORequest request = {
 		.tag = NeonIORequest_RelTruncate,
@@ -1104,6 +1105,7 @@ communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 			.rel_number = NInfoGetRelNumber(rinfo),
 			.fork_number = forkNum,
 			.nblocks = nblocks,
+			.lsn = lsn,
 		}
 	};
 	NeonIOResult result;
@@ -1126,7 +1128,7 @@ communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 }
 
 void
-communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum)
+communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr lsn)
 {
 	NeonIORequest request = {
 		.tag = NeonIORequest_RelUnlink,
@@ -1136,6 +1138,7 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum)
 			.db_oid = NInfoGetDbOid(rinfo),
 			.rel_number = NInfoGetRelNumber(rinfo),
 			.fork_number = forkNum,
+			.lsn = lsn,
 		}
 	};
 	NeonIOResult result;
@@ -1157,6 +1160,39 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum)
 	}
 }
 
+void
+communicator_new_forget_cache(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks, XLogRecPtr lsn)
+{
+	NeonIORequest request = {
+		.tag = NeonIORequest_ForgetCache,
+		.forget_cache = {
+			.request_id = assign_request_id(),
+			.spc_oid = NInfoGetSpcOid(rinfo),
+			.db_oid = NInfoGetDbOid(rinfo),
+			.rel_number = NInfoGetRelNumber(rinfo),
+			.fork_number = forkNum,
+			.nblocks = nblocks,
+			.lsn = lsn,
+		}
+	};
+	NeonIOResult result;
+
+	perform_request(&request, &result);
+	switch (result.tag)
+	{
+		case NeonIOResult_WriteOK:
+			return;
+		case NeonIOResult_Error:
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not forget cache for rel %u/%u/%u.%u: %s",
+							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+			break;
+		default:
+			elog(ERROR, "unexpected result for ForgetCache operation: %d", result.tag);
+			break;
+	}
+}
 
 /* Debugging functions */
 

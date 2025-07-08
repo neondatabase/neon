@@ -502,6 +502,37 @@ nm_adjust_lsn(XLogRecPtr lsn)
 	return lsn;
 }
 
+/*
+ * Get a LSN to use to stamp an operation like relation create or truncate.
+ * On operations on individual pages we use the LSN of the page, but when
+ * e.g. smgrcreate() is called, we have to do something else.
+ */
+XLogRecPtr
+neon_get_write_lsn(void)
+{
+	XLogRecPtr	lsn;
+
+	if (RecoveryInProgress())
+	{
+		/*
+		 * FIXME: v14 doesn't have GetCurrentReplayRecPtr(). Options:
+		 * - add it in our fork
+		 * - store a magic value that means that you must use
+		 *   current latest possible LSN at the time that the request
+		 *   on this thing is made again (or some other recent enough
+		 *   lsn).
+		 */
+#if PG_VERSION_NUM >= 150000
+		lsn = GetCurrentReplayRecPtr(NULL);
+#else
+		lsn = GetXLogReplayRecPtr(NULL); /* FIXME: this is wrong, see above */
+#endif
+	}
+	else
+		lsn = GetXLogInsertRecPtr();
+
+	return lsn;
+}
 
 /*
  * Return LSN for requesting pages and number of blocks from page server
@@ -824,13 +855,15 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 	if (neon_enable_new_communicator)
 	{
+		XLogRecPtr	lsn = neon_get_write_lsn();
+
 		if (isRedo)
 		{
 			if (!communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum))
-				communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
+				communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum, lsn);
 		}
 		else
-			communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
+			communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum, lsn);
 	}
 	else
 	{
@@ -902,7 +935,9 @@ neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
 	{
 		if (neon_enable_new_communicator)
 		{
-			communicator_new_rel_unlink(InfoFromNInfoB(rinfo), forkNum);
+			XLogRecPtr	lsn = neon_get_write_lsn();
+
+			communicator_new_rel_unlink(InfoFromNInfoB(rinfo), forkNum, lsn);
 		}
 		else
 			forget_cached_relsize(InfoFromNInfoB(rinfo), forkNum);
@@ -1962,7 +1997,9 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, Blo
 
 	if (neon_enable_new_communicator)
 	{
-		communicator_new_rel_truncate(InfoFromSMgrRel(reln), forknum, nblocks);
+		XLogRecPtr	lsn = neon_get_write_lsn();
+
+		communicator_new_rel_truncate(InfoFromSMgrRel(reln), forknum, nblocks, lsn);
 	}
 	else
 	{
@@ -2226,12 +2263,15 @@ neon_end_unlogged_build(SMgrRelation reln)
 		nblocks = mdnblocks(reln, MAIN_FORKNUM);
 		recptr = GetXLogInsertRecPtr();
 
-		neon_set_lwlsn_block_range(recptr,
-								   InfoFromNInfoB(rinfob),
-								   MAIN_FORKNUM, 0, nblocks);
-		neon_set_lwlsn_relation(recptr,
-								InfoFromNInfoB(rinfob),
-								MAIN_FORKNUM);
+		if (!neon_enable_new_communicator)
+		{
+			neon_set_lwlsn_block_range(recptr,
+									   InfoFromNInfoB(rinfob),
+									   MAIN_FORKNUM, 0, nblocks);
+			neon_set_lwlsn_relation(recptr,
+									InfoFromNInfoB(rinfob),
+									MAIN_FORKNUM);
+		}
 
 		/* Remove local copy */
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
@@ -2240,8 +2280,12 @@ neon_end_unlogged_build(SMgrRelation reln)
 				 RelFileInfoFmt(InfoFromNInfoB(rinfob)),
 				 forknum);
 
-			// FIXME: also do this with the new communicator
-			if (!neon_enable_new_communicator)
+			if (neon_enable_new_communicator)
+			{
+				/* TODO: we could update the cache with the size, since we have it at hand */
+				communicator_new_forget_cache(InfoFromSMgrRel(reln), forknum, nblocks, recptr);
+			}
+			else
 			{
 				forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
 				lfc_invalidate(InfoFromNInfoB(rinfob), forknum, nblocks);
