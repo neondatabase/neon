@@ -839,7 +839,7 @@ mod tests {
     #[case::disabled(
         DiskUsageEvictionTaskConfig {
             max_usage_pct: Percent::new(80).unwrap(),
-            min_avail_bytes: 1_000_000_000,
+            min_avail_bytes: 2_000_000_000,
             period: Duration::from_secs(60),
             eviction_order: EvictionOrder::RelativeAccessed {
                 highest_layer_count_loses_first: true,
@@ -850,7 +850,7 @@ mod tests {
         },
         r#"
             control_plane_api = "http://localhost:6666"
-            disk_usage_based_eviction = { max_usage_pct = 80, min_avail_bytes = 1000000000, period = "60s", enabled = false }
+            disk_usage_based_eviction = { enabled = false }
         "#
     )]
     fn test_config_disk_usage_based_eviction_is_valid(

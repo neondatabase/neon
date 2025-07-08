@@ -274,6 +274,7 @@ pub struct ConfigToml {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct DiskUsageEvictionTaskConfig {
     pub max_usage_pct: utils::serde_percent::Percent,
     pub min_avail_bytes: u64,
@@ -284,7 +285,6 @@ pub struct DiskUsageEvictionTaskConfig {
     /// Select sorting for evicted layers
     #[serde(default)]
     pub eviction_order: EvictionOrder,
-    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
@@ -300,10 +300,6 @@ impl Default for DiskUsageEvictionTaskConfig {
             enabled: true,
         }
     }
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
