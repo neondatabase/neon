@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use itertools::Itertools;
+use rustls::RootCertStore;
 use rustls::crypto::ring::{self, sign};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
 use rustls::sign::CertifiedKey;
 use x509_cert::der::{Reader, SliceReader};
 
@@ -24,11 +26,36 @@ pub struct TlsConfig {
 pub fn configure_tls(
     key_path: &Path,
     cert_path: &Path,
+    mtls_certs_dir: Option<&Path>,
     certs_dir: Option<&Path>,
     allow_tls_keylogfile: bool,
 ) -> anyhow::Result<TlsConfig> {
     // add default certificate
     let mut cert_resolver = CertResolver::parse_new(key_path, cert_path)?;
+
+    let verifier = match mtls_certs_dir {
+        Some(dir) => {
+            let mut roots = RootCertStore::empty();
+
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+
+                if path.is_file() {
+                    let cert_chain_bytes = std::fs::read(&path).context(format!(
+                        "Failed to read TLS cert file at '{}.'",
+                        path.display()
+                    ))?;
+
+                    for cert in rustls_pemfile::certs(&mut &cert_chain_bytes[..]) {
+                        roots.add(cert?)?;
+                    }
+                }
+            }
+            WebPkiClientVerifier::builder(Arc::new(roots)).build()?
+        }
+        None => WebPkiClientVerifier::no_client_auth(),
+    };
 
     // add extra certificates
     if let Some(certs_dir) = certs_dir {
@@ -55,7 +82,7 @@ pub fn configure_tls(
         rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
             .context("ring should support TLS1.2 and TLS1.3")?
-            .with_no_client_auth()
+            .with_client_cert_verifier(verifier)
             .with_cert_resolver(cert_resolver.clone());
 
     config.alpn_protocols = vec![PG_ALPN_PROTOCOL.to_vec()];

@@ -493,6 +493,7 @@ pub(crate) async fn refresh_config_inner(
                 tls_config.key_path.as_ref(),
                 tls_config.cert_path.as_ref(),
                 None,
+                None,
                 false,
             )
         })

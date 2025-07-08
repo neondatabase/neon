@@ -134,6 +134,9 @@ struct ProxyCliArgs {
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'c', long, alias = "ssl-cert")]
     tls_cert: Option<PathBuf>,
+    /// path to mTLS certs for client postgres connections
+    #[clap(long)]
+    mtls_certs: Option<PathBuf>,
     /// Allow writing TLS session keys to the given file pointed to by the environment variable `SSLKEYLOGFILE`.
     #[clap(long, alias = "allow-ssl-keylogfile")]
     allow_tls_keylogfile: bool,
@@ -625,6 +628,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
             key_path,
             cert_path,
+            args.mtls_certs.as_deref(),
             args.certs_dir.as_deref(),
             args.allow_tls_keylogfile,
         )?),
