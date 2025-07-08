@@ -188,7 +188,8 @@ fn process_key_cert(
     let key = sign::any_supported_type(&priv_key).context("invalid private key")?;
 
     let first_cert = &cert_chain[0];
-    let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
+    // let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
+    let tls_server_end_point = TlsServerEndPoint::Undefined;
 
     let certificate = SliceReader::new(first_cert)
         .context("Failed to parse cerficiate")?

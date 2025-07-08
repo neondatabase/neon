@@ -1,7 +1,8 @@
 //! A group of high-level tests for connection establishing logic and auth.
 #![allow(clippy::unimplemented)]
 
-mod mitm;
+// disabled as we removed support for channel binding.
+// mod mitm;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -296,7 +297,7 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
     ));
 
     let _conn = postgres_client::Config::new("test".to_owned(), 5432)
-        .channel_binding(postgres_client::config::ChannelBinding::Require)
+        .channel_binding(postgres_client::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
         .password(password)
