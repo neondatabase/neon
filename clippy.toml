@@ -1,9 +1,12 @@
 disallowed-methods = [
     "tokio::task::block_in_place",
+
     # Allow this for now, to deny it later once we stop using Handle::block_on completely
     # "tokio::runtime::Handle::block_on",
-    # use tokio_epoll_uring_ext instead
-    "tokio_epoll_uring::thread_local_system",
+
+    # tokio-epoll-uring:
+    # - allow-invalid because the method doesn't exist on macOS
+    { path = "tokio_epoll_uring::thread_local_system", replacement = "tokio_epoll_uring_ext module inside pageserver crate", allow-invalid = true }
 ]
 
 disallowed-macros = [
