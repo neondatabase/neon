@@ -52,6 +52,9 @@ extern void lfc_prewarm(FileCacheState* fcs, uint32 n_workers);
 
 PGDLLEXPORT void lfc_prewarm_main(Datum main_arg);
 
+extern int32 lfc_approximate_working_set_size_seconds(time_t duration, bool reset);
+
+
 static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		 void *buffer)

@@ -583,6 +583,8 @@ _PG_init(void)
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
 PG_FUNCTION_INFO_V1(backpressure_throttling_time);
+PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
+PG_FUNCTION_INFO_V1(approximate_working_set_size);
 
 Datum
 pg_cluster_size(PG_FUNCTION_ARGS)
@@ -627,6 +629,40 @@ Datum
 backpressure_throttling_time(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_UINT64(BackpressureThrottlingTime());
+}
+
+Datum
+approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
+{
+	time_t		duration;
+	int32		dc;
+
+	duration = PG_ARGISNULL(0) ? (time_t) -1 : PG_GETARG_INT32(0);
+
+	if (neon_enable_new_communicator)
+		dc = communicator_new_approximate_working_set_size_seconds(duration, false);
+	else
+		dc = lfc_approximate_working_set_size_seconds(duration, false);
+	if (dc < 0)
+		PG_RETURN_NULL();
+	else
+		PG_RETURN_INT32(dc);
+}
+
+Datum
+approximate_working_set_size(PG_FUNCTION_ARGS)
+{
+	int32		dc;
+	bool		reset = PG_GETARG_BOOL(0);
+
+	if (neon_enable_new_communicator)
+		dc = communicator_new_approximate_working_set_size_seconds(-1, reset);
+	else
+		dc = lfc_approximate_working_set_size_seconds(-1, reset);
+	if (dc < 0)
+		PG_RETURN_NULL();
+	else
+		PG_RETURN_INT32(dc);
 }
 
 static void

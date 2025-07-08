@@ -22,6 +22,7 @@
 #endif
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
+#include "common/hashfn.h"
 #include "executor/instrument.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
@@ -40,6 +41,7 @@
 #include "tcop/tcopprot.h"
 
 #include "communicator_new.h"
+#include "hll.h"
 #include "neon.h"
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
@@ -98,7 +100,19 @@ typedef struct CommunicatorShmemPerBackendData
 
 typedef struct CommunicatorShmemData
 {
-	int			dummy;
+	/*
+	 * Estimation of working set size.
+	 *
+	 * Note that this is not protected by any locks. That's sloppy, but works
+	 * fine in practice. To "add" a value to the HLL state, we just overwrite
+	 * one of the timestamps. Calculating the estimate reads all the values, but
+	 * it also doesn't depend on seeing a consistent snapshot of the values. We
+	 * could get bogus results if accessing the TimestampTz was not atomic, but
+	 * it on any 64-bit platforms we care about it is, and even if we observed a
+	 * torn read every now and then, it wouldn't affect the overall estimate
+	 * much.
+	 */
+	HyperLogLogState wss_estimation;
 
 	CommunicatorShmemPerBackendData backends[]; /* MaxProcs */
 
@@ -249,6 +263,9 @@ communicator_new_shmem_startup(void)
 	communicator_size = MAXALIGN(offsetof(CommunicatorShmemData, backends) + MaxProcs * sizeof(CommunicatorShmemPerBackendData));
 	shmem_ptr = (char *) shmem_ptr + communicator_size;
 	shmem_size -= communicator_size;
+
+	/* Initialize hyper-log-log structure for estimating working set size */
+	initSHLL(&communicator_shmem_ptr->wss_estimation);
 
 	for (int i = 0; i < MaxProcs; i++)
 	{
@@ -742,6 +759,19 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 			.nblocks = nblocks,
 		}
 	};
+
+	{
+		BufferTag tag;
+
+		CopyNRelFileInfoToBufTag(tag, rinfo);
+		tag.forkNum = forkNum;
+		for (int i = 0; i < nblocks; i++)
+		{
+			tag.blockNum = blockno;
+			addSHLL(&communicator_shmem_ptr->wss_estimation,
+					hash_bytes((uint8_t *) &tag, sizeof(tag)));
+		}
+	}
 
 	elog(DEBUG5, "getpagev called for rel %u/%u/%u.%u block %u (%u blocks)",
 		 RelFileInfoFmt(rinfo), forkNum, blockno, nblocks);
@@ -1356,4 +1386,15 @@ bounce_write_if_needed(void *buffer)
 	p = bounce_buf();
 	memcpy(p, buffer, BLCKSZ);
 	return p;
+}
+
+int32
+communicator_new_approximate_working_set_size_seconds(time_t duration, bool reset)
+{
+	int32		dc;
+
+	dc = (int32) estimateSHLL(&communicator_shmem_ptr->wss_estimation, duration);
+	if (reset)
+		memset(communicator_shmem_ptr->wss_estimation.regs, 0, sizeof(communicator_shmem_ptr->wss_estimation.regs));
+	return dc;
 }

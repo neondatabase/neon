@@ -54,4 +54,7 @@ extern void communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum
 extern void communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr lsn);
 extern void communicator_new_forget_cache(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks, XLogRecPtr lsn);
 
+/* other functions */
+extern int32 communicator_new_approximate_working_set_size_seconds(time_t duration, bool reset);
+
 #endif							/* COMMUNICATOR_NEW_H */
