@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context;
-use pageserver_api::config::DiskUsageEvictionTaskConfig;
+use pageserver_api::config::{DiskUsageEvictionTaskConfig, DiskUsageEvictionTaskMode};
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
@@ -171,7 +171,7 @@ pub fn launch_disk_usage_global_eviction_task(
     tenant_manager: Arc<TenantManager>,
     background_jobs_barrier: completion::Barrier,
 ) -> Option<DiskUsageEvictionTask> {
-    let Some(task_config) = &conf.disk_usage_based_eviction else {
+    let DiskUsageEvictionTaskMode::Enabled(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
         return None;
     };

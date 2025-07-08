@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use anyhow::Context;
+use pageserver_api::config::DiskUsageEvictionTaskMode;
 use pageserver_api::models::PageserverUtilization;
 use utils::serde_percent::Percent;
 
@@ -45,9 +46,11 @@ pub(crate) fn regenerate(
     let (disk_wanted_bytes, shard_count) = tenant_manager.calculate_utilization()?;
 
     // Fetch the fraction of disk space which may be used
-    let disk_usable_pct = match conf.disk_usage_based_eviction.clone() {
-        Some(e) => e.max_usage_pct,
-        None => Percent::new(100).unwrap(),
+    let disk_usable_pct = match &conf.disk_usage_based_eviction {
+        DiskUsageEvictionTaskMode::Enabled(disk_usage_eviction_task_config) => {
+            disk_usage_eviction_task_config.max_usage_pct
+        }
+        DiskUsageEvictionTaskMode::Disabled => Percent::new(100).unwrap(),
     };
 
     // Express a static value for how many shards we may schedule on one node

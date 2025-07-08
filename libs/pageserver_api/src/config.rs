@@ -5,6 +5,7 @@ mod tests;
 
 use const_format::formatcp;
 use posthog_client_lite::PostHogClientConfig;
+use utils::serde_percent::Percent;
 pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
 pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
 pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
@@ -223,7 +224,8 @@ pub struct ConfigToml {
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     #[serde(with = "humantime_serde")]
     pub synthetic_size_calculation_interval: Duration,
-    pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
+    #[serde(default)]
+    pub disk_usage_based_eviction: DiskUsageEvictionTaskMode,
     pub test_remote_failures: u64,
     pub ondemand_download_behavior_treat_error_as_warn: bool,
     #[serde(with = "humantime_serde")]
@@ -283,6 +285,52 @@ pub struct DiskUsageEvictionTaskConfig {
     /// Select sorting for evicted layers
     #[serde(default)]
     pub eviction_order: EvictionOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+pub enum DiskUsageEvictionTaskMode {
+    Enabled(DiskUsageEvictionTaskConfig),
+    Disabled,
+}
+
+impl<'de> serde::Deserialize<'de> for DiskUsageEvictionTaskMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Inner {
+            Config(DiskUsageEvictionTaskConfig),
+            Disabled(String),
+        }
+
+        match Inner::deserialize(deserializer)? {
+            Inner::Config(disk_usage_eviction_task_config) => Ok(
+                DiskUsageEvictionTaskMode::Enabled(disk_usage_eviction_task_config),
+            ),
+            Inner::Disabled(s) if s.to_lowercase() == "disabled" => {
+                Ok(DiskUsageEvictionTaskMode::Disabled)
+            }
+            Inner::Disabled(_) => Err(serde::de::Error::custom(
+                "expected 'disabled' or a config object",
+            )),
+        }
+    }
+}
+
+impl Default for DiskUsageEvictionTaskMode {
+    fn default() -> Self {
+        Self::Enabled(DiskUsageEvictionTaskConfig {
+            max_usage_pct: Percent::new(80).unwrap(),
+            min_avail_bytes: 2_000_000_000,
+            period: Duration::from_secs(60),
+            #[cfg(feature = "testing")]
+            mock_statvfs: None,
+            eviction_order: Default::default(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -738,7 +786,7 @@ impl Default for ConfigToml {
 
             metric_collection_bucket: (None),
 
-            disk_usage_based_eviction: (None),
+            disk_usage_based_eviction: DiskUsageEvictionTaskMode::default(),
 
             test_remote_failures: (0),
 
