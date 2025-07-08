@@ -20,6 +20,7 @@ runs:
         main: |
           if [[ "$(uname -s)" == "Darwin" ]]; then
             git config --global credential.helper osxkeychain
+            printf "protocol=https\nhost=github.com\n" | git credential-osxkeychain erase
           fi
 
           git config --global url."https://x-access-token:${SUBZERO_ACCESS_TOKEN}@github.com/neondatabase-labs/subzero".insteadOf "https://github.com/neondatabase-labs/subzero"
