@@ -986,6 +986,7 @@ jobs:
       - name: Verify docker-compose example and test extensions
         timeout-minutes: 60
         env:
+          PARALLEL_COMPUTES: 3
           TAG: >-
             ${{
               needs.meta.outputs.run-kind == 'compute-rc-pr'

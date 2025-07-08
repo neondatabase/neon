@@ -105,7 +105,8 @@ impl ComputeNode {
                 cloned.state.lock().unwrap().lfc_prewarm_state = LfcPrewarmState::Completed;
                 return;
             };
-            error!(%err);
+            crate::metrics::LFC_PREWARM_ERRORS.inc();
+            error!(%err, "prewarming lfc");
             cloned.state.lock().unwrap().lfc_prewarm_state = LfcPrewarmState::Failed {
                 error: err.to_string(),
             };
@@ -180,7 +181,8 @@ impl ComputeNode {
             self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Completed;
             return;
         };
-        error!(%err);
+        crate::metrics::LFC_OFFLOAD_ERRORS.inc();
+        error!(%err, "offloading lfc");
         self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
             error: err.to_string(),
         };

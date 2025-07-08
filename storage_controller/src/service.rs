@@ -7208,6 +7208,12 @@ impl Service {
                 let mut locked = self.inner.write().unwrap();
                 let (nodes, tenants, scheduler) = locked.parts_mut();
 
+                // Calculate a schedule context here to avoid borrow checker issues.
+                let mut schedule_context = ScheduleContext::default();
+                for (_, shard) in tenants.range(TenantShardId::tenant_range(tid.tenant_id)) {
+                    schedule_context.avoid(&shard.intent.all_pageservers());
+                }
+
                 let tenant_shard = match tenants.get_mut(&tid) {
                     Some(tenant_shard) => tenant_shard,
                     None => {
@@ -7233,9 +7239,6 @@ impl Service {
                 }
 
                 if tenant_shard.deref_node(node_id) {
-                    // TODO(ephemeralsad): we should process all shards in a tenant at once, so
-                    // we can avoid settling the tenant unevenly.
-                    let mut schedule_context = ScheduleContext::new(ScheduleMode::Normal);
                     if let Err(e) = tenant_shard.schedule(scheduler, &mut schedule_context) {
                         tracing::error!(
                             "Refusing to delete node, shard {} can't be rescheduled: {e}",

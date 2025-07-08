@@ -2097,9 +2097,6 @@ impl Timeline {
             Err(CompactionError::ShuttingDown) => {
                 // Covered by the `Err(e) if e.is_cancel()` branch.
             }
-            Err(CompactionError::AlreadyRunning(_)) => {
-                // Covered by the `Err(e) if e.is_cancel()` branch.
-            }
             Err(CompactionError::Other(_)) => {
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
@@ -6045,8 +6042,6 @@ pub(crate) enum CompactionError {
     ShuttingDown,
     #[error(transparent)]
     Other(anyhow::Error),
-    #[error("Compaction already running: {0}")]
-    AlreadyRunning(&'static str),
 }
 
 /// Whether [`CompactionError::is_cancel`] should inspect the
@@ -6062,7 +6057,6 @@ impl CompactionError {
     pub fn is_cancel(&self, check_other: CheckOtherForCancel) -> bool {
         let other = match self {
             CompactionError::ShuttingDown => true,
-            CompactionError::AlreadyRunning(_) => true, // XXX why do we treat AlreadyRunning as cancel?
             CompactionError::Other(other) => other,
         };
 
@@ -6104,7 +6098,7 @@ impl CompactionError {
     /// Critical errors that indicate data corruption.
     pub fn is_critical(&self) -> bool {
         let other = match self {
-            CompactionError::ShuttingDown | CompactionError::AlreadyRunning(_) /* TODO: revisit AlreadyRunning variant */ => return false,
+            CompactionError::ShuttingDown => false,
             CompactionError::Other(error) => error,
         };
         other
