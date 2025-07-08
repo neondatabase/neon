@@ -1118,6 +1118,26 @@ enum ImageLayerCreationOutcome {
     Skip,
 }
 
+enum RepartitionError {
+    Other(anyhow::Error),
+    CollectKeyspace(CollectKeySpaceError),
+}
+
+impl RepartitionError {
+    fn is_cancel(&self) -> bool {
+        match self {
+            RepartitionError::Other(_) => false,
+            RepartitionError::CollectKeyspace(e) => e.is_cancel(),
+        }
+    }
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            RepartitionError::Other(e) => e,
+            RepartitionError::CollectKeyspace(e) => e.into_anyhow(),
+        }
+    }
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -4992,7 +5012,7 @@ impl Timeline {
                     ctx,
                 )
                 .await
-                .map_err(|e| FlushLayerError::from_anyhow(self, e.into()))?;
+                .map_err(|e| FlushLayerError::from_anyhow(self, e.into_anyhow()))?;
 
             if self.cancel.is_cancelled() {
                 return Err(FlushLayerError::Cancelled);
@@ -5242,18 +5262,18 @@ impl Timeline {
         partition_size: u64,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), CompactionError> {
+    ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), RepartitionError> {
         let Ok(mut guard) = self.partitioning.try_write_guard() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
-            return Err(CompactionError::Other(anyhow!(
+            return Err(RepartitionError::Other(anyhow!(
                 "repartition() called concurrently"
             )));
         };
         let ((dense_partition, sparse_partition), partition_lsn) = &*guard.read();
         if lsn < *partition_lsn {
-            return Err(CompactionError::Other(anyhow!(
+            return Err(RepartitionError::Other(anyhow!(
                 "repartition() called with LSN going backwards, this should not happen"
             )));
         }
@@ -5277,23 +5297,7 @@ impl Timeline {
         let (dense_ks, sparse_ks) = self
             .collect_keyspace(lsn, ctx)
             .await
-            .inspect_err(|e| {
-                if matches!(
-                    e,
-                    CollectKeySpaceError::Decode(_)
-                        | CollectKeySpaceError::PageRead(
-                            PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
-                        )
-                ) {
-                    // Alert on critical errors that indicate data corruption.
-                    critical_timeline!(
-                        self.tenant_shard_id,
-                        self.timeline_id,
-                        "could not compact, repartitioning keyspace failed: {e:?}"
-                    );
-                }
-            })
-            .map_err(CompactionError::from_collect_keyspace)?;
+            .map_err(RepartitionError::CollectKeyspace)?;
         let dense_partitioning = dense_ks.partition(
             &self.shard_identity,
             partition_size,
