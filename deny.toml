@@ -35,6 +35,7 @@ reason = "The paste crate is a build-only dependency with no runtime components.
 # More documentation for the licenses section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
 [licenses]
+version = 2
 allow = [
     "0BSD",
     "Apache-2.0",
@@ -53,7 +54,7 @@ exceptions = [
     { allow = ["Zlib"], name = "const_format_proc_macros", version = "*" },
     { allow = ["Zlib"], name = "const_format", version = "*" },
     # Subzero integration - unlicensed internal crate
-    { allow = [""], name = "subzero-core", version = "*" },
+    { allow = ["LicenseRef-UNLICENSED"], name = "subzero-core", version = "*" },
 ]
 
 [licenses.private]
