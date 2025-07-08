@@ -98,7 +98,14 @@ where
     D: Deserializer<'de>,
 {
     let opt = Option::<String>::deserialize(deserializer)?;
-    Ok(opt.map(|s| split_comma_separated(&s)))
+    if let Some(s) = &opt {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(split_comma_separated(trimmed)));
+    }
+    Ok(None)
 }
 
 // The ApiConfig is the configuration for the API per endpoint
@@ -118,7 +125,7 @@ pub struct ApiConfig {
     //pub db_pre_request: Option<(String, String)>,
     #[serde(default = "role_claim_key")]
     pub role_claim_key: String,
-    #[serde(deserialize_with = "deserialize_comma_separated_option")]
+    #[serde(default, deserialize_with = "deserialize_comma_separated_option")]
     pub db_extra_search_path: Option<Vec<String>>,
 }
 
@@ -672,7 +679,13 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    let host = request.uri().host().unwrap_or("");
+    // Read host from headers (X-Forwarded-Host takes precedence, then Host, then URI host as fallback)
+    let host = request.headers()
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| request.headers().get("host").and_then(|v| v.to_str().ok()))
+        .unwrap_or_else(|| request.uri().host().unwrap_or(""));
+    
     let path_parts: Vec<&str> = request.uri().path().split('/').collect();
     // a valid path is /database/rest/v1/... so parts should be ["", "database", "rest", "v1", ...]
     let database_name = if path_parts.len() >= 3 && !path_parts[1].is_empty() {
