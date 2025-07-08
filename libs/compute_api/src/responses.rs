@@ -121,6 +121,15 @@ pub enum TerminateMode {
     Immediate,
 }
 
+impl Into<ComputeStatus> for TerminateMode {
+    fn into(self) -> ComputeStatus {
+        match self {
+            TerminateMode::Fast => ComputeStatus::TerminationPendingFast,
+            TerminateMode::Immediate => ComputeStatus::TerminationPendingImmediate,
+        }
+    }
+}
+
 #[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeStatus {
@@ -141,7 +150,9 @@ pub enum ComputeStatus {
     // control-plane to terminate it.
     Failed,
     // Termination requested
-    TerminationPending { mode: TerminateMode },
+    TerminationPendingFast,
+    // Termination requested, without waiting 30s before returning from /terminate
+    TerminationPendingImmediate,
     // Terminated Postgres
     Terminated,
 }
@@ -160,7 +171,10 @@ impl Display for ComputeStatus {
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),
             ComputeStatus::Failed => f.write_str("failed"),
-            ComputeStatus::TerminationPending { .. } => f.write_str("termination-pending"),
+            ComputeStatus::TerminationPendingFast => f.write_str("termination-pending-fast"),
+            ComputeStatus::TerminationPendingImmediate => {
+                f.write_str("termination-pending-immediate")
+            }
             ComputeStatus::Terminated => f.write_str("terminated"),
         }
     }

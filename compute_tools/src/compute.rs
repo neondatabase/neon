@@ -959,11 +959,15 @@ impl ComputeNode {
         let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
         state.terminate_flush_lsn = lsn;
-        if let ComputeStatus::TerminationPending { mode } = state.status {
+        if state.status == ComputeStatus::TerminationPendingFast {
+            state.status = ComputeStatus::Terminated;
+            self.state_changed.notify_all();
+            delay_exit = true
+        } else if state.status == ComputeStatus::TerminationPendingImmediate {
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
             // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = mode == compute_api::responses::TerminateMode::Fast
+            delay_exit = false
         }
         drop(state);
 
@@ -1900,7 +1904,8 @@ impl ComputeNode {
 
                             // exit loop
                             ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending { .. }
+                            | ComputeStatus::TerminationPendingFast
+                            | ComputeStatus::TerminationPendingImmediate
                             | ComputeStatus::Terminated => break 'cert_update,
 
                             // wait

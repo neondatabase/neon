@@ -55,6 +55,10 @@ stateDiagram-v2
   Terminated --> [*] : Compute exited
 ```
 
+> Note: TerminationPending is actually two values in ComputeStatus:
+> TerminationPendingFast and TerminationPendingImmediate, to reflect
+> whether we should wait 30s before returning from /terminate
+
 ## Tests
 
 Cargo formatter:
