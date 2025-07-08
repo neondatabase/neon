@@ -493,8 +493,14 @@ impl StreamPool {
         // Acquire a client from the pool and create a stream.
         let mut client = client_pool.get().await?;
 
-        let (req_tx, req_rx) = mpsc::channel(1);
-        let req_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
+        // NB: use an unbounded channel such that the stream send never blocks. Otherwise, we could
+        // theoretically deadlock if both the client and server block on sends (since we're not
+        // reading responses while sending). This is unlikely to happen due to gRPC/TCP buffers and
+        // low queue depths, but it was seen to happen with the libpq protocol so better safe than
+        // sorry. It should never buffer more than the queue depth anyway, but using an unbounded
+        // channel guarantees that it will never block.
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let req_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(req_rx);
         let mut resp_stream = client.get_pages(req_stream).await?;
 
         // Track caller response channels by request ID. If the task returns early, these response
@@ -521,8 +527,8 @@ impl StreamPool {
                     }
                     callers.insert(req.request_id, resp_tx);
 
-                    // Send the request on the stream. Bail out if the send fails.
-                    req_tx.send(req).await.map_err(|_| {
+                    // Send the request on the stream. Bail out if the stream is closed.
+                    req_tx.send(req).map_err(|_| {
                         tonic::Status::unavailable("stream closed")
                     })?;
                 }
