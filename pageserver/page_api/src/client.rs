@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::Context as _;
 use futures::{Stream, StreamExt as _, TryStreamExt as _};
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
@@ -34,9 +34,7 @@ impl Client {
         E: TryInto<Endpoint> + Send + Sync + 'static,
         <E as TryInto<Endpoint>>::Error: std::error::Error + Send + Sync,
     {
-        let endpoint: Endpoint = endpoint
-            .try_into()
-            .map_err(|err| anyhow!("invalid endpoint: {err}"))?;
+        let endpoint: Endpoint = endpoint.try_into().context("invalid endpoint")?;
         let channel = endpoint.connect().await?;
         Self::new(
             channel,
