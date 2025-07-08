@@ -52,6 +52,8 @@ exceptions = [
     # Zlib license has some restrictions if we decide to change sth
     { allow = ["Zlib"], name = "const_format_proc_macros", version = "*" },
     { allow = ["Zlib"], name = "const_format", version = "*" },
+    # Subzero integration - unlicensed internal crate
+    { allow = [""], name = "subzero-core", version = "*" },
 ]
 
 [licenses.private]
@@ -110,6 +112,8 @@ allow-git = [
     # Crate pinned to commit in origin repo due to opentelemetry version.
     # TODO: Remove this once crate is fetched from crates.io again.
     "https://github.com/mattiapenati/tower-otel",
+    # Subzero integration
+    "https://github.com/neondatabase-labs/subzero",
 ]
 
 [sources.allow-org]
