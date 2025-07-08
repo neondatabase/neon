@@ -4214,7 +4214,7 @@ class NeonLocalProxy(LogUtils):
             "panic",
             "failed",
         ]
-        
+
         for na in not_allowed:
             if na not in allowed_errors:
                 assert not self.log_contains(na), f"Found disallowed error pattern: {na}"
@@ -4260,11 +4260,11 @@ class NeonRestBrokerProxy(LogUtils):
     def start(self) -> Self:
         if self.running:
             return self
-        
+
         # Generate self-signed TLS certificates
         cert_path = self.test_output_dir / "server.crt"
         key_path = self.test_output_dir / "server.key"
-        
+
         if not cert_path.exists() or not key_path.exists():
             import subprocess
             log.info("Generating self-signed TLS certificate for rest broker")
@@ -4273,24 +4273,24 @@ class NeonRestBrokerProxy(LogUtils):
                 "-out", str(cert_path), "-keyout", str(key_path),
                 "-subj", "/CN=*.local.neon.build"
             ], check=True)
-        
+
         log.info(f"Starting rest broker proxy on WSS port {self.wss_port}, HTTP port {self.http_port}")
-        
+
         cmd = [
             str(self.neon_binpath / "proxy"),
             "-c", str(cert_path),
             "-k", str(key_path),
             "--is-auth-broker", "true",
-            "--is-rest-broker", "true", 
+            "--is-rest-broker", "true",
             "--wss", f"{self.host}:{self.wss_port}",
             "--http", f"{self.host}:{self.http_port}",
             "--mgmt", f"{self.host}:{self.mgmt_port}",
             "--auth-backend", "local",
             "--config-path", str(self.config_path),
         ]
-        
+
         log.info(f"Starting rest broker proxy with command: {' '.join(cmd)}")
-        
+
         with open(self.logfile, "w") as logfile:
             self._popen = subprocess.Popen(
                 cmd,
@@ -4304,7 +4304,7 @@ class NeonRestBrokerProxy(LogUtils):
                     "OTEL_SDK_DISABLED": "true",
                 },
             )
-        
+
         self.running = True
         self._wait_until_ready()
         return self
@@ -4312,9 +4312,9 @@ class NeonRestBrokerProxy(LogUtils):
     def stop(self) -> Self:
         if not self.running:
             return self
-        
+
         log.info("Stopping rest broker proxy")
-        
+
         if self._popen is not None:
             self._popen.terminate()
             try:
@@ -4322,7 +4322,7 @@ class NeonRestBrokerProxy(LogUtils):
             except subprocess.TimeoutExpired:
                 log.warning("failed to gracefully terminate rest broker proxy; killing")
                 self._popen.kill()
-        
+
         self.running = False
         return self
 
@@ -4335,11 +4335,11 @@ class NeonRestBrokerProxy(LogUtils):
     def _wait_until_ready(self):
         # Check if the WSS port is ready using a simple HTTPS request
         # REST API is served on the WSS port with HTTPS
-        response = requests.get(f"https://{self.host}:{self.wss_port}/", timeout=1, verify=False)
+        requests.get(f"https://{self.host}:{self.wss_port}/", timeout=1, verify=False)
         # Any response (even error) means the server is up - we just need to connect
-        
+
     def get_metrics(self) -> str:
-        # Metrics are still on the HTTP port  
+        # Metrics are still on the HTTP port
         response = requests.get(f"http://{self.host}:{self.http_port}/metrics", timeout=5)
         response.raise_for_status()
         return response.text
@@ -4356,8 +4356,8 @@ class NeonRestBrokerProxy(LogUtils):
             "no connection available",
             "Pool dropped",
         ]
-        
-        with open(self.logfile, "r") as f:
+
+        with open(self.logfile) as f:
             for line in f:
                 if "ERROR" in line or "FATAL" in line:
                     if not any(allowed in line for allowed in allowed_errors):
@@ -4489,7 +4489,7 @@ def local_proxy_fixed_port(
     test_output_dir: Path,
 ) -> Iterator[NeonLocalProxy]:
     """Local proxy that connects directly to vanilla postgres on the hardcoded port 7432."""
-    
+
     # Start vanilla_pg without database bootstrapping
     vanilla_pg.start()
 
