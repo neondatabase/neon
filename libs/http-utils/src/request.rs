@@ -41,17 +41,35 @@ pub fn get_query_param<'a>(
         Some(q) => q,
         None => return Ok(None),
     };
-    let mut values = url::form_urlencoded::parse(query.as_bytes())
+    let values = url::form_urlencoded::parse(query.as_bytes())
         .filter_map(|(k, v)| if k == param_name { Some(v) } else { None })
         // we call .next() twice below. If it's None the first time, .fuse() ensures it's None afterwards
         .fuse();
 
-    let value1 = values.next();
-    if values.next().is_some() {
-        return Err(ApiError::BadRequest(anyhow!(
-            "param {param_name} specified more than once"
-        )));
-    }
+    // Work around an issue with Alloy's pyroscope scrape where the "seconds"
+    // parameter is added several times. https://github.com/grafana/alloy/issues/3026
+    // TODO: revert after Alloy is fixed.
+    let value1 = values
+        .map(Ok)
+        .reduce(|acc, i| {
+            match acc {
+                Err(_) => acc,
+
+                // It's okay to have duplicates as along as they have the same value.
+                Ok(ref a) if a == &i.unwrap() => acc,
+
+                _ => Err(ApiError::BadRequest(anyhow!(
+                    "param {param_name} specified more than once"
+                ))),
+            }
+        })
+        .transpose()?;
+    // if values.next().is_some() {
+    //     return Err(ApiError::BadRequest(anyhow!(
+    //         "param {param_name} specified more than once"
+    //     )));
+    // }
+
     Ok(value1)
 }
 
@@ -90,5 +108,41 @@ pub async fn ensure_no_body(request: &mut Request<Body>) -> Result<(), ApiError>
     match request.body_mut().data().await {
         Some(_) => Err(ApiError::BadRequest(anyhow!("Unexpected request body"))),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_query_param_duplicate() {
+        let req = Request::builder()
+            .uri("http://localhost:12345/testuri?testparam=1")
+            .body(hyper::Body::empty())
+            .unwrap();
+        let value = get_query_param(&req, "testparam").unwrap();
+        assert_eq!(value.unwrap(), "1");
+
+        let req = Request::builder()
+            .uri("http://localhost:12345/testuri?testparam=1&testparam=1")
+            .body(hyper::Body::empty())
+            .unwrap();
+        let value = get_query_param(&req, "testparam").unwrap();
+        assert_eq!(value.unwrap(), "1");
+
+        let req = Request::builder()
+            .uri("http://localhost:12345/testuri")
+            .body(hyper::Body::empty())
+            .unwrap();
+        let value = get_query_param(&req, "testparam").unwrap();
+        assert!(value.is_none());
+
+        let req = Request::builder()
+            .uri("http://localhost:12345/testuri?testparam=1&testparam=2&testparam=3")
+            .body(hyper::Body::empty())
+            .unwrap();
+        let value = get_query_param(&req, "testparam");
+        assert!(value.is_err());
     }
 }
