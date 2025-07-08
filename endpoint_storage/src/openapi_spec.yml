@@ -44,8 +44,12 @@ paths:
       description: Get file from blob storage
       responses:
         "200":
+          description: "File stream from blob storage"
           content:
-            application/octet-stream
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
         "400":
           description: File was not found
         "403":
@@ -54,11 +58,13 @@ paths:
       description: Insert file into blob storage. If file exists, override it
       requestBody:
         content:
-          application/octet-stream
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
       responses:
         "200":
-          content:
-            application/octet-stream
+          description: File was inserted successfully
         "403":
           description: JWT does not authorize request to this route
     delete:
