@@ -12,7 +12,7 @@ use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
-use pageserver_client_grpc::{PageserverClient, ShardSpec};
+use pageserver_client_grpc::{PageserverClient, ShardSpec, ShardStripeSize};
 use pageserver_page_api as page_api;
 
 use metrics::{IntCounter, IntCounterVec};
@@ -70,6 +70,7 @@ pub(super) async fn init(
     timeline_id: String,
     auth_token: Option<String>,
     shard_map: HashMap<utils::shard::ShardIndex, String>,
+    stripe_size: Option<ShardStripeSize>,
     initial_file_cache_size: u64,
     file_cache_path: Option<PathBuf>,
 ) -> CommunicatorWorkerProcessStruct<'static> {
@@ -91,10 +92,9 @@ pub(super) async fn init(
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
 
-    // TODO: plumb through the stripe size.
     let tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
     let timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
-    let shard_spec = ShardSpec::new(shard_map, None).expect("invalid shard spec");
+    let shard_spec = ShardSpec::new(shard_map, stripe_size).expect("invalid shard spec");
     let client = PageserverClient::new(tenant_id, timeline_id, shard_spec, auth_token)
         .expect("could not create client");
 

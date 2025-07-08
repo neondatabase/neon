@@ -12,10 +12,11 @@ use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool}
 use crate::retry::Retry;
 use crate::split::GetPageSplitter;
 use compute_api::spec::PageserverProtocol;
-use pageserver_api::shard::ShardStripeSize;
 use pageserver_page_api as page_api;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::{ShardCount, ShardIndex, ShardNumber};
+
+pub use pageserver_api::shard::ShardStripeSize;
 
 /// Max number of concurrent clients per channel (i.e. TCP connection). New channels will be spun up
 /// when full.

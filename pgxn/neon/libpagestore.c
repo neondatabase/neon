@@ -80,7 +80,7 @@ int         neon_protocol_version = 3;
 
 static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
-static int	stripe_size;
+int		neon_stripe_size;
 static int	max_sockets;
 
 static int pageserver_response_log_timeout = 10000;
@@ -454,10 +454,10 @@ get_shard_number(BufferTag *tag)
 
 #if PG_MAJORVERSION_NUM < 16
 	hash = murmurhash32(tag->rnode.relNode);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / neon_stripe_size));
 #else
 	hash = murmurhash32(tag->relNumber);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / neon_stripe_size));
 #endif
 
 	return hash % n_shards;
@@ -1510,7 +1510,7 @@ pg_init_libpagestore(void)
 	DefineCustomIntVariable("neon.stripe_size",
 							"sharding stripe size",
 							NULL,
-							&stripe_size,
+							&neon_stripe_size,
 							32768, 1, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_BLOCKS,

@@ -336,6 +336,7 @@ communicator_new_bgworker_main(Datum main_arg)
 									   neon_auth_token,
 									   connstrs,
 									   num_shards,
+									   neon_stripe_size,
 									   lfc_path,
 									   file_cache_size);
 	cis = NULL;

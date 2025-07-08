@@ -10,6 +10,8 @@ use crate::init::CommunicatorInitStruct;
 use crate::worker_process::main_loop;
 use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 
+use pageserver_client_grpc::ShardStripeSize;
+
 /// Launch the communicator's tokio tasks, which do most of the work.
 ///
 /// The caller has initialized the process as a regular PostgreSQL
@@ -24,6 +26,7 @@ pub extern "C" fn communicator_worker_process_launch(
     auth_token: *const c_char,
     shard_map: *mut *mut c_char,
     nshards: u32,
+    stripe_size: u32,
     file_cache_path: *const c_char,
     initial_file_cache_size: u64,
 ) -> &'static CommunicatorWorkerProcessStruct<'static> {
@@ -63,6 +66,11 @@ pub extern "C" fn communicator_worker_process_launch(
         timeline_id.to_string(),
         auth_token,
         shard_map,
+        if stripe_size > 0 {
+            Some(ShardStripeSize(stripe_size))
+        } else {
+            None
+        },
         initial_file_cache_size,
         file_cache_path,
     ));

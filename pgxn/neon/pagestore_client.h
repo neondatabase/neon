@@ -244,6 +244,7 @@ extern char *neon_timeline;
 extern char *neon_tenant;
 extern int32 max_cluster_size;
 extern int  neon_protocol_version;
+extern int	neon_stripe_size;
 
 extern void get_shard_map(char ***connstrs_p, shardno_t *num_shards_p);
 extern shardno_t get_shard_number(BufferTag* tag);
