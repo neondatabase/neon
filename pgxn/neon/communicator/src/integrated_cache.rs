@@ -526,9 +526,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         self.relsize_cache.remove(&RelKey::from(rel));
 
         // update with flush LSN
-        let _ = self
-            .global_lw_lsn
-            .fetch_max(flush_lsn.0, Ordering::Relaxed);
+        let _ = self.global_lw_lsn.fetch_max(flush_lsn.0, Ordering::Relaxed);
 
         // also forget all cached blocks for the relation
         // FIXME

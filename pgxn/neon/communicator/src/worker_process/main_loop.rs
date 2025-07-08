@@ -359,8 +359,14 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 {
                     Ok(nblocks) => {
                         // update the cache
-                        tracing::info!("updated relsize for {:?} in cache: {}, lsn {}", rel, nblocks, read_lsn);
-                        self.cache.remember_rel_size(&rel, nblocks, not_modified_since);
+                        tracing::info!(
+                            "updated relsize for {:?} in cache: {}, lsn {}",
+                            rel,
+                            nblocks,
+                            read_lsn
+                        );
+                        self.cache
+                            .remember_rel_size(&rel, nblocks, not_modified_since);
 
                         NeonIOResult::RelSize(nblocks)
                     }
@@ -469,8 +475,11 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 // TODO: We could put the empty pages to the cache. Maybe have
                 // a marker on the block entries for all-zero pages, instead of
                 // actually storing the empty pages.
-                self.cache
-                    .remember_rel_size(&req.reltag(), req.block_number + req.nblocks, Lsn(req.lsn));
+                self.cache.remember_rel_size(
+                    &req.reltag(),
+                    req.block_number + req.nblocks,
+                    Lsn(req.lsn),
+                );
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelCreate(req) => {
@@ -484,7 +493,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.request_rel_truncate_counter.inc();
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                self.cache.remember_rel_size(&req.reltag(), req.nblocks, Lsn(req.lsn));
+                self.cache
+                    .remember_rel_size(&req.reltag(), req.nblocks, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelUnlink(req) => {
@@ -496,7 +506,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             }
             NeonIORequest::ForgetCache(req) => {
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                self.cache.forget_rel(&req.reltag(), Some(req.nblocks), Lsn(req.lsn));
+                self.cache
+                    .forget_rel(&req.reltag(), Some(req.nblocks), Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
         }

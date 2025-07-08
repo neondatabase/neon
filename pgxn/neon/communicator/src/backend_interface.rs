@@ -161,8 +161,11 @@ pub extern "C" fn bcomm_get_request_slot_status(
             // leave a slot in this state, so if it sees that,
             // something's gone wrong and it's not clear what to do
             // with it.
-            panic!("unexpected Filling state in request slot {}", request_slot_idx);
-        },
+            panic!(
+                "unexpected Filling state in request slot {}",
+                request_slot_idx
+            );
+        }
         NeonIOHandleState::Submitted => true,
         NeonIOHandleState::Processing => true,
         NeonIOHandleState::Completed => true,

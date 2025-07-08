@@ -46,10 +46,7 @@ impl std::fmt::Debug for CommunicatorInitStruct {
         fmt.debug_struct("CommunicatorInitStruct")
             .field("submission_pipe_read_fd", &self.submission_pipe_read_fd)
             .field("submission_pipe_write_fd", &self.submission_pipe_write_fd)
-            .field(
-                "num_neon_request_slots",
-                &self.num_neon_request_slots,
-            )
+            .field("num_neon_request_slots", &self.num_neon_request_slots)
             .field("neon_request_slots length", &self.neon_request_slots.len())
             .finish()
     }

@@ -380,7 +380,6 @@ impl CRelUnlinkRequest {
     }
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CForgetCacheRequest {
