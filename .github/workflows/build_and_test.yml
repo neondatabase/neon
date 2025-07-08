@@ -102,9 +102,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - run: |
-          redocly_img="ghcr.io/redocly/cli:sha256:7ae894de67bb2bdb57326d1e90a8fcc65badfe4b76d171168c5acf65f5bac6ea" # v1.34.4
+          redocly_img="ghcr.io/redocly/cli:1.34.4"
           find . -iname "openapi_spec.y*ml" -exec \
-            docker run --rm -v ${PWD}:/spec ${redocly_img} lint /spec/{} \;
+            docker run --rm -v ${PWD}:/spec ${redocly_img} lint /spec/{} +
 
   check-codestyle-python:
     needs: [ meta, check-permissions, build-build-tools-image ]
