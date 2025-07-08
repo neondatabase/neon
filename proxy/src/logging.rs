@@ -531,13 +531,17 @@ impl EventFormatter {
             message_extractor.finish();
 
             // Direct message fields.
-            let mut fields_present = FieldsPresent(false, skipped_field_indices);
-            event.record(&mut fields_present);
-            if fields_present.0 {
-                serializer.entry(
-                    "fields",
-                    SerializableEventFields(event, skipped_field_indices),
+            {
+                let mut message_skipper = MessageFieldSkipper::new(
+                    serializer.key("fields").object(),
+                    skipped_field_indices,
                 );
+                event.record(&mut message_skipper);
+
+                // rollback if no fields are present.
+                if message_skipper.present {
+                    message_skipper.serializer.finish();
+                }
             }
 
             let mut extracted = ExtractedSpanFields::new(extract_fields);
@@ -660,11 +664,12 @@ impl<'buf> MessageFieldExtractor<'buf> {
     }
 
     #[inline]
-    fn accept_field(&mut self, field: &tracing::field::Field) -> Option<json::ValueSer<'buf>> {
-        if field.name() == MESSAGE_FIELD && !self.skipped_field_indices.contains(field.index()) {
-            self.serializer.take()
-        } else {
-            None
+    fn record_field(&mut self, field: &tracing::field::Field, v: impl json::ValueEncoder) {
+        if field.name() == MESSAGE_FIELD
+            && !self.skipped_field_indices.contains(field.index())
+            && let Some(ser) = self.serializer.take()
+        {
+            ser.value(v);
         }
     }
 }
@@ -672,65 +677,47 @@ impl<'buf> MessageFieldExtractor<'buf> {
 impl tracing::field::Visit for MessageFieldExtractor<'_> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(format_args!("{value:x?}"));
-        }
+        self.record_field(field, format_args!("{value:x?}"));
     }
 
     #[inline]
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(format_args!("{value:?}"));
-        }
+        self.record_field(field, format_args!("{value:?}"));
     }
 
     #[inline]
@@ -739,134 +726,83 @@ impl tracing::field::Visit for MessageFieldExtractor<'_> {
         field: &tracing::field::Field,
         value: &(dyn std::error::Error + 'static),
     ) {
-        if let Some(ser) = self.accept_field(field) {
-            ser.value(format_args!("{value}"));
-        }
-    }
-}
-
-/// Checks if there's any fields and field values present. If not, the JSON subobject
-/// can be skipped.
-// This is entirely optional and only cosmetic, though maybe helps a
-// bit during log parsing in dashboards when there's no field with empty object.
-struct FieldsPresent(pub bool, SkippedFieldIndices);
-
-// Even though some methods have an overhead (error, bytes) it is assumed the
-// compiler won't include this since we ignore the value entirely.
-impl tracing::field::Visit for FieldsPresent {
-    #[inline]
-    fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
-        if !self.1.contains(field.index())
-            && field.name() != MESSAGE_FIELD
-            && !field.name().starts_with("log.")
-        {
-            self.0 |= true;
-        }
-    }
-}
-
-/// Serializes the fields directly supplied with a log event.
-struct SerializableEventFields<'a, 'event>(&'a tracing::Event<'event>, SkippedFieldIndices);
-
-impl json::ValueEncoder for SerializableEventFields<'_, '_> {
-    fn encode(self, v: json::ValueSer<'_>) {
-        json::value_as_object!(|v| {
-            let mut message_skipper = MessageFieldSkipper::new(v, self.1);
-            self.0.record(&mut message_skipper);
-        });
+        self.record_field(field, format_args!("{value}"));
     }
 }
 
 /// A tracing field visitor that skips the message field.
-struct MessageFieldSkipper<'a, 'buf> {
-    serializer: &'a mut json::ObjectSer<'buf>,
+struct MessageFieldSkipper<'buf> {
+    serializer: json::ObjectSer<'buf>,
     skipped_field_indices: SkippedFieldIndices,
+    present: bool,
 }
 
-impl<'a, 'buf> MessageFieldSkipper<'a, 'buf> {
+impl<'buf> MessageFieldSkipper<'buf> {
     #[inline]
-    fn new(
-        serializer: &'a mut json::ObjectSer<'buf>,
-        skipped_field_indices: SkippedFieldIndices,
-    ) -> Self {
+    fn new(serializer: json::ObjectSer<'buf>, skipped_field_indices: SkippedFieldIndices) -> Self {
         Self {
             serializer,
             skipped_field_indices,
+            present: false,
         }
     }
 
     #[inline]
-    fn accept_field(&self, field: &tracing::field::Field) -> bool {
-        field.name() != MESSAGE_FIELD
+    fn record_field(&mut self, field: &tracing::field::Field, v: impl json::ValueEncoder) {
+        if field.name() != MESSAGE_FIELD
             && !field.name().starts_with("log.")
             && !self.skipped_field_indices.contains(field.index())
+        {
+            self.serializer.entry(field.name(), v);
+            self.present |= true;
+        }
     }
 }
 
-impl tracing::field::Visit for MessageFieldSkipper<'_, '_> {
+impl tracing::field::Visit for MessageFieldSkipper<'_> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        if self.accept_field(field) {
-            self.serializer.entry(field.name(), value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        if self.accept_field(field) {
-            self.serializer.entry(field.name(), value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        if self.accept_field(field) {
-            self.serializer.entry(field.name(), value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
-        if self.accept_field(field) {
-            self.serializer.entry(field.name(), value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
-        if self.accept_field(field) {
-            self.serializer.entry(field.name(), value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        if self.accept_field(field) {
-            self.serializer.entry(field.name(), value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
-        if self.accept_field(field) {
-            self.serializer
-                .entry(field.name(), format_args!("{value:x?}"));
-        }
+        self.record_field(field, format_args!("{value:x?}"));
     }
 
     #[inline]
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if self.accept_field(field) {
-            self.serializer.entry(field.name(), value);
-        }
+        self.record_field(field, value);
     }
 
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if self.accept_field(field) {
-            self.serializer
-                .entry(field.name(), format_args!("{value:?}"));
-        }
+        self.record_field(field, format_args!("{value:?}"));
     }
 
     #[inline]
@@ -875,9 +811,7 @@ impl tracing::field::Visit for MessageFieldSkipper<'_, '_> {
         field: &tracing::field::Field,
         value: &(dyn std::error::Error + 'static),
     ) {
-        if self.accept_field(field) {
-            self.serializer.entry(field.name(), format_args!("{value}"));
-        }
+        self.record_field(field, format_args!("{value}"));
     }
 }
 
