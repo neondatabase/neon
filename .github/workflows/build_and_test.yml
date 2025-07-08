@@ -88,8 +88,10 @@ jobs:
     secrets: inherit
 
   lint-openapi-spec:
+    runs-on: ubuntu-22.04
     needs: [ meta, check-permissions ]
-    runs-on: [ self-hosted, small ]
+    # We do need to run this in `.*-rc-pr` because of hotfixes.
+    if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
@@ -101,10 +103,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - run: |
-          redocly_img="ghcr.io/redocly/cli:1.34.4"
-          find . -iname "openapi_spec.y*ml" -exec \
-            docker run --rm -v ${PWD}:/spec ${redocly_img} lint /spec/{} +
+      - run: make lint-openapi-spec
 
   check-codestyle-python:
     needs: [ meta, check-permissions, build-build-tools-image ]

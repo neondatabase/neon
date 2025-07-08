@@ -220,6 +220,11 @@ neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
 setup-pre-commit-hook:
 	ln -s -f $(ROOT_PROJECT_DIR)/pre-commit.py .git/hooks/pre-commit
 
+.PHONY: lint-openapi-spec
+lint-openapi-spec:
+	find . -iname "openapi_spec.y*ml" -exec \
+		docker run --rm -v ${PWD}:/spec ghcr.io/redocly/cli:1.34.4 lint {} \+
+
 # Targets for building PostgreSQL are defined in postgres.mk.
 #
 # But if the caller has indicated that PostgreSQL is already
