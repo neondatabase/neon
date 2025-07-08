@@ -3320,15 +3320,11 @@ impl TenantShard {
     pub(crate) fn maybe_trip_compaction_breaker(&self, err: &CompactionError) {
         if err.is_cancel() {
             return;
-        }
-        match err {
-            CompactionError::ShuttingDown => unreachable!("is_cancel"),
-            CompactionError::Other(err) => {
-                self.compaction_circuit_breaker
-                    .lock()
-                    .unwrap()
-                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
-            }
+        } else {
+            self.compaction_circuit_breaker
+                .lock()
+                .unwrap()
+                .fail(&CIRCUIT_BREAKERS_BROKEN, err);
         }
     }
 

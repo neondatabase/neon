@@ -76,7 +76,7 @@ use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
 use utils::seqwait::SeqWait;
 use utils::simple_rcu::{Rcu, RcuReadGuard};
-use utils::sync::gate::{Gate, GateError, GateGuard};
+use utils::sync::gate::{Gate, GateGuard};
 use utils::{completion, critical_timeline, fs_ext, pausable_failpoint};
 #[cfg(test)]
 use wal_decoder::models::value::Value;
@@ -118,7 +118,6 @@ use crate::pgdatadir_mapping::{
     MAX_AUX_FILE_V2_DELTAS, MetricsUpdate,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::blob_io::WriteBlobError;
 use crate::tenant::config::AttachmentMode;
 use crate::tenant::gc_result::GcResult;
 use crate::tenant::layer_map::LayerMap;
@@ -133,7 +132,6 @@ use crate::tenant::storage_layer::{
 };
 use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::timeline::logical_size::CurrentLogicalSize;
-use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use crate::walingest::WalLagCooldown;
 use crate::walredo::RedoAttemptType;
@@ -6054,65 +6052,88 @@ impl Drop for Timeline {
     }
 }
 
-/// Top-level failure to compact. Use [`Self::is_cancel`].
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum CompactionError {
-    /// Use [`Self::is_cancel`] instead of checking for this variant.
-    #[error("The timeline or pageserver is shutting down")]
-    ShuttingDown,
-    #[error(transparent)]
-    Other(anyhow::Error),
-}
+pub(crate) use compaction_error::CompactionError;
+/// In a private mod to enforce that [`CompactionError::is_cancel`] is used
+/// instead of `match`ing on [`CompactionError::ShuttingDown`].
+mod compaction_error {
+    use utils::sync::gate::GateError;
 
-impl CompactionError {
-    pub fn new_cancelled() -> Self {
-        Self::ShuttingDown
+    use crate::{
+        pgdatadir_mapping::CollectKeySpaceError,
+        tenant::{PageReconstructError, blob_io::WriteBlobError, upload_queue::NotInitialized},
+        virtual_file::owned_buffers_io::write::FlushTaskError,
+    };
+
+    /// Top-level failure to compact. Use [`Self::is_cancel`].
+    #[derive(Debug, thiserror::Error)]
+    pub(crate) enum CompactionError {
+        /// Use [`Self::is_cancel`] instead of checking for this variant.
+        #[error("The timeline or pageserver is shutting down")]
+        #[allow(private_interfaces)]
+        ShuttingDown(ForbidMatching), // private ForbidMatching enforces use of [`Self::is_cancel`].
+        #[error(transparent)]
+        Other(anyhow::Error),
     }
-    /// Errors that can be ignored, i.e., cancel and shutdown.
-    pub fn is_cancel(&self) -> bool {
-        let other = match self {
-            CompactionError::ShuttingDown => return true,
-            CompactionError::Other(other) => other,
-        };
 
-        // The write path of compaction in particular often lacks differentiated
-        // handling errors stemming from cancellation from other errors.
-        // So, if requested, we also check the ::Other variant by downcasting.
-        // The list below has been found empirically from flaky tests and production logs.
-        // The process is simple: on ::Other(), compaction will print the enclosed
-        // anyhow::Error in debug mode, i.e., with backtrace. That backtrace contains the
-        // line where the write path / compaction code does undifferentiated error handling
-        // from a non-anyhow type to an anyhow type. Add the type to the list of downcasts
-        // below, following the same is_cancel() pattern.
+    #[derive(Debug)]
+    struct ForbidMatching;
 
-        let root_cause = other.root_cause();
+    impl CompactionError {
+        pub fn new_cancelled() -> Self {
+            Self::ShuttingDown(ForbidMatching)
+        }
+        /// Errors that can be ignored, i.e., cancel and shutdown.
+        pub fn is_cancel(&self) -> bool {
+            let other = match self {
+                CompactionError::ShuttingDown(_) => return true,
+                CompactionError::Other(other) => other,
+            };
 
-        let upload_queue = root_cause
-            .downcast_ref::<NotInitialized>()
-            .is_some_and(|e| e.is_stopping());
-        let timeline = root_cause
-            .downcast_ref::<PageReconstructError>()
-            .is_some_and(|e| e.is_cancel());
-        let buffered_writer_flush_task_canelled = root_cause
-            .downcast_ref::<FlushTaskError>()
-            .is_some_and(|e| e.is_cancel());
-        let write_blob_cancelled = root_cause
-            .downcast_ref::<WriteBlobError>()
-            .is_some_and(|e| e.is_cancel());
-        let gate_closed = root_cause
-            .downcast_ref::<GateError>()
-            .is_some_and(|e| e.is_cancel());
-        upload_queue
-            || timeline
-            || buffered_writer_flush_task_canelled
-            || write_blob_cancelled
-            || gate_closed
-    }
-    pub fn from_collect_keyspace(err: CollectKeySpaceError) -> Self {
-        if err.is_cancel() {
-            Self::ShuttingDown
-        } else {
-            Self::Other(err.into_anyhow())
+            // The write path of compaction in particular often lacks differentiated
+            // handling errors stemming from cancellation from other errors.
+            // So, if requested, we also check the ::Other variant by downcasting.
+            // The list below has been found empirically from flaky tests and production logs.
+            // The process is simple: on ::Other(), compaction will print the enclosed
+            // anyhow::Error in debug mode, i.e., with backtrace. That backtrace contains the
+            // line where the write path / compaction code does undifferentiated error handling
+            // from a non-anyhow type to an anyhow type. Add the type to the list of downcasts
+            // below, following the same is_cancel() pattern.
+
+            let root_cause = other.root_cause();
+
+            let upload_queue = root_cause
+                .downcast_ref::<NotInitialized>()
+                .is_some_and(|e| e.is_stopping());
+            let timeline = root_cause
+                .downcast_ref::<PageReconstructError>()
+                .is_some_and(|e| e.is_cancel());
+            let buffered_writer_flush_task_canelled = root_cause
+                .downcast_ref::<FlushTaskError>()
+                .is_some_and(|e| e.is_cancel());
+            let write_blob_cancelled = root_cause
+                .downcast_ref::<WriteBlobError>()
+                .is_some_and(|e| e.is_cancel());
+            let gate_closed = root_cause
+                .downcast_ref::<GateError>()
+                .is_some_and(|e| e.is_cancel());
+            upload_queue
+                || timeline
+                || buffered_writer_flush_task_canelled
+                || write_blob_cancelled
+                || gate_closed
+        }
+        pub fn into_anyhow(self) -> anyhow::Error {
+            match self {
+                CompactionError::ShuttingDown(ForbidMatching) => anyhow::Error::new(self),
+                CompactionError::Other(e) => e,
+            }
+        }
+        pub fn from_collect_keyspace(err: CollectKeySpaceError) -> Self {
+            if err.is_cancel() {
+                Self::new_cancelled()
+            } else {
+                Self::Other(err.into_anyhow())
+            }
         }
     }
 }

@@ -572,8 +572,8 @@ impl GcCompactionQueue {
         }
         match res {
             Ok(res) => Ok(res),
-            Err(CompactionError::ShuttingDown) => Err(CompactionError::new_cancelled()),
-            Err(CompactionError::Other(_)) => {
+            Err(e) if e.is_cancel() => Err(e),
+            Err(_) => {
                 // There are some cases where traditional gc might collect some layer
                 // files causing gc-compaction cannot read the full history of the key.
                 // This needs to be resolved in the long-term by improving the compaction
