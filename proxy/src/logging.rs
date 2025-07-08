@@ -6,7 +6,6 @@ use std::{env, io};
 
 use chrono::{DateTime, Utc};
 use opentelemetry::trace::TraceContextExt;
-use serde::ser::{SerializeMap, Serializer};
 use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Span, Subscriber, callsite, span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -259,14 +258,13 @@ where
                 Err(_) => &mut EventFormatter::new(),
             };
 
-            formatter.reset();
             formatter.format(
                 now,
                 event,
                 &ctx,
                 &self.skipped_field_indices,
                 self.extract_fields,
-            )?;
+            );
             self.writer.make_writer().write_all(formatter.buffer())
         });
 
@@ -508,11 +506,6 @@ impl EventFormatter {
         &self.logline_buffer
     }
 
-    #[inline]
-    fn reset(&mut self) {
-        self.logline_buffer.clear();
-    }
-
     fn format<S>(
         &mut self,
         now: DateTime<Utc>,
@@ -520,8 +513,7 @@ impl EventFormatter {
         ctx: &Context<'_, S>,
         skipped_field_indices: &CallsiteMap<SkippedFieldIndices>,
         extract_fields: &'static [&'static str],
-    ) -> io::Result<()>
-    where
+    ) where
         S: Subscriber + for<'a> LookupSpan<'a>,
     {
         let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
@@ -536,32 +528,29 @@ impl EventFormatter {
             .copied()
             .unwrap_or_default();
 
-        let mut serialize = || {
-            let mut serializer = serde_json::Serializer::new(&mut self.logline_buffer);
-
-            let mut serializer = serializer.serialize_map(None)?;
-
+        self.logline_buffer.clear();
+        let serializer = json::ValueSer::new(&mut self.logline_buffer);
+        json::value_as_object!(|serializer| {
             // Timestamp comes first, so raw lines can be sorted by timestamp.
-            serializer.serialize_entry("timestamp", &timestamp)?;
+            serializer.entry("timestamp", &*timestamp);
 
             // Level next.
-            serializer.serialize_entry("level", &meta.level().as_str())?;
+            serializer.entry("level", meta.level().as_str());
 
             // Message next.
-            serializer.serialize_key("message")?;
             let mut message_extractor =
-                MessageFieldExtractor::new(serializer, skipped_field_indices);
+                MessageFieldExtractor::new(serializer.key("message"), skipped_field_indices);
             event.record(&mut message_extractor);
-            let mut serializer = message_extractor.into_serializer()?;
+            message_extractor.finish();
 
             // Direct message fields.
             let mut fields_present = FieldsPresent(false, skipped_field_indices);
             event.record(&mut fields_present);
             if fields_present.0 {
-                serializer.serialize_entry(
+                serializer.entry(
                     "fields",
-                    &SerializableEventFields(event, skipped_field_indices),
-                )?;
+                    SerializableEventFields(event, skipped_field_indices),
+                );
             }
 
             let spans = SerializableSpans {
@@ -571,43 +560,43 @@ impl EventFormatter {
                     .map_or(vec![], |parent| parent.scope().collect()),
                 extracted: ExtractedSpanFields::new(extract_fields),
             };
-            serializer.serialize_entry("spans", &spans)?;
+            serializer.entry("spans", &spans);
 
             // TODO: thread-local cache?
             let pid = std::process::id();
             // Skip adding pid 1 to reduce noise for services running in containers.
             if pid != 1 {
-                serializer.serialize_entry("process_id", &pid)?;
+                serializer.entry("process_id", pid);
             }
 
-            THREAD_ID.with(|tid| serializer.serialize_entry("thread_id", tid))?;
+            THREAD_ID.with(|tid| serializer.entry("thread_id", tid));
 
             // TODO: tls cache? name could change
             if let Some(thread_name) = std::thread::current().name()
                 && !thread_name.is_empty()
                 && thread_name != "tokio-runtime-worker"
             {
-                serializer.serialize_entry("thread_name", thread_name)?;
+                serializer.entry("thread_name", thread_name);
             }
 
             if let Some(task_id) = tokio::task::try_id() {
-                serializer.serialize_entry("task_id", &format_args!("{task_id}"))?;
+                serializer.entry("task_id", format_args!("{task_id}"));
             }
 
-            serializer.serialize_entry("target", meta.target())?;
+            serializer.entry("target", meta.target());
 
             // Skip adding module if it's the same as target.
             if let Some(module) = meta.module_path()
                 && module != meta.target()
             {
-                serializer.serialize_entry("module", module)?;
+                serializer.entry("module", module);
             }
 
             if let Some(file) = meta.file() {
                 if let Some(line) = meta.line() {
-                    serializer.serialize_entry("src", &format_args!("{file}:{line}"))?;
+                    serializer.entry("src", format_args!("{file}:{line}"));
                 } else {
-                    serializer.serialize_entry("src", file)?;
+                    serializer.entry("src", file);
                 }
             }
 
@@ -616,123 +605,113 @@ impl EventFormatter {
                 let otel_spanref = otel_context.span();
                 let span_context = otel_spanref.span_context();
                 if span_context.is_valid() {
-                    serializer.serialize_entry(
-                        "trace_id",
-                        &format_args!("{}", span_context.trace_id()),
-                    )?;
+                    serializer.entry("trace_id", format_args!("{}", span_context.trace_id()));
                 }
             }
 
             if spans.extracted.has_values() {
                 // TODO: add fields from event, too?
-                serializer.serialize_entry("extract", &spans.extracted)?;
+                serializer.entry("extract", spans.extracted);
             }
+        });
 
-            serializer.end()
-        };
-
-        serialize().map_err(io::Error::other)?;
         self.logline_buffer.push(b'\n');
-        Ok(())
     }
 }
 
 /// Extracts the message field that's mixed will other fields.
-struct MessageFieldExtractor<S: serde::ser::SerializeMap> {
-    serializer: S,
+struct MessageFieldExtractor<'buf> {
+    serializer: Option<json::ValueSer<'buf>>,
     skipped_field_indices: SkippedFieldIndices,
-    state: Option<Result<(), S::Error>>,
 }
 
-impl<S: serde::ser::SerializeMap> MessageFieldExtractor<S> {
+impl<'buf> MessageFieldExtractor<'buf> {
     #[inline]
-    fn new(serializer: S, skipped_field_indices: SkippedFieldIndices) -> Self {
+    fn new(serializer: json::ValueSer<'buf>, skipped_field_indices: SkippedFieldIndices) -> Self {
         Self {
-            serializer,
+            serializer: Some(serializer),
             skipped_field_indices,
-            state: None,
         }
     }
 
     #[inline]
-    fn into_serializer(mut self) -> Result<S, S::Error> {
-        match self.state {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(err),
-            None => self.serializer.serialize_value("")?,
+    fn finish(self) {
+        if let Some(ser) = self.serializer {
+            ser.value("");
         }
-        Ok(self.serializer)
     }
 
     #[inline]
-    fn accept_field(&self, field: &tracing::field::Field) -> bool {
-        self.state.is_none()
-            && field.name() == MESSAGE_FIELD
-            && !self.skipped_field_indices.contains(field.index())
+    fn accept_field(&mut self, field: &tracing::field::Field) -> Option<json::ValueSer<'buf>> {
+        if field.name() == MESSAGE_FIELD && !self.skipped_field_indices.contains(field.index()) {
+            self.serializer.take()
+        } else {
+            None
+        }
     }
 }
 
-impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldExtractor<S> {
+impl tracing::field::Visit for MessageFieldExtractor<'_> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&value));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(value);
         }
     }
 
     #[inline]
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&value));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(value);
         }
     }
 
     #[inline]
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&value));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(value);
         }
     }
 
     #[inline]
     fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&value));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(value);
         }
     }
 
     #[inline]
     fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&value));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(value);
         }
     }
 
     #[inline]
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&value));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(value);
         }
     }
 
     #[inline]
     fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&format_args!("{value:x?}")));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(format_args!("{value:x?}"));
         }
     }
 
     #[inline]
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&value));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(value);
         }
     }
 
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&format_args!("{value:?}")));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(format_args!("{value:?}"));
         }
     }
 
@@ -742,8 +721,8 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldExtracto
         field: &tracing::field::Field,
         value: &(dyn std::error::Error + 'static),
     ) {
-        if self.accept_field(field) {
-            self.state = Some(self.serializer.serialize_value(&format_args!("{value}")));
+        if let Some(ser) = self.accept_field(field) {
+            ser.value(format_args!("{value}"));
         }
     }
 }
@@ -771,117 +750,104 @@ impl tracing::field::Visit for FieldsPresent {
 /// Serializes the fields directly supplied with a log event.
 struct SerializableEventFields<'a, 'event>(&'a tracing::Event<'event>, SkippedFieldIndices);
 
-impl serde::ser::Serialize for SerializableEventFields<'_, '_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        use serde::ser::SerializeMap;
-        let serializer = serializer.serialize_map(None)?;
-        let mut message_skipper = MessageFieldSkipper::new(serializer, self.1);
-        self.0.record(&mut message_skipper);
-        let serializer = message_skipper.into_serializer()?;
-        serializer.end()
+impl json::ValueEncoder for SerializableEventFields<'_, '_> {
+    fn encode(self, v: json::ValueSer<'_>) {
+        json::value_as_object!(|v| {
+            let mut message_skipper = MessageFieldSkipper::new(v, self.1);
+            self.0.record(&mut message_skipper);
+        });
     }
 }
 
 /// A tracing field visitor that skips the message field.
-struct MessageFieldSkipper<S: serde::ser::SerializeMap> {
-    serializer: S,
+struct MessageFieldSkipper<'a, 'buf> {
+    serializer: &'a mut json::ObjectSer<'buf>,
     skipped_field_indices: SkippedFieldIndices,
-    state: Result<(), S::Error>,
 }
 
-impl<S: serde::ser::SerializeMap> MessageFieldSkipper<S> {
+impl<'a, 'buf> MessageFieldSkipper<'a, 'buf> {
     #[inline]
-    fn new(serializer: S, skipped_field_indices: SkippedFieldIndices) -> Self {
+    fn new(
+        serializer: &'a mut json::ObjectSer<'buf>,
+        skipped_field_indices: SkippedFieldIndices,
+    ) -> Self {
         Self {
             serializer,
             skipped_field_indices,
-            state: Ok(()),
         }
     }
 
     #[inline]
     fn accept_field(&self, field: &tracing::field::Field) -> bool {
-        self.state.is_ok()
-            && field.name() != MESSAGE_FIELD
+        field.name() != MESSAGE_FIELD
             && !field.name().starts_with("log.")
             && !self.skipped_field_indices.contains(field.index())
     }
-
-    #[inline]
-    fn into_serializer(self) -> Result<S, S::Error> {
-        self.state?;
-        Ok(self.serializer)
-    }
 }
 
-impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<S> {
+impl tracing::field::Visit for MessageFieldSkipper<'_, '_> {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         if self.accept_field(field) {
-            self.state = self.serializer.serialize_entry(field.name(), &value);
+            self.serializer.entry(field.name(), value);
         }
     }
 
     #[inline]
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
         if self.accept_field(field) {
-            self.state = self.serializer.serialize_entry(field.name(), &value);
+            self.serializer.entry(field.name(), value);
         }
     }
 
     #[inline]
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
         if self.accept_field(field) {
-            self.state = self.serializer.serialize_entry(field.name(), &value);
+            self.serializer.entry(field.name(), value);
         }
     }
 
     #[inline]
     fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
         if self.accept_field(field) {
-            self.state = self.serializer.serialize_entry(field.name(), &value);
+            self.serializer.entry(field.name(), value);
         }
     }
 
     #[inline]
     fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
         if self.accept_field(field) {
-            self.state = self.serializer.serialize_entry(field.name(), &value);
+            self.serializer.entry(field.name(), value);
         }
     }
 
     #[inline]
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
         if self.accept_field(field) {
-            self.state = self.serializer.serialize_entry(field.name(), &value);
+            self.serializer.entry(field.name(), value);
         }
     }
 
     #[inline]
     fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
         if self.accept_field(field) {
-            self.state = self
-                .serializer
-                .serialize_entry(field.name(), &format_args!("{value:x?}"));
+            self.serializer
+                .entry(field.name(), format_args!("{value:x?}"));
         }
     }
 
     #[inline]
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if self.accept_field(field) {
-            self.state = self.serializer.serialize_entry(field.name(), &value);
+            self.serializer.entry(field.name(), value);
         }
     }
 
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if self.accept_field(field) {
-            self.state = self
-                .serializer
-                .serialize_entry(field.name(), &format_args!("{value:?}"));
+            self.serializer
+                .entry(field.name(), format_args!("{value:?}"));
         }
     }
 
@@ -892,7 +858,7 @@ impl<S: serde::ser::SerializeMap> tracing::field::Visit for MessageFieldSkipper<
         value: &(dyn std::error::Error + 'static),
     ) {
         if self.accept_field(field) {
-            self.state = self.serializer.serialize_value(&format_args!("{value}"));
+            self.serializer.entry(field.name(), format_args!("{value}"));
         }
     }
 }
@@ -909,15 +875,12 @@ where
     extracted: ExtractedSpanFields,
 }
 
-impl<S> serde::ser::Serialize for SerializableSpans<'_, S>
+impl<S> json::ValueEncoder for &SerializableSpans<'_, S>
 where
     S: for<'lookup> LookupSpan<'lookup>,
 {
-    fn serialize<Ser>(&self, serializer: Ser) -> Result<Ser::Ok, Ser::Error>
-    where
-        Ser: serde::ser::Serializer,
-    {
-        let mut serializer = serializer.serialize_map(None)?;
+    fn encode(self, serializer: json::ValueSer<'_>) {
+        let mut serializer = json::ObjectSer::new(serializer);
 
         for span in self.spans.iter().rev() {
             let ext = span.extensions();
@@ -928,16 +891,16 @@ where
             self.extracted.layer_span(fields);
 
             let SpanFields { values, span_info } = fields;
-            serializer.serialize_entry(
+            serializer.entry(
                 &*span_info.normalized_name,
-                &SerializableSpanFields {
+                SerializableSpanFields {
                     fields: span.metadata().fields(),
                     values,
                 },
-            )?;
+            );
         }
 
-        serializer.end()
+        serializer.finish();
     }
 }
 
@@ -947,21 +910,20 @@ struct SerializableSpanFields<'span> {
     values: &'span [serde_json::Value; MAX_TRACING_FIELDS],
 }
 
-impl serde::ser::Serialize for SerializableSpanFields<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
-        let mut serializer = serializer.serialize_map(None)?;
+impl json::ValueEncoder for SerializableSpanFields<'_> {
+    fn encode(self, serializer: json::ValueSer<'_>) {
+        let mut serializer = json::ObjectSer::new(serializer);
 
         for (field, value) in std::iter::zip(self.fields, self.values) {
             if value.is_null() {
                 continue;
             }
-            serializer.serialize_entry(field.name(), value)?;
+            serializer
+                .key(field.name())
+                .write_raw_json(value.to_string().as_bytes());
         }
 
-        serializer.end()
+        serializer.finish();
     }
 }
 
@@ -999,12 +961,9 @@ impl ExtractedSpanFields {
     }
 }
 
-impl serde::ser::Serialize for ExtractedSpanFields {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
-        let mut serializer = serializer.serialize_map(None)?;
+impl json::ValueEncoder for ExtractedSpanFields {
+    fn encode(self, serializer: json::ValueSer<'_>) {
+        let mut serializer = json::ObjectSer::new(serializer);
 
         let values = self.values.borrow();
         for (key, value) in std::iter::zip(self.names, &*values) {
@@ -1012,10 +971,12 @@ impl serde::ser::Serialize for ExtractedSpanFields {
                 continue;
             }
 
-            serializer.serialize_entry(key, value)?;
+            serializer
+                .key(*key)
+                .write_raw_json(value.to_string().as_bytes());
         }
 
-        serializer.end()
+        serializer.finish();
     }
 }
 
