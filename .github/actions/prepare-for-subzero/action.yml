@@ -18,6 +18,10 @@ runs:
         SUBZERO_ACCESS_TOKEN: ${{ inputs.token }}
       with:
         main: |
+          if [[ "$(uname -s)" == "Darwin" ]]; then
+            git config --global credential.helper osxkeychain
+          fi
+
           git config --global url."https://${SUBZERO_ACCESS_TOKEN}@github.com/neondatabase-labs/subzero".insteadOf "https://github.com/neondatabase-labs/subzero"
         post: |
           git config --global --remove-section url."https://${SUBZERO_ACCESS_TOKEN}@github.com/neondatabase-labs/subzero"
