@@ -36,8 +36,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use subzero_core::{
     api::{
-        ApiResponse, ContentType::{SingularJSON, TextCSV, ApplicationJSON, Other}, ListVal, Payload, Preferences, QueryNode::{Insert, Delete, Update, FunctionCall}, Representation,
-        Resolution::{MergeDuplicates, IgnoreDuplicates}, SingleVal,
+        ApiResponse,
+        ContentType::{ApplicationJSON, Other, SingularJSON, TextCSV},
+        ListVal, Payload, Preferences,
+        QueryNode::{Delete, FunctionCall, Insert, Update},
+        Representation,
+        Resolution::{IgnoreDuplicates, MergeDuplicates},
+        SingleVal,
     },
     config::{db_allowed_select_functions, db_schemas, role_claim_key /*to_tuple*/},
     content_range_header, content_range_status,
@@ -49,7 +54,7 @@ use subzero_core::{
     error::pg_error_to_status_code,
     formatter::{
         Param,
-        Param::{SV, Str, StrOwned, PL, LV},
+        Param::{LV, PL, SV, Str, StrOwned},
         Snippet, SqlParam,
         postgresql::{fmt_main_query, generate},
     },
@@ -183,10 +188,14 @@ impl DbSchemaCache {
             ),
             (
                 &TXN_ISOLATION_LEVEL,
-                HeaderValue::from_str("ReadCommitted").expect("invalid transaction isolation level"),
+                HeaderValue::from_str("ReadCommitted")
+                    .expect("invalid transaction isolation level"),
             ),
             (&AUTHORIZATION, auth_header.clone()),
-            (&RAW_TEXT_OUTPUT, HeaderValue::from_str("true").expect("invalid raw text output")),
+            (
+                &RAW_TEXT_OUTPUT,
+                HeaderValue::from_str("true").expect("invalid raw text output"),
+            ),
         ];
 
         let query = get_postgresql_configuration_query(Some("pgrst.pre_config"));
@@ -229,10 +238,14 @@ impl DbSchemaCache {
             ),
             (
                 &TXN_ISOLATION_LEVEL,
-                HeaderValue::from_str("ReadCommitted").expect("invalid transaction isolation level"),
+                HeaderValue::from_str("ReadCommitted")
+                    .expect("invalid transaction isolation level"),
             ),
             (&AUTHORIZATION, auth_header.clone()),
-            (&RAW_TEXT_OUTPUT, HeaderValue::from_str("true").expect("invalid raw text output")),
+            (
+                &RAW_TEXT_OUTPUT,
+                HeaderValue::from_str("true").expect("invalid raw text output"),
+            ),
         ];
 
         let body = serde_json::json!({
@@ -372,9 +385,8 @@ impl UserFacingError for RestError {
                 // TODO: this is a hack to get the message from the json body
                 let json = s.json_body();
                 let default_message = "Unknown error".to_string();
-                
-                json
-                    .get("message")
+
+                json.get("message")
                     .map_or(default_message.clone(), |m| match m {
                         JsonValue::String(s) => s.clone(),
                         _ => default_message,
@@ -588,9 +600,11 @@ pub(crate) async fn handle(
                 msg="subzero core error",
                 "forwarding error to user"
             );
-            
-            let RestError::SubzeroCore(subzero_err) = e else { panic!("expected subzero core error") };
-            
+
+            let RestError::SubzeroCore(subzero_err) = e else {
+                panic!("expected subzero core error")
+            };
+
             let json_body = subzero_err.json_body();
             let status_code = StatusCode::from_u16(subzero_err.status_code())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -671,9 +685,7 @@ async fn handle_inner(
 
     // we always use the authenticator role to connect to the database
     let autheticator_role = "authenticator";
-    let connection_string = format!(
-        "postgresql://{autheticator_role}@{host}/{database_name}"
-    );
+    let connection_string = format!("postgresql://{autheticator_role}@{host}/{database_name}");
 
     let conn_info = get_conn_info(
         &config.authentication_config,
@@ -724,20 +736,29 @@ async fn handle_rest_inner(
         .await
         .map_err(HttpConnError::from)?;
 
-    let db_schema_cache = config.rest_config.db_schema_cache.as_ref().ok_or(RestError::SubzeroCore(InternalError {
-        message: "DB schema cache is not configured".to_string(),
-    }))?;
+    let db_schema_cache =
+        config
+            .rest_config
+            .db_schema_cache
+            .as_ref()
+            .ok_or(RestError::SubzeroCore(InternalError {
+                message: "DB schema cache is not configured".to_string(),
+            }))?;
 
-    let endpoint_cache_key = conn_info.endpoint_cache_key().ok_or(RestError::SubzeroCore(InternalError {
-        message: "Failed to get endpoint cache key".to_string(),
-    }))?;
+    let endpoint_cache_key = conn_info
+        .endpoint_cache_key()
+        .ok_or(RestError::SubzeroCore(InternalError {
+            message: "Failed to get endpoint cache key".to_string(),
+        }))?;
 
     let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
     let (parts, originial_body) = request.into_parts();
     let headers_map = parts.headers;
-    let auth_header = headers_map.get(AUTHORIZATION).ok_or(RestError::SubzeroCore(InternalError {
-        message: "Authorization header is required".to_string(),
-    }))?;
+    let auth_header = headers_map
+        .get(AUTHORIZATION)
+        .ok_or(RestError::SubzeroCore(InternalError {
+            message: "Authorization header is required".to_string(),
+        }))?;
     let entry = db_schema_cache
         .get_cached_or_remote(
             &endpoint_cache_key,
@@ -803,10 +824,7 @@ async fn handle_rest_inner(
     // start deconstructing the request because subzero core mostly works with &str
     let method = parts.method;
     let method_str = method.to_string();
-    let path = parts
-        .uri
-        .path_and_query()
-        .map_or("/", |pq| pq.as_str());
+    let path = parts.uri.path_and_query().map_or("/", |pq| pq.as_str());
 
     // this is actually the table name (or rpc/function_name)
     // TODO: rename this to something more descriptive
@@ -943,11 +961,17 @@ async fn handle_rest_inner(
             &TXN_ISOLATION_LEVEL,
             HeaderValue::from_str("ReadCommitted").expect("invalid transaction isolation level"),
         ),
-        (&ALLOW_POOL, HeaderValue::from_str("true").expect("invalid allow pool")),
+        (
+            &ALLOW_POOL,
+            HeaderValue::from_str("true").expect("invalid allow pool"),
+        ),
     ];
 
     if api_request.read_only {
-        headers.push((&TXN_READ_ONLY, HeaderValue::from_str("true").expect("invalid read only")));
+        headers.push((
+            &TXN_READ_ONLY,
+            HeaderValue::from_str("true").expect("invalid read only"),
+        ));
     }
 
     // convert the parameters from subzero core representation to a Vec<JsonValue>
@@ -1031,8 +1055,7 @@ async fn handle_rest_inner(
 
     // build the intermediate response object
     let api_response = ApiResponse {
-        page_total: page_total
-            .map_or(0, |v| v.parse::<u64>().unwrap_or(0)),
+        page_total: page_total.map_or(0, |v| v.parse::<u64>().unwrap_or(0)),
         total_result_set: total_result_set.map(|v| v.parse::<u64>().unwrap_or(0)),
         top_level_offset: 0, // FIXME: check why this is 0
         response_headers: response_headers_json,
