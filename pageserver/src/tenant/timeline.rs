@@ -40,7 +40,6 @@ use layer_manager::{
     Shutdown,
 };
 
-use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 use pageserver_api::key::{
@@ -78,7 +77,7 @@ use utils::rate_limit::RateLimit;
 use utils::seqwait::SeqWait;
 use utils::simple_rcu::{Rcu, RcuReadGuard};
 use utils::sync::gate::{Gate, GateError, GateGuard};
-use utils::{completion, critical, fs_ext, pausable_failpoint};
+use utils::{completion, critical_timeline, fs_ext, pausable_failpoint};
 #[cfg(test)]
 use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
@@ -106,7 +105,7 @@ use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
 use crate::disk_usage_eviction_task::{DiskUsageEvictionInfo, EvictionCandidate, finite_f32};
-use crate::feature_resolver::FeatureResolver;
+use crate::feature_resolver::TenantFeatureResolver;
 use crate::keyspace::{KeyPartitioning, KeySpace};
 use crate::l0_flush::{self, L0FlushGlobalState};
 use crate::metrics::{
@@ -204,7 +203,7 @@ pub struct TimelineResources {
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
     pub basebackup_cache: Arc<BasebackupCache>,
-    pub feature_resolver: FeatureResolver,
+    pub feature_resolver: TenantFeatureResolver,
 }
 
 pub struct Timeline {
@@ -452,7 +451,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
-    feature_resolver: FeatureResolver,
+    feature_resolver: TenantFeatureResolver,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -2081,9 +2080,6 @@ impl Timeline {
                 // Cancelled errors are covered by the `Err(e) if e.is_cancel()` branch.
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
-            // Don't change the current value on offload failure or shutdown. We don't want to
-            // abruptly stall nor resume L0 flushes in these cases.
-            Err(CompactionError::Offload(_)) => {}
         };
 
         result
@@ -2147,14 +2143,31 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         // Regardless of whether we're going to try_freeze_and_flush
-        // or not, stop ingesting any more data.
+        // cancel walreceiver to stop ingesting more data asap.
+        //
+        // Note that we're accepting a race condition here where we may
+        // do the final flush below, before walreceiver observes the
+        // cancellation and exits.
+        // This means we may open a new InMemoryLayer after the final flush below.
+        // Flush loop is also still running for a short while, so, in theory, it
+        // could also make its way into the upload queue.
+        //
+        // If we wait for the shutdown of the walreceiver before moving on to the
+        // flush, then that would be avoided. But we don't do it because the
+        // walreceiver entertains reads internally, which means that it possibly
+        // depends on the download of layers. Layer download is only sensitive to
+        // the cancellation of the entire timeline, so cancelling the walreceiver
+        // will have no effect on the individual get requests.
+        // This would cause problems when there is a lot of ongoing downloads or
+        // there is S3 unavailabilities, i.e. detach, deletion, etc would hang,
+        // and we can't deallocate resources of the timeline, etc.
         let walreceiver = self.walreceiver.lock().unwrap().take();
         tracing::debug!(
             is_some = walreceiver.is_some(),
             "Waiting for WalReceiverManager..."
         );
         if let Some(walreceiver) = walreceiver {
-            walreceiver.shutdown().await;
+            walreceiver.cancel().await;
         }
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
@@ -4732,7 +4745,7 @@ impl Timeline {
                 }
 
                 // Fetch the next layer to flush, if any.
-                let (layer, l0_count, frozen_count, frozen_size) = {
+                let (layer, l0_count, frozen_count, frozen_size, open_layer_size) = {
                     let layers = self.layers.read(LayerManagerLockHolder::FlushLoop).await;
                     let Ok(lm) = layers.layer_map() else {
                         info!("dropping out of flush loop for timeline shutdown");
@@ -4745,8 +4758,13 @@ impl Timeline {
                         .iter()
                         .map(|l| l.estimated_in_mem_size())
                         .sum();
+                    let open_layer_size: u64 = lm
+                        .open_layer
+                        .as_ref()
+                        .map(|l| l.estimated_in_mem_size())
+                        .unwrap_or(0);
                     let layer = lm.frozen_layers.front().cloned();
-                    (layer, l0_count, frozen_count, frozen_size)
+                    (layer, l0_count, frozen_count, frozen_size, open_layer_size)
                     // drop 'layers' lock
                 };
                 let Some(layer) = layer else {
@@ -4759,7 +4777,7 @@ impl Timeline {
                     if l0_count >= stall_threshold {
                         warn!(
                             "stalling layer flushes for compaction backpressure at {l0_count} \
-                            L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                            L0 layers ({frozen_count} frozen layers with {frozen_size} bytes, {open_layer_size} bytes in open layer)"
                         );
                         let stall_timer = self
                             .metrics
@@ -4812,7 +4830,7 @@ impl Timeline {
                         let delay = flush_duration.as_secs_f64();
                         info!(
                             "delaying layer flush by {delay:.3}s for compaction backpressure at \
-                            {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes)"
+                            {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes, {open_layer_size} bytes in open layer)"
                         );
                         let _delay_timer = self
                             .metrics
@@ -5311,6 +5329,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         io_concurrency: IoConcurrency,
+        progress: Option<(usize, usize)>,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         let mut wrote_keys = false;
 
@@ -5387,11 +5406,15 @@ impl Timeline {
             }
         }
 
+        let progress_report = progress
+            .map(|(idx, total)| format!("({idx}/{total}) "))
+            .unwrap_or_default();
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
             info!(
-                "produced image layer for rel {}",
+                "{} produced image layer for rel {}",
+                progress_report,
                 ImageLayerName {
                     key_range: img_range.clone(),
                     lsn
@@ -5401,7 +5424,12 @@ impl Timeline {
                 unfinished_image_layer: image_layer_writer,
             })
         } else {
-            tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
+            tracing::debug!(
+                "{} no data in range {}-{}",
+                progress_report,
+                img_range.start,
+                img_range.end
+            );
             Ok(ImageLayerCreationOutcome::Empty)
         }
     }
@@ -5636,7 +5664,8 @@ impl Timeline {
             }
         }
 
-        for partition in partition_parts.iter() {
+        let total = partition_parts.len();
+        for (idx, partition) in partition_parts.iter().enumerate() {
             if self.cancel.is_cancelled() {
                 return Err(CreateImageLayersError::Cancelled);
             }
@@ -5721,6 +5750,7 @@ impl Timeline {
                     ctx,
                     img_range.clone(),
                     io_concurrency,
+                    Some((idx, total)),
                 )
                 .await?
             } else {
@@ -5986,9 +6016,6 @@ impl Drop for Timeline {
 pub(crate) enum CompactionError {
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
-    /// Compaction tried to offload a timeline and failed
-    #[error("Failed to offload timeline: {0}")]
-    Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error("Failed to collect keyspace: {0}")]
     CollectKeySpaceError(#[from] CollectKeySpaceError),
@@ -6017,7 +6044,6 @@ impl CompactionError {
                 | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
                     PageReconstructError::Cancelled
                 ))
-                | Self::Offload(OffloadError::Cancelled)
         ) {
             return true;
         }
@@ -6066,15 +6092,6 @@ impl CompactionError {
                     )
             )
         )
-    }
-}
-
-impl From<OffloadError> for CompactionError {
-    fn from(e: OffloadError) -> Self {
-        match e {
-            OffloadError::Cancelled => Self::ShuttingDown,
-            _ => Self::Offload(e),
-        }
     }
 }
 
@@ -6852,7 +6869,11 @@ impl Timeline {
                     Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
                     Err(walredo::Error::Other(err)) => {
                         if fire_critical_error {
-                            critical!("walredo failure during page reconstruction: {err:?}");
+                            critical_timeline!(
+                                self.tenant_shard_id,
+                                self.timeline_id,
+                                "walredo failure during page reconstruction: {err:?}"
+                            );
                         }
                         return Err(PageReconstructError::WalRedo(
                             err.context("reconstruct a page image"),

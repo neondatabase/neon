@@ -187,4 +187,17 @@ impl Client {
         let response = self.client.get_slru_segment(proto_req).await?;
         Ok(response.into_inner().try_into()?)
     }
+
+    /// Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't
+    /// garbage collect the LSN until the lease expires. Must be acquired on all relevant shards.
+    ///
+    /// Returns the lease expiration time, or a FailedPrecondition status if the lease could not be
+    /// acquired because the LSN has already been garbage collected.
+    pub async fn lease_lsn(
+        &mut self,
+        req: model::LeaseLsnRequest,
+    ) -> Result<model::LeaseLsnResponse, tonic::Status> {
+        let req = proto::LeaseLsnRequest::from(req);
+        Ok(self.client.lease_lsn(req).await?.into_inner().try_into()?)
+    }
 }

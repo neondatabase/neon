@@ -86,7 +86,7 @@ use crate::context;
 use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
-use crate::feature_resolver::FeatureResolver;
+use crate::feature_resolver::{FeatureResolver, TenantFeatureResolver};
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
@@ -387,7 +387,7 @@ pub struct TenantShard {
 
     l0_flush_global_state: L0FlushGlobalState,
 
-    pub(crate) feature_resolver: FeatureResolver,
+    pub(crate) feature_resolver: TenantFeatureResolver,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -3264,7 +3264,7 @@ impl TenantShard {
                 };
                 let gc_compaction_strategy = self
                     .feature_resolver
-                    .evaluate_multivariate("gc-comapction-strategy", self.tenant_shard_id.tenant_id)
+                    .evaluate_multivariate("gc-comapction-strategy")
                     .ok();
                 let span = if let Some(gc_compaction_strategy) = gc_compaction_strategy {
                     info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id, strategy = %gc_compaction_strategy)
@@ -3286,7 +3286,10 @@ impl TenantShard {
                     .or_else(|err| match err {
                         // Ignore this, we likely raced with unarchival.
                         OffloadError::NotArchived => Ok(()),
-                        err => Err(err),
+                        OffloadError::AlreadyInProgress => Ok(()),
+                        OffloadError::Cancelled => Err(CompactionError::ShuttingDown),
+                        // don't break the anyhow chain
+                        OffloadError::Other(err) => Err(CompactionError::Other(err)),
                     })?;
             }
 
@@ -3319,9 +3322,6 @@ impl TenantShard {
         }
         match err {
             CompactionError::ShuttingDown => unreachable!("is_cancel"),
-            // Offload failures don't trip the circuit breaker, since they're cheap to retry and
-            // shouldn't block compaction.
-            CompactionError::Offload(_) => {}
             CompactionError::CollectKeySpaceError(err) => {
                 // CollectKeySpaceError::Cancelled and PageRead::Cancelled are handled in `err.is_cancel` branch.
                 self.compaction_circuit_breaker
@@ -3411,6 +3411,9 @@ impl TenantShard {
         if let Some(ref walredo_mgr) = self.walredo_mgr {
             walredo_mgr.maybe_quiesce(WALREDO_IDLE_TIMEOUT);
         }
+
+        // Update the feature resolver with the latest tenant-spcific data.
+        self.feature_resolver.update_cached_tenant_properties(self);
     }
 
     pub fn timeline_has_no_attached_children(&self, timeline_id: TimelineId) -> bool {
@@ -4493,7 +4496,10 @@ impl TenantShard {
             gc_block: Default::default(),
             l0_flush_global_state,
             basebackup_cache,
-            feature_resolver,
+            feature_resolver: TenantFeatureResolver::new(
+                feature_resolver,
+                tenant_shard_id.tenant_id,
+            ),
         }
     }
 
@@ -4532,6 +4538,10 @@ impl TenantShard {
         Ok(toml_edit::de::from_str::<LocationConf>(&config)?)
     }
 
+    /// Stores a tenant location config to disk.
+    ///
+    /// NB: make sure to call `ShardIdentity::assert_equal` before persisting a new config, to avoid
+    /// changes to shard parameters that may result in data corruption.
     #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(super) async fn persist_tenant_config(
         conf: &'static PageServerConf,

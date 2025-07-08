@@ -27,15 +27,19 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
         [
             ".*Timeline .* was cancelled and cannot be used anymore.*",
             ".*Timeline .* has been deleted.*",
+            ".*Timeline .* was not found in global map.*",
             ".*wal receiver task finished with an error.*",
         ]
     )
 
     ep = env.endpoints.create("main", tenant_id=env.initial_tenant)
-    # We specify all safekeepers, so compute will connect to all of them.
-    # Only those from the current membership configuration will be used.
-    # TODO(diko): set only current safekeepers when cplane notify is implemented.
-    ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+
+    mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+    assert mconf["new_sk_set"] is None
+    assert len(mconf["sk_set"]) == 1
+    assert mconf["generation"] == 1
+
+    ep.start(safekeeper_generation=1, safekeepers=mconf["sk_set"])
     ep.safe_psql("CREATE EXTENSION neon_test_utils;")
     ep.safe_psql("CREATE TABLE t(a int)")
 
@@ -58,7 +62,16 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
 
     assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 4)]
 
+    # 1 initial generation + 2 migrations on each loop iteration.
+    expected_gen = 1 + 2 * 3
+
+    mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+    assert mconf["generation"] == expected_gen
+
+    assert ep.safe_psql("SHOW neon.safekeepers")[0][0].startswith(f"g#{expected_gen}:")
+
+    # Restart and check again to make sure data is persistent.
     ep.stop()
-    ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+    ep.start(safekeeper_generation=1, safekeepers=[3])
 
     assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 4)]

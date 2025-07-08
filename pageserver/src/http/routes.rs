@@ -1896,6 +1896,10 @@ async fn update_tenant_config_handler(
         ShardParameters::from(tenant.get_shard_identity()),
     );
 
+    tenant
+        .get_shard_identity()
+        .assert_equal(location_conf.shard); // not strictly necessary since we construct it above
+
     crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
         .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
@@ -1939,6 +1943,10 @@ async fn patch_tenant_config_handler(
         tenant.get_generation(),
         ShardParameters::from(tenant.get_shard_identity()),
     );
+
+    tenant
+        .get_shard_identity()
+        .assert_equal(location_conf.shard); // not strictly necessary since we construct it above
 
     crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
@@ -2430,6 +2438,7 @@ async fn timeline_offload_handler(
             .map_err(|e| {
                 match e {
                     OffloadError::Cancelled => ApiError::ResourceUnavailable("Timeline shutting down".into()),
+                    OffloadError::AlreadyInProgress => ApiError::Conflict("Timeline already being offloaded or deleted".into()),
                     _ => ApiError::InternalServerError(anyhow!(e))
                 }
             })?;
@@ -2492,7 +2501,6 @@ async fn timeline_checkpoint_handler(
                 .map_err(|e|
                     match e {
                         CompactionError::ShuttingDown => ApiError::ShuttingDown,
-                        CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::CollectKeySpaceError(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::Other(e) => ApiError::InternalServerError(e),
                         CompactionError::AlreadyRunning(_) => ApiError::InternalServerError(anyhow::anyhow!(e)),
@@ -3689,23 +3697,25 @@ async fn tenant_evaluate_feature_flag(
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
-        let properties = tenant.feature_resolver.collect_properties(tenant_shard_id.tenant_id);
+        // TODO: the properties we get here might be stale right after it is collected. But such races are rare (updated every 10s) 
+        // and we don't need to worry about it for now.
+        let properties = tenant.feature_resolver.collect_properties();
         if as_type.as_deref() == Some("boolean") {
-            let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+            let result = tenant.feature_resolver.evaluate_boolean(&flag);
             let result = result.map(|_| true).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else if as_type.as_deref() == Some("multivariate") {
-            let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+            let result = tenant.feature_resolver.evaluate_multivariate(&flag).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else {
             // Auto infer the type of the feature flag.
             let is_boolean = tenant.feature_resolver.is_feature_flag_boolean(&flag).map_err(|e| ApiError::InternalServerError(anyhow::anyhow!("{e}")))?;
             if is_boolean {
-                let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+                let result = tenant.feature_resolver.evaluate_boolean(&flag);
                 let result = result.map(|_| true).map_err(|e| e.to_string());
                 json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             } else {
-                let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+                let result = tenant.feature_resolver.evaluate_multivariate(&flag).map_err(|e| e.to_string());
                 json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             }
         }

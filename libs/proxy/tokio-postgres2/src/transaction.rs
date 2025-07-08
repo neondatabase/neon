@@ -47,7 +47,7 @@ impl<'a> Transaction<'a> {
         &mut self,
         statement: &str,
         params: I,
-    ) -> Result<RowStream, Error>
+    ) -> Result<RowStream<'_>, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,

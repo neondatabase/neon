@@ -30,7 +30,18 @@ ARG BASE_IMAGE_SHA=debian:${DEBIAN_FLAVOR}
 ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bookworm-slim/debian@$BOOKWORM_SLIM_SHA}
 ARG BASE_IMAGE_SHA=${BASE_IMAGE_SHA/debian:bullseye-slim/debian@$BULLSEYE_SLIM_SHA}
 
-# Build Postgres
+# Naive way:
+#
+# 1. COPY . .
+# 1. make neon-pg-ext
+# 2. cargo build <storage binaries>
+#
+# But to enable docker to cache intermediate layers, we perform a few preparatory steps:
+#
+# - Build all postgres versions, depending on just the contents of vendor/
+# - Use cargo chef to build all rust dependencies
+
+# 1. Build all postgres versions
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
 WORKDIR /home/nonroot
 
@@ -38,17 +49,15 @@ COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
 COPY --chown=nonroot vendor/postgres-v15 vendor/postgres-v15
 COPY --chown=nonroot vendor/postgres-v16 vendor/postgres-v16
 COPY --chown=nonroot vendor/postgres-v17 vendor/postgres-v17
-COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 COPY --chown=nonroot postgres.mk postgres.mk
 COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
 
 ENV BUILD_TYPE=release
 RUN set -e \
-    && mold -run make -j $(nproc) -s neon-pg-ext \
-    && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
+    && mold -run make -j $(nproc) -s postgres
 
-# Prepare cargo-chef recipe
+# 2. Prepare cargo-chef recipe
 FROM $REPOSITORY/$IMAGE:$TAG AS plan
 WORKDIR /home/nonroot
 
@@ -56,23 +65,22 @@ COPY --chown=nonroot . .
 
 RUN cargo chef prepare --recipe-path recipe.json
 
-# Build neon binaries
+# Main build image
 FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 ARG BUILD_TAG
-
-COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
-COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
-COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_install/v16/include/postgresql/server
-COPY --from=pg-build /home/nonroot/pg_install/v17/include/postgresql/server pg_install/v17/include/postgresql/server
-COPY --from=plan     /home/nonroot/recipe.json                              recipe.json
-
 ARG ADDITIONAL_RUSTFLAGS=""
 
+# 3. Build cargo dependencies. Note that this step doesn't depend on anything else than
+# `recipe.json`, so the layer can be reused as long as none of the dependencies change.
+COPY --from=plan     /home/nonroot/recipe.json                              recipe.json
 RUN set -e \
     && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo chef cook --locked --release --recipe-path recipe.json
 
+# Perform the main build. We reuse the Postgres build artifacts from the intermediate 'pg-build'
+# layer, and the cargo dependencies built in the previous step.
+COPY --chown=nonroot --from=pg-build /home/nonroot/pg_install/ pg_install
 COPY --chown=nonroot . .
 
 RUN set -e \
@@ -87,10 +95,10 @@ RUN set -e \
       --bin endpoint_storage \
       --bin neon_local \
       --bin storage_scrubber \
-      --locked --release
+      --locked --release \
+    && mold -run make -j $(nproc) -s neon-pg-ext
 
-# Build final image
-#
+# Assemble the final image
 FROM $BASE_IMAGE_SHA
 WORKDIR /data
 
@@ -130,12 +138,15 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy          
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/endpoint_storage    /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_scrubber    /usr/local/bin
+COPY --from=build /home/nonroot/pg_install/v14 /usr/local/v14/
+COPY --from=build /home/nonroot/pg_install/v15 /usr/local/v15/
+COPY --from=build /home/nonroot/pg_install/v16 /usr/local/v16/
+COPY --from=build /home/nonroot/pg_install/v17 /usr/local/v17/
 
-COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
-COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
-COPY --from=pg-build /home/nonroot/pg_install/v16 /usr/local/v16/
-COPY --from=pg-build /home/nonroot/pg_install/v17 /usr/local/v17/
-COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
+# Deprecated: Old deployment scripts use this tarball which contains all the Postgres binaries.
+# That's obsolete, since all the same files are also present under /usr/local/v*. But to keep the
+# old scripts working for now, create the tarball.
+RUN tar -C /usr/local -cvzf /data/postgres_install.tar.gz v14 v15 v16 v17
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.

@@ -10,3 +10,4 @@ test: neon-clog
 test: neon-test-utils
 test: neon-vacuum-full
 test: neon-event-triggers
+test: neon-subxacts

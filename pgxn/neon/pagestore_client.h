@@ -178,6 +178,22 @@ extern NeonResponse *nm_unpack_response(StringInfo s);
 extern char *nm_to_string(NeonMessage *msg);
 
 /*
+ * If debug_compare_local>DEBUG_COMPARE_LOCAL_NONE, we pass through all the SMGR API
+ * calls to md.c, and *also* do the calls to the Page Server. On every
+ * read, compare the versions we read from local disk and Page Server,
+ * and Assert that they are identical.
+ */
+typedef enum
+{
+	DEBUG_COMPARE_LOCAL_NONE,     /* normal mode - pages are storted locally only for unlogged relations */
+	DEBUG_COMPARE_LOCAL_PREFETCH, /* if page is found in prefetch ring, then compare it with local and return */
+	DEBUG_COMPARE_LOCAL_LFC,      /* if page is found in LFC or prefetch ring, then compare it with local and return */
+	DEBUG_COMPARE_LOCAL_ALL       /* always fetch page from PS and compare it with local */
+} DebugCompareLocalMode;
+
+extern int debug_compare_local;
+
+/*
  * API
  */
 

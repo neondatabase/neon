@@ -42,10 +42,12 @@ members = [
     "libs/walproposer",
     "libs/wal_decoder",
     "libs/postgres_initdb",
+    "libs/proxy/json",
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
+    "pgxn/neon/communicator",
 ]
 
 [workspace.package]
@@ -152,6 +154,7 @@ pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointe
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13.5"
+prost-types = "0.13.5"
 rand = "0.8"
 redis = { version = "0.29.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
@@ -254,6 +257,7 @@ desim = { version = "0.1", path = "./libs/desim" }
 endpoint_storage = { version = "0.0.1", path = "./endpoint_storage/" }
 http-utils = { version = "0.1", path = "./libs/http-utils/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
+neon-shmem = { version = "0.1", path = "./libs/neon-shmem/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
@@ -283,6 +287,7 @@ walproposer = { version = "0.1", path = "./libs/walproposer/" }
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
+cbindgen = "0.29.0"
 criterion = "0.5.1"
 rcgen = "0.13"
 rstest = "0.18"

@@ -724,15 +724,21 @@ class NeonEnvBuilder:
 
         shutil.copytree(storcon_db_from_dir, storcon_db_to_dir, ignore=ignore_postgres_log)
         assert not (storcon_db_to_dir / "postgres.log").exists()
+
         # NB: neon_local rewrites postgresql.conf on each start based on neon_local config. No need to patch it.
-        # However, in this new NeonEnv, the pageservers listen on different ports, and the storage controller
-        # will currently reject re-attach requests from them because the NodeMetadata isn't identical.
+        # However, in this new NeonEnv, the pageservers and safekeepers listen on different ports, and the storage
+        # controller will currently reject re-attach requests from them because the NodeMetadata isn't identical.
         # So, from_repo_dir patches up the the storcon database.
         patch_script_path = self.repo_dir / "storage_controller_db.startup.sql"
         assert not patch_script_path.exists()
         patch_script = ""
+
         for ps in self.env.pageservers:
-            patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';"
+            patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';\n"
+
+        for sk in self.env.safekeepers:
+            patch_script += f"UPDATE safekeepers SET http_port={sk.port.http}, port={sk.port.pg} WHERE id = '{sk.id}';\n"
+
         patch_script_path.write_text(patch_script)
 
         # Update the config with info about tenants and timelines
@@ -1861,6 +1867,7 @@ class PageserverSchedulingPolicy(StrEnum):
     FILLING = "Filling"
     PAUSE = "Pause"
     PAUSE_FOR_RESTART = "PauseForRestart"
+    DELETING = "Deleting"
 
 
 class StorageControllerLeadershipStatus(StrEnum):
@@ -2069,11 +2076,27 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
-    def node_delete(self, node_id):
-        log.info(f"node_delete({node_id})")
+    def node_delete_old(self, node_id):
+        log.info(f"node_delete_old({node_id})")
         self.request(
             "DELETE",
             f"{self.api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_delete(self, node_id):
+        log.info(f"node_delete({node_id})")
+        self.request(
+            "PUT",
+            f"{self.api}/control/v1/node/{node_id}/delete",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def cancel_node_delete(self, node_id):
+        log.info(f"cancel_node_delete({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.api}/control/v1/node/{node_id}/delete",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -4339,6 +4362,8 @@ class Endpoint(PgProtocol, LogUtils):
         basebackup_request_tries: int | None = None,
         timeout: str | None = None,
         env: dict[str, str] | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> Self:
         """
         Start the Postgres instance.
@@ -4363,6 +4388,8 @@ class Endpoint(PgProtocol, LogUtils):
             basebackup_request_tries=basebackup_request_tries,
             timeout=timeout,
             env=env,
+            autoprewarm=autoprewarm,
+            offload_lfc_interval_seconds=offload_lfc_interval_seconds,
         )
         self._running.release(1)
         self.log_config_value("shared_buffers")
@@ -4578,6 +4605,8 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         basebackup_request_tries: int | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> Self:
         """
         Create an endpoint, apply config, and start Postgres.
@@ -4598,6 +4627,8 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
+            autoprewarm=autoprewarm,
+            offload_lfc_interval_seconds=offload_lfc_interval_seconds,
         )
 
         return self
@@ -4682,6 +4713,8 @@ class EndpointFactory:
         remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         basebackup_request_tries: int | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4703,6 +4736,8 @@ class EndpointFactory:
             remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             basebackup_request_tries=basebackup_request_tries,
+            autoprewarm=autoprewarm,
+            offload_lfc_interval_seconds=offload_lfc_interval_seconds,
         )
 
     def create(

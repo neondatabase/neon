@@ -98,12 +98,14 @@ typedef struct
 typedef struct DdlHashTable
 {
 	struct DdlHashTable *prev_table;
+	size_t		subtrans_level;
 	HTAB	   *db_table;
 	HTAB	   *role_table;
 } DdlHashTable;
 
 static DdlHashTable RootTable;
 static DdlHashTable *CurrentDdlTable = &RootTable;
+static int SubtransLevel; /* current nesting level of subtransactions */
 
 static void
 PushKeyValue(JsonbParseState **state, char *key, char *value)
@@ -333,8 +335,24 @@ SendDeltasToControlPlane()
 }
 
 static void
+InitCurrentDdlTableIfNeeded()
+{
+	/* Lazy construction of DllHashTable chain */
+	if (SubtransLevel > CurrentDdlTable->subtrans_level)
+	{
+		DdlHashTable *new_table = MemoryContextAlloc(CurTransactionContext, sizeof(DdlHashTable));
+		new_table->prev_table = CurrentDdlTable;
+		new_table->subtrans_level = SubtransLevel;
+		new_table->role_table = NULL;
+		new_table->db_table = NULL;
+		CurrentDdlTable = new_table;
+	}
+}
+
+static void
 InitDbTableIfNeeded()
 {
+	InitCurrentDdlTableIfNeeded();
 	if (!CurrentDdlTable->db_table)
 	{
 		HASHCTL		db_ctl = {};
@@ -353,6 +371,7 @@ InitDbTableIfNeeded()
 static void
 InitRoleTableIfNeeded()
 {
+	InitCurrentDdlTableIfNeeded();
 	if (!CurrentDdlTable->role_table)
 	{
 		HASHCTL		role_ctl = {};
@@ -371,19 +390,21 @@ InitRoleTableIfNeeded()
 static void
 PushTable()
 {
-	DdlHashTable *new_table = MemoryContextAlloc(CurTransactionContext, sizeof(DdlHashTable));
-
-	new_table->prev_table = CurrentDdlTable;
-	new_table->role_table = NULL;
-	new_table->db_table = NULL;
-	CurrentDdlTable = new_table;
+	SubtransLevel += 1;
 }
 
 static void
 MergeTable()
 {
-	DdlHashTable *old_table = CurrentDdlTable;
+	DdlHashTable *old_table;
 
+	Assert(SubtransLevel >= CurrentDdlTable->subtrans_level);
+	if (--SubtransLevel >= CurrentDdlTable->subtrans_level)
+	{
+		return;
+	}
+
+	old_table = CurrentDdlTable;
 	CurrentDdlTable = old_table->prev_table;
 
 	if (old_table->db_table)
@@ -476,11 +497,15 @@ MergeTable()
 static void
 PopTable()
 {
-	/*
-	 * Current table gets freed because it is allocated in aborted
-	 * subtransaction's memory context.
-	 */
-	CurrentDdlTable = CurrentDdlTable->prev_table;
+	Assert(SubtransLevel >= CurrentDdlTable->subtrans_level);
+	if (--SubtransLevel < CurrentDdlTable->subtrans_level)
+	{
+		/*
+		 * Current table gets freed because it is allocated in aborted
+		 * subtransaction's memory context.
+		 */
+		CurrentDdlTable = CurrentDdlTable->prev_table;
+	}
 }
 
 static void

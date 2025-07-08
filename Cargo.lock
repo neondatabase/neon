@@ -1084,6 +1084,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
+name = "cbindgen"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "975982cdb7ad6a142be15bdf84aea7ec6a9e5d4d797c004d43185b24cfe4e684"
+dependencies = [
+ "clap",
+ "heck",
+ "indexmap 2.9.0",
+ "log",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.100",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1268,6 +1287,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "communicator"
+version = "0.1.0"
+dependencies = [
+ "cbindgen",
+ "neon-shmem",
+ "workspace_hack",
+]
+
+[[package]]
 name = "compute_api"
 version = "0.1.0"
 dependencies = [
@@ -1279,6 +1307,7 @@ dependencies = [
  "remote_storage",
  "serde",
  "serde_json",
+ "url",
  "utils",
 ]
 
@@ -1304,6 +1333,7 @@ dependencies = [
  "fail",
  "flate2",
  "futures",
+ "hostname-validator",
  "http 1.1.0",
  "indexmap 2.9.0",
  "itertools 0.10.5",
@@ -2771,6 +2801,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname-validator"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f558a64ac9af88b5ba400d99b579451af0d39c6d360980045b91aac966d705e2"
+
+[[package]]
 name = "http"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3451,6 +3487,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29c15563dc2726973df627357ce0c9ddddbea194836909d655df6a75d2cf296d"
 dependencies = [
  "wasm-bindgen",
+]
+
+[[package]]
+name = "json"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "itoa",
+ "ryu",
 ]
 
 [[package]]
@@ -4421,6 +4466,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror 1.0.69",
+ "tracing",
  "tracing-utils",
  "utils",
 ]
@@ -4479,6 +4525,7 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi_types",
  "prost 0.13.5",
+ "prost-types 0.13.5",
  "strum",
  "strum_macros",
  "thiserror 1.0.69",
@@ -5156,7 +5203,7 @@ dependencies = [
  "petgraph",
  "prettyplease",
  "prost 0.13.5",
- "prost-types 0.13.3",
+ "prost-types 0.13.5",
  "regex",
  "syn 2.0.100",
  "tempfile",
@@ -5199,9 +5246,9 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.13.3"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4759aa0d3a6232fb8dbdb97b61de2c20047c68aca932c7ed76da9d788508d670"
+checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
 dependencies = [
  "prost 0.13.5",
 ]
@@ -6808,6 +6855,7 @@ dependencies = [
  "chrono",
  "clap",
  "clashmap",
+ "compute_api",
  "control_plane",
  "cron",
  "diesel",
@@ -7641,7 +7689,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "prost-build 0.13.3",
- "prost-types 0.13.3",
+ "prost-types 0.13.5",
  "quote",
  "syn 2.0.100",
 ]
@@ -7653,7 +7701,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9687bd5bfeafebdded2356950f278bba8226f0b32109537c4253406e09aafe1"
 dependencies = [
  "prost 0.13.5",
- "prost-types 0.13.3",
+ "prost-types 0.13.5",
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
@@ -8654,8 +8702,10 @@ dependencies = [
  "fail",
  "form_urlencoded",
  "futures-channel",
+ "futures-core",
  "futures-executor",
  "futures-io",
+ "futures-sink",
  "futures-util",
  "generic-array",
  "getrandom 0.2.11",
@@ -8682,6 +8732,7 @@ dependencies = [
  "num-iter",
  "num-rational",
  "num-traits",
+ "once_cell",
  "p256 0.13.2",
  "parquet",
  "prettyplease",

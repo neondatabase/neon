@@ -919,7 +919,7 @@ async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError
     json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
 }
 
-async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_node_delete_old(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
     let req = match maybe_forward(req).await {
@@ -931,7 +931,10 @@ async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiErr
 
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
-    json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
+    json_response(
+        StatusCode::OK,
+        state.service.node_delete_old(node_id).await?,
+    )
 }
 
 async fn handle_tombstone_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -1049,6 +1052,42 @@ async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiErro
     })?;
 
     json_response(StatusCode::OK, leader)
+}
+
+async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::OK,
+        state.service.start_node_delete(node_id).await?,
+    )
+}
+
+async fn handle_cancel_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Infra)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::ACCEPTED,
+        state.service.cancel_node_delete(node_id).await?,
+    )
 }
 
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -2221,8 +2260,14 @@ pub fn make_router(
         .post("/control/v1/node", |r| {
             named_request_span(r, handle_node_register, RequestName("control_v1_node"))
         })
+        // This endpoint is deprecated and will be removed in a future version.
+        // Use PUT /control/v1/node/:node_id/delete instead.
         .delete("/control/v1/node/:node_id", |r| {
-            named_request_span(r, handle_node_delete, RequestName("control_v1_node_delete"))
+            named_request_span(
+                r,
+                handle_node_delete_old,
+                RequestName("control_v1_node_delete"),
+            )
         })
         .get("/control/v1/node", |r| {
             named_request_span(r, handle_node_list, RequestName("control_v1_node"))
@@ -2246,6 +2291,20 @@ pub fn make_router(
         })
         .get("/control/v1/leader", |r| {
             named_request_span(r, handle_get_leader, RequestName("control_v1_get_leader"))
+        })
+        .put("/control/v1/node/:node_id/delete", |r| {
+            named_request_span(
+                r,
+                handle_node_delete,
+                RequestName("control_v1_start_node_delete"),
+            )
+        })
+        .delete("/control/v1/node/:node_id/delete", |r| {
+            named_request_span(
+                r,
+                handle_cancel_node_delete,
+                RequestName("control_v1_cancel_node_delete"),
+            )
         })
         .put("/control/v1/node/:node_id/drain", |r| {
             named_request_span(r, handle_node_drain, RequestName("control_v1_node_drain"))
@@ -2312,7 +2371,7 @@ pub fn make_router(
             named_request_span(
                 r,
                 handle_safekeeper_scheduling_policy,
-                RequestName("v1_safekeeper_status"),
+                RequestName("v1_safekeeper_scheduling_policy"),
             )
         })
         // Tenant Shard operations

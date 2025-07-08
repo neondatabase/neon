@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::safekeeper_reconciler::ScheduleRequest;
+use crate::compute_hook;
 use crate::heartbeater::SafekeeperState;
 use crate::id_lock_map::trace_shared_lock;
 use crate::metrics;
@@ -235,40 +236,30 @@ impl Service {
         F: std::future::Future<Output = mgmt_api::Result<T>> + Send + 'static,
         T: Sync + Send + 'static,
     {
+        let target_sk_count = safekeepers.len();
+
+        if target_sk_count == 0 {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "timeline configured without any safekeepers"
+            )));
+        }
+
+        if target_sk_count < self.config.timeline_safekeeper_count {
+            tracing::warn!(
+                "running a quorum operation with {} safekeepers, which is less than configured {} safekeepers per timeline",
+                target_sk_count,
+                self.config.timeline_safekeeper_count
+            );
+        }
+
         let results = self
             .tenant_timeline_safekeeper_op(safekeepers, op, timeout)
             .await?;
 
         // Now check if quorum was reached in results.
 
-        let target_sk_count = safekeepers.len();
-        let quorum_size = match target_sk_count {
-            0 => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "timeline configured without any safekeepers",
-                )));
-            }
-            1 | 2 => {
-                #[cfg(feature = "testing")]
-                {
-                    // In test settings, it is allowed to have one or two safekeepers
-                    target_sk_count
-                }
-                #[cfg(not(feature = "testing"))]
-                {
-                    // The region is misconfigured: we need at least three safekeepers to be configured
-                    // in order to schedule work to them
-                    tracing::warn!(
-                        "couldn't find at least 3 safekeepers for timeline, found: {:?}",
-                        target_sk_count
-                    );
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                        "couldn't find at least 3 safekeepers to put timeline to"
-                    )));
-                }
-            }
-            _ => target_sk_count / 2 + 1,
-        };
+        let quorum_size = target_sk_count / 2 + 1;
+
         let success_count = results.iter().filter(|res| res.is_ok()).count();
         if success_count < quorum_size {
             // Failure
@@ -814,7 +805,7 @@ impl Service {
                         Safekeeper::from_persistence(
                             crate::persistence::SafekeeperPersistence::from_upsert(
                                 record,
-                                SkSchedulingPolicy::Pause,
+                                SkSchedulingPolicy::Activating,
                             ),
                             CancellationToken::new(),
                             use_https,
@@ -855,27 +846,36 @@ impl Service {
             .await?;
         let node_id = NodeId(id as u64);
         // After the change has been persisted successfully, update the in-memory state
-        {
-            let mut locked = self.inner.write().unwrap();
-            let mut safekeepers = (*locked.safekeepers).clone();
-            let sk = safekeepers
-                .get_mut(&node_id)
-                .ok_or(DatabaseError::Logical("Not found".to_string()))?;
-            sk.set_scheduling_policy(scheduling_policy);
+        self.set_safekeeper_scheduling_policy_in_mem(node_id, scheduling_policy)
+            .await
+    }
 
-            match scheduling_policy {
-                SkSchedulingPolicy::Active => {
-                    locked
-                        .safekeeper_reconcilers
-                        .start_reconciler(node_id, self);
-                }
-                SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
-                    locked.safekeeper_reconcilers.stop_reconciler(node_id);
-                }
+    pub(crate) async fn set_safekeeper_scheduling_policy_in_mem(
+        self: &Arc<Service>,
+        node_id: NodeId,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        let mut locked = self.inner.write().unwrap();
+        let mut safekeepers = (*locked.safekeepers).clone();
+        let sk = safekeepers
+            .get_mut(&node_id)
+            .ok_or(DatabaseError::Logical("Not found".to_string()))?;
+        sk.set_scheduling_policy(scheduling_policy);
+
+        match scheduling_policy {
+            SkSchedulingPolicy::Active => {
+                locked
+                    .safekeeper_reconcilers
+                    .start_reconciler(node_id, self);
             }
-
-            locked.safekeepers = Arc::new(safekeepers);
+            SkSchedulingPolicy::Decomissioned
+            | SkSchedulingPolicy::Pause
+            | SkSchedulingPolicy::Activating => {
+                locked.safekeeper_reconcilers.stop_reconciler(node_id);
+            }
         }
+
+        locked.safekeepers = Arc::new(safekeepers);
         Ok(())
     }
 
@@ -914,13 +914,13 @@ impl Service {
                         // so it isn't counted toward the quorum.
                         if let Some(min_position) = min_position {
                             if let Ok(ok_res) = &res {
-                                if (ok_res.term, ok_res.flush_lsn) < min_position {
+                                if (ok_res.last_log_term, ok_res.flush_lsn) < min_position {
                                     // Use Error::Timeout to make this error retriable.
                                     res = Err(mgmt_api::Error::Timeout(
                                         format!(
                                         "safekeeper {} returned position {:?} which is less than minimum required position {:?}",
                                         client.node_id_label(),
-                                        (ok_res.term, ok_res.flush_lsn),
+                                        (ok_res.last_log_term, ok_res.flush_lsn),
                                         min_position
                                         )
                                     ));
@@ -1198,7 +1198,11 @@ impl Service {
         // 4. Call PUT configuration on safekeepers from the current set,
         // delivering them joint_conf.
 
-        // TODO(diko): need to notify cplane with an updated set of safekeepers.
+        // Notify cplane/compute about the membership change BEFORE changing the membership on safekeepers.
+        // This way the compute will know about new safekeepers from joint_config before we require to
+        // collect a quorum from them.
+        self.cplane_notify_safekeepers(tenant_id, timeline_id, &joint_config)
+            .await?;
 
         let results = self
             .tenant_timeline_set_membership_quorum(
@@ -1212,7 +1216,7 @@ impl Service {
 
         let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
         for res in results.into_iter().flatten() {
-            let sk_position = (res.term, res.flush_lsn);
+            let sk_position = (res.last_log_term, res.flush_lsn);
             if sync_position < sk_position {
                 sync_position = sk_position;
             }
@@ -1305,8 +1309,55 @@ impl Service {
         )
         .await?;
 
-        // TODO(diko): need to notify cplane with an updated set of safekeepers.
+        // Notify cplane/compute about the membership change AFTER changing the membership on safekeepers.
+        // This way the compute will stop talking to excluded safekeepers only after we stop requiring to
+        // collect a quorum from them.
+        self.cplane_notify_safekeepers(tenant_id, timeline_id, &new_conf)
+            .await?;
 
         Ok(())
+    }
+
+    /// Notify cplane about safekeeper membership change.
+    /// The cplane will receive a joint set of safekeepers as a safekeeper list.
+    async fn cplane_notify_safekeepers(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        mconf: &membership::Configuration,
+    ) -> Result<(), ApiError> {
+        let mut safekeepers = Vec::new();
+        let mut ids: HashSet<_> = HashSet::new();
+
+        for member in mconf
+            .members
+            .m
+            .iter()
+            .chain(mconf.new_members.iter().flat_map(|m| m.m.iter()))
+        {
+            if ids.insert(member.id) {
+                safekeepers.push(compute_hook::SafekeeperInfo {
+                    id: member.id,
+                    hostname: Some(member.host.clone()),
+                });
+            }
+        }
+
+        self.compute_hook
+            .notify_safekeepers(
+                compute_hook::SafekeepersUpdate {
+                    tenant_id,
+                    timeline_id,
+                    generation: mconf.generation,
+                    safekeepers,
+                },
+                &self.cancel,
+            )
+            .await
+            .map_err(|err| {
+                ApiError::InternalServerError(anyhow::anyhow!(
+                    "failed to notify cplane about safekeeper membership change: {err}"
+                ))
+            })
     }
 }
