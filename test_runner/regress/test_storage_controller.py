@@ -1034,16 +1034,19 @@ def test_storage_controller_compute_hook_keep_failing(
     alive_pageservers = [p for p in env.pageservers if p.id != banned_tenant_ps.id]
 
     # Stop pageserver and ban tenant to trigger failed reconciliation
+    log.info(f"Banning tenant {banned_tenant} and stopping pageserver {banned_tenant_ps.id}")
     status_by_tenant[banned_tenant] = 423
     banned_tenant_ps.stop()
     env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
     env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
+    env.storage_controller.allowed_errors.append(".*Keeping extra secondaries.*")
     env.storage_controller.allowed_errors.append(".*Shard reconciliation is keep-failing.*")
     env.storage_controller.node_configure(banned_tenant_ps.id, {"availability": "Offline"})
 
     # Migrate all allowed tenant shards to the first alive pageserver
     # to trigger storage controller optimizations due to affinity rules
     for shard_number in range(shard_count):
+        log.info(f"Migrating shard {shard_number} of {allowed_tenant} to {alive_pageservers[0].id}")
         env.storage_controller.tenant_shard_migrate(
             TenantShardId(allowed_tenant, shard_number, shard_count),
             alive_pageservers[0].id,

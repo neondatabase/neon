@@ -572,7 +572,7 @@ impl GcCompactionQueue {
         match res {
             Ok(res) => Ok(res),
             Err(CompactionError::ShuttingDown) => Err(CompactionError::ShuttingDown),
-            Err(_) => {
+            Err(CompactionError::CollectKeySpaceError(_) | CompactionError::Other(_)) => {
                 // There are some cases where traditional gc might collect some layer
                 // files causing gc-compaction cannot read the full history of the key.
                 // This needs to be resolved in the long-term by improving the compaction
@@ -591,9 +591,9 @@ impl GcCompactionQueue {
         timeline: &Arc<Timeline>,
     ) -> Result<CompactionOutcome, CompactionError> {
         let Ok(_one_op_at_a_time_guard) = self.consumer_lock.try_lock() else {
-            return Err(CompactionError::AlreadyRunning(
-                "cannot run gc-compaction because another gc-compaction is running. This should not happen because we only call this function from the gc-compaction queue.",
-            ));
+            return Err(CompactionError::Other(anyhow::anyhow!(
+                "cannot run gc-compaction because another gc-compaction is running. This should not happen because we only call this function from the gc-compaction queue."
+            )));
         };
         let has_pending_tasks;
         let mut yield_for_l0 = false;

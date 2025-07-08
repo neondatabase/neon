@@ -1,7 +1,6 @@
 import random
 import threading
 from enum import StrEnum
-from time import sleep
 from typing import Any
 
 import pytest
@@ -20,28 +19,32 @@ class PrewarmMethod(StrEnum):
 
 
 PREWARM_LABEL = "compute_ctl_lfc_prewarms_total"
+PREWARM_ERR_LABEL = "compute_ctl_lfc_prewarm_errors_total"
 OFFLOAD_LABEL = "compute_ctl_lfc_offloads_total"
+OFFLOAD_ERR_LABEL = "compute_ctl_lfc_offload_errors_total"
 METHOD_VALUES = [e for e in PrewarmMethod]
 METHOD_IDS = [e.value for e in PrewarmMethod]
 
 
 def check_pinned_entries(cur: Cursor):
-    # some LFC buffer can be temporary locked by autovacuum or background writer
-    for _ in range(10):
+    """
+    Wait till none of LFC buffers are pinned
+    """
+
+    def none_pinned():
         cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_chunks_pinned'")
-        n_pinned = cur.fetchall()[0][0]
-        if n_pinned == 0:
-            break
-        sleep(1)
-    assert n_pinned == 0
+        assert cur.fetchall()[0][0] == 0
+
+    wait_until(none_pinned)
 
 
 def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
+    labels = PREWARM_LABEL, OFFLOAD_LABEL, PREWARM_ERR_LABEL, OFFLOAD_ERR_LABEL
     return {
-        sample.name: sample.value
+        sample.name: int(sample.value)
         for family in prom_parse_impl(client.metrics())
         for sample in family.samples
-        if sample.name in (PREWARM_LABEL, OFFLOAD_LABEL)
+        if sample.name in labels
     }
 
 
@@ -54,7 +57,9 @@ def offload_lfc(method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor) 
         assert "error" not in status
         client.offload_lfc()
         assert client.prewarm_lfc_status()["status"] == "not_prewarmed"
-        assert prom_parse(client) == {OFFLOAD_LABEL: 1, PREWARM_LABEL: 0}
+        parsed = prom_parse(client)
+        desired = {OFFLOAD_LABEL: 1, PREWARM_LABEL: 0, OFFLOAD_ERR_LABEL: 0, PREWARM_ERR_LABEL: 0}
+        assert parsed == desired, f"{parsed=} != {desired=}"
     elif method == PrewarmMethod.POSTGRES:
         cur.execute("select get_local_cache_state()")
         return cur.fetchall()[0][0]
@@ -81,12 +86,17 @@ def check_prewarmed(
         assert prom_parse(client)[PREWARM_LABEL] == 1
     elif method == PrewarmMethod.COMPUTE_CTL:
         assert client.prewarm_lfc_status() == desired_status
-        assert prom_parse(client) == {OFFLOAD_LABEL: 0, PREWARM_LABEL: 1}
+        desired = {OFFLOAD_LABEL: 0, PREWARM_LABEL: 1, PREWARM_ERR_LABEL: 0, OFFLOAD_ERR_LABEL: 0}
+        assert prom_parse(client) == desired
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 @pytest.mark.parametrize("method", METHOD_VALUES, ids=METHOD_IDS)
 def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
+    """
+    Test we can offload endpoint's LFC cache to endpoint storage.
+    Test we can prewarm endpoint with LFC cache loaded from endpoint storage.
+    """
     env = neon_simple_env
     n_records = 1000000
     cfg = [
@@ -140,18 +150,15 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
     lfc_used_pages = pg_cur.fetchall()[0][0]
     log.info(f"Used LFC size: {lfc_used_pages}")
     pg_cur.execute("select * from get_prewarm_info()")
-    prewarm_info = pg_cur.fetchall()[0]
-    log.info(f"Prewarm info: {prewarm_info}")
-    total, prewarmed, skipped, _ = prewarm_info
+    total, prewarmed, skipped, _ = pg_cur.fetchall()[0]
+    log.info(f"Prewarm info: {total=} {prewarmed=} {skipped=}")
     progress = (prewarmed + skipped) * 100 // total
     log.info(f"Prewarm progress: {progress}%")
-
     assert lfc_used_pages > 10000
-    assert (
-        prewarm_info[0] > 0
-        and prewarm_info[1] > 0
-        and prewarm_info[0] == prewarm_info[1] + prewarm_info[2]
-    )
+    assert total > 0
+    assert prewarmed > 0
+    assert total == prewarmed + skipped
+
     lfc_cur.execute("select sum(pk) from t")
     assert lfc_cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
 
@@ -168,6 +175,9 @@ WORKLOAD_IDS = METHOD_IDS[:-1]
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 @pytest.mark.parametrize("method", WORKLOAD_VALUES, ids=WORKLOAD_IDS)
 def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMethod):
+    """
+    Test continiously prewarming endpoint when there is a write-heavy workload going in parallel
+    """
     env = neon_simple_env
     n_records = 10000
     n_threads = 4
@@ -247,5 +257,12 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMet
     assert total_balance == 0
 
     check_pinned_entries(pg_cur)
-    if method != PrewarmMethod.POSTGRES:
-        assert prom_parse(http_client) == {OFFLOAD_LABEL: 1, PREWARM_LABEL: n_prewarms}
+    if method == PrewarmMethod.POSTGRES:
+        return
+    desired = {
+        OFFLOAD_LABEL: 1,
+        PREWARM_LABEL: n_prewarms,
+        OFFLOAD_ERR_LABEL: 0,
+        PREWARM_ERR_LABEL: 0,
+    }
+    assert prom_parse(http_client) == desired

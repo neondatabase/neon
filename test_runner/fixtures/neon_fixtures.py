@@ -1315,6 +1315,14 @@ class NeonEnv:
             # This feature is pending rollout.
             # tenant_config["rel_size_v2_enabled"] = True
 
+            # Test authors tend to forget about the default 10min initial lease deadline
+            # when writing tests, which turns their immediate gc requests via mgmt API
+            # into no-ops. Override the binary default here, such that there is no initial
+            # lease deadline by default in tests. Tests that care can always override it
+            # themselves.
+            # Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
+            tenant_config["lsn_lease_length"] = "0s"
+
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
                     self.pageserver_remote_storage
