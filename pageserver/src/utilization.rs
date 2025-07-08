@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use anyhow::Context;
-use pageserver_api::config::DiskUsageEvictionTaskMode;
+use pageserver_api::config::{DiskUsageEvictionTaskConfig, DiskUsageEvictionTaskMode};
 use pageserver_api::models::PageserverUtilization;
 use utils::serde_percent::Percent;
 
@@ -47,9 +47,9 @@ pub(crate) fn regenerate(
 
     // Fetch the fraction of disk space which may be used
     let disk_usable_pct = match &conf.disk_usage_based_eviction {
-        DiskUsageEvictionTaskMode::Enabled(disk_usage_eviction_task_config) => {
-            disk_usage_eviction_task_config.max_usage_pct
-        }
+        DiskUsageEvictionTaskMode::Enabled(DiskUsageEvictionTaskConfig {
+            max_usage_pct, ..
+        }) => *max_usage_pct,
         DiskUsageEvictionTaskMode::Disabled => Percent::new(100).unwrap(),
     };
 
