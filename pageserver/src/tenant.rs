@@ -142,6 +142,9 @@ mod gc_block;
 mod gc_result;
 pub(crate) mod throttle;
 
+#[cfg(test)]
+pub mod debug;
+
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -6015,12 +6018,11 @@ pub(crate) mod harness {
         }
 
         #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
-        pub(crate) async fn do_try_load(
+        pub(crate) async fn do_try_load_with_redo(
             &self,
+            walredo_mgr: Arc<WalRedoManager>,
             ctx: &RequestContext,
         ) -> anyhow::Result<Arc<TenantShard>> {
-            let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
-
             let (basebackup_cache, _) = BasebackupCache::new(Utf8PathBuf::new(), None);
 
             let tenant = Arc::new(TenantShard::new(
@@ -6056,6 +6058,14 @@ pub(crate) mod harness {
                 timeline.set_state(TimelineState::Active);
             }
             Ok(tenant)
+        }
+
+        pub(crate) async fn do_try_load(
+            &self,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<Arc<TenantShard>> {
+            let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
+            self.do_try_load_with_redo(walredo_mgr, ctx).await
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> Utf8PathBuf {

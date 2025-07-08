@@ -61,6 +61,7 @@ use crate::context;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::feature_resolver::FeatureResolver;
+use crate::metrics::LOCAL_DATA_LOSS_SUSPECTED;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationConf;
@@ -3628,6 +3629,17 @@ async fn activate_post_import_handler(
     .await
 }
 
+// [Hadron] Reset gauge metrics that are used to raised alerts. We need this API as a stop-gap measure to reset alerts
+// after we manually rectify situations such as local SSD data loss. We will eventually automate this.
+async fn hadron_reset_alert_gauges(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    LOCAL_DATA_LOSS_SUSPECTED.set(0);
+    json_response(StatusCode::OK, ())
+}
+
 /// Read the end of a tar archive.
 ///
 /// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
@@ -4153,6 +4165,9 @@ pub fn make_router(
         })
         .post("/v1/feature_flag_spec", |r| {
             api_handler(r, update_feature_flag_spec)
+        })
+        .post("/hadron-internal/reset_alert_gauges", |r| {
+            api_handler(r, hadron_reset_alert_gauges)
         })
         .any(handler_404))
 }
