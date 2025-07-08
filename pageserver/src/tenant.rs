@@ -3334,7 +3334,6 @@ impl TenantShard {
                     .unwrap()
                     .fail(&CIRCUIT_BREAKERS_BROKEN, err);
             }
-            CompactionError::AlreadyRunning(_) => {}
         }
     }
 

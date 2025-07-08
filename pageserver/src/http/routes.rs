@@ -2503,7 +2503,6 @@ async fn timeline_checkpoint_handler(
                         CompactionError::ShuttingDown => ApiError::ShuttingDown,
                         CompactionError::CollectKeySpaceError(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::Other(e) => ApiError::InternalServerError(e),
-                        CompactionError::AlreadyRunning(_) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                     }
                 )?;
         }
@@ -3697,7 +3696,7 @@ async fn tenant_evaluate_feature_flag(
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
-        // TODO: the properties we get here might be stale right after it is collected. But such races are rare (updated every 10s) 
+        // TODO: the properties we get here might be stale right after it is collected. But such races are rare (updated every 10s)
         // and we don't need to worry about it for now.
         let properties = tenant.feature_resolver.collect_properties();
         if as_type.as_deref() == Some("boolean") {
