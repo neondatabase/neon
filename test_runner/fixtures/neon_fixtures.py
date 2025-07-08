@@ -4114,13 +4114,16 @@ class NeonLocalProxy(LogUtils):
 
         args = [
             str(self.neon_binpath / "local_proxy"),
-            "--http", f"{self.host}:{self.http_port}",
-            "--metrics", f"{self.host}:{self.metrics_port}",
-            "--postgres", f"127.0.0.1:{self.vanilla_pg.default_options['port']}",
-            "--config-path", str(self.config_path),
+            "--http",
+            f"{self.host}:{self.http_port}",
+            "--metrics",
+            f"{self.host}:{self.metrics_port}",
+            "--postgres",
+            f"127.0.0.1:{self.vanilla_pg.default_options['port']}",
+            "--config-path",
+            str(self.config_path),
             "--disable-pg-session-jwt",
         ]
-
 
         logfile = open(self.logfile, "w")
         self._popen = subprocess.Popen(args, stdout=logfile, stderr=logfile)
@@ -4226,26 +4229,52 @@ class NeonRestBrokerProxy(LogUtils):
 
         if not cert_path.exists() or not key_path.exists():
             import subprocess
-            log.info("Generating self-signed TLS certificate for rest broker")
-            subprocess.run([
-                "openssl", "req", "-new", "-x509", "-days", "365", "-nodes", "-text",
-                "-out", str(cert_path), "-keyout", str(key_path),
-                "-subj", "/CN=*.local.neon.build"
-            ], check=True)
 
-        log.info(f"Starting rest broker proxy on WSS port {self.wss_port}, HTTP port {self.http_port}")
+            log.info("Generating self-signed TLS certificate for rest broker")
+            subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-new",
+                    "-x509",
+                    "-days",
+                    "365",
+                    "-nodes",
+                    "-text",
+                    "-out",
+                    str(cert_path),
+                    "-keyout",
+                    str(key_path),
+                    "-subj",
+                    "/CN=*.local.neon.build",
+                ],
+                check=True,
+            )
+
+        log.info(
+            f"Starting rest broker proxy on WSS port {self.wss_port}, HTTP port {self.http_port}"
+        )
 
         cmd = [
             str(self.neon_binpath / "proxy"),
-            "-c", str(cert_path),
-            "-k", str(key_path),
-            "--is-auth-broker", "true",
-            "--is-rest-broker", "true",
-            "--wss", f"{self.host}:{self.wss_port}",
-            "--http", f"{self.host}:{self.http_port}",
-            "--mgmt", f"{self.host}:{self.mgmt_port}",
-            "--auth-backend", "local",
-            "--config-path", str(self.config_path),
+            "-c",
+            str(cert_path),
+            "-k",
+            str(key_path),
+            "--is-auth-broker",
+            "true",
+            "--is-rest-broker",
+            "true",
+            "--wss",
+            f"{self.host}:{self.wss_port}",
+            "--http",
+            f"{self.host}:{self.http_port}",
+            "--mgmt",
+            f"{self.host}:{self.mgmt_port}",
+            "--auth-backend",
+            "local",
+            "--config-path",
+            str(self.config_path),
         ]
 
         log.info(f"Starting rest broker proxy with command: {' '.join(cmd)}")
@@ -4320,7 +4349,9 @@ class NeonRestBrokerProxy(LogUtils):
             for line in f:
                 if "ERROR" in line or "FATAL" in line:
                     if not any(allowed in line for allowed in allowed_errors):
-                        raise AssertionError(f"Found error in rest broker proxy log: {line.strip()}")
+                        raise AssertionError(
+                            f"Found error in rest broker proxy log: {line.strip()}"
+                        )
 
     def __enter__(self) -> Self:
         return self
@@ -4441,6 +4472,7 @@ def local_proxy(
         proxy.start()
         yield proxy
 
+
 @pytest.fixture(scope="function")
 def local_proxy_fixed_port(
     vanilla_pg: VanillaPostgres,
@@ -4465,6 +4497,7 @@ def local_proxy_fixed_port(
     ) as proxy:
         proxy.start()
         yield proxy
+
 
 @pytest.fixture(scope="function")
 def rest_broker_proxy(

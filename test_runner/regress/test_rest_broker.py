@@ -6,7 +6,9 @@ import requests
 from jwcrypto import jwt
 
 
-def test_rest_broker_happy(local_proxy_fixed_port, rest_broker_proxy, vanilla_pg, neon_authorize_jwk, httpserver):
+def test_rest_broker_happy(
+    local_proxy_fixed_port, rest_broker_proxy, vanilla_pg, neon_authorize_jwk, httpserver
+):
     """Test REST API endpoint using local_proxy and rest_broker_proxy."""
 
     # Use the fixed port local proxy
@@ -66,19 +68,19 @@ def test_rest_broker_happy(local_proxy_fixed_port, rest_broker_proxy, vanilla_pg
                 "role_names": ["authenticator", "authenticated", "anon"],
                 "jwks_url": httpserver.url_for("/.well-known/jwks.json"),
                 "provider_name": "foo",
-                "jwt_audience": None
+                "jwt_audience": None,
             }
         ]
     }
 
     # Write the JWKS config to the config file that rest_broker_proxy expects
     config_file = rest_broker_proxy.config_path
-    with open(config_file, 'w') as f:
+    with open(config_file, "w") as f:
         json.dump(jwks_config, f)
 
     # Write the same config to the local_proxy config file
     local_config_file = local_proxy.config_path
-    with open(local_config_file, 'w') as f:
+    with open(local_config_file, "w") as f:
         json.dump(jwks_config, f)
 
     # Signal both proxies to reload their config
@@ -96,8 +98,8 @@ def test_rest_broker_happy(local_proxy_fixed_port, rest_broker_proxy, vanilla_pg
             "sub": "user",
             "role": "authenticated",  # role that's in role_names
             "exp": 9999999999,  # expires far in the future
-            "iat": 1000000000   # issued at
-        }
+            "iat": 1000000000,  # issued at
+        },
     )
     token.make_signed_token(neon_authorize_jwk)
 
@@ -116,11 +118,8 @@ def test_rest_broker_happy(local_proxy_fixed_port, rest_broker_proxy, vanilla_pg
         headers={
             "Authorization": f"Bearer {token.serialize()}",
         },
-        params={
-            "id": "eq.1",
-            "select": "name"
-        },
-        verify=False  # Skip SSL verification for self-signed certs
+        params={"id": "eq.1", "select": "name"},
+        verify=False,  # Skip SSL verification for self-signed certs
     )
 
     print(f"Response status: {response.status_code}")
