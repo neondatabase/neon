@@ -118,7 +118,6 @@ use crate::pgdatadir_mapping::{
     MAX_AUX_FILE_V2_DELTAS, MetricsUpdate,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::AttachmentMode;
 use crate::tenant::gc_result::GcResult;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::metadata::TimelineMetadata;
@@ -1771,30 +1770,31 @@ impl Timeline {
                     existing_lease.clone()
                 }
                 Entry::Vacant(vacant) => {
-                    // Reject already GC-ed LSN if we are in AttachedSingle and
-                    // not blocked by the lsn lease deadline.
+                    // Never allow a lease to be requested for an LSN below the applied GC cutoff. The data could have been deleted.
+                    let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
+                    if lsn < *latest_gc_cutoff_lsn {
+                        bail!(
+                            "tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}",
+                            lsn,
+                            *latest_gc_cutoff_lsn
+                        );
+                    }
+
+                    // We allow create lease for those below the planned gc cutoff if we are still within the grace period
+                    // of GC blocking.
                     let validate = {
                         let conf = self.tenant_conf.load();
-                        conf.location.attach_mode == AttachmentMode::Single
-                            && !conf.is_gc_blocked_by_lsn_lease_deadline()
+                        !conf.is_gc_blocked_by_lsn_lease_deadline()
                     };
 
-                    if init || validate {
-                        let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
-                        if lsn < *latest_gc_cutoff_lsn {
-                            bail!(
-                                "tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}",
-                                lsn,
-                                *latest_gc_cutoff_lsn
-                            );
-                        }
-                        if lsn < planned_cutoff {
-                            bail!(
-                                "tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}",
-                                lsn,
-                                planned_cutoff
-                            );
-                        }
+                    // Do not allow initial lease creation to be below the planned gc cutoff. The client (compute_ctl) determines
+                    // whether it is a initial lease creation or a renewal.
+                    if (init || validate) && lsn < planned_cutoff {
+                        bail!(
+                            "tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}",
+                            lsn,
+                            planned_cutoff
+                        );
                     }
 
                     let dt: DateTime<Utc> = valid_until.into();
