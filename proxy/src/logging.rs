@@ -248,7 +248,7 @@ where
         //       early, before OTel machinery, and add as event extension.
         let now = self.clock.now();
 
-        let res: io::Result<()> = EVENT_FORMATTER.with(|f| {
+        EVENT_FORMATTER.with(|f| {
             let mut borrow = f.try_borrow_mut();
             let formatter = match borrow.as_deref_mut() {
                 Ok(formatter) => formatter,
@@ -265,23 +265,10 @@ where
                 &self.skipped_field_indices,
                 self.extract_fields,
             );
-            self.writer.make_writer().write_all(formatter.buffer())
-        });
 
-        // In case logging fails we generate a simpler JSON object.
-        if let Err(err) = res
-            && let Ok(mut line) = serde_json::to_vec(&serde_json::json!( {
-                "timestamp": now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-                "level": "ERROR",
-                "message": format_args!("cannot log event: {err:?}"),
-                "fields": {
-                    "event": format_args!("{event:?}"),
-                },
-            }))
-        {
-            line.push(b'\n');
-            self.writer.make_writer().write_all(&line).ok();
-        }
+            // nothing we can do with IO errors here.
+            self.writer.make_writer().write_all(formatter.buffer()).ok();
+        });
     }
 
     /// Registers a SpanFields instance as span extension.
