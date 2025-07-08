@@ -1199,112 +1199,127 @@ communicator_new_forget_cache(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 static char *
 print_neon_io_request(NeonIORequest *request)
 {
+	static char buf[100];
+
 	switch (request->tag)
 	{
 		case NeonIORequest_Empty:
-			return pstrdup("Empty");
-			break;
+			snprintf(buf, sizeof(buf), "Empty");
+			return buf;
 		case NeonIORequest_RelExists:
 			{
 				CRelExistsRequest *r = &request->rel_exists;
 
-				return psprintf("RelExists: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+				snprintf(buf, sizeof(buf), "RelExists: req " UINT64_FORMAT " rel %u/%u/%u.%u",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+				return buf;
 			}
 		case NeonIORequest_RelSize:
 			{
 				CRelSizeRequest *r = &request->rel_size;
 
-				return psprintf("RelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+				snprintf(buf, sizeof(buf), "RelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+				return buf;
 			}
 		case NeonIORequest_GetPageV:
 			{
 				CGetPageVRequest *r = &request->get_page_v;
 
-				return psprintf("GetPageV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
+				snprintf(buf, sizeof(buf), "GetPageV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+				return buf;
 			}
 		case NeonIORequest_PrefetchV:
 			{
 				CPrefetchVRequest *r = &request->prefetch_v;
 
-				return psprintf("PrefetchV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
+				snprintf(buf, sizeof(buf), "PrefetchV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+				return buf;
 			}
 		case NeonIORequest_DbSize:
 			{
 				CDbSizeRequest *r = &request->db_size;
 
-				return psprintf("PrefetchV: req " UINT64_FORMAT " db %u",
+				snprintf(buf, sizeof(buf), "PrefetchV: req " UINT64_FORMAT " db %u",
 								r->request_id, r->db_oid);
+				return buf;
 			}
 		case NeonIORequest_WritePage:
 			{
 				CWritePageRequest *r = &request->write_page;
 
-				return psprintf("WritePage: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
+				snprintf(buf, sizeof(buf), "WritePage: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
 								LSN_FORMAT_ARGS(r->lsn));
+				return buf;
 			}
 		case NeonIORequest_RelExtend:
 			{
 				CRelExtendRequest *r = &request->rel_extend;
 
-				return psprintf("RelExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
+				snprintf(buf, sizeof(buf), "RelExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
 								LSN_FORMAT_ARGS(r->lsn));
+				return buf;
 			}
 		case NeonIORequest_RelZeroExtend:
 			{
 				CRelZeroExtendRequest *r = &request->rel_zero_extend;
 
-				return psprintf("RelZeroExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u-%u lsn %X/%X",
+				snprintf(buf, sizeof(buf), "RelZeroExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u-%u lsn %X/%X",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks,
 								LSN_FORMAT_ARGS(r->lsn));
+				return buf;
 			}
 		case NeonIORequest_RelCreate:
 			{
 				CRelCreateRequest *r = &request->rel_create;
 
-				return psprintf("RelCreate: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+				snprintf(buf, sizeof(buf), "RelCreate: req " UINT64_FORMAT " rel %u/%u/%u.%u",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+				return buf;
 			}
 		case NeonIORequest_RelTruncate:
 			{
 				CRelTruncateRequest *r = &request->rel_truncate;
 
-				return psprintf("RelTruncate: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u",
+				snprintf(buf, sizeof(buf), "RelTruncate: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->nblocks);
+				return buf;
 			}
 		case NeonIORequest_RelUnlink:
 			{
 				CRelUnlinkRequest *r = &request->rel_unlink;
 
-				return psprintf("RelUnlink: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+				snprintf(buf, sizeof(buf), "RelUnlink: req " UINT64_FORMAT " rel %u/%u/%u.%u",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+				return buf;
 			}
 		case NeonIORequest_ForgetCache:
 			{
 				CForgetCacheRequest *r = &request->forget_cache;
 
-				return psprintf("ForgetCache: req " UINT64_FORMAT " rel %u/%u/%u.%u blocks: %u",
+				snprintf(buf, sizeof(buf), "ForgetCache: req " UINT64_FORMAT " rel %u/%u/%u.%u blocks: %u",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number,
 					r->nblocks);
+				return buf;
 			}
 	}
-	return psprintf("Unknown request type %u", request->tag);
+	snprintf(buf, sizeof(buf), "Unknown request type %d", (int) request->tag);
+	return buf;
 }
 
 
