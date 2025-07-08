@@ -23,7 +23,7 @@ use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_E
 use crate::task_mgr::{self, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS, TaskKind};
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::compaction::CompactionOutcome;
-use crate::tenant::timeline::{CheckOtherForCancel, CompactionError};
+use crate::tenant::timeline::{CompactionError};
 use crate::tenant::{TenantShard, TenantState};
 
 /// Semaphore limiting concurrent background tasks (across all tenants).
@@ -292,7 +292,7 @@ pub(crate) fn log_compaction_error(
     task_cancelled: bool,
     degrade_to_warning: bool,
 ) {
-    let is_cancel = err.is_cancel(CheckOtherForCancel::Yes);
+    let is_cancel = err.is_cancel();
 
     let level = if is_cancel || task_cancelled {
         Level::INFO

@@ -2116,16 +2116,10 @@ impl Timeline {
         };
 
         // Signal compaction failure to avoid L0 flush stalls when it's broken.
-        // XXX this looks an awful lot like the circuit breaker code? Can we dedupe classification?
         match &result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
-            Err(e) if e.is_cancel(CheckOtherForCancel::No /* XXX flip this to Yes so that all the Other() errors that are cancel don't trip the circuit breaker? */) => {}
-            Err(CompactionError::ShuttingDown) => {
-                // Covered by the `Err(e) if e.is_cancel()` branch.
-            }
-            Err(CompactionError::Other(_)) => {
-                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
-            }
+            Err(e) if e.is_cancel() => {}
+            Err(_) => self.compaction_failed.store(true, AtomicOrdering::Relaxed),
         };
 
         result
@@ -6060,26 +6054,19 @@ impl Drop for Timeline {
     }
 }
 
-/// Top-level failure to compact.
+/// Top-level failure to compact. Use [`Self::is_cancel`].
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CompactionError {
+    /// Use [`Self::is_cancel`] instead of checking for this variant.
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
     #[error(transparent)]
     Other(anyhow::Error),
 }
 
-/// Whether [`CompactionError::is_cancel`] should inspect the
-/// [`CompactionError::Other`] anyhow Error's root cause for
-/// typical causes of cancellation.
-pub(crate) enum CheckOtherForCancel {
-    No,
-    Yes,
-}
-
 impl CompactionError {
     /// Errors that can be ignored, i.e., cancel and shutdown.
-    pub fn is_cancel(&self, check_other: CheckOtherForCancel) -> bool {
+    pub fn is_cancel(&self) -> bool {
         let other = match self {
             CompactionError::ShuttingDown => return true,
             CompactionError::Other(other) => other,
@@ -6095,10 +6082,7 @@ impl CompactionError {
         // from a non-anyhow type to an anyhow type. Add the type to the list of downcasts
         // below, following the same is_cancel() pattern.
 
-        let root_cause = match &check_other {
-            CheckOtherForCancel::No => return false,
-            CheckOtherForCancel::Yes => other.root_cause(),
-        };
+        let root_cause = other.root_cause();
 
         let upload_queue = root_cause
             .downcast_ref::<NotInitialized>()
