@@ -5,6 +5,7 @@ mod tests;
 
 use const_format::formatcp;
 use posthog_client_lite::PostHogClientConfig;
+use utils::serde_percent::Percent;
 pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
 pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
 pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
@@ -223,7 +224,7 @@ pub struct ConfigToml {
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     #[serde(with = "humantime_serde")]
     pub synthetic_size_calculation_interval: Duration,
-    pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
+    pub disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
     pub test_remote_failures: u64,
     pub ondemand_download_behavior_treat_error_as_warn: bool,
     #[serde(with = "humantime_serde")]
@@ -273,6 +274,7 @@ pub struct ConfigToml {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct DiskUsageEvictionTaskConfig {
     pub max_usage_pct: utils::serde_percent::Percent,
     pub min_avail_bytes: u64,
@@ -283,6 +285,21 @@ pub struct DiskUsageEvictionTaskConfig {
     /// Select sorting for evicted layers
     #[serde(default)]
     pub eviction_order: EvictionOrder,
+    pub enabled: bool,
+}
+
+impl Default for DiskUsageEvictionTaskConfig {
+    fn default() -> Self {
+        Self {
+            max_usage_pct: Percent::new(80).unwrap(),
+            min_avail_bytes: 2_000_000_000,
+            period: Duration::from_secs(60),
+            #[cfg(feature = "testing")]
+            mock_statvfs: None,
+            eviction_order: EvictionOrder::default(),
+            enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -738,7 +755,7 @@ impl Default for ConfigToml {
 
             metric_collection_bucket: (None),
 
-            disk_usage_based_eviction: (None),
+            disk_usage_based_eviction: DiskUsageEvictionTaskConfig::default(),
 
             test_remote_failures: (0),
 
