@@ -680,12 +680,13 @@ async fn handle_inner(
     );
 
     // Read host from headers (X-Forwarded-Host takes precedence, then Host, then URI host as fallback)
-    let host = request.headers()
+    let host = request
+        .headers()
         .get("x-forwarded-host")
         .and_then(|v| v.to_str().ok())
         .or_else(|| request.headers().get("host").and_then(|v| v.to_str().ok()))
         .unwrap_or_else(|| request.uri().host().unwrap_or(""));
-    
+
     let path_parts: Vec<&str> = request.uri().path().split('/').collect();
     // a valid path is /database/rest/v1/... so parts should be ["", "database", "rest", "v1", ...]
     let database_name = if path_parts.len() >= 3 && !path_parts[1].is_empty() {
