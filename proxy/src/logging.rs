@@ -15,7 +15,7 @@ use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::{FormatEvent, FormatFields};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::registry::{LookupSpan, SpanRef};
+use tracing_subscriber::registry::LookupSpan;
 
 /// Initialize logging and OpenTelemetry tracing and exporter.
 ///
@@ -540,14 +540,32 @@ impl EventFormatter {
                 );
             }
 
-            let spans = SerializableSpans {
-                // collect all spans from parent to root.
-                spans: ctx
+            let mut extracted = ExtractedSpanFields::new(extract_fields);
+
+            let spans = serializer.key("spans");
+            json::value_as_object!(|spans| {
+                let parent_spans = ctx
                     .event_span(event)
-                    .map_or(vec![], |parent| parent.scope().collect()),
-                extracted: ExtractedSpanFields::new(extract_fields),
-            };
-            serializer.entry("spans", &spans);
+                    .map_or(vec![], |parent| parent.scope().collect());
+
+                for span in parent_spans.iter().rev() {
+                    let ext = span.extensions();
+
+                    // all spans should have this extension.
+                    let Some(fields) = ext.get() else { continue };
+
+                    extracted.layer_span(fields);
+
+                    let SpanFields { values, span_info } = fields;
+                    spans.entry(
+                        &*span_info.normalized_name,
+                        SerializableSpanFields {
+                            fields: span.metadata().fields(),
+                            values,
+                        },
+                    );
+                }
+            });
 
             // TODO: thread-local cache?
             let pid = std::process::id();
@@ -596,9 +614,9 @@ impl EventFormatter {
                 }
             }
 
-            if spans.extracted.has_values() {
+            if extracted.has_values() {
                 // TODO: add fields from event, too?
-                serializer.entry("extract", spans.extracted);
+                serializer.entry("extract", extracted);
             }
         });
 
@@ -850,47 +868,6 @@ impl tracing::field::Visit for MessageFieldSkipper<'_, '_> {
     }
 }
 
-/// Serializes the span stack from root to leaf (parent of event) as object
-/// with the span names as keys. To prevent collision we append a numberic value
-/// to the name. Also, collects any span fields we're interested in. Last one
-/// wins.
-struct SerializableSpans<'ctx, S>
-where
-    S: for<'lookup> LookupSpan<'lookup>,
-{
-    spans: Vec<SpanRef<'ctx, S>>,
-    extracted: ExtractedSpanFields,
-}
-
-impl<S> json::ValueEncoder for &SerializableSpans<'_, S>
-where
-    S: for<'lookup> LookupSpan<'lookup>,
-{
-    fn encode(self, serializer: json::ValueSer<'_>) {
-        let mut serializer = json::ObjectSer::new(serializer);
-
-        for span in self.spans.iter().rev() {
-            let ext = span.extensions();
-
-            // all spans should have this extension.
-            let Some(fields) = ext.get() else { continue };
-
-            self.extracted.layer_span(fields);
-
-            let SpanFields { values, span_info } = fields;
-            serializer.entry(
-                &*span_info.normalized_name,
-                SerializableSpanFields {
-                    fields: span.metadata().fields(),
-                    values,
-                },
-            );
-        }
-
-        serializer.finish();
-    }
-}
-
 /// Serializes the span fields as object.
 struct SerializableSpanFields<'span> {
     fields: &'span tracing::field::FieldSet,
@@ -916,19 +893,18 @@ impl json::ValueEncoder for SerializableSpanFields<'_> {
 
 struct ExtractedSpanFields {
     names: &'static [&'static str],
-    values: RefCell<Vec<serde_json::Value>>,
+    values: Vec<serde_json::Value>,
 }
 
 impl ExtractedSpanFields {
     fn new(names: &'static [&'static str]) -> Self {
         ExtractedSpanFields {
             names,
-            values: RefCell::new(vec![serde_json::Value::Null; names.len()]),
+            values: vec![serde_json::Value::Null; names.len()],
         }
     }
 
-    fn layer_span(&self, fields: &SpanFields) {
-        let mut v = self.values.borrow_mut();
+    fn layer_span(&mut self, fields: &SpanFields) {
         let SpanFields { values, span_info } = fields;
 
         // extract the fields
@@ -937,14 +913,14 @@ impl ExtractedSpanFields {
 
             if !value.is_null() {
                 // TODO: replace clone with reference, if possible.
-                v[i] = value.clone();
+                self.values[i] = value.clone();
             }
         }
     }
 
     #[inline]
     fn has_values(&self) -> bool {
-        self.values.borrow().iter().any(|v| !v.is_null())
+        self.values.iter().any(|v| !v.is_null())
     }
 }
 
@@ -952,8 +928,7 @@ impl json::ValueEncoder for ExtractedSpanFields {
     fn encode(self, serializer: json::ValueSer<'_>) {
         let mut serializer = json::ObjectSer::new(serializer);
 
-        let values = self.values.borrow();
-        for (key, value) in std::iter::zip(self.names, &*values) {
+        for (key, value) in std::iter::zip(self.names, self.values) {
             if value.is_null() {
                 continue;
             }
