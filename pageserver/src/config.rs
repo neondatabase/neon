@@ -804,7 +804,7 @@ mod tests {
 
     #[rstest]
     #[
-        case::enabled_omitted(
+        case::omit_the_whole_config(
             DiskUsageEvictionTaskConfig {
                 max_usage_pct: Percent::new(80).unwrap(),
                 min_avail_bytes: 2_000_000_000,
@@ -819,7 +819,7 @@ mod tests {
         "#,
     )]
     #[
-        case::enabled_omitted(
+        case::omit_enabled_field(
             DiskUsageEvictionTaskConfig {
                 max_usage_pct: Percent::new(80).unwrap(),
                 min_avail_bytes: 1_000_000_000,
