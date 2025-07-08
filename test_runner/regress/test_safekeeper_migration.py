@@ -27,6 +27,7 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
         [
             ".*Timeline .* was cancelled and cannot be used anymore.*",
             ".*Timeline .* has been deleted.*",
+            ".*Timeline .* was not found in global map.*",
             ".*wal receiver task finished with an error.*",
         ]
     )

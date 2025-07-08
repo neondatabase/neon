@@ -13,9 +13,8 @@ use tracing::{debug, info};
 use super::{EndpointAccessControl, RoleAccessControl};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
-use crate::cache::endpoints::EndpointsCache;
 use crate::cache::project_info::ProjectInfoCacheImpl;
-use crate::config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions};
+use crate::config::{CacheOptions, ProjectInfoCacheOptions};
 use crate::context::RequestContext;
 use crate::control_plane::{CachedNodeInfo, ControlPlaneApi, NodeInfoCache, errors};
 use crate::error::ReportableError;
@@ -121,15 +120,12 @@ pub struct ApiCaches {
     pub(crate) node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
     pub project_info: Arc<ProjectInfoCacheImpl>,
-    /// List of all valid endpoints.
-    pub endpoints_cache: Arc<EndpointsCache>,
 }
 
 impl ApiCaches {
     pub fn new(
         wake_compute_cache_config: CacheOptions,
         project_info_cache_config: ProjectInfoCacheOptions,
-        endpoint_cache_config: EndpointCacheConfig,
     ) -> Self {
         Self {
             node_info: NodeInfoCache::new(
@@ -139,7 +135,6 @@ impl ApiCaches {
                 true,
             ),
             project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
-            endpoints_cache: Arc::new(EndpointsCache::new(endpoint_cache_config)),
         }
     }
 }

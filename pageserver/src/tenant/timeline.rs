@@ -40,7 +40,6 @@ use layer_manager::{
     Shutdown,
 };
 
-use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 use pageserver_api::key::{
@@ -202,7 +201,7 @@ pub struct TimelineResources {
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
     pub basebackup_cache: Arc<BasebackupCache>,
-    pub feature_resolver: TenantFeatureResolver,
+    pub feature_resolver: Arc<TenantFeatureResolver>,
 }
 
 pub struct Timeline {
@@ -450,7 +449,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
-    feature_resolver: TenantFeatureResolver,
+    feature_resolver: Arc<TenantFeatureResolver>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -2068,9 +2067,6 @@ impl Timeline {
             Err(CompactionError::ShuttingDown) => {
                 // Covered by the `Err(e) if e.is_cancel()` branch.
             }
-            Err(CompactionError::AlreadyRunning(_)) => {
-                // Covered by the `Err(e) if e.is_cancel()` branch.
-            }
             Err(CompactionError::Other(_)) => {
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
@@ -2078,9 +2074,6 @@ impl Timeline {
                 // Cancelled errors are covered by the `Err(e) if e.is_cancel()` branch.
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
-            // Don't change the current value on offload failure or shutdown. We don't want to
-            // abruptly stall nor resume L0 flushes in these cases.
-            Err(CompactionError::Offload(_)) => {}
         };
 
         result
@@ -3129,7 +3122,7 @@ impl Timeline {
 
                 basebackup_cache: resources.basebackup_cache,
 
-                feature_resolver: resources.feature_resolver,
+                feature_resolver: resources.feature_resolver.clone(),
             };
 
             result.repartition_threshold =
@@ -6017,16 +6010,11 @@ impl Drop for Timeline {
 pub(crate) enum CompactionError {
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
-    /// Compaction tried to offload a timeline and failed
-    #[error("Failed to offload timeline: {0}")]
-    Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error("Failed to collect keyspace: {0}")]
     CollectKeySpaceError(#[from] CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
-    #[error("Compaction already running: {0}")]
-    AlreadyRunning(&'static str),
 }
 
 impl CompactionError {
@@ -6035,12 +6023,10 @@ impl CompactionError {
         matches!(
             self,
             Self::ShuttingDown
-                | Self::AlreadyRunning(_)
                 | Self::CollectKeySpaceError(CollectKeySpaceError::Cancelled)
                 | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
                     PageReconstructError::Cancelled
                 ))
-                | Self::Offload(OffloadError::Cancelled)
         )
     }
 
@@ -6055,15 +6041,6 @@ impl CompactionError {
                     )
             )
         )
-    }
-}
-
-impl From<OffloadError> for CompactionError {
-    fn from(e: OffloadError) -> Self {
-        match e {
-            OffloadError::Cancelled => Self::ShuttingDown,
-            _ => Self::Offload(e),
-        }
     }
 }
 

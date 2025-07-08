@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use arc_swap::ArcSwap;
 use pageserver_api::config::NodeMetadata;
@@ -355,11 +359,17 @@ impl PerTenantProperties {
     }
 }
 
-#[derive(Clone)]
 pub struct TenantFeatureResolver {
     inner: FeatureResolver,
     tenant_id: TenantId,
-    cached_tenant_properties: Arc<ArcSwap<HashMap<String, PostHogFlagFilterPropertyValue>>>,
+    cached_tenant_properties: ArcSwap<HashMap<String, PostHogFlagFilterPropertyValue>>,
+
+    // Add feature flag on the critical path below.
+    //
+    // If a feature flag will be used on the critical path, we will update it in the tenant housekeeping loop insetad of
+    // resolving directly by calling `evaluate_multivariate` or `evaluate_boolean`. Remember to update the flag in the
+    // housekeeping loop. The user should directly read this atomic flag instead of using the set of evaluate functions.
+    pub feature_test_remote_size_flag: AtomicBool,
 }
 
 impl TenantFeatureResolver {
@@ -367,7 +377,8 @@ impl TenantFeatureResolver {
         Self {
             inner,
             tenant_id,
-            cached_tenant_properties: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
+            cached_tenant_properties: ArcSwap::new(Arc::new(HashMap::new())),
+            feature_test_remote_size_flag: AtomicBool::new(false),
         }
     }
 
@@ -396,7 +407,8 @@ impl TenantFeatureResolver {
         self.inner.is_feature_flag_boolean(flag_key)
     }
 
-    pub fn update_cached_tenant_properties(&self, tenant_shard: &TenantShard) {
+    /// Refresh the cached properties and flags on the critical path.
+    pub fn refresh_properties_and_flags(&self, tenant_shard: &TenantShard) {
         let mut remote_size_mb = None;
         for timeline in tenant_shard.list_timelines() {
             let size = timeline.metrics.resident_physical_size_get();
@@ -410,5 +422,12 @@ impl TenantFeatureResolver {
         self.cached_tenant_properties.store(Arc::new(
             PerTenantProperties { remote_size_mb }.into_posthog_properties(),
         ));
+
+        // BEGIN: Update the feature flag on the critical path.
+        self.feature_test_remote_size_flag.store(
+            self.evaluate_boolean("test-remote-size-flag").is_ok(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        // END: Update the feature flag on the critical path.
     }
 }

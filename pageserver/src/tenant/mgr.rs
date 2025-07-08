@@ -679,7 +679,7 @@ pub async fn init_tenant_mgr(
                     tenant_shard_id,
                     &tenant_dir_path,
                     resources.clone(),
-                    AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
+                    AttachedTenantConf::new(conf, location_conf.tenant_conf, attached_conf),
                     shard_identity,
                     Some(init_order.clone()),
                     SpawnMode::Lazy,
@@ -857,8 +857,11 @@ impl TenantManager {
                             // take our fast path and just provide the updated configuration
                             // to the tenant.
                             tenant.set_new_location_config(
-                                AttachedTenantConf::try_from(new_location_config.clone())
-                                    .map_err(UpsertLocationError::BadRequest)?,
+                                AttachedTenantConf::try_from(
+                                    self.conf,
+                                    new_location_config.clone(),
+                                )
+                                .map_err(UpsertLocationError::BadRequest)?,
                             );
 
                             Some(FastPathModified::Attached(tenant.clone()))
@@ -1061,7 +1064,7 @@ impl TenantManager {
                 // Testing hack: if we are configured with no control plane, then drop the generation
                 // from upserts.  This enables creating generation-less tenants even though neon_local
                 // always uses generations when calling the location conf API.
-                let attached_conf = AttachedTenantConf::try_from(new_location_config)
+                let attached_conf = AttachedTenantConf::try_from(self.conf, new_location_config)
                     .map_err(UpsertLocationError::BadRequest)?;
 
                 let tenant = tenant_spawn(
@@ -1265,7 +1268,7 @@ impl TenantManager {
             tenant_shard_id,
             &tenant_path,
             self.resources.clone(),
-            AttachedTenantConf::try_from(config)?,
+            AttachedTenantConf::try_from(self.conf, config)?,
             shard_identity,
             None,
             SpawnMode::Eager,
@@ -2146,7 +2149,7 @@ impl TenantManager {
                 tenant_shard_id,
                 &tenant_path,
                 self.resources.clone(),
-                AttachedTenantConf::try_from(config).map_err(Error::DetachReparent)?,
+                AttachedTenantConf::try_from(self.conf, config).map_err(Error::DetachReparent)?,
                 shard_identity,
                 None,
                 SpawnMode::Eager,
