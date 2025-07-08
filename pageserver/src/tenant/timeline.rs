@@ -40,7 +40,6 @@ use layer_manager::{
     Shutdown,
 };
 
-use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 use pageserver_api::key::{
@@ -2078,9 +2077,6 @@ impl Timeline {
                 // Cancelled errors are covered by the `Err(e) if e.is_cancel()` branch.
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
-            // Don't change the current value on offload failure or shutdown. We don't want to
-            // abruptly stall nor resume L0 flushes in these cases.
-            Err(CompactionError::Offload(_)) => {}
         };
 
         result
@@ -6017,9 +6013,6 @@ impl Drop for Timeline {
 pub(crate) enum CompactionError {
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
-    /// Compaction tried to offload a timeline and failed
-    #[error("Failed to offload timeline: {0}")]
-    Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error("Failed to collect keyspace: {0}")]
     CollectKeySpaceError(#[from] CollectKeySpaceError),
@@ -6040,7 +6033,6 @@ impl CompactionError {
                 | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
                     PageReconstructError::Cancelled
                 ))
-                | Self::Offload(OffloadError::Cancelled)
         )
     }
 
@@ -6055,15 +6047,6 @@ impl CompactionError {
                     )
             )
         )
-    }
-}
-
-impl From<OffloadError> for CompactionError {
-    fn from(e: OffloadError) -> Self {
-        match e {
-            OffloadError::Cancelled => Self::ShuttingDown,
-            _ => Self::Offload(e),
-        }
     }
 }
 

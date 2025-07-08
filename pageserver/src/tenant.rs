@@ -3288,7 +3288,9 @@ impl TenantShard {
                         // Ignore this, we likely raced with unarchival.
                         OffloadError::NotArchived => Ok(()),
                         OffloadError::AlreadyInProgress => Ok(()),
-                        err => Err(err),
+                        OffloadError::Cancelled => Err(CompactionError::ShuttingDown),
+                        // don't break the anyhow chain
+                        OffloadError::Other(err) => Err(CompactionError::Other(err)),
                     })?;
             }
 
@@ -3319,9 +3321,6 @@ impl TenantShard {
         match err {
             err if err.is_cancel() => {}
             CompactionError::ShuttingDown => (),
-            // Offload failures don't trip the circuit breaker, since they're cheap to retry and
-            // shouldn't block compaction.
-            CompactionError::Offload(_) => {}
             CompactionError::CollectKeySpaceError(err) => {
                 // CollectKeySpaceError::Cancelled and PageRead::Cancelled are handled in `err.is_cancel` branch.
                 self.compaction_circuit_breaker
