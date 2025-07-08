@@ -564,16 +564,14 @@ impl InterpretedWalReader {
 
                         // Clean up any shard senders that have dropped out before adding the new
                         // one. This avoids a build up of dead senders.
-                        while let Some(sender) = senders.last() {
-                            if sender.tx.is_closed() {
-                                let sender_id = ShardSenderId::new(shard_id, sender.sender_id);
+                        senders.retain(|sender| {
+                            let closed = sender.tx.is_closed();
 
-                                senders.pop();
-                                tracing::info!("Removed shard sender {}", sender_id);
-                            } else {
-                                break;
-                            }
-                        }
+                            let sender_id = ShardSenderId::new(shard_id, sender.sender_id);
+                            tracing::info!("Removed shard sender {}", sender_id);
+
+                            !closed
+                        });
 
                         let new_sender_id = match senders.last() {
                             Some(sender) => sender.sender_id.next(),
