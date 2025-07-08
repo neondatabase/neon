@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -x
 
 if [[ -v BENCHMARK_CONNSTR ]]; then
@@ -26,8 +26,9 @@ if [[ -v BENCHMARK_CONNSTR ]]; then
   fi
 fi
 REGULAR_USER=false
-while getopts r arg; do
-  case $arg in
+PARALLEL_COMPUTES=${PARALLEL_COMPUTES:-1}
+while getopts pr arg; do
+  case ${arg} in
   r)
     REGULAR_USER=true
     shift $((OPTIND-1))
@@ -41,26 +42,49 @@ extdir=${1}
 
 cd "${extdir}" || exit 2
 FAILED=
-LIST=$( (echo -e "${SKIP//","/"\n"}"; ls) | sort | uniq -u)
-for d in ${LIST}; do
-    [ -d "${d}" ] || continue
-    if ! psql -w -c "select 1" >/dev/null; then
-      FAILED="${d} ${FAILED}"
-      break
-    fi
-    if [[ ${REGULAR_USER} = true ]] && [ -f "${d}"/regular-test.sh ]; then
-       "${d}/regular-test.sh" || FAILED="${d} ${FAILED}"
-       continue
-    fi
+export FAILED_FILE=/tmp/failed
+rm -f ${FAILED_FILE}
+mapfile -t LIST < <( (echo -e "${SKIP//","/"\n"}"; ls) | sort | uniq -u)
+if [[ ${PARALLEL_COMPUTES} -gt 1 ]]; then
+  # Avoid errors if RUN_FIRST is not defined
+  RUN_FIRST=${RUN_FIRST:-}
+  # Move entries listed in the RUN_FIRST variable to the beginning
+  ORDERED_LIST=$(printf "%s\n" "${LIST[@]}" | grep -x -Ff <(echo -e "${RUN_FIRST//,/$'\n'}"); printf "%s\n" "${LIST[@]}" | grep -vx -Ff <(echo -e "${RUN_FIRST//,/$'\n'}"))
+  parallel -j"${PARALLEL_COMPUTES}" "[[ -d {} ]] || exit 0
+                export PGHOST=compute{%}
+                if ! psql -c 'select 1'>/dev/null; then
+                  exit 1
+                fi
+                echo Running on \${PGHOST}
+                if [[ -f ${extdir}/{}/neon-test.sh ]]; then
+                  echo Running from script
+                  ${extdir}/{}/neon-test.sh || echo {} >> ${FAILED_FILE};
+                else
+                  echo Running using make;
+                  USE_PGXS=1 make -C {} installcheck || echo {} >> ${FAILED_FILE};
+                fi" ::: ${ORDERED_LIST}
+  [[ ! -f ${FAILED_FILE} ]] && exit 0
+else
+  for d in "${LIST[@]}"; do
+      [ -d "${d}" ] || continue
+      if ! psql -w -c "select 1" >/dev/null; then
+        FAILED="${d} ${FAILED}"
+        break
+      fi
+      if [[ ${REGULAR_USER} = true ]] && [ -f "${d}"/regular-test.sh ]; then
+        "${d}/regular-test.sh" || FAILED="${d} ${FAILED}"
+        continue
+      fi
 
-    if [ -f "${d}/neon-test.sh" ]; then
-       "${d}/neon-test.sh" || FAILED="${d} ${FAILED}"
-    else
-       USE_PGXS=1 make -C "${d}" installcheck || FAILED="${d} ${FAILED}"
-    fi
-done
-[ -z "${FAILED}" ] && exit 0
-for d in ${FAILED}; do
+      if [ -f "${d}/neon-test.sh" ]; then
+        "${d}/neon-test.sh" || FAILED="${d} ${FAILED}"
+      else
+        USE_PGXS=1 make -C "${d}" installcheck || FAILED="${d} ${FAILED}"
+      fi
+  done
+  [[ -z ${FAILED} ]]  && exit 0
+fi
+for d in ${FAILED} $([[ ! -f ${FAILED_FILE} ]] || cat ${FAILED_FILE}); do
   cat "$(find $d -name regression.diffs)"
 done
 for postgis_diff in /tmp/pgis_reg/*_diff; do
@@ -68,4 +92,5 @@ for postgis_diff in /tmp/pgis_reg/*_diff; do
   cat "${postgis_diff}"
 done
 echo "${FAILED}"
+cat ${FAILED_FILE}
 exit 1
