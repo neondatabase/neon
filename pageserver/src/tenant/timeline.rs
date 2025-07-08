@@ -598,6 +598,7 @@ impl PageReconstructError {
             PageReconstructError::MissingKey(_) => false,
         }
     }
+    #[allow(dead_code)] // we use the is_cancel + into_anyhow pattern in quite a few places, this one will follow soon enough
     pub(crate) fn into_anyhow(self) -> anyhow::Error {
         match self {
             PageReconstructError::Other(e) => e,
@@ -968,7 +969,12 @@ impl WaitLsnError {
     pub(crate) fn is_cancel(&self) -> bool {
         match self {
             WaitLsnError::Shutdown => true,
-            WaitLsnError::BadState(timeline_state) => todo!(),
+            WaitLsnError::BadState(timeline_state) => match timeline_state {
+                TimelineState::Loading => false,
+                TimelineState::Active => false,
+                TimelineState::Stopping => true,
+                TimelineState::Broken { .. } => false,
+            },
             WaitLsnError::Timeout(_) => false,
         }
     }
@@ -984,10 +990,10 @@ impl WaitLsnError {
 impl From<WaitLsnError> for tonic::Status {
     fn from(err: WaitLsnError) -> Self {
         use tonic::Code;
-        let code = match &err {
-            WaitLsnError::Timeout(_) => Code::Internal,
-            WaitLsnError::BadState(_) => Code::Internal,
-            WaitLsnError::Shutdown => Code::Unavailable,
+        let code = if err.is_cancel() {
+            Code::Unavailable
+        } else {
+            Code::Internal
         };
         tonic::Status::new(code, err.to_string())
     }
@@ -2098,10 +2104,6 @@ impl Timeline {
                 // Covered by the `Err(e) if e.is_cancel()` branch.
             }
             Err(CompactionError::Other(_)) => {
-                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
-            }
-            Err(CompactionError::CollectKeySpaceError(_)) => {
-                // Cancelled errors are covered by the `Err(e) if e.is_cancel()` branch.
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
         };
@@ -5275,7 +5277,22 @@ impl Timeline {
             ));
         }
 
-        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
+        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await.inspect_err(|e| {
+            if matches!(
+                e,
+                CollectKeySpaceError::Decode(_)
+                    | CollectKeySpaceError::PageRead(
+                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                    )
+            ) {
+                // Alert on critical errors that indicate data corruption.
+                critical_timeline!(
+                    self.tenant_shard_id,
+                    self.timeline_id,
+                    "could not compact, repartitioning keyspace failed: {e:?}"
+                );
+            }
+        })?;
         let dense_partitioning = dense_ks.partition(
             &self.shard_identity,
             partition_size,
@@ -6056,20 +6073,14 @@ impl CompactionError {
     /// Errors that can be ignored, i.e., cancel and shutdown.
     pub fn is_cancel(&self, check_other: CheckOtherForCancel) -> bool {
         let other = match self {
-            CompactionError::ShuttingDown => true,
+            CompactionError::ShuttingDown => return true,
             CompactionError::Other(other) => other,
         };
 
         // TODO: why are we only checking the root cause here? shouldn't we do these checks for each error in the chain?
         let root_cause = match &check_other {
             CheckOtherForCancel::No => return false,
-            CheckOtherForCancel::Yes => {
-                if let Self::Other(other) = self {
-                    other.root_cause()
-                } else {
-                    return false;
-                }
-            }
+            CheckOtherForCancel::Yes => other.root_cause(),
         };
 
         let upload_queue = root_cause
@@ -6092,22 +6103,6 @@ impl CompactionError {
             || buffered_writer_flush_task_canelled
             || write_blob_cancelled
             || gate_closed
-            || collect_keyspace_cancelled
-    }
-
-    /// Critical errors that indicate data corruption.
-    pub fn is_critical(&self) -> bool {
-        let other = match self {
-            CompactionError::ShuttingDown => false,
-            CompactionError::Other(error) => error,
-        };
-        other
-            .chain()
-            .find(|e| {
-                e.downcast_ref::<CollectKeySpaceError>()
-                    .and_then(|e| !e.is_cancel())
-            })
-            .is_some()
     }
 }
 

@@ -572,7 +572,7 @@ impl GcCompactionQueue {
         match res {
             Ok(res) => Ok(res),
             Err(CompactionError::ShuttingDown) => Err(CompactionError::ShuttingDown),
-            Err(CompactionError::CollectKeySpaceError(_) | CompactionError::Other(_)) => {
+            Err(CompactionError::Other(_)) => {
                 // There are some cases where traditional gc might collect some layer
                 // files causing gc-compaction cannot read the full history of the key.
                 // This needs to be resolved in the long-term by improving the compaction
@@ -1419,15 +1419,6 @@ impl Timeline {
             // Suppress errors when cancelled.
             Err(_) if self.cancel.is_cancelled() => {}
             Err(err) if err.is_cancel(CheckOtherForCancel::No) => {}
-
-            // Alert on critical errors that indicate data corruption.
-            Err(err) if err.is_critical() => {
-                critical_timeline!(
-                    self.tenant_shard_id,
-                    self.timeline_id,
-                    "could not compact, repartitioning keyspace failed: {err:?}"
-                );
-            }
 
             // Log other errors. No partitioning? This is normal, if the timeline was just created
             // as an empty timeline. Also in unit tests, when we use the timeline as a simple

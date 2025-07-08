@@ -141,19 +141,18 @@ pub(crate) enum CollectKeySpaceError {
     Cancelled,
 }
 
-// separate impl block because this might become a trait down the line
 impl CollectKeySpaceError {
     pub(crate) fn is_cancel(&self) -> bool {
         match self {
-            CollectKeySpaceError::Decode(e) => e.is_cancel(),
+            CollectKeySpaceError::Decode(_) => false,
             CollectKeySpaceError::PageRead(e) => e.is_cancel(),
             CollectKeySpaceError::Cancelled => true,
         }
     }
     pub(crate) fn into_anyhow(self) -> anyhow::Error {
         match self {
-            CollectKeySpaceError::Decode(e) => e.into_anyhow(),
-            CollectKeySpaceError::PageRead(e) => e.into_anyhow(),
+            CollectKeySpaceError::Decode(e) => anyhow::Error::new(e),
+            CollectKeySpaceError::PageRead(e) => anyhow::Error::new(e),
             CollectKeySpaceError::Cancelled => anyhow::Error::new(self),
         }
     }
