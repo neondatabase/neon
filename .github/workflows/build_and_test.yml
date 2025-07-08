@@ -88,7 +88,8 @@ jobs:
     secrets: inherit
 
   lint-openapi-spec:
-    needs: [ check-permissions ]
+    needs: [ meta, check-permissions ]
+    runs-on: [ self-hosted, small ]
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
@@ -101,9 +102,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - run: |
-          for file in $(find -iname openapi_spec.y*ml); do
-              docker run  --rm -v $PWD:/spec ghcr.io/redocly/cli lint /spec/$file
-          done
+          find -iname "openapi_spec.y*ml" -exec \
+            "docker run  --rm -v ${PWD}:/spec ghcr.io/redocly/cli lint /spec/{}"
 
   check-codestyle-python:
     needs: [ meta, check-permissions, build-build-tools-image ]
