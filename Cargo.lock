@@ -3490,6 +3490,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "json"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "itoa",
+ "ryu",
+]
+
+[[package]]
 name = "json-structural-diff"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8693,8 +8702,10 @@ dependencies = [
  "fail",
  "form_urlencoded",
  "futures-channel",
+ "futures-core",
  "futures-executor",
  "futures-io",
+ "futures-sink",
  "futures-util",
  "generic-array",
  "getrandom 0.2.11",
