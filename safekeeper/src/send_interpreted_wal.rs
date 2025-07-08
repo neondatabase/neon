@@ -568,7 +568,9 @@ impl InterpretedWalReader {
                             let closed = sender.tx.is_closed();
 
                             let sender_id = ShardSenderId::new(shard_id, sender.sender_id);
-                            tracing::info!("Removed shard sender {}", sender_id);
+                            if closed {
+                                tracing::info!("Removed shard sender {}", sender_id);
+                            }
 
                             !closed
                         });
