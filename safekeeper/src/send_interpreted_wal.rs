@@ -567,8 +567,8 @@ impl InterpretedWalReader {
                         senders.retain(|sender| {
                             let closed = sender.tx.is_closed();
 
-                            let sender_id = ShardSenderId::new(shard_id, sender.sender_id);
                             if closed {
+                                let sender_id = ShardSenderId::new(shard_id, sender.sender_id);
                                 tracing::info!("Removed shard sender {}", sender_id);
                             }
 
