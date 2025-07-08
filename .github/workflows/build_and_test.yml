@@ -306,14 +306,14 @@ jobs:
       statuses: write
       contents: write
       pull-requests: write
-    runs-on: [ self-hosted, unit-perf ]
+    runs-on: [ self-hosted, unit-perf-aws-arm ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       # for changed limits, see comments on `options:` earlier in this file
-      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --ulimit nofile=65536:65536 --security-opt seccomp=unconfined
     strategy:
       fail-fast: false
       matrix:
@@ -986,6 +986,7 @@ jobs:
       - name: Verify docker-compose example and test extensions
         timeout-minutes: 60
         env:
+          PARALLEL_COMPUTES: 3
           TAG: >-
             ${{
               needs.meta.outputs.run-kind == 'compute-rc-pr'

@@ -1572,6 +1572,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pgaudit-src
 ARG PG_VERSION
 WORKDIR /ext-src
+COPY "compute/patches/pgaudit-parallel_workers-${PG_VERSION}.patch" .
 RUN case "${PG_VERSION}" in \
     "v14") \
     export PGAUDIT_VERSION=1.6.3 \
@@ -1594,7 +1595,8 @@ RUN case "${PG_VERSION}" in \
     esac && \
     wget https://github.com/pgaudit/pgaudit/archive/refs/tags/${PGAUDIT_VERSION}.tar.gz -O pgaudit.tar.gz && \
     echo "${PGAUDIT_CHECKSUM} pgaudit.tar.gz" | sha256sum --check && \
-    mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C .
+    mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C . && \
+    patch -p1 < "/ext-src/pgaudit-parallel_workers-${PG_VERSION}.patch"
 
 FROM pg-build AS pgaudit-build
 COPY --from=pgaudit-src /ext-src/ /ext-src/
@@ -1634,11 +1636,14 @@ RUN make install USE_PGXS=1 -j $(getconf _NPROCESSORS_ONLN)
 # compile neon extensions
 #
 #########################################################################################
-FROM pg-build AS neon-ext-build
+FROM pg-build-with-cargo AS neon-ext-build
 ARG PG_VERSION
 
-COPY pgxn/ pgxn/
-RUN make -j $(getconf _NPROCESSORS_ONLN) -C pgxn -s install-compute
+USER root
+COPY . .
+
+RUN make -j $(getconf _NPROCESSORS_ONLN) -C pgxn -s install-compute \
+      BUILD_TYPE=release CARGO_BUILD_FLAGS="--locked --release" NEON_CARGO_ARTIFACT_TARGET_DIR="$(pwd)/target/release"
 
 #########################################################################################
 #
@@ -1910,10 +1915,10 @@ RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /e
 
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN echo /usr/local/pgsql/lib > /etc/ld.so.conf.d/00-neon.conf && /sbin/ldconfig
-RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl jq \
+RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl jq parallel \
    && apt clean && rm -rf /ext-src/*.tar.gz /ext-src/*.patch /var/lib/apt/lists/*
 ENV PATH=/usr/local/pgsql/bin:$PATH
-ENV PGHOST=compute
+ENV PGHOST=compute1
 ENV PGPORT=55433
 ENV PGUSER=cloud_admin
 ENV PGDATABASE=postgres

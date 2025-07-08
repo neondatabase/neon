@@ -55,9 +55,10 @@ def test_pageserver_characterize_throughput_with_n_tenants(
 @pytest.mark.parametrize("duration", [20 * 60])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(2048)])
 # we use 1 client to characterize latencies, and 64 clients to characterize throughput/scalability
-# we use 64 clients because typically for a high number of connections we recommend the connection pooler
-# which by default uses 64 connections
-@pytest.mark.parametrize("n_clients", [1, 64])
+# we use 8 clients because we see a latency knee around 6-8 clients on im4gn.2xlarge instance type,
+# which we use for this periodic test - at a cpu utilization of around 70 % - which is considered
+# a good utilization for pageserver.
+@pytest.mark.parametrize("n_clients", [1, 8])
 @pytest.mark.parametrize("n_tenants", [1])
 @pytest.mark.timeout(2400)
 def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_many_clients_one_tenant(
@@ -103,9 +104,7 @@ def setup_and_run_pagebench_benchmark(
     # configure cache sizes like in prod
     page_cache_size = 16384
     max_file_descriptors = 500000
-    neon_env_builder.pageserver_config_override = (
-        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
-    )
+    neon_env_builder.pageserver_config_override = f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}; disk_usage_based_eviction={{max_usage_pct=99, min_avail_bytes=0, period = '999y'}}"
 
     tracing_config = PageserverTracingConfig(
         sampling_ratio=(0, 1000),

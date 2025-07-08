@@ -5,6 +5,7 @@ use compute_api::responses::LfcOffloadState;
 use compute_api::responses::LfcPrewarmState;
 use http::StatusCode;
 use reqwest::Client;
+use std::mem::replace;
 use std::sync::Arc;
 use tokio::{io::AsyncReadExt, spawn};
 use tracing::{error, info};
@@ -88,17 +89,15 @@ impl ComputeNode {
         self.state.lock().unwrap().lfc_offload_state.clone()
     }
 
-    /// Returns false if there is a prewarm request ongoing, true otherwise
+    /// If there is a prewarm request ongoing, return false, true otherwise
     pub fn prewarm_lfc(self: &Arc<Self>, from_endpoint: Option<String>) -> bool {
-        crate::metrics::LFC_PREWARM_REQUESTS.inc();
         {
             let state = &mut self.state.lock().unwrap().lfc_prewarm_state;
-            if let LfcPrewarmState::Prewarming =
-                std::mem::replace(state, LfcPrewarmState::Prewarming)
-            {
+            if let LfcPrewarmState::Prewarming = replace(state, LfcPrewarmState::Prewarming) {
                 return false;
             }
         }
+        crate::metrics::LFC_PREWARMS.inc();
 
         let cloned = self.clone();
         spawn(async move {
@@ -106,7 +105,8 @@ impl ComputeNode {
                 cloned.state.lock().unwrap().lfc_prewarm_state = LfcPrewarmState::Completed;
                 return;
             };
-            error!(%err);
+            crate::metrics::LFC_PREWARM_ERRORS.inc();
+            error!(%err, "prewarming lfc");
             cloned.state.lock().unwrap().lfc_prewarm_state = LfcPrewarmState::Failed {
                 error: err.to_string(),
             };
@@ -152,30 +152,40 @@ impl ComputeNode {
             .map(|_| ())
     }
 
-    /// Returns false if there is an offload request ongoing, true otherwise
+    /// If offload request is ongoing, return false, true otherwise
     pub fn offload_lfc(self: &Arc<Self>) -> bool {
-        crate::metrics::LFC_OFFLOAD_REQUESTS.inc();
         {
             let state = &mut self.state.lock().unwrap().lfc_offload_state;
-            if let LfcOffloadState::Offloading =
-                std::mem::replace(state, LfcOffloadState::Offloading)
-            {
+            if replace(state, LfcOffloadState::Offloading) == LfcOffloadState::Offloading {
                 return false;
             }
         }
-
         let cloned = self.clone();
-        spawn(async move {
-            let Err(err) = cloned.offload_lfc_impl().await else {
-                cloned.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Completed;
-                return;
-            };
-            error!(%err);
-            cloned.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
-                error: err.to_string(),
-            };
-        });
+        spawn(async move { cloned.offload_lfc_with_state_update().await });
         true
+    }
+
+    pub async fn offload_lfc_async(self: &Arc<Self>) {
+        {
+            let state = &mut self.state.lock().unwrap().lfc_offload_state;
+            if replace(state, LfcOffloadState::Offloading) == LfcOffloadState::Offloading {
+                return;
+            }
+        }
+        self.offload_lfc_with_state_update().await
+    }
+
+    async fn offload_lfc_with_state_update(&self) {
+        crate::metrics::LFC_OFFLOADS.inc();
+        let Err(err) = self.offload_lfc_impl().await else {
+            self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Completed;
+            return;
+        };
+        crate::metrics::LFC_OFFLOAD_ERRORS.inc();
+        error!(%err, "offloading lfc");
+        self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
+            error: err.to_string(),
+        };
     }
 
     async fn offload_lfc_impl(&self) -> Result<()> {

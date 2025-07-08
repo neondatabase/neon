@@ -137,7 +137,7 @@ impl Future for JobSpec {
             let state = state.as_mut().expect("should be set on thread startup");
 
             state.tick = state.tick.wrapping_add(1);
-            if state.tick % SKETCH_RESET_INTERVAL == 0 {
+            if state.tick.is_multiple_of(SKETCH_RESET_INTERVAL) {
                 state.countmin.reset();
             }
 

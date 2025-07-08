@@ -97,20 +97,34 @@ pub(crate) static PG_TOTAL_DOWNTIME_MS: Lazy<GenericCounter<AtomicU64>> = Lazy::
     .expect("failed to define a metric")
 });
 
-/// Needed as neon.file_cache_prewarm_batch == 0 doesn't mean we never tried to prewarm.
-/// On the other hand, LFC_PREWARMED_PAGES is excessive as we can GET /lfc/prewarm
-pub(crate) static LFC_PREWARM_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static LFC_PREWARMS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "compute_ctl_lfc_prewarm_requests_total",
-        "Total number of LFC prewarm requests made by compute_ctl",
+        "compute_ctl_lfc_prewarms_total",
+        "Total number of LFC prewarms requested by compute_ctl or autoprewarm option",
     )
     .expect("failed to define a metric")
 });
 
-pub(crate) static LFC_OFFLOAD_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static LFC_PREWARM_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "compute_ctl_lfc_offload_requests_total",
-        "Total number of LFC offload requests made by compute_ctl",
+        "compute_ctl_lfc_prewarm_errors_total",
+        "Total number of LFC prewarms errors requested by compute_ctl or autoprewarm option",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LFC_OFFLOADS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "compute_ctl_lfc_offloads_total",
+        "Total number of LFC offloads requested by compute_ctl or lfc_offload_period_seconds option",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LFC_OFFLOAD_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "compute_ctl_lfc_offload_errors_total",
+        "Total number of LFC offload errors requested by compute_ctl or lfc_offload_period_seconds option",
     )
     .expect("failed to define a metric")
 });
@@ -124,7 +138,9 @@ pub fn collect() -> Vec<MetricFamily> {
     metrics.extend(AUDIT_LOG_DIR_SIZE.collect());
     metrics.extend(PG_CURR_DOWNTIME_MS.collect());
     metrics.extend(PG_TOTAL_DOWNTIME_MS.collect());
-    metrics.extend(LFC_PREWARM_REQUESTS.collect());
-    metrics.extend(LFC_OFFLOAD_REQUESTS.collect());
+    metrics.extend(LFC_PREWARMS.collect());
+    metrics.extend(LFC_PREWARM_ERRORS.collect());
+    metrics.extend(LFC_OFFLOADS.collect());
+    metrics.extend(LFC_OFFLOAD_ERRORS.collect());
     metrics
 }

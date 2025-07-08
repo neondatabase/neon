@@ -36,7 +36,7 @@ use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, trace, warn};
-use utils::critical;
+use utils::critical_timeline;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use wal_decoder::models::record::NeonWalRecord;
@@ -572,7 +572,7 @@ impl GcCompactionQueue {
         match res {
             Ok(res) => Ok(res),
             Err(CompactionError::ShuttingDown) => Err(CompactionError::ShuttingDown),
-            Err(_) => {
+            Err(CompactionError::CollectKeySpaceError(_) | CompactionError::Other(_)) => {
                 // There are some cases where traditional gc might collect some layer
                 // files causing gc-compaction cannot read the full history of the key.
                 // This needs to be resolved in the long-term by improving the compaction
@@ -591,9 +591,9 @@ impl GcCompactionQueue {
         timeline: &Arc<Timeline>,
     ) -> Result<CompactionOutcome, CompactionError> {
         let Ok(_one_op_at_a_time_guard) = self.consumer_lock.try_lock() else {
-            return Err(CompactionError::AlreadyRunning(
-                "cannot run gc-compaction because another gc-compaction is running. This should not happen because we only call this function from the gc-compaction queue.",
-            ));
+            return Err(CompactionError::Other(anyhow::anyhow!(
+                "cannot run gc-compaction because another gc-compaction is running. This should not happen because we only call this function from the gc-compaction queue."
+            )));
         };
         let has_pending_tasks;
         let mut yield_for_l0 = false;
@@ -1390,7 +1390,11 @@ impl Timeline {
                             GetVectoredError::MissingKey(_),
                         ) = err
                         {
-                            critical!("missing key during compaction: {err:?}");
+                            critical_timeline!(
+                                self.tenant_shard_id,
+                                self.timeline_id,
+                                "missing key during compaction: {err:?}"
+                            );
                         }
                     })?;
 
@@ -1418,7 +1422,11 @@ impl Timeline {
 
             // Alert on critical errors that indicate data corruption.
             Err(err) if err.is_critical() => {
-                critical!("could not compact, repartitioning keyspace failed: {err:?}");
+                critical_timeline!(
+                    self.tenant_shard_id,
+                    self.timeline_id,
+                    "could not compact, repartitioning keyspace failed: {err:?}"
+                );
             }
 
             // Log other errors. No partitioning? This is normal, if the timeline was just created

@@ -18,9 +18,10 @@ use metrics::set_build_info_metric;
 use remote_storage::RemoteStorageConfig;
 use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
-    DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
-    DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR, DEFAULT_SSL_CERT_FILE,
-    DEFAULT_SSL_CERT_RELOAD_PERIOD, DEFAULT_SSL_KEY_FILE,
+    DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
+    DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES, DEFAULT_MAX_TIMELINE_DISK_USAGE_BYTES,
+    DEFAULT_PARTIAL_BACKUP_CONCURRENCY, DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
+    DEFAULT_SSL_CERT_FILE, DEFAULT_SSL_CERT_RELOAD_PERIOD, DEFAULT_SSL_KEY_FILE,
 };
 use safekeeper::wal_backup::WalBackup;
 use safekeeper::{
@@ -138,6 +139,15 @@ struct Args {
     /// Safekeeper won't be elected for WAL offloading if it is lagging for more than this value in bytes
     #[arg(long, default_value_t = DEFAULT_MAX_OFFLOADER_LAG_BYTES)]
     max_offloader_lag: u64,
+    /* BEGIN_HADRON */
+    /// Safekeeper will re-elect a new offloader if the current backup lagging for more than this value in bytes
+    #[arg(long, default_value_t = DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES)]
+    max_reelect_offloader_lag_bytes: u64,
+    /// Safekeeper will stop accepting new WALs if the timeline disk usage exceeds this value in bytes.
+    /// Setting this value to 0 disables the limit.
+    #[arg(long, default_value_t = DEFAULT_MAX_TIMELINE_DISK_USAGE_BYTES)]
+    max_timeline_disk_usage_bytes: u64,
+    /* END_HADRON */
     /// Number of max parallel WAL segments to be offloaded to remote storage.
     #[arg(long, default_value = "5")]
     wal_backup_parallel_jobs: usize,
@@ -391,6 +401,10 @@ async fn main() -> anyhow::Result<()> {
         peer_recovery_enabled: args.peer_recovery,
         remote_storage: args.remote_storage,
         max_offloader_lag_bytes: args.max_offloader_lag,
+        /* BEGIN_HADRON */
+        max_reelect_offloader_lag_bytes: args.max_reelect_offloader_lag_bytes,
+        max_timeline_disk_usage_bytes: args.max_timeline_disk_usage_bytes,
+        /* END_HADRON */
         wal_backup_enabled: !args.disable_wal_backup,
         backup_parallel_jobs: args.wal_backup_parallel_jobs,
         pg_auth,

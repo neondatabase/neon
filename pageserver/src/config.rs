@@ -28,6 +28,7 @@ use reqwest::Url;
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
+use utils::serde_percent::Percent;
 
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -459,7 +460,16 @@ impl PageServerConf {
             metric_collection_endpoint,
             metric_collection_bucket,
             synthetic_size_calculation_interval,
-            disk_usage_based_eviction,
+            disk_usage_based_eviction: Some(disk_usage_based_eviction.unwrap_or(
+                DiskUsageEvictionTaskConfig {
+                    max_usage_pct: Percent::new(80).unwrap(),
+                    min_avail_bytes: 2_000_000_000,
+                    period: Duration::from_secs(60),
+                    #[cfg(feature = "testing")]
+                    mock_statvfs: None,
+                    eviction_order: Default::default(),
+                },
+            )),
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
@@ -625,7 +635,7 @@ impl PageServerConf {
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
         let pg_distrib_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
-        let config_toml = pageserver_api::config::ConfigToml {
+        let mut config_toml = pageserver_api::config::ConfigToml {
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             pg_distrib_dir: Some(pg_distrib_dir),
@@ -637,6 +647,15 @@ impl PageServerConf {
             control_plane_api: Some(Url::parse("http://localhost:6666").unwrap()),
             ..Default::default()
         };
+
+        // Test authors tend to forget about the default 10min initial lease deadline
+        // when writing tests, which turns their immediate gc requests via mgmt API
+        // into no-ops. Override the binary default here, such that there is no initial
+        // lease deadline by default in tests. Tests that care can always override it
+        // themselves.
+        // Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
+        config_toml.tenant_config.lsn_lease_length = Duration::from_secs(0);
+
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
     }
 }
@@ -696,6 +715,8 @@ impl ConfigurableSemaphore {
 
 #[cfg(test)]
 mod tests {
+
+    use std::time::Duration;
 
     use camino::Utf8PathBuf;
     use rstest::rstest;
@@ -797,5 +818,21 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_config_disk_usage_based_eviction_is_valid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("disk_usage_based_eviction is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        let config = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir).unwrap();
+        let disk_usage_based_eviction = config.disk_usage_based_eviction.unwrap();
+        assert_eq!(disk_usage_based_eviction.max_usage_pct.get(), 80);
+        assert_eq!(disk_usage_based_eviction.min_avail_bytes, 2_000_000_000);
+        assert_eq!(disk_usage_based_eviction.period, Duration::from_secs(60));
+        assert_eq!(disk_usage_based_eviction.eviction_order, Default::default());
     }
 }
