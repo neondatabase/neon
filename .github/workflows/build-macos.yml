@@ -59,6 +59,11 @@ jobs:
         with:
           token: ${{ secrets.CI_ACCESS_TOKEN }}
 
+      - name: Debug subzero
+        run: |
+          git clone --depth 1 https://github.com/neondatabase-labs/subzero subzero-temp
+          rm -rf subzero-temp/
+
       - name: Install build dependencies
         run: |
           brew install flex bison openssl protobuf icu4c
@@ -116,6 +121,11 @@ jobs:
             ~/.cargo/git
             target
           key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
+
+      - name: Debug subzero
+        run: |
+          git clone --depth 1 https://github.com/neondatabase-labs/subzero subzero-temp
+          rm -rf subzero-temp/
 
       # Build the neon-specific postgres extensions, and all the Rust bits.
       #
