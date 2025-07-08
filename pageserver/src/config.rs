@@ -15,7 +15,7 @@ use anyhow::{Context, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
-    DiskUsageEvictionTaskMode, MaxGetVectoredKeys, MaxVectoredReadBytes,
+    DiskUsageEvictionTaskConfig, MaxGetVectoredKeys, MaxVectoredReadBytes,
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined, PostHogConfig,
 };
 use pageserver_api::models::ImageCompressionAlgorithm;
@@ -145,7 +145,7 @@ pub struct PageServerConf {
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
 
-    pub disk_usage_based_eviction: DiskUsageEvictionTaskMode,
+    pub disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
 
     pub test_remote_failures: u64,
 
@@ -700,9 +700,7 @@ mod tests {
     use std::time::Duration;
 
     use camino::Utf8PathBuf;
-    use pageserver_api::config::{
-        DiskUsageEvictionTaskConfig, DiskUsageEvictionTaskMode, EvictionOrder,
-    };
+    use pageserver_api::config::{DiskUsageEvictionTaskConfig, EvictionOrder};
     use rstest::rstest;
     use utils::{id::NodeId, serde_percent::Percent};
 
@@ -806,23 +804,23 @@ mod tests {
 
     #[rstest]
     #[
-        case::disk_usage_eviction_task_mode_omitted(
-            DiskUsageEvictionTaskMode::Enabled(DiskUsageEvictionTaskConfig {
+        case::enabled_omitted(
+            DiskUsageEvictionTaskConfig {
                 max_usage_pct: Percent::new(80).unwrap(),
                 min_avail_bytes: 2_000_000_000,
                 period: Duration::from_secs(60),
                 eviction_order: Default::default(),
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
-            }
-        ),
+                enabled: true,
+            },
         r#"
             control_plane_api = "http://localhost:6666"
         "#,
     )]
     #[
-        case::backward_compatibility_yaml(
-            DiskUsageEvictionTaskMode::Enabled(DiskUsageEvictionTaskConfig {
+        case::enabled_omitted(
+            DiskUsageEvictionTaskConfig {
                 max_usage_pct: Percent::new(80).unwrap(),
                 min_avail_bytes: 1_000_000_000,
                 period: Duration::from_secs(60),
@@ -831,22 +829,32 @@ mod tests {
                 },
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
-            }
-        ),
+                enabled: true,
+            },
         r#"
             control_plane_api = "http://localhost:6666"
             disk_usage_based_eviction = { max_usage_pct = 80, min_avail_bytes = 1000000000, period = "60s" }
         "#,
     )]
-    #[case::eviction_task_disabled(
-        DiskUsageEvictionTaskMode::Disabled,
+    #[case::disabled(
+        DiskUsageEvictionTaskConfig {
+            max_usage_pct: Percent::new(80).unwrap(),
+            min_avail_bytes: 1_000_000_000,
+            period: Duration::from_secs(60),
+            eviction_order: EvictionOrder::RelativeAccessed {
+                highest_layer_count_loses_first: true,
+            },
+            #[cfg(feature = "testing")]
+            mock_statvfs: None,
+            enabled: false,
+        },
         r#"
             control_plane_api = "http://localhost:6666"
-            disk_usage_based_eviction = "disabled"
+            disk_usage_based_eviction = { max_usage_pct = 80, min_avail_bytes = 1000000000, period = "60s", enabled = false }
         "#
     )]
     fn test_config_disk_usage_based_eviction_is_valid(
-        #[case] expected_disk_usage_based_eviction: DiskUsageEvictionTaskMode,
+        #[case] expected_disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
         #[case] input: &str,
     ) {
         let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
