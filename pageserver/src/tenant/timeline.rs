@@ -588,6 +588,27 @@ pub(crate) enum PageReconstructError {
     MissingKey(Box<MissingKeyError>),
 }
 
+impl PageReconstructError {
+    pub(crate) fn is_cancel(&self) -> bool {
+        match self {
+            PageReconstructError::Other(_) => false,
+            PageReconstructError::AncestorLsnTimeout(e) => e.is_cancel(),
+            PageReconstructError::Cancelled => true,
+            PageReconstructError::WalRedo(_) => false,
+            PageReconstructError::MissingKey(_) => false,
+        }
+    }
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            PageReconstructError::Other(e) => e,
+            PageReconstructError::AncestorLsnTimeout(e) => e.into_anyhow(),
+            PageReconstructError::Cancelled => anyhow::Error::new(self),
+            PageReconstructError::WalRedo(e) => e,
+            PageReconstructError::MissingKey(_) => anyhow::Error::new(self),
+        }
+    }
+}
+
 impl From<anyhow::Error> for PageReconstructError {
     fn from(value: anyhow::Error) -> Self {
         // with walingest.rs many PageReconstructError are wrapped in as anyhow::Error
@@ -738,17 +759,6 @@ impl std::fmt::Display for MissingKeyError {
         }
 
         Ok(())
-    }
-}
-
-impl PageReconstructError {
-    /// Returns true if this error indicates a tenant/timeline shutdown alike situation
-    pub(crate) fn is_stopping(&self) -> bool {
-        use PageReconstructError::*;
-        match self {
-            Cancelled => true,
-            Other(_) | AncestorLsnTimeout(_) | WalRedo(_) | MissingKey(_) => false,
-        }
     }
 }
 
@@ -952,6 +962,23 @@ pub enum WaitLsnError {
     // Timeout expired while waiting for LSN to catch up with goal.
     #[error("{0}")]
     Timeout(String),
+}
+
+impl WaitLsnError {
+    pub(crate) fn is_cancel(&self) -> bool {
+        match self {
+            WaitLsnError::Shutdown => true,
+            WaitLsnError::BadState(timeline_state) => todo!(),
+            WaitLsnError::Timeout(_) => false,
+        }
+    }
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            WaitLsnError::Shutdown => anyhow::Error::new(self),
+            WaitLsnError::BadState(_) => anyhow::Error::new(self),
+            WaitLsnError::Timeout(_) => anyhow::Error::new(self),
+        }
+    }
 }
 
 impl From<WaitLsnError> for tonic::Status {
@@ -6018,7 +6045,7 @@ pub(crate) enum CompactionError {
     ShuttingDown,
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error("Failed to collect keyspace: {0}")]
-    CollectKeySpaceError(#[from] CollectKeySpaceError),
+    CollectKeySpaceError(CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
     #[error("Compaction already running: {0}")]
@@ -6064,7 +6091,7 @@ impl CompactionError {
             .is_some_and(|e| e.is_stopping());
         let timeline = root_cause
             .downcast_ref::<PageReconstructError>()
-            .is_some_and(|e| e.is_stopping());
+            .is_some_and(|e| e.is_cancel());
         let buffered_writer_flush_task_canelled = root_cause
             .downcast_ref::<FlushTaskError>()
             .is_some_and(|e| e.is_cancel());
@@ -6083,6 +6110,14 @@ impl CompactionError {
 
     /// Critical errors that indicate data corruption.
     pub fn is_critical(&self) -> bool {
+        match self {
+            CompactionError::ShuttingDown => todo!(),
+            CompactionError::CollectKeySpaceError(collect_key_space_error) => todo!(),
+            CompactionError::Other(error) => error
+                .chain()
+                .find(|e| e.downcast_ref::<CollectKeySpaceError>()),
+            CompactionError::AlreadyRunning(_) => todo!(),
+        }
         matches!(
             self,
             Self::CollectKeySpaceError(

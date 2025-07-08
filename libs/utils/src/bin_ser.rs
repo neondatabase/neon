@@ -34,6 +34,18 @@ pub enum DeserializeError {
     Io(io::Error),
 }
 
+impl DeserializeError {
+    pub fn is_cancel(&self) -> bool {
+        match self {
+            DeserializeError::BadInput |
+            DeserializeError::Io(error) => false,
+        }
+    }
+    pub fn into_anyhow(self) -> anyhow::Error {
+        anyhow::Error::new(self)
+    }
+}
+
 impl From<bincode::Error> for DeserializeError {
     fn from(e: bincode::Error) -> Self {
         match *e {

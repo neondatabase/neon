@@ -141,6 +141,23 @@ pub(crate) enum CollectKeySpaceError {
     Cancelled,
 }
 
+impl CollectKeySpaceError {
+    pub(crate) fn is_cancel(&self) -> bool {
+        match self {
+            CollectKeySpaceError::Decode(e) => e.is_cancel(),
+            CollectKeySpaceError::PageRead(e) => e.is_cancel(),
+            CollectKeySpaceError::Cancelled => true,
+        }
+    }
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            CollectKeySpaceError::Decode(e) => e.into_anyhow(),
+            CollectKeySpaceError::PageRead(e) => e.into_anyhow(),
+            CollectKeySpaceError::Cancelled => anyhow::Error::new(self),
+        }
+    }
+}
+
 impl From<PageReconstructError> for CollectKeySpaceError {
     fn from(err: PageReconstructError) -> Self {
         match err {
