@@ -201,7 +201,7 @@ pub struct TimelineResources {
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
     pub basebackup_cache: Arc<BasebackupCache>,
-    pub feature_resolver: TenantFeatureResolver,
+    pub feature_resolver: Arc<TenantFeatureResolver>,
 }
 
 pub struct Timeline {
@@ -449,7 +449,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
-    feature_resolver: TenantFeatureResolver,
+    feature_resolver: Arc<TenantFeatureResolver>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -3122,7 +3122,7 @@ impl Timeline {
 
                 basebackup_cache: resources.basebackup_cache,
 
-                feature_resolver: resources.feature_resolver,
+                feature_resolver: resources.feature_resolver.clone(),
             };
 
             result.repartition_threshold =
