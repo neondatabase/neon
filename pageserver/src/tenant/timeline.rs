@@ -2067,9 +2067,6 @@ impl Timeline {
             Err(CompactionError::ShuttingDown) => {
                 // Covered by the `Err(e) if e.is_cancel()` branch.
             }
-            Err(CompactionError::AlreadyRunning(_)) => {
-                // Covered by the `Err(e) if e.is_cancel()` branch.
-            }
             Err(CompactionError::Other(_)) => {
                 self.compaction_failed.store(true, AtomicOrdering::Relaxed)
             }
@@ -6018,8 +6015,6 @@ pub(crate) enum CompactionError {
     CollectKeySpaceError(#[from] CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
-    #[error("Compaction already running: {0}")]
-    AlreadyRunning(&'static str),
 }
 
 impl CompactionError {
@@ -6028,7 +6023,6 @@ impl CompactionError {
         matches!(
             self,
             Self::ShuttingDown
-                | Self::AlreadyRunning(_)
                 | Self::CollectKeySpaceError(CollectKeySpaceError::Cancelled)
                 | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
                     PageReconstructError::Cancelled
