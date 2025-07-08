@@ -3322,13 +3322,6 @@ impl TenantShard {
         }
         match err {
             CompactionError::ShuttingDown => unreachable!("is_cancel"),
-            CompactionError::CollectKeySpaceError(err) => {
-                // CollectKeySpaceError::Cancelled and PageRead::Cancelled are handled in `err.is_cancel` branch.
-                self.compaction_circuit_breaker
-                    .lock()
-                    .unwrap()
-                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
-            }
             CompactionError::Other(err) => {
                 self.compaction_circuit_breaker
                     .lock()

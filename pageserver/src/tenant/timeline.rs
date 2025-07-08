@@ -6043,9 +6043,6 @@ impl Drop for Timeline {
 pub(crate) enum CompactionError {
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
-    /// Compaction cannot be done right now; page reconstruction and so on.
-    #[error("Failed to collect keyspace: {0}")]
-    CollectKeySpaceError(CollectKeySpaceError),
     #[error(transparent)]
     Other(anyhow::Error),
     #[error("Compaction already running: {0}")]
@@ -6063,18 +6060,13 @@ pub(crate) enum CheckOtherForCancel {
 impl CompactionError {
     /// Errors that can be ignored, i.e., cancel and shutdown.
     pub fn is_cancel(&self, check_other: CheckOtherForCancel) -> bool {
-        if matches!(
-            self,
-            Self::ShuttingDown
-                | Self::AlreadyRunning(_) // XXX why do we treat AlreadyRunning as cancel?
-                | Self::CollectKeySpaceError(CollectKeySpaceError::Cancelled)
-                | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
-                    PageReconstructError::Cancelled
-                ))
-        ) {
-            return true;
-        }
+        let other = match self {
+            CompactionError::ShuttingDown => true,
+            CompactionError::AlreadyRunning(_) => true, // XXX why do we treat AlreadyRunning as cancel?
+            CompactionError::Other(other) => other,
+        };
 
+        // TODO: why are we only checking the root cause here? shouldn't we do these checks for each error in the chain?
         let root_cause = match &check_other {
             CheckOtherForCancel::No => return false,
             CheckOtherForCancel::Yes => {
@@ -6106,27 +6098,32 @@ impl CompactionError {
             || buffered_writer_flush_task_canelled
             || write_blob_cancelled
             || gate_closed
+            || collect_keyspace_cancelled
     }
 
     /// Critical errors that indicate data corruption.
     pub fn is_critical(&self) -> bool {
-        match self {
-            CompactionError::ShuttingDown => todo!(),
-            CompactionError::CollectKeySpaceError(collect_key_space_error) => todo!(),
-            CompactionError::Other(error) => error
-                .chain()
-                .find(|e| e.downcast_ref::<CollectKeySpaceError>()),
-            CompactionError::AlreadyRunning(_) => todo!(),
+        let other = match self {
+            CompactionError::ShuttingDown | CompactionError::AlreadyRunning(_) /* TODO: revisit AlreadyRunning variant */ => return false,
+            CompactionError::Other(error) => error,
+        };
+        other
+            .chain()
+            .find(|e| {
+                e.downcast_ref::<CollectKeySpaceError>()
+                    .and_then(|e| !e.is_cancel())
+            })
+            .is_some()
+    }
+}
+
+impl From<CollectKeySpaceError> for CompactionError {
+    fn from(value: CollectKeySpaceError) -> Self {
+        if value.is_cancel() {
+            Self::ShuttingDown
+        } else {
+            Self::Other(value.into_anyhow())
         }
-        matches!(
-            self,
-            Self::CollectKeySpaceError(
-                CollectKeySpaceError::Decode(_)
-                    | CollectKeySpaceError::PageRead(
-                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
-                    )
-            )
-        )
     }
 }
 

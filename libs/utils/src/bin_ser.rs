@@ -38,11 +38,14 @@ impl DeserializeError {
     pub fn is_cancel(&self) -> bool {
         match self {
             DeserializeError::BadInput |
-            DeserializeError::Io(error) => false,
+            DeserializeError::Io(_) => false,
         }
     }
     pub fn into_anyhow(self) -> anyhow::Error {
-        anyhow::Error::new(self)
+        match &self {
+            DeserializeError::BadInput => anyhow::Error::new(self),
+            DeserializeError::Io(_) => anyhow::Error::new(self),
+        }
     }
 }
 

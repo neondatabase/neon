@@ -141,6 +141,7 @@ pub(crate) enum CollectKeySpaceError {
     Cancelled,
 }
 
+// separate impl block because this might become a trait down the line
 impl CollectKeySpaceError {
     pub(crate) fn is_cancel(&self) -> bool {
         match self {
