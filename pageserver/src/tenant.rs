@@ -3288,7 +3288,7 @@ impl TenantShard {
                         // Ignore this, we likely raced with unarchival.
                         OffloadError::NotArchived => Ok(()),
                         OffloadError::AlreadyInProgress => Ok(()),
-                        OffloadError::Cancelled => Err(CompactionError::ShuttingDown),
+                        OffloadError::Cancelled => Err(CompactionError::new_cancelled()),
                         // don't break the anyhow chain
                         OffloadError::Other(err) => Err(CompactionError::Other(err)),
                     })?;

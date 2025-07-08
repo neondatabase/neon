@@ -1005,7 +1005,7 @@ impl From<WaitLsnError> for tonic::Status {
 impl From<CreateImageLayersError> for CompactionError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
-            CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            CreateImageLayersError::Cancelled => CompactionError::new_cancelled(),
             CreateImageLayersError::Other(e) => {
                 CompactionError::Other(e.context("create image layers"))
             }
@@ -6065,6 +6065,9 @@ pub(crate) enum CompactionError {
 }
 
 impl CompactionError {
+    pub fn new_cancelled() -> Self {
+        Self::ShuttingDown
+    }
     /// Errors that can be ignored, i.e., cancel and shutdown.
     pub fn is_cancel(&self) -> bool {
         let other = match self {
@@ -6121,7 +6124,7 @@ impl From<super::upload_queue::NotInitialized> for CompactionError {
                 CompactionError::Other(anyhow::anyhow!(value))
             }
             super::upload_queue::NotInitialized::ShuttingDown
-            | super::upload_queue::NotInitialized::Stopped => CompactionError::ShuttingDown,
+            | super::upload_queue::NotInitialized::Stopped => CompactionError::new_cancelled(),
         }
     }
 }
@@ -6131,7 +6134,7 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
         match e {
             super::storage_layer::layer::DownloadError::TimelineShutdown
             | super::storage_layer::layer::DownloadError::DownloadCancelled => {
-                CompactionError::ShuttingDown
+                CompactionError::new_cancelled()
             }
             super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads
             | super::storage_layer::layer::DownloadError::DownloadRequired
@@ -6150,14 +6153,14 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
 
 impl From<layer_manager::Shutdown> for CompactionError {
     fn from(_: layer_manager::Shutdown) -> Self {
-        CompactionError::ShuttingDown
+        CompactionError::new_cancelled()
     }
 }
 
 impl From<super::storage_layer::errors::PutError> for CompactionError {
     fn from(e: super::storage_layer::errors::PutError) -> Self {
         if e.is_cancel() {
-            CompactionError::ShuttingDown
+            CompactionError::new_cancelled()
         } else {
             CompactionError::Other(e.into_anyhow())
         }
@@ -6256,7 +6259,7 @@ impl Timeline {
         let mut guard = tokio::select! {
             guard = self.layers.write(LayerManagerLockHolder::Compaction) => guard,
             _ = self.cancel.cancelled() => {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
         };
 
