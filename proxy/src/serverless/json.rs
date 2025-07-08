@@ -1,29 +1,86 @@
 use postgres_client::Row;
 use postgres_client::types::{Kind, Type};
+use serde::de::{Deserializer, Visitor};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
+
+struct PgTextVisitor<'de>(&'de RawValue);
+impl<'de> Visitor<'de> for PgTextVisitor<'de> {
+    type Value = Option<String>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("any valid JSON value")
+    }
+
+    // special care for nulls
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    // convert to text with escaping
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(Some(self.0.get().to_owned()))
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(Some(self.0.get().to_owned()))
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(Some(self.0.get().to_owned()))
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(Some(self.0.get().to_owned()))
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, _: A) -> Result<Self::Value, A::Error> {
+        Ok(Some(self.0.get().to_owned()))
+    }
+
+    // avoid escaping here, as we pass this as a parameter
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(Some(v.to_string()))
+    }
+    fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+        Ok(Some(v))
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut output = String::new();
+        output.push('{');
+        let mut comma = false;
+        while let Some(val) = seq.next_element::<Value>()? {
+            if comma {
+                output.push(',');
+            }
+            comma = true;
+
+            let val = match val {
+                Value::Null => "NULL".to_string(),
+
+                // convert to text with escaping
+                // here string needs to be escaped, as it is part of the array
+                v @ (Value::Bool(_) | Value::Number(_) | Value::String(_)) => v.to_string(),
+                v @ Value::Object(_) => Value::String(v.to_string()).to_string(),
+
+                // recurse into array
+                Value::Array(arr) => json_array_to_pg_array(&arr),
+            };
+            output.push_str(&val);
+        }
+        output.push('}');
+        Ok(Some(output))
+    }
+}
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
 // as parameters.
 //
-pub(crate) fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
-    json.iter().map(json_value_to_pg_text).collect()
-}
-
-fn json_value_to_pg_text(value: &Value) -> Option<String> {
-    match value {
-        // special care for nulls
-        Value::Null => None,
-
-        // convert to text with escaping
-        v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
-
-        // avoid escaping here, as we pass this as a parameter
-        Value::String(s) => Some(s.clone()),
-
-        // special care for arrays
-        Value::Array(arr) => Some(json_array_to_pg_array(arr)),
-    }
+pub(crate) fn json_to_pg_text(json: Vec<Box<RawValue>>) -> Vec<Option<String>> {
+    json.into_iter()
+        .map(|raw| raw.deserialize_any(PgTextVisitor(&raw)).unwrap_or(None))
+        .collect()
 }
 
 //
@@ -384,6 +441,14 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn json_to_pg_text(json: Vec<serde_json::Value>) -> Vec<Option<String>> {
+        let json = json
+            .into_iter()
+            .map(|value| serde_json::from_str(&value.to_string()).unwrap())
+            .collect();
+        super::json_to_pg_text(json)
+    }
 
     #[test]
     fn test_atomic_types_to_pg_params() {
