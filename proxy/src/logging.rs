@@ -52,7 +52,7 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
             StderrWriter {
                 stderr: std::io::stderr(),
             },
-            &["request_id", "session_id", "conn_id"],
+            &["conn_id", "ep", "query_id", "request_id", "session_id"],
         ))
     } else {
         None
@@ -271,18 +271,18 @@ where
         });
 
         // In case logging fails we generate a simpler JSON object.
-        if let Err(err) = res {
-            if let Ok(mut line) = serde_json::to_vec(&serde_json::json!( {
+        if let Err(err) = res
+            && let Ok(mut line) = serde_json::to_vec(&serde_json::json!( {
                 "timestamp": now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
                 "level": "ERROR",
                 "message": format_args!("cannot log event: {err:?}"),
                 "fields": {
                     "event": format_args!("{event:?}"),
                 },
-            })) {
-                line.push(b'\n');
-                self.writer.make_writer().write_all(&line).ok();
-            }
+            }))
+        {
+            line.push(b'\n');
+            self.writer.make_writer().write_all(&line).ok();
         }
     }
 
@@ -583,10 +583,11 @@ impl EventFormatter {
             THREAD_ID.with(|tid| serializer.serialize_entry("thread_id", tid))?;
 
             // TODO: tls cache? name could change
-            if let Some(thread_name) = std::thread::current().name() {
-                if !thread_name.is_empty() && thread_name != "tokio-runtime-worker" {
-                    serializer.serialize_entry("thread_name", thread_name)?;
-                }
+            if let Some(thread_name) = std::thread::current().name()
+                && !thread_name.is_empty()
+                && thread_name != "tokio-runtime-worker"
+            {
+                serializer.serialize_entry("thread_name", thread_name)?;
             }
 
             if let Some(task_id) = tokio::task::try_id() {
@@ -596,10 +597,10 @@ impl EventFormatter {
             serializer.serialize_entry("target", meta.target())?;
 
             // Skip adding module if it's the same as target.
-            if let Some(module) = meta.module_path() {
-                if module != meta.target() {
-                    serializer.serialize_entry("module", module)?;
-                }
+            if let Some(module) = meta.module_path()
+                && module != meta.target()
+            {
+                serializer.serialize_entry("module", module)?;
             }
 
             if let Some(file) = meta.file() {

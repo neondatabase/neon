@@ -152,7 +152,7 @@ pub fn draw_history<W: std::io::Write>(history: &[LayerTraceEvent], mut output: 
         let key_diff = key_end - key_start;
 
         if key_start >= key_end {
-            panic!("Invalid key range {}-{}", key_start, key_end);
+            panic!("Invalid key range {key_start}-{key_end}");
         }
 
         let lsn_start = lsn_map.map(f.lsn_range.start);
@@ -212,12 +212,12 @@ pub fn draw_history<W: std::io::Write>(history: &[LayerTraceEvent], mut output: 
                 )?;
                 writeln!(svg, "</line>")?;
             }
-            Ordering::Greater => panic!("Invalid lsn range {}-{}", lsn_start, lsn_end),
+            Ordering::Greater => panic!("Invalid lsn range {lsn_start}-{lsn_end}"),
         }
         files_seen.insert(f);
     }
 
-    writeln!(svg, "{}", EndSvg)?;
+    writeln!(svg, "{EndSvg}")?;
 
     let mut layer_events_str = String::new();
     let mut first = true;

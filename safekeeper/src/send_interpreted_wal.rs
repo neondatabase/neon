@@ -8,15 +8,15 @@ use futures::StreamExt;
 use futures::future::Either;
 use pageserver_api::shard::ShardIdentity;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend};
-use postgres_ffi::get_current_timestamp;
 use postgres_ffi::waldecoder::{WalDecodeError, WalStreamDecoder};
+use postgres_ffi::{PgMajorVersion, get_current_timestamp};
 use pq_proto::{BeMessage, InterpretedWalRecordsBody, WalSndKeepAlive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::SendError;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::{Instrument, error, info, info_span};
-use utils::critical;
+use utils::critical_timeline;
 use utils::lsn::Lsn;
 use utils::postgres_client::{Compression, InterpretedFormat};
 use wal_decoder::models::{InterpretedWalRecord, InterpretedWalRecords};
@@ -78,7 +78,7 @@ pub(crate) struct InterpretedWalReader {
     shard_senders: HashMap<ShardIdentity, smallvec::SmallVec<[ShardSenderState; 1]>>,
     shard_notification_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AttachShardNotification>>,
     state: Arc<std::sync::RwLock<InterpretedWalReaderState>>,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 }
 
 /// A handle for [`InterpretedWalReader`] which allows for interacting with it
@@ -258,7 +258,7 @@ impl InterpretedWalReader {
         start_pos: Lsn,
         tx: tokio::sync::mpsc::Sender<Batch>,
         shard: ShardIdentity,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         appname: &Option<String>,
     ) -> InterpretedWalReaderHandle {
         let state = Arc::new(std::sync::RwLock::new(InterpretedWalReaderState::Running {
@@ -267,6 +267,8 @@ impl InterpretedWalReader {
         }));
 
         let (shard_notification_tx, shard_notification_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let ttid = wal_stream.ttid;
 
         let reader = InterpretedWalReader {
             wal_stream,
@@ -300,7 +302,11 @@ impl InterpretedWalReader {
                     .inspect_err(|err| match err {
                         // TODO: we may want to differentiate these errors further.
                         InterpretedWalReaderError::Decode(_) => {
-                            critical!("failed to decode WAL record: {err:?}");
+                            critical_timeline!(
+                                ttid.tenant_id,
+                                ttid.timeline_id,
+                                "failed to read WAL record: {err:?}"
+                            );
                         }
                         err => error!("failed to read WAL record: {err}"),
                     })
@@ -322,7 +328,7 @@ impl InterpretedWalReader {
         start_pos: Lsn,
         tx: tokio::sync::mpsc::Sender<Batch>,
         shard: ShardIdentity,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         shard_notification_rx: Option<
             tokio::sync::mpsc::UnboundedReceiver<AttachShardNotification>,
         >,
@@ -363,9 +369,14 @@ impl InterpretedWalReader {
             metric.dec();
         }
 
+        let ttid = self.wal_stream.ttid;
         match self.run_impl(start_pos).await {
             Err(err @ InterpretedWalReaderError::Decode(_)) => {
-                critical!("failed to decode WAL record: {err:?}");
+                critical_timeline!(
+                    ttid.tenant_id,
+                    ttid.timeline_id,
+                    "failed to decode WAL record: {err:?}"
+                );
             }
             Err(err) => error!("failed to read WAL record: {err}"),
             Ok(()) => info!("interpreted wal reader exiting"),
@@ -718,7 +729,7 @@ mod tests {
     use std::time::Duration;
 
     use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
-    use postgres_ffi::MAX_SEND_SIZE;
+    use postgres_ffi::{MAX_SEND_SIZE, PgMajorVersion};
     use tokio::sync::mpsc::error::TryRecvError;
     use utils::id::{NodeId, TenantTimelineId};
     use utils::lsn::Lsn;
@@ -734,7 +745,7 @@ mod tests {
 
         const SIZE: usize = 8 * 1024;
         const MSG_COUNT: usize = 200;
-        const PG_VERSION: u32 = 17;
+        const PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
         const SHARD_COUNT: u8 = 2;
 
         let start_lsn = Lsn::from_str("0/149FD18").unwrap();
@@ -876,7 +887,7 @@ mod tests {
 
         const SIZE: usize = 8 * 1024;
         const MSG_COUNT: usize = 200;
-        const PG_VERSION: u32 = 17;
+        const PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
         const SHARD_COUNT: u8 = 2;
 
         let start_lsn = Lsn::from_str("0/149FD18").unwrap();
@@ -1025,7 +1036,7 @@ mod tests {
 
         const SIZE: usize = 64 * 1024;
         const MSG_COUNT: usize = 10;
-        const PG_VERSION: u32 = 17;
+        const PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
         const SHARD_COUNT: u8 = 2;
         const WAL_READER_BATCH_SIZE: usize = 8192;
 
@@ -1148,7 +1159,7 @@ mod tests {
 
         const SIZE: usize = 8 * 1024;
         const MSG_COUNT: usize = 10;
-        const PG_VERSION: u32 = 17;
+        const PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
 
         let start_lsn = Lsn::from_str("0/149FD18").unwrap();
         let env = Env::new(true).unwrap();

@@ -108,7 +108,7 @@ impl std::fmt::Debug for ManagerCtlMessage {
         match self {
             ManagerCtlMessage::GuardRequest(_) => write!(f, "GuardRequest"),
             ManagerCtlMessage::TryGuardRequest(_) => write!(f, "TryGuardRequest"),
-            ManagerCtlMessage::GuardDrop(id) => write!(f, "GuardDrop({:?})", id),
+            ManagerCtlMessage::GuardDrop(id) => write!(f, "GuardDrop({id:?})"),
             ManagerCtlMessage::BackupPartialReset(_) => write!(f, "BackupPartialReset"),
         }
     }

@@ -18,6 +18,8 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
+    Safekeeper,
+    StorageControllerApiException,
     flush_ep_to_pageserver,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -26,6 +28,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
+from fixtures.safekeeper.http import MembershipConfiguration
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
@@ -73,6 +76,7 @@ if TYPE_CHECKING:
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
+#    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
 #
 #    # Build previous version of binaries and store them somewhere:
 #    rm -rf pg_install target
@@ -99,6 +103,7 @@ if TYPE_CHECKING:
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
+#    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
 #    export NEON_BIN=target/${BUILD_TYPE}
 #    export POSTGRES_DISTRIB_DIR=pg_install
 #
@@ -123,6 +128,12 @@ if TYPE_CHECKING:
 check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
     os.environ.get("CHECK_ONDISK_DATA_COMPATIBILITY") is None,
     reason="CHECK_ONDISK_DATA_COMPATIBILITY env is not set",
+)
+
+skip_old_debug_versions = pytest.mark.skipif(
+    os.getenv("BUILD_TYPE", "debug") == "debug"
+    and os.getenv("DEFAULT_PG_VERSION") in [PgVersion.V14, PgVersion.V15, PgVersion.V16],
+    reason="compatibility snaphots not available for old versions of debug builds",
 )
 
 
@@ -195,6 +206,7 @@ ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_backward_compatibility(
@@ -222,6 +234,7 @@ def test_backward_compatibility(
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_forward_compatibility(
@@ -291,7 +304,20 @@ def test_forward_compatibility(
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
     ep = env.endpoints.create("main")
     ep_env = {"LD_LIBRARY_PATH": str(env.pg_distrib_dir / f"v{env.pg_version}/lib")}
-    ep.start(env=ep_env)
+
+    # If the compatibility snapshot was created with --timelines-onto-safekeepers=false,
+    # we should not pass safekeeper_generation to the endpoint because the compute
+    # will not be able to start.
+    # Zero generation is INVALID_GENERATION.
+    generation = 0
+    try:
+        res = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+        generation = res["generation"]
+    except StorageControllerApiException as e:
+        if e.status_code != 404 or not re.search(r"Timeline .* not found", str(e)):
+            raise e
+
+    ep.start(env=ep_env, safekeeper_generation=generation)
 
     connstr = ep.connstr()
 
@@ -341,7 +367,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     )
 
     # Timeline exists again: restart the endpoint
-    ep.start(env=ep_env)
+    ep.start(env=ep_env, safekeeper_generation=generation)
 
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
@@ -542,6 +568,24 @@ def test_historic_storage_formats(
     # All our artifacts should contain at least one timeline
     assert len(timelines) > 0
 
+    # Import tenant does not create the timeline on safekeepers,
+    # because it is a debug handler and the timeline may have already been
+    # created on some set of safekeepers.
+    # Create the timeline on safekeepers manually.
+    # TODO(diko): when we have the script/storcon handler to migrate
+    # the timeline to storcon, we can replace this code with it.
+    mconf = MembershipConfiguration(
+        generation=1,
+        members=Safekeeper.sks_to_safekeeper_ids([env.safekeepers[0]]),
+        new_members=None,
+    )
+    members_sks = Safekeeper.mconf_sks(env, mconf)
+
+    for timeline in timelines:
+        Safekeeper.create_timeline(
+            dataset.tenant_id, timeline["timeline_id"], env.pageserver, mconf, members_sks
+        )
+
     # TODO: ensure that the snapshots we're importing contain a sensible variety of content, at the very
     # least they should include a mixture of deltas and image layers.  Preferably they should also
     # contain some "exotic" stuff like aux files from logical replication.
@@ -573,6 +617,7 @@ def test_historic_storage_formats(
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.parametrize(
     **fixtures.utils.allpairs_versions(),

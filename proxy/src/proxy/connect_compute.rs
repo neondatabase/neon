@@ -2,8 +2,7 @@ use async_trait::async_trait;
 use tokio::time;
 use tracing::{debug, info, warn};
 
-use crate::auth::backend::ComputeUserInfo;
-use crate::compute::{self, AuthInfo, COULD_NOT_CONNECT, PostgresConnection};
+use crate::compute::{self, COULD_NOT_CONNECT, ComputeConnection};
 use crate::config::{ComputeConfig, RetryConfig};
 use crate::context::RequestContext;
 use crate::control_plane::errors::WakeComputeError;
@@ -50,15 +49,13 @@ pub(crate) trait ConnectMechanism {
 }
 
 pub(crate) struct TcpMechanism {
-    pub(crate) auth: AuthInfo,
     /// connect_to_compute concurrency lock
     pub(crate) locks: &'static ApiLocks<Host>,
-    pub(crate) user_info: ComputeUserInfo,
 }
 
 #[async_trait]
 impl ConnectMechanism for TcpMechanism {
-    type Connection = PostgresConnection;
+    type Connection = ComputeConnection;
     type ConnectError = compute::ConnectionError;
     type Error = compute::ConnectionError;
 
@@ -71,13 +68,9 @@ impl ConnectMechanism for TcpMechanism {
         ctx: &RequestContext,
         node_info: &control_plane::CachedNodeInfo,
         config: &ComputeConfig,
-    ) -> Result<PostgresConnection, Self::Error> {
+    ) -> Result<ComputeConnection, Self::Error> {
         let permit = self.locks.get_permit(&node_info.conn_info.host).await?;
-        permit.release_result(
-            node_info
-                .connect(ctx, &self.auth, config, self.user_info.clone())
-                .await,
-        )
+        permit.release_result(node_info.connect(ctx, config).await)
     }
 }
 
@@ -119,7 +112,7 @@ where
     let node_info = if !node_info.cached() || !err.should_retry_wake_compute() {
         // If we just recieved this from cplane and didn't get it from cache, we shouldn't retry.
         // Do not need to retrieve a new node_info, just return the old one.
-        if should_retry(&err, num_retries, compute.retry) {
+        if !should_retry(&err, num_retries, compute.retry) {
             Metrics::get().proxy.retries_metric.observe(
                 RetriesMetricGroup {
                     outcome: ConnectOutcome::Failed,

@@ -24,7 +24,7 @@ The value to place in the `aud` claim.
 
 @final
 class ComputeClaimsScope(StrEnum):
-    ADMIN = "admin"
+    ADMIN = "compute_ctl:admin"
 
 
 @final
@@ -57,6 +57,8 @@ class EndpointHttpClient(requests.Session):
         self.auth = BearerAuth(jwt)
 
         self.mount("http://", HTTPAdapter())
+        self.prewarm_url = f"http://localhost:{external_port}/lfc/prewarm"
+        self.offload_url = f"http://localhost:{external_port}/lfc/offload"
 
     def dbs_and_roles(self):
         res = self.get(f"http://localhost:{self.external_port}/dbs_and_roles", auth=self.auth)
@@ -64,33 +66,39 @@ class EndpointHttpClient(requests.Session):
         return res.json()
 
     def prewarm_lfc_status(self) -> dict[str, str]:
-        res = self.get(f"http://localhost:{self.external_port}/lfc/prewarm")
+        res = self.get(self.prewarm_url)
         res.raise_for_status()
         json: dict[str, str] = res.json()
         return json
 
     def prewarm_lfc(self, from_endpoint_id: str | None = None):
-        url: str = f"http://localhost:{self.external_port}/lfc/prewarm"
         params = {"from_endpoint": from_endpoint_id} if from_endpoint_id else dict()
-        self.post(url, params=params).raise_for_status()
+        self.post(self.prewarm_url, params=params).raise_for_status()
+        self.prewarm_lfc_wait()
 
+    def prewarm_lfc_wait(self):
         def prewarmed():
             json = self.prewarm_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"{status}, error {err}"
+            assert status == "completed", f"{status}, {err=}"
 
         wait_until(prewarmed, timeout=60)
 
-    def offload_lfc(self):
-        url = f"http://localhost:{self.external_port}/lfc/offload"
-        self.post(url).raise_for_status()
+    def offload_lfc_status(self) -> dict[str, str]:
+        res = self.get(self.offload_url)
+        res.raise_for_status()
+        json: dict[str, str] = res.json()
+        return json
 
+    def offload_lfc(self):
+        self.post(self.offload_url).raise_for_status()
+        self.offload_lfc_wait()
+
+    def offload_lfc_wait(self):
         def offloaded():
-            res = self.get(url)
-            res.raise_for_status()
-            json = res.json()
+            json = self.offload_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"{status}, error {err}"
+            assert status == "completed", f"{status}, {err=}"
 
         wait_until(offloaded)
 

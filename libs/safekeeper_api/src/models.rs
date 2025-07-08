@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::TimestampTz;
+use postgres_versioninfo::PgVersionId;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
@@ -23,8 +24,7 @@ pub struct TimelineCreateRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub mconf: Configuration,
-    /// In the PG_VERSION_NUM macro format, like 140017.
-    pub pg_version: u32,
+    pub pg_version: PgVersionId,
     pub system_id: Option<u64>,
     // By default WAL_SEGMENT_SIZE
     pub wal_seg_size: Option<u32>,
@@ -210,7 +210,7 @@ pub struct TimelineStatus {
 }
 
 /// Request to switch membership configuration.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TimelineMembershipSwitchRequest {
     pub mconf: Configuration,
@@ -221,6 +221,8 @@ pub struct TimelineMembershipSwitchRequest {
 pub struct TimelineMembershipSwitchResponse {
     pub previous_conf: Configuration,
     pub current_conf: Configuration,
+    pub last_log_term: Term,
+    pub flush_lsn: Lsn,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]

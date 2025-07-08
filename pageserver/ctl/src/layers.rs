@@ -13,7 +13,7 @@ use pageserver::{page_cache, virtual_file};
 use pageserver_api::key::Key;
 use utils::id::{TenantId, TimelineId};
 
-use crate::layer_map_analyzer::parse_filename;
+use crate::layer_map_analyzer::{LayerFile, parse_filename};
 
 #[derive(Subcommand)]
 pub(crate) enum LayerCmd {
@@ -38,6 +38,8 @@ pub(crate) enum LayerCmd {
         /// The id from list-layer command
         id: usize,
     },
+    /// Dump all information of a layer file locally
+    DumpLayerLocal { path: PathBuf },
     RewriteSummary {
         layer_file_path: Utf8PathBuf,
         #[clap(long)]
@@ -131,15 +133,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             }
 
             for (idx, layer_file) in to_print {
-                println!(
-                    "[{:3}]  key:{}-{}\n       lsn:{}-{}\n       delta:{}",
-                    idx,
-                    layer_file.key_range.start,
-                    layer_file.key_range.end,
-                    layer_file.lsn_range.start,
-                    layer_file.lsn_range.end,
-                    layer_file.is_delta,
-                );
+                print_layer_file(idx, &layer_file);
             }
             Ok(())
         }
@@ -159,16 +153,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                 let layer = layer?;
                 if let Ok(layer_file) = parse_filename(&layer.file_name().into_string().unwrap()) {
                     if *id == idx {
-                        // TODO(chi): dedup code
-                        println!(
-                            "[{:3}]  key:{}-{}\n       lsn:{}-{}\n       delta:{}",
-                            idx,
-                            layer_file.key_range.start,
-                            layer_file.key_range.end,
-                            layer_file.lsn_range.start,
-                            layer_file.lsn_range.end,
-                            layer_file.is_delta,
-                        );
+                        print_layer_file(idx, &layer_file);
 
                         if layer_file.is_delta {
                             read_delta_file(layer.path(), &ctx).await?;
@@ -179,6 +164,18 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                         break;
                     }
                     idx += 1;
+                }
+            }
+            Ok(())
+        }
+        LayerCmd::DumpLayerLocal { path } => {
+            if let Ok(layer_file) = parse_filename(path.file_name().unwrap().to_str().unwrap()) {
+                print_layer_file(0, &layer_file);
+
+                if layer_file.is_delta {
+                    read_delta_file(path, &ctx).await?;
+                } else {
+                    read_image_file(path, &ctx).await?;
                 }
             }
             Ok(())
@@ -246,4 +243,16 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             anyhow::bail!("not an image or delta layer: {layer_file_path}");
         }
     }
+}
+
+fn print_layer_file(idx: usize, layer_file: &LayerFile) {
+    println!(
+        "[{:3}]  key:{}-{}\n       lsn:{}-{}\n       delta:{}",
+        idx,
+        layer_file.key_range.start,
+        layer_file.key_range.end,
+        layer_file.lsn_range.start,
+        layer_file.lsn_range.end,
+        layer_file.is_delta,
+    );
 }

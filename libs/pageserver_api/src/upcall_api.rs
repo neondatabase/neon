@@ -9,7 +9,7 @@ use utils::id::{NodeId, TimelineId};
 
 use crate::controller_api::NodeRegisterRequest;
 use crate::models::{LocationConfigMode, ShardImportStatus};
-use crate::shard::TenantShardId;
+use crate::shard::{ShardStripeSize, TenantShardId};
 
 /// Upcall message sent by the pageserver to the configured `control_plane_api` on
 /// startup.
@@ -23,19 +23,13 @@ pub struct ReAttachRequest {
     pub register: Option<NodeRegisterRequest>,
 }
 
-fn default_mode() -> LocationConfigMode {
-    LocationConfigMode::AttachedSingle
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ReAttachResponseTenant {
     pub id: TenantShardId,
     /// Mandatory if LocationConfigMode is None or set to an Attached* mode
     pub r#gen: Option<u32>,
-
-    /// Default value only for backward compat: this field should be set
-    #[serde(default = "default_mode")]
     pub mode: LocationConfigMode,
+    pub stripe_size: ShardStripeSize,
 }
 #[derive(Serialize, Deserialize)]
 pub struct ReAttachResponse {

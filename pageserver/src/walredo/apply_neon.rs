@@ -2,16 +2,16 @@ use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::BytesMut;
 use pageserver_api::key::Key;
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::SlruKind;
-use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::v14::nonrelfile_utils::{
     mx_offset_to_flags_bitshift, mx_offset_to_flags_offset, mx_offset_to_member_offset,
     transaction_id_set_status,
 };
 use postgres_ffi::{BLCKSZ, pg_constants};
+use postgres_ffi_types::forknum::VISIBILITYMAP_FORKNUM;
 use tracing::*;
 use utils::lsn::Lsn;
+use wal_decoder::models::record::NeonWalRecord;
 
 /// Can this request be served by neon redo functions
 /// or we need to pass it to wal-redo postgres process?
@@ -52,8 +52,7 @@ pub(crate) fn apply_in_neon(
             let (rel, _) = key.to_rel_block().context("invalid record")?;
             assert!(
                 rel.forknum == VISIBILITYMAP_FORKNUM,
-                "TruncateVisibilityMap record on unexpected rel {}",
-                rel
+                "TruncateVisibilityMap record on unexpected rel {rel}"
             );
             let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
             map[*trunc_byte + 1..].fill(0u8);
@@ -78,8 +77,7 @@ pub(crate) fn apply_in_neon(
             let (rel, blknum) = key.to_rel_block().context("invalid record")?;
             assert!(
                 rel.forknum == VISIBILITYMAP_FORKNUM,
-                "ClearVisibilityMapFlags record on unexpected rel {}",
-                rel
+                "ClearVisibilityMapFlags record on unexpected rel {rel}"
             );
             if let Some(heap_blkno) = *new_heap_blkno {
                 // Calculate the VM block and offset that corresponds to the heap block.
@@ -124,8 +122,7 @@ pub(crate) fn apply_in_neon(
             assert_eq!(
                 slru_kind,
                 SlruKind::Clog,
-                "ClogSetCommitted record with unexpected key {}",
-                key
+                "ClogSetCommitted record with unexpected key {key}"
             );
             for &xid in xids {
                 let pageno = xid / pg_constants::CLOG_XACTS_PER_PAGE;
@@ -135,15 +132,11 @@ pub(crate) fn apply_in_neon(
                 // Check that we're modifying the correct CLOG block.
                 assert!(
                     segno == expected_segno,
-                    "ClogSetCommitted record for XID {} with unexpected key {}",
-                    xid,
-                    key
+                    "ClogSetCommitted record for XID {xid} with unexpected key {key}"
                 );
                 assert!(
                     blknum == expected_blknum,
-                    "ClogSetCommitted record for XID {} with unexpected key {}",
-                    xid,
-                    key
+                    "ClogSetCommitted record for XID {xid} with unexpected key {key}"
                 );
 
                 transaction_id_set_status(xid, pg_constants::TRANSACTION_STATUS_COMMITTED, page);
@@ -169,8 +162,7 @@ pub(crate) fn apply_in_neon(
             assert_eq!(
                 slru_kind,
                 SlruKind::Clog,
-                "ClogSetAborted record with unexpected key {}",
-                key
+                "ClogSetAborted record with unexpected key {key}"
             );
             for &xid in xids {
                 let pageno = xid / pg_constants::CLOG_XACTS_PER_PAGE;
@@ -180,15 +172,11 @@ pub(crate) fn apply_in_neon(
                 // Check that we're modifying the correct CLOG block.
                 assert!(
                     segno == expected_segno,
-                    "ClogSetAborted record for XID {} with unexpected key {}",
-                    xid,
-                    key
+                    "ClogSetAborted record for XID {xid} with unexpected key {key}"
                 );
                 assert!(
                     blknum == expected_blknum,
-                    "ClogSetAborted record for XID {} with unexpected key {}",
-                    xid,
-                    key
+                    "ClogSetAborted record for XID {xid} with unexpected key {key}"
                 );
 
                 transaction_id_set_status(xid, pg_constants::TRANSACTION_STATUS_ABORTED, page);
@@ -199,8 +187,7 @@ pub(crate) fn apply_in_neon(
             assert_eq!(
                 slru_kind,
                 SlruKind::MultiXactOffsets,
-                "MultixactOffsetCreate record with unexpected key {}",
-                key
+                "MultixactOffsetCreate record with unexpected key {key}"
             );
             // Compute the block and offset to modify.
             // See RecordNewMultiXact in PostgreSQL sources.
@@ -213,15 +200,11 @@ pub(crate) fn apply_in_neon(
             let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
             assert!(
                 segno == expected_segno,
-                "MultiXactOffsetsCreate record for multi-xid {} with unexpected key {}",
-                mid,
-                key
+                "MultiXactOffsetsCreate record for multi-xid {mid} with unexpected key {key}"
             );
             assert!(
                 blknum == expected_blknum,
-                "MultiXactOffsetsCreate record for multi-xid {} with unexpected key {}",
-                mid,
-                key
+                "MultiXactOffsetsCreate record for multi-xid {mid} with unexpected key {key}"
             );
 
             LittleEndian::write_u32(&mut page[offset..offset + 4], *moff);
@@ -231,8 +214,7 @@ pub(crate) fn apply_in_neon(
             assert_eq!(
                 slru_kind,
                 SlruKind::MultiXactMembers,
-                "MultixactMembersCreate record with unexpected key {}",
-                key
+                "MultixactMembersCreate record with unexpected key {key}"
             );
             for (i, member) in members.iter().enumerate() {
                 let offset = moff + i as u32;
@@ -249,15 +231,11 @@ pub(crate) fn apply_in_neon(
                 let expected_blknum = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                 assert!(
                     segno == expected_segno,
-                    "MultiXactMembersCreate record for offset {} with unexpected key {}",
-                    moff,
-                    key
+                    "MultiXactMembersCreate record for offset {moff} with unexpected key {key}"
                 );
                 assert!(
                     blknum == expected_blknum,
-                    "MultiXactMembersCreate record for offset {} with unexpected key {}",
-                    moff,
-                    key
+                    "MultiXactMembersCreate record for offset {moff} with unexpected key {key}"
                 );
 
                 let mut flagsval = LittleEndian::read_u32(&page[flagsoff..flagsoff + 4]);

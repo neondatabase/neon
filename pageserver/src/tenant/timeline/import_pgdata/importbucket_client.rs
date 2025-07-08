@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
-use postgres_ffi::ControlFileData;
+use postgres_ffi::{ControlFileData, PgMajorVersion};
 use remote_storage::{
     Download, DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, Listing,
     ListingObject, RemotePath, RemoteStorageConfig,
@@ -264,7 +264,7 @@ impl ControlFile {
     pub(crate) fn base_lsn(&self) -> Lsn {
         Lsn(self.control_file_data.checkPoint).align()
     }
-    pub(crate) fn pg_version(&self) -> u32 {
+    pub(crate) fn pg_version(&self) -> PgMajorVersion {
         self.try_pg_version()
             .expect("prepare() checks that try_pg_version doesn't error")
     }
@@ -274,13 +274,14 @@ impl ControlFile {
     pub(crate) fn control_file_buf(&self) -> &Bytes {
         &self.control_file_buf
     }
-    fn try_pg_version(&self) -> anyhow::Result<u32> {
+
+    fn try_pg_version(&self) -> anyhow::Result<PgMajorVersion> {
         Ok(match self.control_file_data.catalog_version_no {
             // thesea are from catversion.h
-            202107181 => 14,
-            202209061 => 15,
-            202307071 => 16,
-            202406281 => 17,
+            202107181 => PgMajorVersion::PG14,
+            202209061 => PgMajorVersion::PG15,
+            202307071 => PgMajorVersion::PG16,
+            202406281 => PgMajorVersion::PG17,
             catversion => {
                 anyhow::bail!("unrecognized catalog version {catversion}")
             }

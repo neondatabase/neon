@@ -5,18 +5,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use compute_api::spec::PageserverProtocol;
 use control_plane::endpoint::{ComputeControlPlane, EndpointStatus};
 use control_plane::local_env::LocalEnv;
 use futures::StreamExt;
 use hyper::StatusCode;
+use pageserver_api::config::DEFAULT_GRPC_LISTEN_PORT;
 use pageserver_api::controller_api::AvailabilityZone;
 use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
 use postgres_connection::parse_host_port;
+use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 use utils::backoff::{self};
-use utils::id::{NodeId, TenantId};
+use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
 use crate::service::Config;
 
@@ -34,7 +37,7 @@ struct UnshardedComputeHookTenant {
     preferred_az: Option<AvailabilityZone>,
 
     // Must hold this lock to send a notification.
-    send_lock: Arc<tokio::sync::Mutex<Option<ComputeRemoteState>>>,
+    send_lock: Arc<tokio::sync::Mutex<Option<ComputeRemoteTenantState>>>,
 }
 struct ShardedComputeHookTenant {
     stripe_size: ShardStripeSize,
@@ -47,7 +50,7 @@ struct ShardedComputeHookTenant {
     // Must hold this lock to send a notification.  The contents represent
     // the last successfully sent notification, and are used to coalesce multiple
     // updates by only sending when there is a chance since our last successful send.
-    send_lock: Arc<tokio::sync::Mutex<Option<ComputeRemoteState>>>,
+    send_lock: Arc<tokio::sync::Mutex<Option<ComputeRemoteTenantState>>>,
 }
 
 /// Represents our knowledge of the compute's state: we can update this when we get a
@@ -55,14 +58,44 @@ struct ShardedComputeHookTenant {
 ///
 /// Should be wrapped in an Option<>, as we cannot always know the remote state.
 #[derive(PartialEq, Eq, Debug)]
-struct ComputeRemoteState {
+struct ComputeRemoteState<R> {
     // The request body which was acked by the compute
-    request: ComputeHookNotifyRequest,
+    request: R,
 
     // Whether the cplane indicated that the state was applied to running computes, or just
     // persisted.  In the Neon control plane, this is the difference between a 423 response (meaning
     // persisted but not applied), and a 2xx response (both persisted and applied)
     applied: bool,
+}
+
+type ComputeRemoteTenantState = ComputeRemoteState<NotifyAttachRequest>;
+type ComputeRemoteTimelineState = ComputeRemoteState<NotifySafekeepersRequest>;
+
+/// The trait which define the handler-specific types and methods.
+/// We have two implementations of this trait so far:
+/// - [`ComputeHookTenant`] for tenant attach notifications ("/notify-attach")
+/// - [`ComputeHookTimeline`] for safekeeper change notifications ("/notify-safekeepers")
+trait ApiMethod {
+    /// Type of the key which identifies the resource.
+    /// It's either TenantId for tenant attach notifications,
+    /// or TenantTimelineId for safekeeper change notifications.
+    type Key: std::cmp::Eq + std::hash::Hash + Clone;
+
+    type Request: serde::Serialize + std::fmt::Debug;
+
+    const API_PATH: &'static str;
+
+    fn maybe_send(
+        &self,
+        key: Self::Key,
+        lock: Option<tokio::sync::OwnedMutexGuard<Option<ComputeRemoteState<Self::Request>>>>,
+    ) -> MaybeSendResult<Self::Request, Self::Key>;
+
+    async fn notify_local(
+        env: &LocalEnv,
+        cplane: &ComputeControlPlane,
+        req: &Self::Request,
+    ) -> Result<(), NotifyError>;
 }
 
 enum ComputeHookTenant {
@@ -95,7 +128,7 @@ impl ComputeHookTenant {
         }
     }
 
-    fn get_send_lock(&self) -> &Arc<tokio::sync::Mutex<Option<ComputeRemoteState>>> {
+    fn get_send_lock(&self) -> &Arc<tokio::sync::Mutex<Option<ComputeRemoteTenantState>>> {
         match self {
             Self::Unsharded(unsharded_tenant) => &unsharded_tenant.send_lock,
             Self::Sharded(sharded_tenant) => &sharded_tenant.send_lock,
@@ -189,19 +222,136 @@ impl ComputeHookTenant {
     }
 }
 
+/// The state of a timeline we need to notify the compute about.
+struct ComputeHookTimeline {
+    generation: SafekeeperGeneration,
+    safekeepers: Vec<SafekeeperInfo>,
+
+    send_lock: Arc<tokio::sync::Mutex<Option<ComputeRemoteTimelineState>>>,
+}
+
+impl ComputeHookTimeline {
+    /// Construct a new ComputeHookTimeline with the given safekeepers and generation.
+    fn new(generation: SafekeeperGeneration, safekeepers: Vec<SafekeeperInfo>) -> Self {
+        Self {
+            generation,
+            safekeepers,
+            send_lock: Arc::default(),
+        }
+    }
+
+    /// Update the state with a new SafekeepersUpdate.
+    /// Noop if the update generation is not greater than the current generation.
+    fn update(&mut self, sk_update: SafekeepersUpdate) {
+        if sk_update.generation > self.generation {
+            self.generation = sk_update.generation;
+            self.safekeepers = sk_update.safekeepers;
+        }
+    }
+}
+
+impl ApiMethod for ComputeHookTimeline {
+    type Key = TenantTimelineId;
+    type Request = NotifySafekeepersRequest;
+
+    const API_PATH: &'static str = "notify-safekeepers";
+
+    fn maybe_send(
+        &self,
+        ttid: TenantTimelineId,
+        lock: Option<tokio::sync::OwnedMutexGuard<Option<ComputeRemoteTimelineState>>>,
+    ) -> MaybeSendNotifySafekeepersResult {
+        let locked = match lock {
+            Some(already_locked) => already_locked,
+            None => {
+                // Lock order: this _must_ be only a try_lock, because we are called inside of the [`ComputeHook::timelines`] lock.
+                let Ok(locked) = self.send_lock.clone().try_lock_owned() else {
+                    return MaybeSendResult::AwaitLock((ttid, self.send_lock.clone()));
+                };
+                locked
+            }
+        };
+
+        if locked
+            .as_ref()
+            .is_some_and(|s| s.request.generation >= self.generation)
+        {
+            return MaybeSendResult::Noop;
+        }
+
+        MaybeSendResult::Transmit((
+            NotifySafekeepersRequest {
+                tenant_id: ttid.tenant_id,
+                timeline_id: ttid.timeline_id,
+                generation: self.generation,
+                safekeepers: self.safekeepers.clone(),
+            },
+            locked,
+        ))
+    }
+
+    async fn notify_local(
+        _env: &LocalEnv,
+        cplane: &ComputeControlPlane,
+        req: &NotifySafekeepersRequest,
+    ) -> Result<(), NotifyError> {
+        let NotifySafekeepersRequest {
+            tenant_id,
+            timeline_id,
+            generation,
+            safekeepers,
+        } = req;
+
+        for (endpoint_name, endpoint) in &cplane.endpoints {
+            if endpoint.tenant_id == *tenant_id
+                && endpoint.timeline_id == *timeline_id
+                && endpoint.status() == EndpointStatus::Running
+            {
+                tracing::info!("Reconfiguring safekeepers for endpoint {endpoint_name}");
+
+                let safekeepers = safekeepers.iter().map(|sk| sk.id).collect::<Vec<_>>();
+
+                endpoint
+                    .reconfigure_safekeepers(safekeepers, *generation)
+                    .await
+                    .map_err(NotifyError::NeonLocal)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-struct ComputeHookNotifyRequestShard {
+struct NotifyAttachRequestShard {
     node_id: NodeId,
     shard_number: ShardNumber,
 }
 
 /// Request body that we send to the control plane to notify it of where a tenant is attached
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-struct ComputeHookNotifyRequest {
+struct NotifyAttachRequest {
     tenant_id: TenantId,
     preferred_az: Option<String>,
     stripe_size: Option<ShardStripeSize>,
-    shards: Vec<ComputeHookNotifyRequestShard>,
+    shards: Vec<NotifyAttachRequestShard>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
+pub(crate) struct SafekeeperInfo {
+    pub id: NodeId,
+    /// Hostname of the safekeeper.
+    /// It exists for better debuggability. Might be missing.
+    /// Should not be used for anything else.
+    pub hostname: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+struct NotifySafekeepersRequest {
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    generation: SafekeeperGeneration,
+    safekeepers: Vec<SafekeeperInfo>,
 }
 
 /// Error type for attempts to call into the control plane compute notification hook
@@ -233,42 +383,50 @@ pub(crate) enum NotifyError {
     NeonLocal(anyhow::Error),
 }
 
-enum MaybeSendResult {
+enum MaybeSendResult<R, K> {
     // Please send this request while holding the lock, and if you succeed then write
     // the request into the lock.
     Transmit(
         (
-            ComputeHookNotifyRequest,
-            tokio::sync::OwnedMutexGuard<Option<ComputeRemoteState>>,
+            R,
+            tokio::sync::OwnedMutexGuard<Option<ComputeRemoteState<R>>>,
         ),
     ),
     // Something requires sending, but you must wait for a current sender then call again
-    AwaitLock(Arc<tokio::sync::Mutex<Option<ComputeRemoteState>>>),
+    AwaitLock((K, Arc<tokio::sync::Mutex<Option<ComputeRemoteState<R>>>>)),
     // Nothing requires sending
     Noop,
 }
 
-impl ComputeHookTenant {
+type MaybeSendNotifyAttachResult = MaybeSendResult<NotifyAttachRequest, TenantId>;
+type MaybeSendNotifySafekeepersResult = MaybeSendResult<NotifySafekeepersRequest, TenantTimelineId>;
+
+impl ApiMethod for ComputeHookTenant {
+    type Key = TenantId;
+    type Request = NotifyAttachRequest;
+
+    const API_PATH: &'static str = "notify-attach";
+
     fn maybe_send(
         &self,
         tenant_id: TenantId,
-        lock: Option<tokio::sync::OwnedMutexGuard<Option<ComputeRemoteState>>>,
-    ) -> MaybeSendResult {
+        lock: Option<tokio::sync::OwnedMutexGuard<Option<ComputeRemoteTenantState>>>,
+    ) -> MaybeSendNotifyAttachResult {
         let locked = match lock {
             Some(already_locked) => already_locked,
             None => {
-                // Lock order: this _must_ be only a try_lock, because we are called inside of the [`ComputeHook::state`] lock.
+                // Lock order: this _must_ be only a try_lock, because we are called inside of the [`ComputeHook::tenants`] lock.
                 let Ok(locked) = self.get_send_lock().clone().try_lock_owned() else {
-                    return MaybeSendResult::AwaitLock(self.get_send_lock().clone());
+                    return MaybeSendResult::AwaitLock((tenant_id, self.get_send_lock().clone()));
                 };
                 locked
             }
         };
 
         let request = match self {
-            Self::Unsharded(unsharded_tenant) => Some(ComputeHookNotifyRequest {
+            Self::Unsharded(unsharded_tenant) => Some(NotifyAttachRequest {
                 tenant_id,
-                shards: vec![ComputeHookNotifyRequestShard {
+                shards: vec![NotifyAttachRequestShard {
                     shard_number: ShardNumber(0),
                     node_id: unsharded_tenant.node_id,
                 }],
@@ -281,12 +439,12 @@ impl ComputeHookTenant {
             Self::Sharded(sharded_tenant)
                 if sharded_tenant.shards.len() == sharded_tenant.shard_count.count() as usize =>
             {
-                Some(ComputeHookNotifyRequest {
+                Some(NotifyAttachRequest {
                     tenant_id,
                     shards: sharded_tenant
                         .shards
                         .iter()
-                        .map(|(shard_number, node_id)| ComputeHookNotifyRequestShard {
+                        .map(|(shard_number, node_id)| NotifyAttachRequestShard {
                             shard_number: *shard_number,
                             node_id: *node_id,
                         })
@@ -331,6 +489,51 @@ impl ComputeHookTenant {
             }
         }
     }
+
+    async fn notify_local(
+        env: &LocalEnv,
+        cplane: &ComputeControlPlane,
+        req: &NotifyAttachRequest,
+    ) -> Result<(), NotifyError> {
+        let NotifyAttachRequest {
+            tenant_id,
+            shards,
+            stripe_size,
+            preferred_az: _preferred_az,
+        } = req;
+
+        for (endpoint_name, endpoint) in &cplane.endpoints {
+            if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
+                tracing::info!("Reconfiguring pageservers for endpoint {endpoint_name}");
+
+                let pageservers = shards
+                    .iter()
+                    .map(|shard| {
+                        let ps_conf = env
+                            .get_pageserver_conf(shard.node_id)
+                            .expect("Unknown pageserver");
+                        if endpoint.grpc {
+                            let addr = ps_conf.listen_grpc_addr.as_ref().expect("no gRPC address");
+                            let (host, port) = parse_host_port(addr).expect("invalid gRPC address");
+                            let port = port.unwrap_or(DEFAULT_GRPC_LISTEN_PORT);
+                            (PageserverProtocol::Grpc, host, port)
+                        } else {
+                            let (host, port) = parse_host_port(&ps_conf.listen_pg_addr)
+                                .expect("Unable to parse listen_pg_addr");
+                            (PageserverProtocol::Libpq, host, port.unwrap_or(5432))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                endpoint
+                    .reconfigure_pageservers(pageservers, *stripe_size)
+                    .await
+                    .map_err(NotifyError::NeonLocal)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// The compute hook is a destination for notifications about changes to tenant:pageserver
@@ -338,14 +541,15 @@ impl ComputeHookTenant {
 /// the compute connection string.
 pub(super) struct ComputeHook {
     config: Config,
-    state: std::sync::Mutex<HashMap<TenantId, ComputeHookTenant>>,
+    tenants: std::sync::Mutex<HashMap<TenantId, ComputeHookTenant>>,
+    timelines: std::sync::Mutex<HashMap<TenantTimelineId, ComputeHookTimeline>>,
     authorization_header: Option<String>,
 
     // Concurrency limiter, so that we do not overload the cloud control plane when updating
     // large numbers of tenants (e.g. when failing over after a node failure)
     api_concurrency: tokio::sync::Semaphore,
 
-    // This lock is only used in testing enviroments, to serialize calls into neon_lock
+    // This lock is only used in testing enviroments, to serialize calls into neon_local
     neon_local_lock: tokio::sync::Mutex<()>,
 
     // We share a client across all notifications to enable connection re-use etc when
@@ -364,12 +568,19 @@ pub(crate) struct ShardUpdate<'a> {
     pub(crate) preferred_az: Option<Cow<'a, AvailabilityZone>>,
 }
 
+pub(crate) struct SafekeepersUpdate {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) timeline_id: TimelineId,
+    pub(crate) generation: SafekeeperGeneration,
+    pub(crate) safekeepers: Vec<SafekeeperInfo>,
+}
+
 impl ComputeHook {
     pub(super) fn new(config: Config) -> anyhow::Result<Self> {
         let authorization_header = config
             .control_plane_jwt_token
             .clone()
-            .map(|jwt| format!("Bearer {}", jwt));
+            .map(|jwt| format!("Bearer {jwt}"));
 
         let mut client = reqwest::ClientBuilder::new().timeout(NOTIFY_REQUEST_TIMEOUT);
         for cert in &config.ssl_ca_certs {
@@ -380,7 +591,8 @@ impl ComputeHook {
             .context("Failed to build http client for compute hook")?;
 
         Ok(Self {
-            state: Default::default(),
+            tenants: Default::default(),
+            timelines: Default::default(),
             config,
             authorization_header,
             neon_local_lock: Default::default(),
@@ -390,10 +602,7 @@ impl ComputeHook {
     }
 
     /// For test environments: use neon_local's LocalEnv to update compute
-    async fn do_notify_local(
-        &self,
-        reconfigure_request: &ComputeHookNotifyRequest,
-    ) -> Result<(), NotifyError> {
+    async fn do_notify_local<M: ApiMethod>(&self, req: &M::Request) -> Result<(), NotifyError> {
         // neon_local updates are not safe to call concurrently, use a lock to serialize
         // all calls to this function
         let _locked = self.neon_local_lock.lock().await;
@@ -413,42 +622,14 @@ impl ComputeHook {
         };
         let cplane =
             ComputeControlPlane::load(env.clone()).expect("Error loading compute control plane");
-        let ComputeHookNotifyRequest {
-            tenant_id,
-            shards,
-            stripe_size,
-            preferred_az: _preferred_az,
-        } = reconfigure_request;
 
-        let compute_pageservers = shards
-            .iter()
-            .map(|shard| {
-                let ps_conf = env
-                    .get_pageserver_conf(shard.node_id)
-                    .expect("Unknown pageserver");
-                let (pg_host, pg_port) = parse_host_port(&ps_conf.listen_pg_addr)
-                    .expect("Unable to parse listen_pg_addr");
-                (pg_host, pg_port.unwrap_or(5432))
-            })
-            .collect::<Vec<_>>();
-
-        for (endpoint_name, endpoint) in &cplane.endpoints {
-            if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
-                tracing::info!("Reconfiguring endpoint {}", endpoint_name,);
-                endpoint
-                    .reconfigure(compute_pageservers.clone(), *stripe_size, None)
-                    .await
-                    .map_err(NotifyError::NeonLocal)?;
-            }
-        }
-
-        Ok(())
+        M::notify_local(&env, &cplane, req).await
     }
 
-    async fn do_notify_iteration(
+    async fn do_notify_iteration<Req: serde::Serialize + std::fmt::Debug>(
         &self,
         url: &String,
-        reconfigure_request: &ComputeHookNotifyRequest,
+        reconfigure_request: &Req,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         let req = self.client.request(reqwest::Method::PUT, url);
@@ -470,9 +651,7 @@ impl ComputeHook {
         };
 
         // Treat all 2xx responses as success
-        if response.status() >= reqwest::StatusCode::OK
-            && response.status() < reqwest::StatusCode::MULTIPLE_CHOICES
-        {
+        if response.status().is_success() {
             if response.status() != reqwest::StatusCode::OK {
                 // Non-200 2xx response: it doesn't make sense to retry, but this is unexpected, so
                 // log a warning.
@@ -523,10 +702,10 @@ impl ComputeHook {
         }
     }
 
-    async fn do_notify(
+    async fn do_notify<R: serde::Serialize + std::fmt::Debug>(
         &self,
         url: &String,
-        reconfigure_request: &ComputeHookNotifyRequest,
+        reconfigure_request: &R,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         // We hold these semaphore units across all retries, rather than only across each
@@ -558,13 +737,13 @@ impl ComputeHook {
     }
 
     /// Synchronous phase: update the per-tenant state for the next intended notification
-    fn notify_prepare(&self, shard_update: ShardUpdate) -> MaybeSendResult {
-        let mut state_locked = self.state.lock().unwrap();
+    fn notify_attach_prepare(&self, shard_update: ShardUpdate) -> MaybeSendNotifyAttachResult {
+        let mut tenants_locked = self.tenants.lock().unwrap();
 
         use std::collections::hash_map::Entry;
         let tenant_shard_id = shard_update.tenant_shard_id;
 
-        let tenant = match state_locked.entry(tenant_shard_id.tenant_id) {
+        let tenant = match tenants_locked.entry(tenant_shard_id.tenant_id) {
             Entry::Vacant(e) => {
                 let ShardUpdate {
                     tenant_shard_id,
@@ -588,10 +767,37 @@ impl ComputeHook {
         tenant.maybe_send(tenant_shard_id.tenant_id, None)
     }
 
-    async fn notify_execute(
+    fn notify_safekeepers_prepare(
         &self,
-        maybe_send_result: MaybeSendResult,
-        tenant_shard_id: TenantShardId,
+        safekeepers_update: SafekeepersUpdate,
+    ) -> MaybeSendNotifySafekeepersResult {
+        let mut timelines_locked = self.timelines.lock().unwrap();
+
+        let ttid = TenantTimelineId {
+            tenant_id: safekeepers_update.tenant_id,
+            timeline_id: safekeepers_update.timeline_id,
+        };
+
+        use std::collections::hash_map::Entry;
+        let timeline = match timelines_locked.entry(ttid) {
+            Entry::Vacant(e) => e.insert(ComputeHookTimeline::new(
+                safekeepers_update.generation,
+                safekeepers_update.safekeepers,
+            )),
+            Entry::Occupied(e) => {
+                let timeline = e.into_mut();
+                timeline.update(safekeepers_update);
+                timeline
+            }
+        };
+
+        timeline.maybe_send(ttid, None)
+    }
+
+    async fn notify_execute<M: ApiMethod>(
+        &self,
+        state: &std::sync::Mutex<HashMap<M::Key, M>>,
+        maybe_send_result: MaybeSendResult<M::Request, M::Key>,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
         // Process result: we may get an update to send, or we may have to wait for a lock
@@ -600,7 +806,7 @@ impl ComputeHook {
             MaybeSendResult::Noop => {
                 return Ok(());
             }
-            MaybeSendResult::AwaitLock(send_lock) => {
+            MaybeSendResult::AwaitLock((key, send_lock)) => {
                 let send_locked = tokio::select! {
                     guard = send_lock.lock_owned() => {guard},
                     _ = cancel.cancelled() => {
@@ -611,11 +817,11 @@ impl ComputeHook {
                 // Lock order: maybe_send is called within the `[Self::state]` lock, and takes the send lock, but here
                 // we have acquired the send lock and take `[Self::state]` lock.  This is safe because maybe_send only uses
                 // try_lock.
-                let state_locked = self.state.lock().unwrap();
-                let Some(tenant) = state_locked.get(&tenant_shard_id.tenant_id) else {
+                let state_locked = state.lock().unwrap();
+                let Some(resource_state) = state_locked.get(&key) else {
                     return Ok(());
                 };
-                match tenant.maybe_send(tenant_shard_id.tenant_id, Some(send_locked)) {
+                match resource_state.maybe_send(key, Some(send_locked)) {
                     MaybeSendResult::AwaitLock(_) => {
                         unreachable!("We supplied lock guard")
                     }
@@ -634,14 +840,18 @@ impl ComputeHook {
                     .control_plane_url
                     .as_ref()
                     .map(|control_plane_url| {
-                        format!("{}/notify-attach", control_plane_url.trim_end_matches('/'))
+                        format!(
+                            "{}/{}",
+                            control_plane_url.trim_end_matches('/'),
+                            M::API_PATH
+                        )
                     });
 
             // We validate this at startup
             let notify_url = compute_hook_url.as_ref().unwrap();
             self.do_notify(notify_url, &request, cancel).await
         } else {
-            self.do_notify_local(&request).await.map_err(|e| {
+            self.do_notify_local::<M>(&request).await.map_err(|e| {
                 // This path is for testing only, so munge the error into our prod-style error type.
                 tracing::error!("neon_local notification hook failed: {e}");
                 NotifyError::Fatal(StatusCode::INTERNAL_SERVER_ERROR)
@@ -677,7 +887,7 @@ impl ComputeHook {
     /// Infallible synchronous fire-and-forget version of notify(), that sends its results to
     /// a channel.  Something should consume the channel and arrange to try notifying again
     /// if something failed.
-    pub(super) fn notify_background(
+    pub(super) fn notify_attach_background(
         self: &Arc<Self>,
         notifications: Vec<ShardUpdate>,
         result_tx: tokio::sync::mpsc::Sender<Result<(), (TenantShardId, NotifyError)>>,
@@ -686,7 +896,7 @@ impl ComputeHook {
         let mut maybe_sends = Vec::new();
         for shard_update in notifications {
             let tenant_shard_id = shard_update.tenant_shard_id;
-            let maybe_send_result = self.notify_prepare(shard_update);
+            let maybe_send_result = self.notify_attach_prepare(shard_update);
             maybe_sends.push((tenant_shard_id, maybe_send_result))
         }
 
@@ -705,10 +915,10 @@ impl ComputeHook {
 
                     async move {
                         this
-                            .notify_execute(maybe_send_result, tenant_shard_id, &cancel)
+                            .notify_execute(&this.tenants, maybe_send_result, &cancel)
                             .await.map_err(|e| (tenant_shard_id, e))
                     }.instrument(info_span!(
-                        "notify_background", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()
+                        "notify_attach_background", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()
                     ))
                 })
                 .buffered(API_CONCURRENCY);
@@ -751,14 +961,23 @@ impl ComputeHook {
     /// ensuring that they eventually call again to ensure that the compute is eventually notified of
     /// the proper pageserver nodes for a tenant.
     #[tracing::instrument(skip_all, fields(tenant_id=%shard_update.tenant_shard_id.tenant_id, shard_id=%shard_update.tenant_shard_id.shard_slug(), node_id))]
-    pub(super) async fn notify<'a>(
+    pub(super) async fn notify_attach<'a>(
         &self,
         shard_update: ShardUpdate<'a>,
         cancel: &CancellationToken,
     ) -> Result<(), NotifyError> {
-        let tenant_shard_id = shard_update.tenant_shard_id;
-        let maybe_send_result = self.notify_prepare(shard_update);
-        self.notify_execute(maybe_send_result, tenant_shard_id, cancel)
+        let maybe_send_result = self.notify_attach_prepare(shard_update);
+        self.notify_execute(&self.tenants, maybe_send_result, cancel)
+            .await
+    }
+
+    pub(super) async fn notify_safekeepers(
+        &self,
+        safekeepers_update: SafekeepersUpdate,
+        cancel: &CancellationToken,
+    ) -> Result<(), NotifyError> {
+        let maybe_send_result = self.notify_safekeepers_prepare(safekeepers_update);
+        self.notify_execute(&self.timelines, maybe_send_result, cancel)
             .await
     }
 
@@ -774,8 +993,8 @@ impl ComputeHook {
     ) {
         use std::collections::hash_map::Entry;
 
-        let mut state_locked = self.state.lock().unwrap();
-        match state_locked.entry(tenant_shard_id.tenant_id) {
+        let mut tenants_locked = self.tenants.lock().unwrap();
+        match tenants_locked.entry(tenant_shard_id.tenant_id) {
             Entry::Vacant(_) => {
                 // This is a valid but niche case, where the tenant was previously attached
                 // as a Secondary location and then detached, so has no previously notified

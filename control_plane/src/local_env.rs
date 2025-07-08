@@ -12,9 +12,11 @@ use std::{env, fs};
 
 use anyhow::{Context, bail};
 use clap::ValueEnum;
+use pageserver_api::config::PostHogConfig;
 use pem::Pem;
 use postgres_backend::AuthType;
 use reqwest::{Certificate, Url};
+use safekeeper_api::PgMajorVersion;
 use serde::{Deserialize, Serialize};
 use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
@@ -209,6 +211,12 @@ pub struct NeonStorageControllerConf {
     pub use_https_safekeeper_api: bool,
 
     pub use_local_compute_notifications: bool,
+
+    pub timeline_safekeeper_count: Option<usize>,
+
+    pub posthog_config: Option<PostHogConfig>,
+
+    pub kick_secondary_downloads: Option<bool>,
 }
 
 impl NeonStorageControllerConf {
@@ -236,9 +244,12 @@ impl Default for NeonStorageControllerConf {
             heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
             long_reconcile_threshold: None,
             use_https_pageserver_api: false,
-            timelines_onto_safekeepers: false,
+            timelines_onto_safekeepers: true,
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
+            timeline_safekeeper_count: None,
+            posthog_config: None,
+            kick_secondary_downloads: None,
         }
     }
 }
@@ -254,7 +265,7 @@ impl Default for EndpointStorageConf {
 impl NeonBroker {
     pub fn client_url(&self) -> Url {
         let url = if let Some(addr) = self.listen_https_addr {
-            format!("https://{}", addr)
+            format!("https://{addr}")
         } else {
             format!(
                 "http://{}",
@@ -418,25 +429,21 @@ impl LocalEnv {
         self.pg_distrib_dir.clone()
     }
 
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_distrib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
-        #[allow(clippy::manual_range_patterns)]
-        match pg_version {
-            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(path.join(pg_version.v_str()))
     }
 
-    pub fn pg_dir(&self, pg_version: u32, dir_name: &str) -> anyhow::Result<PathBuf> {
+    pub fn pg_dir(&self, pg_version: PgMajorVersion, dir_name: &str) -> anyhow::Result<PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join(dir_name))
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_bin_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<PathBuf> {
         self.pg_dir(pg_version, "bin")
     }
 
-    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_lib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<PathBuf> {
         self.pg_dir(pg_version, "lib")
     }
 
@@ -727,7 +734,7 @@ impl LocalEnv {
                 let config_toml_path = dentry.path().join("pageserver.toml");
                 let config_toml: PageserverConfigTomlSubset = toml_edit::de::from_str(
                     &std::fs::read_to_string(&config_toml_path)
-                        .with_context(|| format!("read {:?}", config_toml_path))?,
+                        .with_context(|| format!("read {config_toml_path:?}"))?,
                 )
                 .context("parse pageserver.toml")?;
                 let identity_toml_path = dentry.path().join("identity.toml");
@@ -737,7 +744,7 @@ impl LocalEnv {
                 }
                 let identity_toml: IdentityTomlSubset = toml_edit::de::from_str(
                     &std::fs::read_to_string(&identity_toml_path)
-                        .with_context(|| format!("read {:?}", identity_toml_path))?,
+                        .with_context(|| format!("read {identity_toml_path:?}"))?,
                 )
                 .context("parse identity.toml")?;
                 let PageserverConfigTomlSubset {

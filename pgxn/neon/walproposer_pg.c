@@ -1890,7 +1890,7 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	return rc;
 }
 
-static void
+static void __attribute__((noreturn))
 walprop_pg_finish_sync_safekeepers(WalProposer *wp, XLogRecPtr lsn)
 {
 	fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(lsn));

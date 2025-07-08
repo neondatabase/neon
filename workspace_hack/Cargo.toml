@@ -20,8 +20,7 @@ anstream = { version = "0.6" }
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["ws"] }
 axum-core = { version = "0.5", default-features = false, features = ["tracing"] }
-base64-594e8ee84c453af0 = { package = "base64", version = "0.13", features = ["alloc"] }
-base64-647d43efb71741da = { package = "base64", version = "0.21" }
+base64 = { version = "0.21" }
 base64ct = { version = "1", default-features = false, features = ["std"] }
 bytes = { version = "1", features = ["serde"] }
 camino = { version = "1", default-features = false, features = ["serde1"] }
@@ -41,8 +40,10 @@ env_logger = { version = "0.11" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
+futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-io = { version = "0.3" }
+futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 generic-array = { version = "0.14", default-features = false, features = ["more_lengths", "zeroize"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
@@ -98,7 +99,7 @@ time = { version = "0.3", features = ["macros", "serde-well-known"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
+tokio-util = { version = "0.7", features = ["codec", "compat", "io-util", "rt"] }
 toml_edit = { version = "0.22", features = ["serde"] }
 tower = { version = "0.5", default-features = false, features = ["balance", "buffer", "limit", "log"] }
 tracing = { version = "0.1", features = ["log"] }
@@ -114,10 +115,13 @@ zstd-sys = { version = "2", default-features = false, features = ["legacy", "std
 
 [build-dependencies]
 ahash = { version = "0.8" }
+anstream = { version = "0.6" }
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
+clap = { version = "4", features = ["derive", "env", "string"] }
+clap_builder = { version = "4", default-features = false, features = ["color", "env", "help", "std", "string", "suggestions", "usage"] }
 either = { version = "1" }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
@@ -145,6 +149,7 @@ regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
 regex-syntax = { version = "0.8" }
 serde = { version = "1", features = ["alloc", "derive"] }
+serde_json = { version = "1", features = ["alloc", "raw_value"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing", "serde"] }
 toml_edit = { version = "0.22", features = ["serde"] }

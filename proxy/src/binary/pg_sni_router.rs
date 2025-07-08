@@ -4,6 +4,7 @@
 //! This allows connecting to pods/services running in the same Kubernetes cluster from
 //! the outside. Similar to an ingress controller for HTTPS.
 
+use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -26,9 +27,10 @@ use utils::sentry_init::init_sentry;
 
 use crate::context::RequestContext;
 use crate::metrics::{Metrics, ThreadPoolMetrics};
+use crate::pglb::TlsRequired;
 use crate::pqproto::FeStartupPacket;
 use crate::protocol2::ConnectionInfo;
-use crate::proxy::{ErrorSource, TlsRequired, copy_bidirectional_client_compute};
+use crate::proxy::{ErrorSource, copy_bidirectional_client_compute};
 use crate::stream::{PqStream, Stream};
 use crate::util::run_until_cancelled;
 
@@ -228,7 +230,6 @@ pub(super) async fn task_main(
                     .set_nodelay(true)
                     .context("failed to set socket option")?;
 
-                info!(%peer_addr, "serving");
                 let ctx = RequestContext::new(
                     session_id,
                     ConnectionInfo {
@@ -236,11 +237,18 @@ pub(super) async fn task_main(
                         extra: None,
                     },
                     crate::metrics::Protocol::SniRouter,
-                    "sni",
                 );
                 handle_client(ctx, dest_suffix, tls_config, compute_tls_config, socket).await
             }
             .unwrap_or_else(|e| {
+                if let Some(FirstMessage(io_error)) = e.downcast_ref() {
+                    // this is noisy. if we get EOF on the very first message that's likely
+                    // just NLB doing a healthcheck.
+                    if io_error.kind() == io::ErrorKind::UnexpectedEof {
+                        return;
+                    }
+                }
+
                 // Acknowledge that the task has finished with an error.
                 error!("per-client task finished with an error: {e:#}");
             })
@@ -257,12 +265,19 @@ pub(super) async fn task_main(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+struct FirstMessage(io::Error);
+
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     ctx: &RequestContext,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
 ) -> anyhow::Result<TlsStream<S>> {
-    let (mut stream, msg) = PqStream::parse_startup(Stream::from_raw(raw_stream)).await?;
+    let (mut stream, msg) = PqStream::parse_startup(Stream::from_raw(raw_stream))
+        .await
+        .map_err(FirstMessage)?;
+
     match msg {
         FeStartupPacket::SslRequest { direct: None } => {
             let raw = stream.accept_tls().await?;

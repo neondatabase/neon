@@ -374,7 +374,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             let request = Request::builder()
                 .uri(format!("/{tenant}/{timeline}/{endpoint}/sub/path/key"))
                 .method(method)
-                .header("Authorization", format!("Bearer {}", token))
+                .header("Authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap();
             let status = ServiceExt::ready(&mut app)

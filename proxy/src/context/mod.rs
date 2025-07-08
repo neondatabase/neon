@@ -7,7 +7,7 @@ use once_cell::sync::OnceCell;
 use smol_str::SmolStr;
 use tokio::sync::mpsc;
 use tracing::field::display;
-use tracing::{Span, debug, error, info_span};
+use tracing::{Span, error, info_span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -15,10 +15,7 @@ use self::parquet::RequestData;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::error::ErrorKind;
 use crate::intern::{BranchIdInt, ProjectIdInt};
-use crate::metrics::{
-    ConnectOutcome, InvalidEndpointsGroup, LatencyAccumulated, LatencyTimer, Metrics, Protocol,
-    Waiting,
-};
+use crate::metrics::{LatencyAccumulated, LatencyTimer, Metrics, Protocol, Waiting};
 use crate::pqproto::StartupMessageParams;
 use crate::protocol2::{ConnectionInfo, ConnectionInfoExtra};
 use crate::types::{DbName, EndpointId, RoleName};
@@ -46,7 +43,6 @@ struct RequestContextInner {
     pub(crate) session_id: Uuid,
     pub(crate) protocol: Protocol,
     first_packet: chrono::DateTime<Utc>,
-    region: &'static str,
     pub(crate) span: Span,
 
     // filled in as they are discovered
@@ -71,8 +67,6 @@ struct RequestContextInner {
     // This sender is only used to log the length of session in case of success.
     disconnect_sender: Option<mpsc::UnboundedSender<RequestData>>,
     pub(crate) latency_timer: LatencyTimer,
-    // Whether proxy decided that it's not a valid endpoint end rejected it before going to cplane.
-    rejected: Option<bool>,
     disconnect_timestamp: Option<chrono::DateTime<Utc>>,
 }
 
@@ -94,7 +88,6 @@ impl Clone for RequestContext {
             session_id: inner.session_id,
             protocol: inner.protocol,
             first_packet: inner.first_packet,
-            region: inner.region,
             span: info_span!("background_task"),
 
             project: inner.project,
@@ -108,7 +101,6 @@ impl Clone for RequestContext {
             auth_method: inner.auth_method.clone(),
             jwt_issuer: inner.jwt_issuer.clone(),
             success: inner.success,
-            rejected: inner.rejected,
             cold_start_info: inner.cold_start_info,
             pg_options: inner.pg_options.clone(),
             testodrome_query_id: inner.testodrome_query_id.clone(),
@@ -124,12 +116,7 @@ impl Clone for RequestContext {
 }
 
 impl RequestContext {
-    pub fn new(
-        session_id: Uuid,
-        conn_info: ConnectionInfo,
-        protocol: Protocol,
-        region: &'static str,
-    ) -> Self {
+    pub fn new(session_id: Uuid, conn_info: ConnectionInfo, protocol: Protocol) -> Self {
         // TODO: be careful with long lived spans
         let span = info_span!(
             "connect_request",
@@ -145,7 +132,6 @@ impl RequestContext {
             session_id,
             protocol,
             first_packet: Utc::now(),
-            region,
             span,
 
             project: None,
@@ -159,7 +145,6 @@ impl RequestContext {
             auth_method: None,
             jwt_issuer: None,
             success: false,
-            rejected: None,
             cold_start_info: ColdStartInfo::Unknown,
             pg_options: None,
             testodrome_query_id: None,
@@ -179,7 +164,7 @@ impl RequestContext {
         let ip = IpAddr::from([127, 0, 0, 1]);
         let addr = SocketAddr::new(ip, 5432);
         let conn_info = ConnectionInfo { addr, extra: None };
-        RequestContext::new(Uuid::now_v7(), conn_info, Protocol::Tcp, "test")
+        RequestContext::new(Uuid::now_v7(), conn_info, Protocol::Tcp)
     }
 
     pub(crate) fn console_application_name(&self) -> String {
@@ -189,11 +174,6 @@ impl RequestContext {
             this.application.as_deref().unwrap_or_default(),
             this.protocol
         )
-    }
-
-    pub(crate) fn set_rejected(&self, rejected: bool) {
-        let mut this = self.0.try_lock().expect("should not deadlock");
-        this.rejected = Some(rejected);
     }
 
     pub(crate) fn set_cold_start_info(&self, info: ColdStartInfo) {
@@ -217,11 +197,9 @@ impl RequestContext {
         if let Some(options_str) = options.get("options") {
             // If not found directly, try to extract it from the options string
             for option in options_str.split_whitespace() {
-                if option.starts_with("neon_query_id:") {
-                    if let Some(value) = option.strip_prefix("neon_query_id:") {
-                        this.set_testodrome_id(value.into());
-                        break;
-                    }
+                if let Some(value) = option.strip_prefix("neon_query_id:") {
+                    this.set_testodrome_id(value.into());
+                    break;
                 }
             }
         }
@@ -471,38 +449,6 @@ impl RequestContextInner {
     }
 
     fn log_connect(&mut self) {
-        let outcome = if self.success {
-            ConnectOutcome::Success
-        } else {
-            ConnectOutcome::Failed
-        };
-
-        // TODO: get rid of entirely/refactor
-        // check for false positives
-        // AND false negatives
-        if let Some(rejected) = self.rejected {
-            let ep = self
-                .endpoint_id
-                .as_ref()
-                .map(|x| x.as_str())
-                .unwrap_or_default();
-            // This makes sense only if cache is disabled
-            debug!(
-                ?outcome,
-                ?rejected,
-                ?ep,
-                "check endpoint is valid with outcome"
-            );
-            Metrics::get()
-                .proxy
-                .invalid_endpoints_total
-                .inc(InvalidEndpointsGroup {
-                    protocol: self.protocol,
-                    rejected: rejected.into(),
-                    outcome,
-                });
-        }
-
         if let Some(tx) = self.sender.take() {
             // If type changes, this error handling needs to be updated.
             let tx: mpsc::UnboundedSender<RequestData> = tx;

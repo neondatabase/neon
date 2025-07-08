@@ -16,8 +16,10 @@ memoffset.workspace = true
 pprof.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+postgres_ffi_types.workspace = true
 utils.workspace = true
 tracing.workspace = true
+postgres_versioninfo.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
