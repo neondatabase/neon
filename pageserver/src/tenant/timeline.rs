@@ -6085,7 +6085,16 @@ impl CompactionError {
             CompactionError::Other(other) => other,
         };
 
-        // TODO: why are we only checking the root cause here? shouldn't we do these checks for each error in the chain?
+        // The write path of compaction in particular often lacks differentiated
+        // handling errors stemming from cancellation from other errors.
+        // So, if requested, we also check the ::Other variant by downcasting.
+        // The list below has been found empirically from flaky tests and production logs.
+        // The process is simple: on ::Other(), compaction will print the enclosed
+        // anyhow::Error in debug mode, i.e., with backtrace. That backtrace contains the
+        // line where the write path / compaction code does undifferentiated error handling
+        // from a non-anyhow type to an anyhow type. Add the type to the list of downcasts
+        // below, following the same is_cancel() pattern.
+
         let root_cause = match &check_other {
             CheckOtherForCancel::No => return false,
             CheckOtherForCancel::Yes => other.root_cause(),
