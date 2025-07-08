@@ -557,13 +557,17 @@ impl EventFormatter {
                     extracted.layer_span(fields);
 
                     let SpanFields { values, span_info } = fields;
-                    spans.entry(
-                        &*span_info.normalized_name,
-                        SerializableSpanFields {
-                            fields: span.metadata().fields(),
-                            values,
-                        },
-                    );
+
+                    let span_fields = spans.key(&*span_info.normalized_name);
+                    json::value_as_object!(|span_fields| {
+                        for (field, value) in std::iter::zip(span.metadata().fields(), values) {
+                            if value.is_null() {
+                                continue;
+                            }
+                            let raw = value.to_string();
+                            span_fields.key(field.name()).write_raw_json(raw.as_bytes());
+                        }
+                    });
                 }
             });
 
@@ -616,7 +620,16 @@ impl EventFormatter {
 
             if extracted.has_values() {
                 // TODO: add fields from event, too?
-                serializer.entry("extract", extracted);
+                let extract = serializer.key("extract");
+                json::value_as_object!(|extract| {
+                    for (key, value) in std::iter::zip(extracted.names, extracted.values) {
+                        if value.is_null() {
+                            continue;
+                        }
+                        let raw = value.to_string();
+                        extract.key(*key).write_raw_json(raw.as_bytes());
+                    }
+                });
             }
         });
 
@@ -868,29 +881,6 @@ impl tracing::field::Visit for MessageFieldSkipper<'_, '_> {
     }
 }
 
-/// Serializes the span fields as object.
-struct SerializableSpanFields<'span> {
-    fields: &'span tracing::field::FieldSet,
-    values: &'span [serde_json::Value; MAX_TRACING_FIELDS],
-}
-
-impl json::ValueEncoder for SerializableSpanFields<'_> {
-    fn encode(self, serializer: json::ValueSer<'_>) {
-        let mut serializer = json::ObjectSer::new(serializer);
-
-        for (field, value) in std::iter::zip(self.fields, self.values) {
-            if value.is_null() {
-                continue;
-            }
-            serializer
-                .key(field.name())
-                .write_raw_json(value.to_string().as_bytes());
-        }
-
-        serializer.finish();
-    }
-}
-
 struct ExtractedSpanFields {
     names: &'static [&'static str],
     values: Vec<serde_json::Value>,
@@ -921,24 +911,6 @@ impl ExtractedSpanFields {
     #[inline]
     fn has_values(&self) -> bool {
         self.values.iter().any(|v| !v.is_null())
-    }
-}
-
-impl json::ValueEncoder for ExtractedSpanFields {
-    fn encode(self, serializer: json::ValueSer<'_>) {
-        let mut serializer = json::ObjectSer::new(serializer);
-
-        for (key, value) in std::iter::zip(self.names, self.values) {
-            if value.is_null() {
-                continue;
-            }
-
-            serializer
-                .key(*key)
-                .write_raw_json(value.to_string().as_bytes());
-        }
-
-        serializer.finish();
     }
 }
 
