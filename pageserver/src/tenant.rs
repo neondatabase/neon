@@ -386,7 +386,7 @@ pub struct TenantShard {
 
     l0_flush_global_state: L0FlushGlobalState,
 
-    pub(crate) feature_resolver: TenantFeatureResolver,
+    pub(crate) feature_resolver: Arc<TenantFeatureResolver>,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -4494,10 +4494,10 @@ impl TenantShard {
             gc_block: Default::default(),
             l0_flush_global_state,
             basebackup_cache,
-            feature_resolver: TenantFeatureResolver::new(
+            feature_resolver: Arc::new(TenantFeatureResolver::new(
                 feature_resolver,
                 tenant_shard_id.tenant_id,
-            ),
+            )),
         }
     }
 

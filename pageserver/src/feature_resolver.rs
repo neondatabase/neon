@@ -359,18 +359,17 @@ impl PerTenantProperties {
     }
 }
 
-#[derive(Clone)]
 pub struct TenantFeatureResolver {
     inner: FeatureResolver,
     tenant_id: TenantId,
-    cached_tenant_properties: Arc<ArcSwap<HashMap<String, PostHogFlagFilterPropertyValue>>>,
+    cached_tenant_properties: ArcSwap<HashMap<String, PostHogFlagFilterPropertyValue>>,
 
     // Add feature flag on the critical path below.
     //
     // If a feature flag will be used on the critical path, we will update it in the tenant housekeeping loop insetad of
     // resolving directly by calling `evaluate_multivariate` or `evaluate_boolean`. Remember to update the flag in the
     // housekeeping loop. The user should directly read this atomic flag instead of using the set of evaluate functions.
-    pub feature_test_remote_size_flag: Arc<AtomicBool>,
+    pub feature_test_remote_size_flag: AtomicBool,
 }
 
 impl TenantFeatureResolver {
@@ -378,8 +377,8 @@ impl TenantFeatureResolver {
         Self {
             inner,
             tenant_id,
-            cached_tenant_properties: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
-            feature_test_remote_size_flag: Arc::new(AtomicBool::new(false)),
+            cached_tenant_properties: ArcSwap::new(Arc::new(HashMap::new())),
+            feature_test_remote_size_flag: AtomicBool::new(false),
         }
     }
 
