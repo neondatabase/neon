@@ -972,6 +972,10 @@ def test_image_creation_timeout(neon_env_builder: NeonEnvBuilder):
         "checkpoint_distance": 10 * 1024,
         "checkpoint_timeout": "1s",
         "image_layer_force_creation_period": "1s",
+        # The lsn for forced image layer creations is calculated once every 10 minutes.
+        # Hence, drive compaction manually such that the test doesn't compute it at the
+        # wrong time.
+        "compaction_period": "0s",
     }
 
     # consider every tenant large to run the image layer generation check more eagerly
@@ -992,7 +996,12 @@ def test_image_creation_timeout(neon_env_builder: NeonEnvBuilder):
     for v in range(10):
         endpoint.safe_psql(f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))")
 
+    # Sleep a bit such that the inserts are considered when calculating the forced image layer creation LSN.
+    time.sleep(2)
+
     def check_force_image_creation():
+        ps_http = env.pageserver.http_client()
+        ps_http.timeline_compact(tenant_id, timeline_id)
         image, delta = get_layer_map(env, tenant_id, timeline_id, 0)
         log.info(f"images: {image}, deltas: {delta}")
         assert image > 0
