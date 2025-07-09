@@ -14,7 +14,7 @@ POSTGRES_VERSIONS = v17 v16 v15 v14
 # it is derived from BUILD_TYPE.
 
 # All intermediate build artifacts are stored here.
-BUILD_DIR := build
+BUILD_DIR := $(ROOT_PROJECT_DIR)/build
 
 ICU_PREFIX_DIR := /usr/local/icu
 
