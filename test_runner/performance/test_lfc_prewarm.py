@@ -1,14 +1,21 @@
 from __future__ import annotations
+
 import timeit
 from pathlib import Path
 from typing import TYPE_CHECKING
+
 from fixtures.benchmark_fixture import PgBenchRunResult
-from fixtures.neon_fixtures import fork_at_current_lsn, Endpoint
+
 from performance.test_perf_pgbench import utc_now_timestamp
-from fixtures.compare_fixtures import NeonCompare
+
+if TYPE_CHECKING:
+    from fixtures.compare_fixtures import NeonCompare
+    from fixtures.neon_fixtures import Endpoint
+
 
 # These tests compare performance for a write-heavy and read-heavy workloads of an ordinary endpoint
 # compared to the endpoint which saves its LFC and prewarms using it on startup.
+
 
 def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
     env = neon_compare.env
@@ -40,6 +47,7 @@ def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
             run_end_timestamp=run_end_timestamp,
         )
         neon_compare.zenbenchmark.record_pg_bench_result(ep.branch_name, res)
+
 
 def test_compare_prewarmed_read_perf(neon_compare: NeonCompare):
     env = neon_compare.env
