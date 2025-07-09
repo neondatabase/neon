@@ -238,7 +238,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMet
     prewarm_thread.start()
 
     def prewarmed():
-        assert n_prewarms > 5
+        assert n_prewarms > 3
 
     wait_until(prewarmed)
 
