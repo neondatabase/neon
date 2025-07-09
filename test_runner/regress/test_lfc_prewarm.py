@@ -240,7 +240,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMet
     def prewarmed():
         assert n_prewarms > 3
 
-    wait_until(prewarmed)
+    wait_until(prewarmed, timeout=40)  # debug builds don't finish in 20s
 
     running = False
     for t in workload_threads:
