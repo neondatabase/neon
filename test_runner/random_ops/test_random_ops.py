@@ -282,8 +282,8 @@ class NeonProject:
         if parent_timestamp:
             parent_timestamp_str = parent_timestamp.isoformat().replace("+00:00", "Z")
         branch_def = self.neon_api.create_branch(
-                self.id, parent_id=parent_id, parent_timestamp=parent_timestamp_str
-            )
+            self.id, parent_id=parent_id, parent_timestamp=parent_timestamp_str
+        )
         new_branch = NeonBranch(self, branch_def)
         self.wait()
         return new_branch
