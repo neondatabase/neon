@@ -15,6 +15,24 @@ use utils::shard::{ShardCount, ShardNumber, TenantShardId};
 
 use crate::compute::ComputeNode;
 
+#[derive(Default)]
+pub(crate) struct State {
+    desired_lease_lsn: tokio::sync::watch::Sender<Option<Lsn>>,
+}
+
+impl State {
+    pub fn update_desired_lease_lsn(&self, update: Lsn) {
+        self.desired_lease_lsn.send_if_modified(|value| {
+            let modified = *value != Some(update);
+            if let Some(value) = *value && value > update {
+                warn!(current=%value, new=%update, "desired lease lsn moving backwards, this shouldn't happen");
+            }
+            *value = Some(update);
+            modified
+        });
+    }
+}
+
 /// Spawns a background thread to periodically renew LSN leases for static compute.
 /// Do nothing if the compute is not in static mode.
 pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
