@@ -3075,7 +3075,6 @@ impl TenantShard {
     /// `pitr` specifies the same as a time difference from the current time. The effective
     /// GC cutoff point is determined conservatively by either `horizon` and `pitr`, whichever
     /// requires more history to be retained.
-    //
     pub(crate) async fn gc_iteration(
         &self,
         target_timeline_id: Option<TimelineId>,
@@ -3083,6 +3082,19 @@ impl TenantShard {
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
+    ) -> Result<GcResult, GcError> {
+        self.gc_iteration_inner(target_timeline_id, horizon, pitr, cancel, ctx, false)
+            .await
+    }
+
+    pub(crate) async fn gc_iteration_inner(
+        &self,
+        target_timeline_id: Option<TimelineId>,
+        horizon: u64,
+        pitr: Duration,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+        skip_precond_checks: bool,
     ) -> Result<GcResult, GcError> {
         // Don't start doing work during shutdown
         if let TenantState::Stopping { .. } = self.current_state() {
@@ -3094,7 +3106,7 @@ impl TenantShard {
             return Err(GcError::NotActive);
         }
 
-        {
+        if !skip_precond_checks {
             let conf = self.tenant_conf.load();
 
             // If we may not delete layers, then simply skip GC.  Even though a tenant
