@@ -29,8 +29,8 @@ use pageserver::task_mgr::{
 };
 use pageserver::tenant::{TenantSharedResources, mgr, secondary};
 use pageserver::{
-    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, HttpsEndpointListener, http,
-    page_cache, page_service, task_mgr, virtual_file,
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, HttpsEndpointListener,
+    MetricsCollectionTask, http, page_cache, page_service, task_mgr, virtual_file,
 };
 use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;

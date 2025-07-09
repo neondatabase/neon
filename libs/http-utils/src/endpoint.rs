@@ -20,9 +20,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
 use tracing::{Instrument, debug, info, info_span, warn};
 use utils::auth::{AuthError, Claims, SwappableJwtAuth};
+use utils::metrics_collector::{METRICS_COLLECTOR, METRICS_STALE_MILLIS};
 
 use crate::error::{ApiError, api_error_handler, route_error_handler};
-use crate::metrics_collector::{METRICS_COLLECTOR, METRICS_STALE_MILLIS};
 use crate::request::{get_query_param, parse_query_param};
 
 static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
