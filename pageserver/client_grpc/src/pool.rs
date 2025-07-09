@@ -30,6 +30,7 @@
 //! TODO: observability.
 
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZero;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -44,22 +45,10 @@ use pageserver_page_api as page_api;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::ShardIndex;
 
-/// Max number of concurrent clients per channel.
-///
-/// TODO: tune these constants, and make them configurable.
-/// TODO: consider separate limits for unary and streaming clients, so we don't fill up channels
-/// with only streams.
-const CLIENTS_PER_CHANNEL: usize = 16;
-
-/// Maximum number of concurrent clients per `ClientPool`.
-const CLIENT_LIMIT: usize = 64;
-
-/// Max number of pipelined requests per gRPC GetPage stream.
-const STREAM_QUEUE_DEPTH: usize = 2;
-
 /// A gRPC channel pool, for a single Pageserver. A channel is shared by many clients (via HTTP/2
-/// stream multiplexing), up to `CLIENTS_PER_CHANNEL`. The pool does not limit the number of
-/// channels, and instead relies on `ClientPool` to limit the number of concurrent clients.
+/// stream multiplexing), up to `clients_per_channel` -- a new channel will be spun up beyond this.
+/// The pool does not limit the number of channels, and instead relies on `ClientPool` or
+/// `StreamPool` to limit the number of concurrent clients.
 ///
 /// The pool is always wrapped in an outer `Arc`, to allow long-lived guards across tasks/threads.
 ///
@@ -69,6 +58,8 @@ const STREAM_QUEUE_DEPTH: usize = 2;
 pub struct ChannelPool {
     /// Pageserver endpoint to connect to.
     endpoint: Endpoint,
+    /// Max number of clients per channel. Beyond this, a new channel will be created.
+    max_clients_per_channel: NonZero<usize>,
     /// Open channels.
     channels: Mutex<BTreeMap<ChannelID, ChannelEntry>>,
     /// Channel ID generator.
@@ -86,13 +77,14 @@ struct ChannelEntry {
 
 impl ChannelPool {
     /// Creates a new channel pool for the given Pageserver endpoint.
-    pub fn new<E>(endpoint: E) -> anyhow::Result<Arc<Self>>
+    pub fn new<E>(endpoint: E, max_clients_per_channel: NonZero<usize>) -> anyhow::Result<Arc<Self>>
     where
         E: TryInto<Endpoint> + Send + Sync + 'static,
         <E as TryInto<Endpoint>>::Error: std::error::Error + Send + Sync,
     {
         Ok(Arc::new(Self {
             endpoint: endpoint.try_into()?,
+            max_clients_per_channel,
             channels: Mutex::default(),
             next_channel_id: AtomicUsize::default(),
         }))
@@ -120,8 +112,11 @@ impl ChannelPool {
         // with lower-ordered channel IDs first. This will cluster clients in lower-ordered
         // channels, and free up higher-ordered channels such that they can be reaped.
         for (&id, entry) in channels.iter_mut() {
-            assert!(entry.clients <= CLIENTS_PER_CHANNEL, "channel overflow");
-            if entry.clients < CLIENTS_PER_CHANNEL {
+            assert!(
+                entry.clients <= self.max_clients_per_channel.get(),
+                "channel overflow"
+            );
+            if entry.clients < self.max_clients_per_channel.get() {
                 entry.clients += 1;
                 return ChannelGuard {
                     pool: Arc::downgrade(self),
@@ -181,7 +176,7 @@ impl Drop for ChannelGuard {
 
 /// A pool of gRPC clients for a single tenant shard. Each client acquires a channel from the inner
 /// `ChannelPool`. A client is only given out to single caller at a time. The pool limits the total
-/// number of concurrent clients to `CLIENT_LIMIT` via semaphore.
+/// number of concurrent clients to `max_clients` via semaphore.
 ///
 /// The pool is always wrapped in an outer `Arc`, to allow long-lived guards across tasks/threads.
 ///
@@ -197,8 +192,8 @@ pub struct ClientPool {
     auth_token: Option<String>,
     /// Channel pool to acquire channels from.
     channel_pool: Arc<ChannelPool>,
-    /// Limits the max number of concurrent clients for this pool.
-    limiter: Arc<Semaphore>,
+    /// Limits the max number of concurrent clients for this pool. None if the pool is unbounded.
+    limiter: Option<Arc<Semaphore>>,
     /// Idle pooled clients. Acquired clients are removed from here and returned on drop.
     ///
     /// The first client in the map will be acquired next. The map is sorted by client ID, which in
@@ -221,13 +216,15 @@ struct ClientEntry {
 
 impl ClientPool {
     /// Creates a new client pool for the given tenant shard. Channels are acquired from the given
-    /// `ChannelPool`, which must point to a Pageserver that hosts the tenant shard.
+    /// `ChannelPool`, which must point to a Pageserver that hosts the tenant shard. Allows up to
+    /// `max_clients` concurrent clients, or unbounded if None.
     pub fn new(
         channel_pool: Arc<ChannelPool>,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_token: Option<String>,
+        max_clients: Option<NonZero<usize>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             tenant_id,
@@ -236,25 +233,24 @@ impl ClientPool {
             auth_token,
             channel_pool,
             idle: Mutex::default(),
-            limiter: Arc::new(Semaphore::new(CLIENT_LIMIT)),
+            limiter: max_clients.map(|max| Arc::new(Semaphore::new(max.get()))),
             next_client_id: AtomicUsize::default(),
         })
     }
 
     /// Gets a client from the pool, or creates a new one if necessary. Connections are established
-    /// lazily and do not block, but this call can block if the pool is at `CLIENT_LIMIT`. The
-    /// client is returned to the pool when the guard is dropped.
+    /// lazily and do not block, but this call can block if the pool is at `max_clients`. The client
+    /// is returned to the pool when the guard is dropped.
     ///
     /// This is moderately performance-sensitive. It is called for every unary request, but these
     /// establish a new gRPC stream per request so they're already expensive. GetPage requests use
     /// the `StreamPool` instead.
     pub async fn get(self: &Arc<Self>) -> anyhow::Result<ClientGuard> {
-        let permit = self
-            .limiter
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("never closed");
+        // Acquire a permit if the pool is bounded.
+        let mut permit = None;
+        if let Some(limiter) = self.limiter.clone() {
+            permit = Some(limiter.acquire_owned().await.expect("never closed"));
+        }
 
         // Fast path: acquire an idle client from the pool.
         if let Some((id, entry)) = self.idle.lock().unwrap().pop_first() {
@@ -296,9 +292,9 @@ impl ClientPool {
 pub struct ClientGuard {
     pool: Weak<ClientPool>,
     id: ClientID,
-    client: Option<page_api::Client>,    // Some until dropped
-    channel_guard: Option<ChannelGuard>, // Some until dropped
-    permit: OwnedSemaphorePermit,
+    client: Option<page_api::Client>,     // Some until dropped
+    channel_guard: Option<ChannelGuard>,  // Some until dropped
+    permit: Option<OwnedSemaphorePermit>, // None if pool is unbounded
 }
 
 impl Deref for ClientGuard {
@@ -341,16 +337,21 @@ impl Drop for ClientGuard {
 /// TODO: reap idle streams.
 /// TODO: consider making this generic over request and response types; not currently needed.
 pub struct StreamPool {
-    /// The client pool to acquire clients from.
+    /// The client pool to acquire clients from. Must be unbounded.
     client_pool: Arc<ClientPool>,
     /// All pooled streams.
     ///
     /// Incoming requests will be sent over an existing stream with available capacity. If all
-    /// streams are full, a new one is spun up and added to the pool (up to the `ClientPool` limit).
-    /// Each stream has an associated Tokio task that processes requests and responses.
+    /// streams are full, a new one is spun up and added to the pool (up to `max_streams`). Each
+    /// stream has an associated Tokio task that processes requests and responses.
     streams: Arc<Mutex<HashMap<StreamID, StreamEntry>>>,
-    /// Limits the max number of concurrent requests (not streams).
-    limiter: Arc<Semaphore>,
+    /// The max number of concurrent streams, or None if unbounded.
+    max_streams: Option<NonZero<usize>>,
+    /// The max number of concurrent requests per stream.
+    max_queue_depth: NonZero<usize>,
+    /// Limits the max number of concurrent requests, given by `max_streams * max_queue_depth`.
+    /// None if the pool is unbounded.
+    limiter: Option<Arc<Semaphore>>,
     /// Stream ID generator.
     next_stream_id: AtomicUsize,
 }
@@ -369,16 +370,27 @@ struct StreamEntry {
 }
 
 impl StreamPool {
-    /// Creates a new stream pool, using the given client pool.
+    /// Creates a new stream pool, using the given client pool. It will send up to `max_queue_depth`
+    /// concurrent requests on each stream, and use up to `max_streams` concurrent streams.
     ///
-    /// NB: the stream pool should use a dedicated client pool. Otherwise, long-lived streams may
-    /// fill up the client pool and starve out unary requests. Client pools can share the same
-    /// `ChannelPool` though, since the channel pool is unbounded.
-    pub fn new(client_pool: Arc<ClientPool>) -> Arc<Self> {
+    /// The client pool must be unbounded. The stream pool will enforce its own limits, and because
+    /// streams are long-lived they can cause persistent starvation if they exhaust the client pool.
+    /// The stream pool should generally have its own dedicated client pool (but it can share a
+    /// channel pool with others since these are always unbounded).
+    pub fn new(
+        client_pool: Arc<ClientPool>,
+        max_streams: Option<NonZero<usize>>,
+        max_queue_depth: NonZero<usize>,
+    ) -> Arc<Self> {
+        assert!(client_pool.limiter.is_none(), "bounded client pool");
         Arc::new(Self {
             client_pool,
             streams: Arc::default(),
-            limiter: Arc::new(Semaphore::new(CLIENT_LIMIT * STREAM_QUEUE_DEPTH)),
+            limiter: max_streams.map(|max_streams| {
+                Arc::new(Semaphore::new(max_streams.get() * max_queue_depth.get()))
+            }),
+            max_streams,
+            max_queue_depth,
             next_stream_id: AtomicUsize::default(),
         })
     }
@@ -402,18 +414,17 @@ impl StreamPool {
     ///
     /// For now, we just do something simple and functional, but very inefficient (linear scan).
     pub async fn get(&self) -> StreamGuard {
-        let permit = self
-            .limiter
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("never closed");
+        // Acquire a permit if the pool is bounded.
+        let mut permit = None;
+        if let Some(limiter) = self.limiter.clone() {
+            permit = Some(limiter.acquire_owned().await.expect("never closed"));
+        }
         let mut streams = self.streams.lock().unwrap();
 
         // Look for a pooled stream with available capacity.
         for entry in streams.values() {
             assert!(
-                entry.queue_depth.load(Ordering::Relaxed) <= STREAM_QUEUE_DEPTH,
+                entry.queue_depth.load(Ordering::Relaxed) <= self.max_queue_depth.get(),
                 "stream queue overflow"
             );
             if entry
@@ -421,7 +432,7 @@ impl StreamPool {
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |queue_depth| {
                     // Increment the queue depth via compare-and-swap.
                     // TODO: review ordering.
-                    (queue_depth < STREAM_QUEUE_DEPTH).then_some(queue_depth + 1)
+                    (queue_depth < self.max_queue_depth.get()).then_some(queue_depth + 1)
                 })
                 .is_ok()
             {
@@ -438,18 +449,16 @@ impl StreamPool {
         // join onto this stream and also create additional streams concurrently if this fills up.
         let id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let queue_depth = Arc::new(AtomicUsize::new(1)); // reserve quota for this caller
-        let (req_tx, req_rx) = mpsc::channel(STREAM_QUEUE_DEPTH);
+        let (req_tx, req_rx) = mpsc::channel(self.max_queue_depth.get());
         let entry = StreamEntry {
             sender: req_tx.clone(),
             queue_depth: queue_depth.clone(),
         };
         streams.insert(id, entry);
 
-        // NB: make sure we don't overshoot the client limit. The semaphore limit is CLIENT_LIMIT *
-        // STREAM_QUEUE_DEPTH, but if we were to misaccount queue depth we'd try to spin up more
-        // streams than CLIENT_LIMIT and block on the client pool ~forever. This should not happen
-        // because we only acquire queue depth under lock and after acquiring a semaphore permit.
-        assert!(streams.len() <= CLIENT_LIMIT, "stream overflow");
+        if let Some(max_streams) = self.max_streams {
+            assert!(streams.len() <= max_streams.get(), "stream overflow");
+        };
 
         let client_pool = self.client_pool.clone();
         let streams = self.streams.clone();
@@ -484,19 +493,22 @@ impl StreamPool {
         // Acquire a client from the pool and create a stream.
         let mut client = client_pool.get().await?;
 
-        let (req_tx, req_rx) = mpsc::channel(STREAM_QUEUE_DEPTH);
-        let req_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
+        // NB: use an unbounded channel such that the stream send never blocks. Otherwise, we could
+        // theoretically deadlock if both the client and server block on sends (since we're not
+        // reading responses while sending). This is unlikely to happen due to gRPC/TCP buffers and
+        // low queue depths, but it was seen to happen with the libpq protocol so better safe than
+        // sorry. It should never buffer more than the queue depth anyway, but using an unbounded
+        // channel guarantees that it will never block.
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let req_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(req_rx);
         let mut resp_stream = client.get_pages(req_stream).await?;
 
         // Track caller response channels by request ID. If the task returns early, these response
         // channels will be dropped and the waiting callers will receive an error.
-        let mut callers = HashMap::with_capacity(STREAM_QUEUE_DEPTH);
+        let mut callers = HashMap::new();
 
         // Process requests and responses.
         loop {
-            // NB: this can trip if the server doesn't respond to a request, so only debug_assert.
-            debug_assert!(callers.len() <= STREAM_QUEUE_DEPTH, "stream queue overflow");
-
             tokio::select! {
                 // Receive requests from callers and send them to the stream.
                 req = caller_rx.recv() => {
@@ -515,8 +527,8 @@ impl StreamPool {
                     }
                     callers.insert(req.request_id, resp_tx);
 
-                    // Send the request on the stream. Bail out if the send fails.
-                    req_tx.send(req).await.map_err(|_| {
+                    // Send the request on the stream. Bail out if the stream is closed.
+                    req_tx.send(req).map_err(|_| {
                         tonic::Status::unavailable("stream closed")
                     })?;
                 }
@@ -545,7 +557,7 @@ impl StreamPool {
 pub struct StreamGuard {
     sender: RequestSender,
     queue_depth: Arc<AtomicUsize>,
-    permit: OwnedSemaphorePermit,
+    permit: Option<OwnedSemaphorePermit>, // None if pool is unbounded
 }
 
 impl StreamGuard {
