@@ -7176,7 +7176,7 @@ checksum = "81cdd64d312baedb58e21336b31bc043b77e01cc99033ce76ef539f78e965ebc"
 [[package]]
 name = "subzero-core"
 version = "3.0.1"
-source = "git+https://github.com/neondatabase-labs/subzero?rev=4b87b463515f3f0cc408f592b3c0e55f23fc22dd#4b87b463515f3f0cc408f592b3c0e55f23fc22dd"
+source = "git+https://github.com/neondatabase/subzero?rev=4b87b463515f3f0cc408f592b3c0e55f23fc22dd#4b87b463515f3f0cc408f592b3c0e55f23fc22dd"
 dependencies = [
  "base64 0.22.1",
  "csv",
