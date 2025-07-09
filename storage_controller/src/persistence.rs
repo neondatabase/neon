@@ -131,6 +131,7 @@ pub(crate) enum DatabaseOperation {
     InsertTimeline,
     UpdateTimelineMembership,
     UpdateCplaneNotifiedGeneration,
+    UpdateSkSetNotifiedGeneration,
     GetTimeline,
     InsertTimelineReconcile,
     RemoveTimelineReconcile,
@@ -1467,6 +1468,8 @@ impl Persistence {
     /// Update timeline membership configuration in the database.
     /// Perform a compare-and-swap (CAS) operation on the timeline's generation.
     /// The `new_generation` must be the next (+1) generation after the one in the database.
+    /// Also inserts reconcile_requests to safekeeper_timeline_pending_ops table in the same
+    /// transaction.
     pub(crate) async fn update_timeline_membership(
         &self,
         tenant_id: TenantId,
@@ -1517,11 +1520,6 @@ impl Persistence {
                 };
 
                 for req in reconcile_requests {
-                    // For simplicity it makes sense to keep only the last operation
-                    // per (tenant, timeline, sk) tuple: if we migrated a timeline
-                    // from node and adding it back it is not necessary to remove
-                    // data on it. Hence, generation is not part of primary key and
-                    // we override any rows with lower generations here.
                     let inserted_updated = diesel::insert_into(stpo::table)
                         .values(req)
                         .on_conflict((stpo::tenant_id, stpo::timeline_id, stpo::sk_id))
@@ -1585,6 +1583,10 @@ impl Persistence {
         .await
     }
 
+    /// Update the sk set notified generation for a timeline.
+    /// Perform a compare-and-swap (CAS) operation on the timeline's sk set notified generation.
+    /// The update will fail if the specified generation is less than the sk set notified generation
+    /// in the database.
     pub(crate) async fn update_sk_set_notified_generation(
         &self,
         tenant_id: TenantId,
@@ -1596,7 +1598,7 @@ impl Persistence {
         let tenant_id = &tenant_id;
         let timeline_id = &timeline_id;
         self.with_measured_conn(
-            DatabaseOperation::UpdateCplaneNotifiedGeneration,
+            DatabaseOperation::UpdateSkSetNotifiedGeneration,
             move |conn| {
                 Box::pin(async move {
                     let updated = diesel::update(dsl::timelines)

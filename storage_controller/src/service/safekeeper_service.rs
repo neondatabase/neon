@@ -1044,7 +1044,7 @@ impl Service {
     /// The function does best effort: if an exclude request is unsuccessful,
     /// it will be added to the in-memory reconciler, and the function will succeed anyway.
     ///
-    /// Might fail if there is eroror accessing the database.
+    /// Might fail if there is error accessing the database.
     async fn tenant_timeline_safekeeper_exclude_reconcile(
         self: &Arc<Self>,
         tenant_id: TenantId,
@@ -1090,7 +1090,7 @@ impl Service {
                     host_list: Vec::new(),
                     tenant_id,
                     timeline_id: Some(timeline_id),
-                    generation: mconf.generation.into_inner(),
+                    generation,
                     kind: SafekeeperTimelineOpKind::Exclude,
                 };
                 reconcile_requests.push(req);
@@ -1298,7 +1298,7 @@ impl Service {
             &new_safekeepers,
             &joint_config,
             Some(sync_position),
-            false, // don't update notified generation
+            false, // we're just waiting for sync position, don't update notified generation
         )
         .await?;
 
@@ -1460,7 +1460,7 @@ impl Service {
         if timeline.new_sk_set.is_some() {
             // Logical error, should never happen.
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                "timeline {tenant_id}/{timeline_id} is already migrating to a different safekeeper set"
+                "can't finish timeline migration for {tenant_id}/{timeline_id}: new_sk_set is not None"
             )));
         }
 
@@ -1473,6 +1473,8 @@ impl Service {
             new_members: None,
         };
 
+        // We might have failed between commiting reconciliation requests and adding them to the in-memory reconciler.
+        // Reload them from the database.
         let pending_ops = self
             .persistence
             .list_pending_ops_for_timeline(tenant_id, timeline_id)
