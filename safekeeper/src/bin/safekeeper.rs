@@ -244,6 +244,11 @@ struct Args {
     #[arg(long)]
     enable_tls_wal_service_api: bool,
 
+    /// Controls whether to collect all metrics on each scrape or to return potentially stale
+    /// results.
+    #[arg(long, default_value_t = true)]
+    force_metric_collection_on_scrape: bool,
+
     /// Run in development mode (disables security checks)
     #[arg(long, help = "Run in development mode (disables security checks)")]
     dev: bool,
@@ -429,6 +434,7 @@ async fn main() -> anyhow::Result<()> {
         ssl_ca_certs,
         use_https_safekeeper_api: args.use_https_safekeeper_api,
         enable_tls_wal_service_api: args.enable_tls_wal_service_api,
+        force_metric_collection_on_scrape: args.force_metric_collection_on_scrape,
     });
 
     // initialize sentry if SENTRY_DSN is provided
