@@ -38,14 +38,22 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
     assert len(mconf["sk_set"]) == 1
     assert mconf["generation"] == 1
 
+    current_sk = mconf["sk_set"][0]
+
     ep.start(safekeeper_generation=1, safekeepers=mconf["sk_set"])
     ep.safe_psql("CREATE EXTENSION neon_test_utils;")
     ep.safe_psql("CREATE TABLE t(a int)")
+
+    expected_gen = 1
 
     for active_sk in range(1, 4):
         env.storage_controller.migrate_safekeepers(
             env.initial_tenant, env.initial_timeline, [active_sk]
         )
+
+        if active_sk != current_sk:
+            expected_gen += 2
+            current_sk = active_sk
 
         other_sks = [sk for sk in range(1, 4) if sk != active_sk]
 
@@ -60,9 +68,6 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
     ep.clear_buffers()
 
     assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 4)]
-
-    # 1 initial generation + 2 migrations on each loop iteration.
-    expected_gen = 1 + 2 * 3
 
     mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
     assert mconf["generation"] == expected_gen

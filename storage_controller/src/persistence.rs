@@ -130,6 +130,7 @@ pub(crate) enum DatabaseOperation {
     SetPreferredAzs,
     InsertTimeline,
     UpdateTimelineMembership,
+    UpdateCplaneNotifiedGeneration,
     GetTimeline,
     InsertTimelineReconcile,
     RemoveTimelineReconcile,
@@ -1473,8 +1474,11 @@ impl Persistence {
         new_generation: SafekeeperGeneration,
         sk_set: &[NodeId],
         new_sk_set: Option<&[NodeId]>,
+        reconcile_requests: &[TimelinePendingOpPersistence],
     ) -> DatabaseResult<()> {
-        use crate::schema::timelines::dsl;
+        use crate::schema::safekeeper_timeline_pending_ops as stpo;
+        use crate::schema::timelines;
+        use diesel::query_dsl::methods::FilterDsl;
 
         let prev_generation = new_generation.previous().unwrap();
 
@@ -1482,14 +1486,15 @@ impl Persistence {
         let timeline_id = &timeline_id;
         self.with_measured_conn(DatabaseOperation::UpdateTimelineMembership, move |conn| {
             Box::pin(async move {
-                let updated = diesel::update(dsl::timelines)
-                    .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
-                    .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
-                    .filter(dsl::generation.eq(prev_generation.into_inner() as i32))
+                let updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(&tenant_id.to_string()))
+                    .filter(timelines::timeline_id.eq(&timeline_id.to_string()))
+                    .filter(timelines::generation.eq(prev_generation.into_inner() as i32))
                     .set((
-                        dsl::generation.eq(new_generation.into_inner() as i32),
-                        dsl::sk_set.eq(sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>()),
-                        dsl::new_sk_set.eq(new_sk_set
+                        timelines::generation.eq(new_generation.into_inner() as i32),
+                        timelines::sk_set
+                            .eq(sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>()),
+                        timelines::new_sk_set.eq(new_sk_set
                             .map(|set| set.iter().map(|id| id.0 as i64).collect::<Vec<_>>())),
                     ))
                     .execute(conn)
@@ -1499,17 +1504,121 @@ impl Persistence {
                     0 => {
                         // TODO(diko): It makes sense to select the current generation
                         // and include it in the error message for better debuggability.
-                        Err(DatabaseError::Cas(
+                        return Err(DatabaseError::Cas(
                             "Failed to update membership configuration".to_string(),
-                        ))
+                        ));
                     }
-                    1 => Ok(()),
-                    _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({updated})"
-                    ))),
+                    1 => {}
+                    _ => {
+                        return Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({updated})"
+                        )));
+                    }
+                };
+
+                for req in reconcile_requests {
+                    // For simplicity it makes sense to keep only the last operation
+                    // per (tenant, timeline, sk) tuple: if we migrated a timeline
+                    // from node and adding it back it is not necessary to remove
+                    // data on it. Hence, generation is not part of primary key and
+                    // we override any rows with lower generations here.
+                    let inserted_updated = diesel::insert_into(stpo::table)
+                        .values(req)
+                        .on_conflict((stpo::tenant_id, stpo::timeline_id, stpo::sk_id))
+                        .do_update()
+                        .set(req)
+                        .filter(stpo::generation.lt(req.generation))
+                        .execute(conn)
+                        .await?;
+
+                    if inserted_updated > 1 {
+                        return Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({inserted_updated})"
+                        )));
+                    }
                 }
+
+                Ok(())
             })
         })
+        .await
+    }
+
+    /// Update the cplane notified generation for a timeline.
+    /// Perform a compare-and-swap (CAS) operation on the timeline's cplane notified generation.
+    /// The update will fail if the specified generation is less than the cplane notified generation
+    /// in the database.
+    pub(crate) async fn update_cplane_notified_generation(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        generation: SafekeeperGeneration,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(
+            DatabaseOperation::UpdateCplaneNotifiedGeneration,
+            move |conn| {
+                Box::pin(async move {
+                    let updated = diesel::update(dsl::timelines)
+                        .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                        .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                        .filter(dsl::cplane_notified_generation.le(generation.into_inner() as i32))
+                        .set(dsl::cplane_notified_generation.eq(generation.into_inner() as i32))
+                        .execute(conn)
+                        .await?;
+
+                    match updated {
+                        0 => Err(DatabaseError::Cas(
+                            "Failed to update cplane notified generation".to_string(),
+                        )),
+                        1 => Ok(()),
+                        _ => Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({updated})"
+                        ))),
+                    }
+                })
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn update_sk_set_notified_generation(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        generation: SafekeeperGeneration,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(
+            DatabaseOperation::UpdateCplaneNotifiedGeneration,
+            move |conn| {
+                Box::pin(async move {
+                    let updated = diesel::update(dsl::timelines)
+                        .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                        .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                        .filter(dsl::sk_set_notified_generation.le(generation.into_inner() as i32))
+                        .set(dsl::sk_set_notified_generation.eq(generation.into_inner() as i32))
+                        .execute(conn)
+                        .await?;
+
+                    match updated {
+                        0 => Err(DatabaseError::Cas(
+                            "Failed to update sk set notified generation".to_string(),
+                        )),
+                        1 => Ok(()),
+                        _ => Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({updated})"
+                        ))),
+                    }
+                })
+            },
+        )
         .await
     }
 
@@ -2462,6 +2571,7 @@ pub(crate) struct TimelinePersistence {
     pub(crate) new_sk_set: Option<Vec<i64>>,
     pub(crate) cplane_notified_generation: i32,
     pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) sk_set_notified_generation: i32,
 }
 
 /// This is separate from [TimelinePersistence] only because postgres allows NULLs
@@ -2480,6 +2590,7 @@ pub(crate) struct TimelineFromDb {
     pub(crate) new_sk_set: Option<Vec<Option<i64>>>,
     pub(crate) cplane_notified_generation: i32,
     pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) sk_set_notified_generation: i32,
 }
 
 impl TimelineFromDb {
@@ -2499,6 +2610,7 @@ impl TimelineFromDb {
             new_sk_set,
             cplane_notified_generation: self.cplane_notified_generation,
             deleted_at: self.deleted_at,
+            sk_set_notified_generation: self.sk_set_notified_generation,
         }
     }
 }
