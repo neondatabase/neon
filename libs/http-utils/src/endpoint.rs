@@ -251,11 +251,14 @@ impl std::io::Write for ChannelWriter {
     }
 }
 
-pub async fn prometheus_metrics_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+pub async fn prometheus_metrics_handler(
+    req: Request<Body>,
+    use_latest_default: bool,
+) -> Result<Response<Body>, ApiError> {
     SERVE_METRICS_COUNT.inc();
 
     // HADRON
-    let use_latest = parse_query_param(&req, "use_latest")?.unwrap_or(false);
+    let use_latest = parse_query_param(&req, "use_latest")?.unwrap_or(use_latest_default);
     let started_at = std::time::Instant::now();
 
     let (tx, rx) = mpsc::channel(1);

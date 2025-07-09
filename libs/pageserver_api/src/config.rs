@@ -271,6 +271,7 @@ pub struct ConfigToml {
     pub timeline_import_config: TimelineImportConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub basebackup_cache_config: Option<BasebackupCacheConfig>,
+    pub force_metric_collection_on_scrape: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -821,6 +822,7 @@ impl Default for ConfigToml {
             },
             basebackup_cache_config: None,
             posthog_config: None,
+            force_metric_collection_on_scrape: true,
         }
     }
 }

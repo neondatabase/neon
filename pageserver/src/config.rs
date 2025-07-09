@@ -248,6 +248,10 @@ pub struct PageServerConf {
     pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
 
     pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
+
+    /// Controls whether to collect all metrics on each scrape or to return potentially stale
+    /// results.
+    pub force_metric_collection_on_scrape: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -427,6 +431,7 @@ impl PageServerConf {
             posthog_config,
             timeline_import_config,
             basebackup_cache_config,
+            force_metric_collection_on_scrape,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -484,6 +489,7 @@ impl PageServerConf {
             dev_mode,
             timeline_import_config,
             basebackup_cache_config,
+            force_metric_collection_on_scrape,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
