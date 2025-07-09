@@ -72,6 +72,7 @@ jobs:
   check-macos-build:
     needs: [ check-permissions, files-changed ]
     uses: ./.github/workflows/build-macos.yml
+    secrets: inherit
     with:
       pg_versions: ${{ needs.files-changed.outputs.postgres_changes }}
       rebuild_rust_code: ${{ fromJSON(needs.files-changed.outputs.rebuild_rust_code) }}
