@@ -78,7 +78,7 @@ COPY --from=plan     /home/nonroot/recipe.json                              reci
 RUN --mount=type=secret,uid=1000,id=SUBZERO_ACCESS_TOKEN \
     set -e \
     && if [ -s /run/secrets/SUBZERO_ACCESS_TOKEN ]; then \
-        git config --global url."https://$(cat /run/secrets/SUBZERO_ACCESS_TOKEN)@github.com/neondatabase-labs/subzero".insteadOf "https://github.com/neondatabase-labs/subzero" \
+        git config --global url."https://$(cat /run/secrets/SUBZERO_ACCESS_TOKEN)@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero" \
         && export CARGO_NET_GIT_FETCH_WITH_CLI=true; \
     fi \
     && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo chef cook --locked --release --recipe-path recipe.json
