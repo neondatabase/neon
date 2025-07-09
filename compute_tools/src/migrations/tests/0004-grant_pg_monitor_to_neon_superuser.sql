@@ -6,7 +6,7 @@ BEGIN
             admin_option AS admin
         INTO monitor
         FROM pg_auth_members
-        WHERE roleid = 'pg_monitor'::regrole
+        WHERE roleid = 'neon_superuser'::regrole
             AND member = 'pg_monitor'::regrole;
 
     IF NOT monitor.member THEN
