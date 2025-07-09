@@ -2,7 +2,7 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Where to install Postgres, default is ./pg_install, maybe useful for package
 # managers.
-POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
+POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install
 
 # Supported PostgreSQL versions
 POSTGRES_VERSIONS = v17 v16 v15 v14
