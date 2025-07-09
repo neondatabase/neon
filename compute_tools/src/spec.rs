@@ -9,6 +9,7 @@ use reqwest::StatusCode;
 use tokio_postgres::Client;
 use tracing::{error, info, instrument};
 
+use crate::compute::ComputeNodeParams;
 use crate::config;
 use crate::metrics::{CPLANE_REQUESTS_TOTAL, CPlaneRequestRPC, UNKNOWN_HTTP_STATUS};
 use crate::migration::MigrationRunner;
@@ -169,7 +170,7 @@ pub async fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
 }
 
 #[instrument(skip_all)]
-pub async fn handle_migrations(client: &mut Client) -> Result<()> {
+pub async fn handle_migrations(params: ComputeNodeParams, client: &mut Client) -> Result<()> {
     info!("handle migrations");
 
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -178,26 +179,61 @@ pub async fn handle_migrations(client: &mut Client) -> Result<()> {
 
     // Add new migrations in numerical order.
     let migrations = [
-        include_str!("./migrations/0001-neon_superuser_bypass_rls.sql"),
-        include_str!("./migrations/0002-alter_roles.sql"),
-        include_str!("./migrations/0003-grant_pg_create_subscription_to_neon_superuser.sql"),
-        include_str!("./migrations/0004-grant_pg_monitor_to_neon_superuser.sql"),
-        include_str!("./migrations/0005-grant_all_on_tables_to_neon_superuser.sql"),
-        include_str!("./migrations/0006-grant_all_on_sequences_to_neon_superuser.sql"),
-        include_str!(
-            "./migrations/0007-grant_all_on_tables_to_neon_superuser_with_grant_option.sql"
+        &format!(
+            include_str!("./migrations/0001-add_bypass_rls_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
         ),
-        include_str!(
-            "./migrations/0008-grant_all_on_sequences_to_neon_superuser_with_grant_option.sql"
+        &format!(
+            include_str!("./migrations/0002-alter_roles.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!("./migrations/0003-grant_pg_create_subscription_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!("./migrations/0004-grant_pg_monitor_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!("./migrations/0005-grant_all_on_tables_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!("./migrations/0006-grant_all_on_sequences_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!(
+                "./migrations/0007-grant_all_on_tables_with_grant_option_to_privileged_role.sql"
+            ),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!(
+                "./migrations/0008-grant_all_on_sequences_with_grant_option_to_privileged_role.sql"
+            ),
+            privileged_role_name = params.privileged_role_name
         ),
         include_str!("./migrations/0009-revoke_replication_for_previously_allowed_roles.sql"),
-        include_str!(
-            "./migrations/0010-grant_snapshot_synchronization_funcs_to_neon_superuser.sql"
+        &format!(
+            include_str!(
+                "./migrations/0010-grant_snapshot_synchronization_funcs_to_privileged_role.sql"
+            ),
+            privileged_role_name = params.privileged_role_name
         ),
-        include_str!(
-            "./migrations/0011-grant_pg_show_replication_origin_status_to_neon_superuser.sql"
+        &format!(
+            include_str!(
+                "./migrations/0011-grant_pg_show_replication_origin_status_to_privileged_role.sql"
+            ),
+            privileged_role_name = params.privileged_role_name
         ),
-        include_str!("./migrations/0012-grant_pg_signal_backend_to_neon_superuser.sql"),
+        &format!(
+            include_str!(
+                "./migrations/0012-grant_pg_signal_backend_to_privileged_role.sql"
+            ),
+            privileged_role_name = params.privileged_role_name
+        ),
     ];
 
     MigrationRunner::new(client, &migrations)

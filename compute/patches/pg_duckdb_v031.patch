@@ -28,6 +28,14 @@ index d777d76..af60106 100644
  GRANT ALL ON FUNCTION duckdb.cache_info() TO PUBLIC;
  GRANT ALL ON FUNCTION duckdb.cache_delete(TEXT) TO PUBLIC;
  GRANT ALL ON PROCEDURE duckdb.recycle_ddb() TO PUBLIC;
-+GRANT ALL ON FUNCTION duckdb.install_extension(TEXT) TO neon_superuser;
-+GRANT ALL ON TABLE duckdb.extensions TO neon_superuser;
-+GRANT ALL ON SEQUENCE duckdb.extensions_table_seq TO neon_superuser;
+
++DO $$
++DECLARE
++  privileged_role_name text;
++BEGIN
++  privileged_role_name := current_setting('neon.privileged_role_name');
++
++  EXECUTE format('GRANT ALL ON FUNCTION duckdb.install_extension(TEXT) TO %I', privileged_role_name);
++  EXECUTE format('GRANT ALL ON TABLE duckdb.extensions TO %I', privileged_role_name);
++  EXECUTE format('GRANT ALL ON SEQUENCE duckdb.extensions_table_seq TO %I', privileged_role_name);
++END$$;
