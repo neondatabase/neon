@@ -332,7 +332,7 @@ def test_multiple_subscription_branching(neon_simple_env: NeonEnv):
 
             last_insert_lsn = query_scalar(cursor, "select pg_current_wal_insert_lsn();")
 
-    def start_publisher_workload(table_num: int, duration: int):
+    def start_publisher_workload(i: int, duration: int):
         start = time.time()
         with endpoint.cursor(dbname="publisher_db") as cur:
             while time.time() - start < duration:
