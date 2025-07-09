@@ -384,7 +384,7 @@ pub struct SafekeepersInfo {
     pub safekeepers: Vec<SafekeeperInfo>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SafekeeperInfo {
     pub id: NodeId,
     pub hostname: String,
