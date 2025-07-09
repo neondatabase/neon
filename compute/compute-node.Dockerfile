@@ -185,6 +185,7 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/dblink.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgres_fdw.control && \
     file=/usr/local/pgsql/share/extension/postgres_fdw--1.0.sql && [ -e $file ] && \
+    # TODO: switch to patch and use neon.privileged_role_name
     echo 'GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO neon_superuser;' >> $file && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/earthdistance.control && \
@@ -196,9 +197,9 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/refint.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control && \
-    # We need to grant EXECUTE on pg_stat_statements_reset() to neon_superuser.
+    # We need to grant EXECUTE on pg_stat_statements_reset() to {privileged_role_name}.
     # In vanilla postgres this function is limited to Postgres role superuser.
-    # In neon we have neon_superuser role that is not a superuser but replaces superuser in some cases.
+    # In neon we have {privileged_role_name} role that is not a superuser but replaces superuser in some cases.
     # We could add the additional grant statements to the postgres repository but it would be hard to maintain,
     # whenever we need to pick up a new postgres version and we want to limit the changes in our postgres fork,
     # so we do it here.
@@ -207,7 +208,8 @@ RUN cd postgres && \
         # Note that there are no downgrade scripts for pg_stat_statements, so we \
         # don't have to modify any downgrade paths or (much) older versions: we only \
         # have to make sure every creation of the pg_stat_statements_reset function \
-        # also adds execute permissions to the neon_superuser.
+        # also adds execute permissions to the {privileged_role_name}.
+        # TODO: switch to patch and use neon.privileged_role_name
         case $filename in \
           pg_stat_statements--1.4.sql) \
             # pg_stat_statements_reset is first created with 1.4

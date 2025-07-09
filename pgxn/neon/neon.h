@@ -16,7 +16,8 @@
 extern char *neon_auth_token;
 extern char *neon_timeline;
 extern char *neon_tenant;
-
+// TODO: move variable definition to the Postgres fork and set it from the extension.
+extern char *privileged_role_name;
 extern char *wal_acceptors_list;
 extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;
