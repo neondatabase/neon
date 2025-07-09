@@ -23,9 +23,9 @@ runs:
             printf "protocol=https\nhost=github.com\n" | git credential-osxkeychain erase
           fi
 
-          git config --global url."https://x-access-token:${SUBZERO_ACCESS_TOKEN}@github.com/neondatabase-labs/subzero".insteadOf "https://github.com/neondatabase-labs/subzero"
+          git config --global url."https://x-access-token:${SUBZERO_ACCESS_TOKEN}@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero"
         post: |
-          git config --global --unset url."https://x-access-token:${SUBZERO_ACCESS_TOKEN}@github.com/neondatabase-labs/subzero".insteadOf "https://github.com/neondatabase-labs/subzero"
+          git config --global --unset url."https://x-access-token:${SUBZERO_ACCESS_TOKEN}@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero"
 
     - name: Set `CARGO_NET_GIT_FETCH_WITH_CLI=true` env variable
       shell: bash -euxo pipefail {0}
