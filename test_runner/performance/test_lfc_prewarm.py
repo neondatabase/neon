@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import fork_at_current_lsn
 from performance.test_perf_pgbench import utc_now_timestamp
 from fixtures.compare_fixtures import NeonCompare
 
-# These tests compare performance for a write-heavy and read-heavy workkloads of an ordinary endpoint
+# These tests compare performance for a write-heavy and read-heavy workloads of an ordinary endpoint
 # compared to the endpoint which saves its LFC and prewarms using it on startup.
 
 def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
