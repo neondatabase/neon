@@ -138,11 +138,11 @@ impl Retry {
             tonic::Code::AlreadyExists => false,
             tonic::Code::DataLoss => false,
             tonic::Code::FailedPrecondition => false,
-            tonic::Code::InvalidArgument => false,
             // NB: don't retry Internal. It is intended for serious errors such as invariant
             // violations, and is also used for client-side invariant checks that would otherwise
             // result in retry loops.
             tonic::Code::Internal => false,
+            tonic::Code::InvalidArgument => false,
             tonic::Code::NotFound => false,
             tonic::Code::OutOfRange => false,
             tonic::Code::PermissionDenied => false,
