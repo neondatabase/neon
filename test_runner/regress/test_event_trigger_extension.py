@@ -72,15 +72,16 @@ def test_event_trigger_extension(neon_env_builder_event_trigger_extension: NeonE
     endpoint.safe_psql(f"CREATE DATABASE {database}")
     endpoint.safe_psql(f"CREATE EXTENSION {extension}", dbname=database)
 
-    # Check that the extension is owned by the bootstrap user, which has
-    # hardcoded OID 10 per Postgres code: src/include/catalog/pg_authid.dat
-    pg_bootstrap_superuser_oid = 10
+    # check that the extension is owned by the bootstrap superuser (cloud_admin)
+    pg_bootstrap_superuser_name = "cloud_admin"
     with endpoint.connect(dbname=database) as pg_conn:
         with pg_conn.cursor() as cur:
-            cur.execute(f"select extowner from pg_extension where extname = '{extension}'")
-            oid = cast("tuple[int]", cur.fetchone())[0]
-            assert oid == pg_bootstrap_superuser_oid, (
-                f"extension {extension} is not owned by bootstrap user with oid 10"
+            cur.execute(
+                f"select rolname from pg_roles r join pg_extension e on r.oid = e.extowner where extname = '{extension}'"
+            )
+            owner = cast("tuple[str]", cur.fetchone())[0]
+            assert owner == pg_bootstrap_superuser_name, (
+                f"extension {extension} is not owned by bootstrap user '{pg_bootstrap_superuser_name}'"
             )
 
     # test that the SQL-only Event Trigger (SECURITY DEFINER function) runs
