@@ -416,15 +416,6 @@ components:
         total_startup_ms:
           type: integer
 
-    Info:
-      type: object
-      description: Information about VM/Pod.
-      required:
-        - num_cpus
-      properties:
-        num_cpus:
-          type: integer
-
     DbsAndRoles:
       type: object
       description: Databases and Roles
@@ -641,26 +632,6 @@ components:
         error:
           description: Promote error, if any
           type: string
-
-    InstalledExtensions:
-      type: object
-      properties:
-        extensions:
-          description: Contains list of installed extensions.
-          type: array
-          items:
-            type: object
-            properties:
-              extname:
-                type: string
-              version:
-                type: string
-                items:
-                  type: string
-              n_databases:
-                type: integer
-              owned_by_superuser:
-                type: integer
 
     SetRoleGrantsRequest:
       type: object

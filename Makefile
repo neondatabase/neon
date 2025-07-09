@@ -222,8 +222,12 @@ setup-pre-commit-hook:
 
 .PHONY: lint-openapi-spec
 lint-openapi-spec:
-	find . -iname "openapi_spec.y*ml" -exec \
-		docker run --rm -v ${PWD}:/spec ghcr.io/redocly/cli:1.34.4 lint {} \+
+	# operation-2xx-response: pageserver timeline delete returns 404 on success
+	find . -iname "openapi_spec.y*ml" -exec\
+		docker run --rm -v ${PWD}:/spec ghcr.io/redocly/cli:1.34.4\
+			--skip-rule=operation-operationId --skip-rule=operation-summary --extends=minimal\
+			--skip-rule=no-server-example.com --skip-rule=operation-2xx-response\
+			lint {} \+
 
 # Targets for building PostgreSQL are defined in postgres.mk.
 #
