@@ -318,7 +318,6 @@ pub(crate) fn log_compaction_error(
     let level = match err {
         e if e.is_cancel() => return,
         ShuttingDown => return,
-        CollectKeySpaceError(_) => Level::ERROR,
         _ if task_cancelled => Level::INFO,
         Other(err) => {
             let root_cause = err.root_cause();
@@ -328,7 +327,7 @@ pub(crate) fn log_compaction_error(
                 .is_some_and(|e| e.is_stopping());
             let timeline = root_cause
                 .downcast_ref::<PageReconstructError>()
-                .is_some_and(|e| e.is_stopping());
+                .is_some_and(|e| e.is_cancel());
             let buffered_writer_flush_task_canelled = root_cause
                 .downcast_ref::<FlushTaskError>()
                 .is_some_and(|e| e.is_cancel());

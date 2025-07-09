@@ -16,7 +16,8 @@ use super::{
     Timeline,
 };
 
-use crate::tenant::timeline::DeltaEntry;
+use crate::pgdatadir_mapping::CollectKeySpaceError;
+use crate::tenant::timeline::{DeltaEntry, RepartitionError};
 use crate::walredo::RedoAttemptType;
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
@@ -64,7 +65,7 @@ use crate::tenant::timeline::{
     DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
     ResidentLayer, drop_layer_manager_rlock,
 };
-use crate::tenant::{DeltaLayer, MaybeOffloaded};
+use crate::tenant::{DeltaLayer, MaybeOffloaded, PageReconstructError};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
@@ -572,7 +573,7 @@ impl GcCompactionQueue {
         match res {
             Ok(res) => Ok(res),
             Err(CompactionError::ShuttingDown) => Err(CompactionError::ShuttingDown),
-            Err(CompactionError::CollectKeySpaceError(_) | CompactionError::Other(_)) => {
+            Err(CompactionError::Other(_)) => {
                 // There are some cases where traditional gc might collect some layer
                 // files causing gc-compaction cannot read the full history of the key.
                 // This needs to be resolved in the long-term by improving the compaction
@@ -1417,22 +1418,33 @@ impl Timeline {
             }
 
             // Suppress errors when cancelled.
-            Err(_) if self.cancel.is_cancelled() => {}
+            //
+            // Log other errors but continue. Failure to repartition is normal, if the timeline was just created
+            // as an empty timeline. Also in unit tests, when we use the timeline as a simple
+            // key-value store, ignoring the datadir layout. Log the error but continue.
+            //
+            // TODO:
+            // 1. shouldn't we return early here if we observe cancellation
+            // 2. Experiment: can we stop checking self.cancel here?
+            Err(_) if self.cancel.is_cancelled() => {} // TODO: try how we fare removing this branch
             Err(err) if err.is_cancel() => {}
-
-            // Alert on critical errors that indicate data corruption.
-            Err(err) if err.is_critical() => {
+            Err(RepartitionError::CollectKeyspace(
+                e @ CollectKeySpaceError::Decode(_)
+                | e @ CollectKeySpaceError::PageRead(
+                    PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                ),
+            )) => {
+                // Alert on critical errors that indicate data corruption.
                 critical_timeline!(
                     self.tenant_shard_id,
                     self.timeline_id,
-                    "could not compact, repartitioning keyspace failed: {err:?}"
+                    "could not compact, repartitioning keyspace failed: {e:?}"
                 );
             }
-
-            // Log other errors. No partitioning? This is normal, if the timeline was just created
-            // as an empty timeline. Also in unit tests, when we use the timeline as a simple
-            // key-value store, ignoring the datadir layout. Log the error but continue.
-            Err(err) => error!("could not compact, repartitioning keyspace failed: {err:?}"),
+            Err(e) => error!(
+                "could not compact, repartitioning keyspace failed: {:?}",
+                e.into_anyhow()
+            ),
         };
 
         let partition_count = self.partitioning.read().0.0.parts.len();
@@ -2518,7 +2530,10 @@ impl Timeline {
             return Err(CompactionError::ShuttingDown);
         }
 
-        let (dense_ks, _sparse_ks) = self.collect_keyspace(end_lsn, ctx).await?;
+        let (dense_ks, _sparse_ks) = self
+            .collect_keyspace(end_lsn, ctx)
+            .await
+            .map_err(CompactionError::from_collect_keyspace)?;
         // TODO(chi): ignore sparse_keyspace for now, compact it in the future.
         let mut adaptor = TimelineAdaptor::new(self, (end_lsn, dense_ks));
 
