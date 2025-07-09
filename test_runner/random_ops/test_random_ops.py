@@ -142,6 +142,9 @@ class NeonBranch:
     def terminate_benchmark(self) -> None:
         self.project.terminate_benchmark(self.id)
 
+    def reset_to_parent(self) -> None:
+        self.neon_api.reset_to_parent(self.project_id, self.id)
+
     def restore_random_time(self) -> None:
         """
         Does PITR, i.e. calls the reset API call on the same branch to the random time in the past
@@ -313,6 +316,14 @@ class NeonProject:
         if parent.id in self.reset_branches:
             parent.delete()
 
+    def get_random_leaf_branch(self) -> NeonBranch | None:
+        target: NeonBranch | None = None
+        if self.leaf_branches:
+            target = random.choice(list(self.leaf_branches.values()))
+        else:
+            log.info("No leaf branches found")
+        return target
+
     def delete_endpoint(self, endpoint_id: str) -> None:
         self.terminate_benchmark(endpoint_id)
         self.neon_api.delete_endpoint(self.id, endpoint_id)
@@ -427,13 +438,10 @@ def do_action(project: NeonProject, action: str) -> bool:
         log.info("Created branch %s", child)
         child.start_benchmark()
     elif action == "delete_branch":
-        if project.leaf_branches:
-            target: NeonBranch = random.choice(list(project.leaf_branches.values()))
-            log.info("Trying to delete branch %s", target)
-            target.delete()
-        else:
-            log.info("Leaf branches not found, skipping")
+        if (target := project.get_random_leaf_branch()) is None:
             return False
+        log.info("Trying to delete branch %s", target)
+        target.delete()
     elif action == "new_ro_endpoint":
         ep = random.choice(
             [br for br in project.branches.values() if br.id not in project.reset_branches]
@@ -453,13 +461,15 @@ def do_action(project: NeonProject, action: str) -> bool:
         target_ep.delete()
         log.info("endpoint %s deleted", target_ep.id)
     elif action == "restore_random_time":
-        if project.leaf_branches:
-            br: NeonBranch = random.choice(list(project.leaf_branches.values()))
-            log.info("Restore %s", br)
-            br.restore_random_time()
-        else:
-            log.info("No leaf branches found")
+        if (target := project.get_random_leaf_branch()) is None:
             return False
+        log.info("Restore %s", target)
+        target.restore_random_time()
+    elif action == "reset_to_parent":
+        if (target := project.get_random_leaf_branch()) is None:
+            return False
+        log.info("Reset to parent %s", target)
+        target.reset_to_parent()
     else:
         raise ValueError(f"The action {action} is unknown")
     return True
@@ -491,7 +501,8 @@ def test_api_random(
         ("new_ro_endpoint", 1.4),
         ("delete_ro_endpoint", 0.8),
         ("delete_branch", 1.2),
-        ("restore_random_time", 1.2),
+        ("restore_random_time", 0.9),
+        ("reset_to_parent", 0.3),
     )
     if num_ops_env := os.getenv("NUM_OPERATIONS"):
         num_operations = int(num_ops_env)
