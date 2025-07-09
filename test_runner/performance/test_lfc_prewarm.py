@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import timeit
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from fixtures.benchmark_fixture import PgBenchRunResult
 
@@ -46,7 +46,8 @@ def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
             run_start_timestamp=run_start_timestamp,
             run_end_timestamp=run_end_timestamp,
         )
-        neon_compare.zenbenchmark.record_pg_bench_result(ep.branch_name, res)
+        name: str = cast("str", ep.branch_name)
+        neon_compare.zenbenchmark.record_pg_bench_result(name, res)
 
 
 def test_compare_prewarmed_read_perf(neon_compare: NeonCompare):
