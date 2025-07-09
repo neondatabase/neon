@@ -250,7 +250,7 @@ pub struct PageServerConf {
     pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
 
     /// Defines what is a big tenant for the purpose of image layer generation.
-    /// See [`Timeline::should_check_if_image_layers_required`].
+    /// See Timeline::should_check_if_image_layers_required
     pub image_layer_generation_large_timeline_threshold: Option<u64>,
 }
 
