@@ -56,11 +56,14 @@ pub fn write_postgres_conf(
 
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
-    if let Some(s) = &spec.pageserver_connstring {
-        writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
-    }
+    // Setting stripe size before connstring is required to avoid compute routing keys to the wrong shard.
+    // Otherwise, if we set the connstring first and then stripe size, there will be a very small window
+    // where the default stripe size is used and the connstring is set.
     if let Some(stripe_size) = spec.shard_stripe_size {
         writeln!(file, "neon.stripe_size={stripe_size}")?;
+    }
+    if let Some(s) = &spec.pageserver_connstring {
+        writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
     }
     if !spec.safekeeper_connstrings.is_empty() {
         let mut neon_safekeepers_value = String::new();
