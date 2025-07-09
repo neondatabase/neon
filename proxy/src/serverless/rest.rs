@@ -927,7 +927,11 @@ async fn handle_rest_inner(
     if let Some(extra) = &db_extra_search_path {
         search_path.extend(extra.iter().map(|s| s.as_str()));
     }
-    let search_path_str = search_path.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",");
+    let search_path_str = search_path
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
     let mut env: HashMap<&str, &str> = HashMap::from([
         ("request.method", api_request.method),
         ("request.path", api_request.path),
