@@ -119,9 +119,6 @@ class NeonBranch:
         max_time = datetime.now(UTC) - timedelta(seconds=1)
         return (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
 
-    def create_child_branch_random_time(self) -> NeonBranch | None:
-        return self.create_child_branch(self.random_time())
-
     def create_child_branch(self, parent_timestamp: datetime | None = None) -> NeonBranch | None:
         return self.project.create_branch(self.id, parent_timestamp)
 
@@ -424,11 +421,7 @@ def do_action(project: NeonProject, action: str) -> bool:
         parent = project.branches[
             random.choice(list(set(project.branches.keys()) - project.reset_branches))
         ]
-        child = parent.create_child_branch()
-        if use_random_time:
-            child = parent.create_child_branch_random_time()
-        else:
-            child = parent.create_child_branch()
+        child = parent.create_child_branch(parent.random_time() if use_random_time else None)
         if child is None:
             return False
         log.info("Created branch %s", child)
