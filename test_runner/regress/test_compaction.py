@@ -974,6 +974,9 @@ def test_image_creation_timeout(neon_env_builder: NeonEnvBuilder):
         "image_layer_force_creation_period": "1s",
     }
 
+    # consider every tenant large to run the image layer generation check more eagerly
+    neon_env_builder.pageserver_config_override = "image_layer_generation_large_timeline_threshold=0"
+
     neon_env_builder.num_pageservers = 1
     neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)

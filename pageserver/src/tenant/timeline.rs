@@ -3141,7 +3141,7 @@ impl Timeline {
                 last_image_layer_creation_check_instant: Mutex::new(None),
                 // HADRON
                 force_image_creation_lsn: AtomicLsn::new(0),
-                force_image_creation_lsn_computed_at: tokio::sync::Mutex::new(None),
+                force_image_creation_lsn_computed_at: std::sync::Mutex::new(None),
                 last_received_wal: Mutex::new(None),
                 rel_size_latest_cache: RwLock::new(HashMap::new()),
                 rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),
@@ -5622,9 +5622,7 @@ impl Timeline {
     ///        suffer from the lack of image layers
     ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
-        // HADRON: we consider every tenant to be large to periodically create new image layers
-        // TODO: Make this configurable
-        const LARGE_TENANT_THRESHOLD: u64 = 1;
+        let large_timeline_threshold = self.conf.image_layer_generation_large_timeline_threshold;
 
         let last_checks_at = self.last_image_layer_creation_check_at.load();
         let distance = lsn
@@ -5638,12 +5636,12 @@ impl Timeline {
         let mut time_based_decision = false;
         let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
         if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
-            let check_required_after = if Into::<u64>::into(&logical_size) >= LARGE_TENANT_THRESHOLD
-            {
-                self.get_checkpoint_timeout()
-            } else {
-                Duration::from_secs(3600 * 48)
-            };
+            let check_required_after =
+                if Some(Into::<u64>::into(&logical_size)) >= large_timeline_threshold {
+                    self.get_checkpoint_timeout()
+                } else {
+                    Duration::from_secs(3600 * 48)
+                };
 
             time_based_decision = match *last_check_instant {
                 Some(last_check) => {
