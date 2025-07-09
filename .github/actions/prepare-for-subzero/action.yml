@@ -1,18 +1,18 @@
 name: 'Prepare current job for subzero'
 description: >
-  Set git token to access `neondatabase-labs/subzero` from cargo build,
+  Set git token to access `neondatabase/subzero` from cargo build,
   and set `CARGO_NET_GIT_FETCH_WITH_CLI=true` env variable to use git CLI
 
 inputs:
   token:
-    description: 'GitHub token with access to neondatabase-labs/subzero'
+    description: 'GitHub token with access to neondatabase/subzero'
     required: true
 
 runs:
   using: "composite"
 
   steps:
-    - name: Set git token for neondatabase-labs/subzero
+    - name: Set git token for neondatabase/subzero
       uses: pyTooling/Actions/with-post-step@2307b526df64d55e95884e072e49aac2a00a9afa # v5.1.0
       env:
         SUBZERO_ACCESS_TOKEN: ${{ inputs.token }}

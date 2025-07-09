@@ -1637,7 +1637,7 @@ COPY . .
 
 RUN --mount=type=secret,uid=1000,id=SUBZERO_ACCESS_TOKEN \
     if [ -s /run/secrets/SUBZERO_ACCESS_TOKEN ]; then \
-        git config --global url."https://$(cat /run/secrets/SUBZERO_ACCESS_TOKEN)@github.com/neondatabase-labs/subzero".insteadOf "https://github.com/neondatabase-labs/subzero" \
+        git config --global url."https://$(cat /run/secrets/SUBZERO_ACCESS_TOKEN)@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero" \
         && export CARGO_NET_GIT_FETCH_WITH_CLI=true; \
     fi && \
     make -j $(getconf _NPROCESSORS_ONLN) -C pgxn -s install-compute \
@@ -1743,7 +1743,7 @@ RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
     --mount=type=cache,uid=1000,target=/home/nonroot/target \
     --mount=type=secret,uid=1000,id=SUBZERO_ACCESS_TOKEN \
     if [ -s /run/secrets/SUBZERO_ACCESS_TOKEN ]; then \
-        git config --global url."https://$(cat /run/secrets/SUBZERO_ACCESS_TOKEN)@github.com/neondatabase-labs/subzero".insteadOf "https://github.com/neondatabase-labs/subzero" \
+        git config --global url."https://$(cat /run/secrets/SUBZERO_ACCESS_TOKEN)@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero" \
         && export CARGO_NET_GIT_FETCH_WITH_CLI=true; \
     fi && \
     cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
