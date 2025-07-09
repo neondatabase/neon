@@ -186,7 +186,6 @@ class NeonBranch:
         preserve_under_name: str | None = None,
     ) -> dict[str, Any] | None:
         if not self.project.check_limit_branches():
-            log.info("branch limit exceeded, skipping")
             return None
         endpoints = [ep for ep in self.endpoints.values() if ep.type == "read_only"]
         # Terminate all the benchmarks running to prevent errors. Errors in benchmark during pgbench are expected
