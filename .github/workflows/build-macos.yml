@@ -59,10 +59,6 @@ jobs:
         with:
           token: ${{ secrets.CI_ACCESS_TOKEN }}
 
-      - name: Debug
-        run: |
-          git config --global --list
-
       - name: Install build dependencies
         run: |
           brew install flex bison openssl protobuf icu4c
