@@ -625,7 +625,7 @@ impl GrpcClient {
         ttid: TenantTimelineId,
         compression: bool,
     ) -> anyhow::Result<Self> {
-        let mut client = page_api::Client::new(
+        let mut client = page_api::Client::connect(
             connstring.to_string(),
             ttid.tenant_id,
             ttid.timeline_id,

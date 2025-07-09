@@ -116,26 +116,6 @@ paths:
               schema:
                 type: string
 
-  /v1/tenant/{tenant_id}/timeline:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-    get:
-      description: Get timelines for tenant
-      responses:
-        "200":
-          description: TimelineInfo
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/TimelineInfo"
-
-
   /v1/tenant/{tenant_id}/timeline/{timeline_id}:
     parameters:
       - name: tenant_id
@@ -618,7 +598,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SecondaryProgress"
 
-  /v1/tenant/{tenant_id}/timeline/:
+  /v1/tenant/{tenant_id}/timeline:
     parameters:
       - name: tenant_id
         in: path
@@ -685,6 +665,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+    get:
+      description: Get timelines for tenant
+      responses:
+        "200":
+          description: TimelineInfo
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimelineInfo"
 
   /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/detach_ancestor:
     parameters:
@@ -767,7 +758,7 @@ paths:
                 $ref: "#/components/schemas/ServiceUnavailableError"
 
 
-  /v1/tenant/:
+  /v1/tenant:
     get:
       description: Get tenants list
       responses:
@@ -847,7 +838,7 @@ paths:
                 items:
                   $ref: "#/components/schemas/TenantInfo"
 
-  /v1/tenant/{tenant_id}/config/:
+  /v1/tenant/{tenant_id}/config:
     parameters:
       - name: tenant_id
         in: path

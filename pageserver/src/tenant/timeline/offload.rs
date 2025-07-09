@@ -17,8 +17,6 @@ pub(crate) enum OffloadError {
     Cancelled,
     #[error("Timeline is not archived")]
     NotArchived,
-    #[error(transparent)]
-    RemoteStorage(anyhow::Error),
     #[error("Offload or deletion already in progress")]
     AlreadyInProgress,
     #[error("Unexpected offload error: {0}")]
@@ -29,7 +27,7 @@ impl From<TenantManifestError> for OffloadError {
     fn from(e: TenantManifestError) -> Self {
         match e {
             TenantManifestError::Cancelled => Self::Cancelled,
-            TenantManifestError::RemoteStorage(e) => Self::RemoteStorage(e),
+            TenantManifestError::RemoteStorage(e) => Self::Other(e),
         }
     }
 }

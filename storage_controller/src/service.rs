@@ -1677,7 +1677,21 @@ impl Service {
             .collect::<anyhow::Result<Vec<_>>>()?;
         let safekeepers: HashMap<NodeId, Safekeeper> =
             safekeepers.into_iter().map(|n| (n.get_id(), n)).collect();
-        tracing::info!("Loaded {} safekeepers from database.", safekeepers.len());
+        let count_policy = |policy| {
+            safekeepers
+                .iter()
+                .filter(|sk| sk.1.scheduling_policy() == policy)
+                .count()
+        };
+        let active_sk_count = count_policy(SkSchedulingPolicy::Active);
+        let activating_sk_count = count_policy(SkSchedulingPolicy::Activating);
+        let pause_sk_count = count_policy(SkSchedulingPolicy::Pause);
+        let decom_sk_count = count_policy(SkSchedulingPolicy::Decomissioned);
+        tracing::info!(
+            "Loaded {} safekeepers from database. Active {active_sk_count}, activating {activating_sk_count}, \
+            paused {pause_sk_count}, decomissioned {decom_sk_count}.",
+            safekeepers.len()
+        );
         metrics::METRICS_REGISTRY
             .metrics_group
             .storage_controller_safekeeper_nodes
@@ -1968,6 +1982,14 @@ impl Service {
                 this.spawn_heartbeat_driver().await;
             }
         });
+
+        // Check that there is enough safekeepers configured that we can create new timelines
+        let test_sk_res = this.safekeepers_for_new_timeline().await;
+        tracing::info!(
+            timeline_safekeeper_count = config.timeline_safekeeper_count,
+            timelines_onto_safekeepers = config.timelines_onto_safekeepers,
+            "viability test result (test timeline creation on safekeepers): {test_sk_res:?}",
+        );
 
         Ok(this)
     }
@@ -7208,6 +7230,12 @@ impl Service {
                 let mut locked = self.inner.write().unwrap();
                 let (nodes, tenants, scheduler) = locked.parts_mut();
 
+                // Calculate a schedule context here to avoid borrow checker issues.
+                let mut schedule_context = ScheduleContext::default();
+                for (_, shard) in tenants.range(TenantShardId::tenant_range(tid.tenant_id)) {
+                    schedule_context.avoid(&shard.intent.all_pageservers());
+                }
+
                 let tenant_shard = match tenants.get_mut(&tid) {
                     Some(tenant_shard) => tenant_shard,
                     None => {
@@ -7233,9 +7261,6 @@ impl Service {
                 }
 
                 if tenant_shard.deref_node(node_id) {
-                    // TODO(ephemeralsad): we should process all shards in a tenant at once, so
-                    // we can avoid settling the tenant unevenly.
-                    let mut schedule_context = ScheduleContext::new(ScheduleMode::Normal);
                     if let Err(e) = tenant_shard.schedule(scheduler, &mut schedule_context) {
                         tracing::error!(
                             "Refusing to delete node, shard {} can't be rescheduled: {e}",

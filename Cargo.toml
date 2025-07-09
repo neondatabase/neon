@@ -8,6 +8,7 @@ members = [
     "pageserver/compaction",
     "pageserver/ctl",
     "pageserver/client",
+    "pageserver/client_grpc",
     "pageserver/pagebench",
     "pageserver/page_api",
     "proxy",
