@@ -4926,7 +4926,7 @@ impl Service {
             results.push((idx, node, r.unwrap_or(Err(mgmt_api::Error::Cancelled))));
         }
 
-        results.sort_by_key(|(idx,_, _)| *idx);
+        results.sort_by_key(|(idx, _, _)| *idx);
         results.into_iter().map(|(_, node, r)| (node, r)).collect()
     }
 
