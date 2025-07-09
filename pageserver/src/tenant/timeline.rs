@@ -1002,7 +1002,7 @@ impl From<WaitLsnError> for tonic::Status {
 impl From<CreateImageLayersError> for CompactionError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
-            CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            CreateImageLayersError::Cancelled => CompactionError::new_cancelled(),
             CreateImageLayersError::Other(e) => {
                 CompactionError::Other(e.context("create image layers"))
             }
@@ -2117,12 +2117,7 @@ impl Timeline {
         match &result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
             Err(e) if e.is_cancel() => {}
-            Err(CompactionError::ShuttingDown) => {
-                // Covered by the `Err(e) if e.is_cancel()` branch.
-            }
-            Err(CompactionError::Other(_)) => {
-                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
-            }
+            Err(_) => self.compaction_failed.store(true, AtomicOrdering::Relaxed),
         };
 
         result
@@ -6057,26 +6052,88 @@ impl Drop for Timeline {
     }
 }
 
-/// Top-level failure to compact.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum CompactionError {
-    #[error("The timeline or pageserver is shutting down")]
-    ShuttingDown,
-    #[error(transparent)]
-    Other(anyhow::Error),
-}
+pub(crate) use compaction_error::CompactionError;
+/// In a private mod to enforce that [`CompactionError::is_cancel`] is used
+/// instead of `match`ing on [`CompactionError::ShuttingDown`].
+mod compaction_error {
+    use utils::sync::gate::GateError;
 
-impl CompactionError {
-    /// Errors that can be ignored, i.e., cancel and shutdown.
-    pub fn is_cancel(&self) -> bool {
-        matches!(self, Self::ShuttingDown)
+    use crate::{
+        pgdatadir_mapping::CollectKeySpaceError,
+        tenant::{PageReconstructError, blob_io::WriteBlobError, upload_queue::NotInitialized},
+        virtual_file::owned_buffers_io::write::FlushTaskError,
+    };
+
+    /// Top-level failure to compact. Use [`Self::is_cancel`].
+    #[derive(Debug, thiserror::Error)]
+    pub(crate) enum CompactionError {
+        /// Use [`Self::is_cancel`] instead of checking for this variant.
+        #[error("The timeline or pageserver is shutting down")]
+        #[allow(private_interfaces)]
+        ShuttingDown(ForbidMatching), // private ForbidMatching enforces use of [`Self::is_cancel`].
+        #[error(transparent)]
+        Other(anyhow::Error),
     }
 
-    pub fn from_collect_keyspace(err: CollectKeySpaceError) -> Self {
-        if err.is_cancel() {
-            Self::ShuttingDown
-        } else {
-            Self::Other(err.into_anyhow())
+    #[derive(Debug)]
+    struct ForbidMatching;
+
+    impl CompactionError {
+        pub fn new_cancelled() -> Self {
+            Self::ShuttingDown(ForbidMatching)
+        }
+        /// Errors that can be ignored, i.e., cancel and shutdown.
+        pub fn is_cancel(&self) -> bool {
+            let other = match self {
+                CompactionError::ShuttingDown(_) => return true,
+                CompactionError::Other(other) => other,
+            };
+
+            // The write path of compaction in particular often lacks differentiated
+            // handling errors stemming from cancellation from other errors.
+            // So, if requested, we also check the ::Other variant by downcasting.
+            // The list below has been found empirically from flaky tests and production logs.
+            // The process is simple: on ::Other(), compaction will print the enclosed
+            // anyhow::Error in debug mode, i.e., with backtrace. That backtrace contains the
+            // line where the write path / compaction code does undifferentiated error handling
+            // from a non-anyhow type to an anyhow type. Add the type to the list of downcasts
+            // below, following the same is_cancel() pattern.
+
+            let root_cause = other.root_cause();
+
+            let upload_queue = root_cause
+                .downcast_ref::<NotInitialized>()
+                .is_some_and(|e| e.is_stopping());
+            let timeline = root_cause
+                .downcast_ref::<PageReconstructError>()
+                .is_some_and(|e| e.is_cancel());
+            let buffered_writer_flush_task_canelled = root_cause
+                .downcast_ref::<FlushTaskError>()
+                .is_some_and(|e| e.is_cancel());
+            let write_blob_cancelled = root_cause
+                .downcast_ref::<WriteBlobError>()
+                .is_some_and(|e| e.is_cancel());
+            let gate_closed = root_cause
+                .downcast_ref::<GateError>()
+                .is_some_and(|e| e.is_cancel());
+            upload_queue
+                || timeline
+                || buffered_writer_flush_task_canelled
+                || write_blob_cancelled
+                || gate_closed
+        }
+        pub fn into_anyhow(self) -> anyhow::Error {
+            match self {
+                CompactionError::ShuttingDown(ForbidMatching) => anyhow::Error::new(self),
+                CompactionError::Other(e) => e,
+            }
+        }
+        pub fn from_collect_keyspace(err: CollectKeySpaceError) -> Self {
+            if err.is_cancel() {
+                Self::new_cancelled()
+            } else {
+                Self::Other(err.into_anyhow())
+            }
         }
     }
 }
@@ -6088,7 +6145,7 @@ impl From<super::upload_queue::NotInitialized> for CompactionError {
                 CompactionError::Other(anyhow::anyhow!(value))
             }
             super::upload_queue::NotInitialized::ShuttingDown
-            | super::upload_queue::NotInitialized::Stopped => CompactionError::ShuttingDown,
+            | super::upload_queue::NotInitialized::Stopped => CompactionError::new_cancelled(),
         }
     }
 }
@@ -6098,7 +6155,7 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
         match e {
             super::storage_layer::layer::DownloadError::TimelineShutdown
             | super::storage_layer::layer::DownloadError::DownloadCancelled => {
-                CompactionError::ShuttingDown
+                CompactionError::new_cancelled()
             }
             super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads
             | super::storage_layer::layer::DownloadError::DownloadRequired
@@ -6117,14 +6174,14 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
 
 impl From<layer_manager::Shutdown> for CompactionError {
     fn from(_: layer_manager::Shutdown) -> Self {
-        CompactionError::ShuttingDown
+        CompactionError::new_cancelled()
     }
 }
 
 impl From<super::storage_layer::errors::PutError> for CompactionError {
     fn from(e: super::storage_layer::errors::PutError) -> Self {
         if e.is_cancel() {
-            CompactionError::ShuttingDown
+            CompactionError::new_cancelled()
         } else {
             CompactionError::Other(e.into_anyhow())
         }
@@ -6223,7 +6280,7 @@ impl Timeline {
         let mut guard = tokio::select! {
             guard = self.layers.write(LayerManagerLockHolder::Compaction) => guard,
             _ = self.cancel.cancelled() => {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
         };
 

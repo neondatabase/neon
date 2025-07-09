@@ -79,8 +79,8 @@ use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerNa
 use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
-    CompactFlags, CompactOptions, CompactRequest, CompactionError, MarkInvisibleRequest, Timeline,
-    WaitLsnTimeout, WaitLsnWaiter, import_pgdata,
+    CompactFlags, CompactOptions, CompactRequest, MarkInvisibleRequest, Timeline, WaitLsnTimeout,
+    WaitLsnWaiter, import_pgdata,
 };
 use crate::tenant::{
     GetTimelineError, LogicalSizeCalculationCause, OffloadedTimeline, PageReconstructError,
@@ -2500,9 +2500,10 @@ async fn timeline_checkpoint_handler(
                 .compact(&cancel, flags, &ctx)
                 .await
                 .map_err(|e|
-                    match e {
-                        CompactionError::ShuttingDown => ApiError::ShuttingDown,
-                        CompactionError::Other(e) => ApiError::InternalServerError(e),
+                    if e.is_cancel() {
+                        ApiError::ShuttingDown
+                    } else {
+                        ApiError::InternalServerError(e.into_anyhow())
                     }
                 )?;
         }

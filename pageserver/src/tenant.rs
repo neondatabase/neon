@@ -3291,7 +3291,7 @@ impl TenantShard {
                         // Ignore this, we likely raced with unarchival.
                         OffloadError::NotArchived => Ok(()),
                         OffloadError::AlreadyInProgress => Ok(()),
-                        OffloadError::Cancelled => Err(CompactionError::ShuttingDown),
+                        OffloadError::Cancelled => Err(CompactionError::new_cancelled()),
                         // don't break the anyhow chain
                         OffloadError::Other(err) => Err(CompactionError::Other(err)),
                     })?;
@@ -3321,16 +3321,13 @@ impl TenantShard {
 
     /// Trips the compaction circuit breaker if appropriate.
     pub(crate) fn maybe_trip_compaction_breaker(&self, err: &CompactionError) {
-        match err {
-            err if err.is_cancel() => {}
-            CompactionError::ShuttingDown => (),
-            CompactionError::Other(err) => {
-                self.compaction_circuit_breaker
-                    .lock()
-                    .unwrap()
-                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
-            }
+        if err.is_cancel() {
+            return;
         }
+        self.compaction_circuit_breaker
+            .lock()
+            .unwrap()
+            .fail(&CIRCUIT_BREAKERS_BROKEN, err);
     }
 
     /// Cancel scheduled compaction tasks
