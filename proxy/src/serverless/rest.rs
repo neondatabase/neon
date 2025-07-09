@@ -535,7 +535,7 @@ pub(crate) async fn handle(
             ctx.set_success();
 
             // Handling the error response from local proxy here
-            if config.rest_config.is_rest_broker && r.status().is_server_error() {
+            if r.status().is_server_error() {
                 let status = r.status();
 
                 let body_bytes = r
@@ -579,24 +579,6 @@ pub(crate) async fn handle(
             }
             r
         }
-        // Err(e @ RestError::Cancelled(_)) => {
-        //     let error_kind = e.get_error_kind();
-        //     ctx.set_error_kind(error_kind);
-
-        //     let message = "Query cancelled, connection was terminated";
-
-        //     tracing::info!(
-        //         kind=error_kind.to_metric_label(),
-        //         error=%e,
-        //         msg=message,
-        //         "forwarding error to user"
-        //     );
-
-        //     json_response(
-        //         StatusCode::BAD_REQUEST,
-        //         json!({ "message": message, "code": SqlState::PROTOCOL_VIOLATION.code() }),
-        //     )?
-        // }
         Err(e @ RestError::SubzeroCore(_)) => {
             let error_kind = e.get_error_kind();
             ctx.set_error_kind(error_kind);
@@ -713,7 +695,7 @@ async fn handle_inner(
     );
 
     match conn_info.auth {
-        AuthData::Jwt(jwt) if config.rest_config.is_rest_broker => {
+        AuthData::Jwt(jwt) => {
             let api_prefix = format!("/{database_name}/rest/v1/");
             handle_rest_inner(
                 config,
@@ -727,7 +709,7 @@ async fn handle_inner(
             )
             .await
         }
-        _ => Err(RestError::ConnInfo(ConnInfoError::MissingCredentials(
+        AuthData::Password(_) => Err(RestError::ConnInfo(ConnInfoError::MissingCredentials(
             Credentials::BearerJwt,
         ))),
     }
@@ -873,15 +855,19 @@ async fn handle_rest_inner(
 
     let cookies = HashMap::new(); // TODO: add cookies
 
-    // Read the request body
-    let body_bytes =
-        read_body_with_limit(originial_body, config.http_config.max_request_size_bytes)
-            .await
-            .map_err(ReadPayloadError::from)?;
-    let body_as_string: Option<String> = if body_bytes.is_empty() {
+    // Read the request body (skip for GET requests)
+    let body_as_string: Option<String> = if method == Method::GET {
         None
     } else {
-        Some(String::from_utf8_lossy(&body_bytes).into_owned())
+        let body_bytes =
+            read_body_with_limit(originial_body, config.http_config.max_request_size_bytes)
+                .await
+                .map_err(ReadPayloadError::from)?;
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(&body_bytes).into_owned())
+        }
     };
 
     // parse the request into an ApiRequest struct
@@ -941,7 +927,7 @@ async fn handle_rest_inner(
     if let Some(extra) = &db_extra_search_path {
         search_path.extend(extra.iter().map(|s| s.as_str()));
     }
-    let search_path_str = search_path.join(",");
+    let search_path_str = search_path.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",");
     let mut env: HashMap<&str, &str> = HashMap::from([
         ("request.method", api_request.method),
         ("request.path", api_request.path),
