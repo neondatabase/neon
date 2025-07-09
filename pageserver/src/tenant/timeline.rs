@@ -2349,6 +2349,10 @@ impl Timeline {
         self.remote_client.is_invisible()
     }
 
+    pub(crate) fn is_read_only(&self) -> Option<bool> {
+        self.remote_client.is_read_only()
+    }
+
     pub(crate) fn is_stopping(&self) -> bool {
         self.current_state() == TimelineState::Stopping
     }

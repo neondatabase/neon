@@ -1602,6 +1602,10 @@ pub struct TimelineInfo {
     /// The status of the rel_size migration.
     pub rel_size_migration: Option<RelSizeMigration>,
 
+    /// Whether the timeline is read-only (doesn't support WAL advancing).
+    /// The property is not recursive; child timelines can be non-read-only.
+    pub read_only: bool,
+
     /// Whether the timeline is invisible in synthetic size calculations.
     pub is_invisible: Option<bool>,
 }

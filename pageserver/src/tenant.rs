@@ -943,6 +943,7 @@ pub(crate) struct CreateTimelineParamsBranch {
     pub(crate) new_timeline_id: TimelineId,
     pub(crate) ancestor_timeline_id: TimelineId,
     pub(crate) ancestor_start_lsn: Option<Lsn>,
+    pub(crate) read_only: bool,
 }
 
 #[derive(Debug)]
@@ -2572,6 +2573,7 @@ impl TenantShard {
             initdb_lsn,
             pg_version,
         );
+        let read_only = false;
         self.prepare_new_timeline(
             new_timeline_id,
             &new_metadata,
@@ -2579,6 +2581,7 @@ impl TenantShard {
             initdb_lsn,
             None,
             None,
+            read_only,
             ctx,
         )
         .await
@@ -2723,6 +2726,7 @@ impl TenantShard {
                 new_timeline_id,
                 ancestor_timeline_id,
                 mut ancestor_start_lsn,
+                read_only,
             }) => {
                 let ancestor_timeline = self
                     .get_timeline(ancestor_timeline_id, false)
@@ -2775,8 +2779,14 @@ impl TenantShard {
                         })?;
                 }
 
-                self.branch_timeline(&ancestor_timeline, new_timeline_id, ancestor_start_lsn, ctx)
-                    .await?
+                self.branch_timeline(
+                    &ancestor_timeline,
+                    new_timeline_id,
+                    ancestor_start_lsn,
+                    read_only,
+                    ctx,
+                )
+                .await?
             }
             CreateTimelineParams::ImportPgdata(params) => {
                 self.create_timeline_import_pgdata(params, ctx).await?
@@ -2901,6 +2911,7 @@ impl TenantShard {
                     initdb_lsn,
                     PgMajorVersion::PG15,
                 );
+                let read_only = false;
                 this.prepare_new_timeline(
                     new_timeline_id,
                     &new_metadata,
@@ -2908,6 +2919,7 @@ impl TenantShard {
                     initdb_lsn,
                     None,
                     None,
+                    read_only,
                     ctx,
                 )
                 .await
@@ -4957,9 +4969,10 @@ impl TenantShard {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
+        read_only: bool,
         ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, ctx)
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, read_only, ctx)
             .await
     }
 
@@ -4968,6 +4981,7 @@ impl TenantShard {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
+        read_only: bool,
         ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
@@ -5079,6 +5093,7 @@ impl TenantShard {
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
                 Some(src_timeline.get_rel_size_v2_status()),
+                read_only,
                 ctx,
             )
             .await?;
@@ -5343,6 +5358,7 @@ impl TenantShard {
             }
         }
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+        let read_only = false;
 
         // Import the contents of the data directory at the initial checkpoint
         // LSN, and any WAL after that.
@@ -5365,6 +5381,7 @@ impl TenantShard {
                 pgdata_lsn,
                 None,
                 None,
+                read_only,
                 ctx,
             )
             .await?;
@@ -5448,14 +5465,17 @@ impl TenantShard {
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
         rel_size_v2_status: Option<RelSizeMigration>,
+        read_only: bool,
         ctx: &RequestContext,
     ) -> anyhow::Result<(UninitializedTimeline<'a>, RequestContext)> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);
-        resources
-            .remote_client
-            .init_upload_queue_for_empty_remote(new_metadata, rel_size_v2_status.clone())?;
+        resources.remote_client.init_upload_queue_for_empty_remote(
+            new_metadata,
+            rel_size_v2_status.clone(),
+            read_only,
+        )?;
 
         let (timeline_struct, timeline_ctx) = self
             .create_timeline_struct(
