@@ -46,9 +46,9 @@ jobs:
         with:
           submodules: true
 
-      # - uses: ./.github/actions/prepare-for-subzero
-      #   with:
-      #     token: ${{ secrets.CI_ACCESS_TOKEN }}
+      - uses: ./.github/actions/prepare-for-subzero
+        with:
+          token: ${{ secrets.CI_ACCESS_TOKEN }}
 
       - name: Cache cargo deps
         uses: tespkg/actions-cache@b7bf5fcc2f98a52ac6080eb0fd282c2f752074b1  # v1.8.0
