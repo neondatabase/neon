@@ -4339,6 +4339,7 @@ dependencies = [
  "arc-swap",
  "async-compression",
  "async-stream",
+ "base64 0.22.1",
  "bincode",
  "bit_field",
  "byteorder",
@@ -4488,6 +4489,21 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "tokio-util",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
+name = "pageserver_client_grpc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "pageserver_page_api",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tracing",
  "utils",
  "workspace_hack",
 ]
@@ -5684,6 +5700,8 @@ dependencies = [
  "azure_identity",
  "azure_storage",
  "azure_storage_blobs",
+ "base64 0.22.1",
+ "byteorder",
  "bytes",
  "camino",
  "camino-tempfile",

@@ -1057,7 +1057,7 @@ impl ComputeNode {
         };
 
         let (reader, connected) = tokio::runtime::Handle::current().block_on(async move {
-            let mut client = page_api::Client::new(
+            let mut client = page_api::Client::connect(
                 shard0_connstr,
                 spec.tenant_id,
                 spec.timeline_id,
@@ -2433,19 +2433,11 @@ LIMIT 100",
         // If the value is -1, we never suspend so set the value to default collection.
         // If the value is 0, it means default, we will just continue to use the default.
         if spec.suspend_timeout_seconds == -1 || spec.suspend_timeout_seconds == 0 {
-            info!(
-                "[NEON_EXT_INT_UPD] Spec Timeout: {}, New Timeout: {}",
-                spec.suspend_timeout_seconds, DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL
-            );
             self.params.installed_extensions_collection_interval.store(
                 DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL,
                 std::sync::atomic::Ordering::SeqCst,
             );
         } else {
-            info!(
-                "[NEON_EXT_INT_UPD] Spec Timeout: {}",
-                spec.suspend_timeout_seconds
-            );
             self.params.installed_extensions_collection_interval.store(
                 spec.suspend_timeout_seconds as u64,
                 std::sync::atomic::Ordering::SeqCst,

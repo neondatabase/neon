@@ -28,7 +28,6 @@ use reqwest::Url;
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
-use utils::serde_percent::Percent;
 
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -146,7 +145,7 @@ pub struct PageServerConf {
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
 
-    pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
+    pub disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
 
     pub test_remote_failures: u64,
 
@@ -460,16 +459,7 @@ impl PageServerConf {
             metric_collection_endpoint,
             metric_collection_bucket,
             synthetic_size_calculation_interval,
-            disk_usage_based_eviction: Some(disk_usage_based_eviction.unwrap_or(
-                DiskUsageEvictionTaskConfig {
-                    max_usage_pct: Percent::new(80).unwrap(),
-                    min_avail_bytes: 2_000_000_000,
-                    period: Duration::from_secs(60),
-                    #[cfg(feature = "testing")]
-                    mock_statvfs: None,
-                    eviction_order: Default::default(),
-                },
-            )),
+            disk_usage_based_eviction,
             test_remote_failures,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
@@ -719,8 +709,9 @@ mod tests {
     use std::time::Duration;
 
     use camino::Utf8PathBuf;
+    use pageserver_api::config::{DiskUsageEvictionTaskConfig, EvictionOrder};
     use rstest::rstest;
-    use utils::id::NodeId;
+    use utils::{id::NodeId, serde_percent::Percent};
 
     use super::PageServerConf;
 
@@ -820,19 +811,69 @@ mod tests {
             .expect("parse_and_validate");
     }
 
-    #[test]
-    fn test_config_disk_usage_based_eviction_is_valid() {
-        let input = r#"
+    #[rstest]
+    #[
+        case::omit_the_whole_config(
+            DiskUsageEvictionTaskConfig {
+                max_usage_pct: Percent::new(80).unwrap(),
+                min_avail_bytes: 2_000_000_000,
+                period: Duration::from_secs(60),
+                eviction_order: Default::default(),
+                #[cfg(feature = "testing")]
+                mock_statvfs: None,
+                enabled: true,
+            },
+        r#"
             control_plane_api = "http://localhost:6666"
-        "#;
+        "#,
+    )]
+    #[
+        case::omit_enabled_field(
+            DiskUsageEvictionTaskConfig {
+                max_usage_pct: Percent::new(80).unwrap(),
+                min_avail_bytes: 1_000_000_000,
+                period: Duration::from_secs(60),
+                eviction_order: EvictionOrder::RelativeAccessed {
+                    highest_layer_count_loses_first: true,
+                },
+                #[cfg(feature = "testing")]
+                mock_statvfs: None,
+                enabled: true,
+            },
+        r#"
+            control_plane_api = "http://localhost:6666"
+            disk_usage_based_eviction = { max_usage_pct = 80, min_avail_bytes = 1000000000, period = "60s" }
+        "#,
+    )]
+    #[case::disabled(
+        DiskUsageEvictionTaskConfig {
+            max_usage_pct: Percent::new(80).unwrap(),
+            min_avail_bytes: 2_000_000_000,
+            period: Duration::from_secs(60),
+            eviction_order: EvictionOrder::RelativeAccessed {
+                highest_layer_count_loses_first: true,
+            },
+            #[cfg(feature = "testing")]
+            mock_statvfs: None,
+            enabled: false,
+        },
+        r#"
+            control_plane_api = "http://localhost:6666"
+            disk_usage_based_eviction = { enabled = false }
+        "#
+    )]
+    fn test_config_disk_usage_based_eviction_is_valid(
+        #[case] expected_disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
+        #[case] input: &str,
+    ) {
         let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
             .expect("disk_usage_based_eviction is valid");
         let workdir = Utf8PathBuf::from("/nonexistent");
         let config = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir).unwrap();
-        let disk_usage_based_eviction = config.disk_usage_based_eviction.unwrap();
-        assert_eq!(disk_usage_based_eviction.max_usage_pct.get(), 80);
-        assert_eq!(disk_usage_based_eviction.min_avail_bytes, 2_000_000_000);
-        assert_eq!(disk_usage_based_eviction.period, Duration::from_secs(60));
-        assert_eq!(disk_usage_based_eviction.eviction_order, Default::default());
+        let disk_usage_based_eviction = config.disk_usage_based_eviction;
+        assert_eq!(
+            expected_disk_usage_based_eviction,
+            disk_usage_based_eviction
+        );
     }
 }

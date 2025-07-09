@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::os::fd::RawFd;
@@ -102,7 +103,18 @@ pub(crate) static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::n
     .expect("failed to define a metric")
 });
 
-// Buckets for background operation duration in seconds, like compaction, GC, size calculation.
+/* BEGIN_HADRON */
+pub(crate) static STORAGE_ACTIVE_COUNT_PER_TIMELINE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_active_storage_operations_count",
+        "Count of active storage operations with operation, tenant and timeline dimensions",
+        &["operation", "tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+/*END_HADRON */
+
+// Buckets for background operations like compaction, GC, size calculation
 const STORAGE_OP_BUCKETS: &[f64] = &[0.010, 0.100, 1.0, 10.0, 100.0, 1000.0];
 
 pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
@@ -2810,6 +2822,31 @@ pub(crate) static WALRECEIVER_CANDIDATES_ADDED: Lazy<IntCounter> =
 pub(crate) static WALRECEIVER_CANDIDATES_REMOVED: Lazy<IntCounter> =
     Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["remove"]));
 
+pub(crate) static LOCAL_DATA_LOSS_SUSPECTED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "pageserver_local_data_loss_suspected",
+        "Non-zero value indicates that pageserver local data loss is suspected (and highly likely)."
+    )
+    .expect("failed to define a metric")
+});
+
+// Counter keeping track of misrouted PageStream requests. Spelling out PageStream requests here to distinguish
+// it from other types of reqeusts (SK wal replication, http requests, etc.). PageStream requests are used by
+// Postgres compute to fetch data from pageservers.
+// A misrouted PageStream request is registered if the pageserver cannot find the tenant identified in the
+// request, or if the pageserver is not the "primary" serving the tenant shard. These error almost always identify
+// issues with compute configuration, caused by either the compute node itself being stuck in the wrong
+// configuration or Storage Controller reconciliation bugs. Misrouted requests are expected during tenant migration
+// and/or during recovery following a pageserver failure, but persistently high rates of misrouted requests
+// are indicative of bugs (and unavailability).
+pub(crate) static MISROUTED_PAGESTREAM_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_misrouted_pagestream_requests_total",
+        "Number of pageserver pagestream requests that were routed to the wrong pageserver"
+    )
+    .expect("failed to define a metric")
+});
+
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting
@@ -3048,13 +3085,19 @@ pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
 pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
     start: Instant,
+    stopped: Cell<bool>,
 }
 
 impl StorageTimeMetricsTimer {
     fn new(metrics: StorageTimeMetrics) -> Self {
+        /*BEGIN_HADRON */
+        // record the active operation as the timer starts
+        metrics.timeline_active_count.inc();
+        /*END_HADRON */
         Self {
             metrics,
             start: Instant::now(),
+            stopped: Cell::new(false),
         }
     }
 
@@ -3070,6 +3113,10 @@ impl StorageTimeMetricsTimer {
         self.metrics.timeline_sum.inc_by(seconds);
         self.metrics.timeline_count.inc();
         self.metrics.global_histogram.observe(seconds);
+        /* BEGIN_HADRON*/
+        self.stopped.set(true);
+        self.metrics.timeline_active_count.dec();
+        /*END_HADRON */
         duration
     }
 
@@ -3079,6 +3126,16 @@ impl StorageTimeMetricsTimer {
         AlwaysRecordingStorageTimeMetricsTimer(Some(self))
     }
 }
+
+/*BEGIN_HADRON */
+impl Drop for StorageTimeMetricsTimer {
+    fn drop(&mut self) {
+        if !self.stopped.get() {
+            self.metrics.timeline_active_count.dec();
+        }
+    }
+}
+/*END_HADRON */
 
 pub(crate) struct AlwaysRecordingStorageTimeMetricsTimer(Option<StorageTimeMetricsTimer>);
 
@@ -3105,6 +3162,10 @@ pub(crate) struct StorageTimeMetrics {
     timeline_sum: Counter,
     /// Number of oeprations, per operation, tenant_id and timeline_id
     timeline_count: IntCounter,
+    /*BEGIN_HADRON */
+    /// Number of active operations per operation, tenant_id, and timeline_id
+    timeline_active_count: IntGauge,
+    /*END_HADRON */
     /// Global histogram having only the "operation" label.
     global_histogram: Histogram,
 }
@@ -3124,6 +3185,11 @@ impl StorageTimeMetrics {
         let timeline_count = STORAGE_TIME_COUNT_PER_TIMELINE
             .get_metric_with_label_values(&[operation, tenant_id, shard_id, timeline_id])
             .unwrap();
+        /*BEGIN_HADRON */
+        let timeline_active_count = STORAGE_ACTIVE_COUNT_PER_TIMELINE
+            .get_metric_with_label_values(&[operation, tenant_id, shard_id, timeline_id])
+            .unwrap();
+        /*END_HADRON */
         let global_histogram = STORAGE_TIME_GLOBAL
             .get_metric_with_label_values(&[operation])
             .unwrap();
@@ -3131,6 +3197,7 @@ impl StorageTimeMetrics {
         StorageTimeMetrics {
             timeline_sum,
             timeline_count,
+            timeline_active_count,
             global_histogram,
         }
     }
@@ -3544,6 +3611,14 @@ impl TimelineMetrics {
                 shard_id,
                 timeline_id,
             ]);
+            /* BEGIN_HADRON */
+            let _ = STORAGE_ACTIVE_COUNT_PER_TIMELINE.remove_label_values(&[
+                op,
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ]);
+            /*END_HADRON */
         }
 
         for op in StorageIoSizeOperation::VARIANTS {
@@ -4336,6 +4411,9 @@ pub(crate) mod disk_usage_based_eviction {
         pub(crate) layers_collected: IntCounter,
         pub(crate) layers_selected: IntCounter,
         pub(crate) layers_evicted: IntCounter,
+        /*BEGIN_HADRON */
+        pub(crate) bytes_evicted: IntCounter,
+        /*END_HADRON */
     }
 
     impl Default for Metrics {
@@ -4372,12 +4450,21 @@ pub(crate) mod disk_usage_based_eviction {
             )
             .unwrap();
 
+            /*BEGIN_HADRON */
+            let bytes_evicted = register_int_counter!(
+                "pageserver_disk_usage_based_eviction_evicted_bytes_total",
+                "Amount of bytes successfully evicted"
+            )
+            .unwrap();
+            /*END_HADRON */
+
             Self {
                 tenant_collection_time,
                 tenant_layer_count,
                 layers_collected,
                 layers_selected,
                 layers_evicted,
+                bytes_evicted,
             }
         }
     }
@@ -4497,6 +4584,7 @@ pub fn preinitialize_metrics(
         &CIRCUIT_BREAKERS_UNBROKEN,
         &PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL,
         &WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS,
+        &MISROUTED_PAGESTREAM_REQUESTS,
     ]
     .into_iter()
     .for_each(|c| {
@@ -4534,6 +4622,7 @@ pub fn preinitialize_metrics(
 
     // gauges
     WALRECEIVER_ACTIVE_MANAGERS.get();
+    LOCAL_DATA_LOSS_SUSPECTED.get();
 
     // histograms
     [

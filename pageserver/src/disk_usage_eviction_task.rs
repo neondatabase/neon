@@ -171,7 +171,8 @@ pub fn launch_disk_usage_global_eviction_task(
     tenant_manager: Arc<TenantManager>,
     background_jobs_barrier: completion::Barrier,
 ) -> Option<DiskUsageEvictionTask> {
-    let Some(task_config) = &conf.disk_usage_based_eviction else {
+    let task_config = &conf.disk_usage_based_eviction;
+    if !task_config.enabled {
         info!("disk usage based eviction task not configured");
         return None;
     };
@@ -458,6 +459,9 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 match next {
                     Ok(Ok(file_size)) => {
                         METRICS.layers_evicted.inc();
+                        /*BEGIN_HADRON */
+                        METRICS.bytes_evicted.inc_by(file_size);
+                        /*END_HADRON */
                         usage_assumed.add_available_bytes(file_size);
                     }
                     Ok(Err((
@@ -1265,6 +1269,7 @@ mod filesystem_level_usage {
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
                 eviction_order: pageserver_api::config::EvictionOrder::default(),
+                enabled: true,
             },
             total_bytes: 100_000,
             avail_bytes: 0,
