@@ -10,7 +10,7 @@ use measured::{
     Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
     MetricGroup,
 };
-use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
+use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogVec};
 use tokio::time::{self, Instant};
 
 use crate::control_plane::messages::ColdStartInfo;
@@ -36,7 +36,6 @@ impl Metrics {
         metrics.proxy.redis_errors_total.init_all_dense();
         metrics.proxy.redis_events_count.init_all_dense();
         metrics.proxy.retries_metric.init_all_dense();
-        metrics.proxy.invalid_endpoints_total.init_all_dense();
         metrics.proxy.connection_failures_total.init_all_dense();
 
         SELF.set(metrics)
@@ -80,11 +79,6 @@ pub struct ProxyMetrics {
     )]
     pub console_request_latency: HistogramVec<ConsoleRequestSet, 16>,
 
-    /// Time it takes to acquire a token to call console plane.
-    // largest bucket = 3^16 * 0.05ms = 2.15s
-    #[metric(metadata = Thresholds::exponential_buckets(0.00005, 3.0))]
-    pub control_plane_token_acquire_seconds: Histogram<16>,
-
     /// Size of the HTTP request body lengths.
     // smallest bucket = 16 bytes
     // largest bucket = 4^12 * 16 bytes = 256MB
@@ -98,18 +92,9 @@ pub struct ProxyMetrics {
     /// Number of opened connections to a database.
     pub http_pool_opened_connections: Gauge,
 
-    /// Number of cache hits/misses for allowed ips.
-    pub allowed_ips_cache_misses: CounterVec<StaticLabelSet<CacheOutcome>>,
-
     /// Number of allowed ips
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0]))]
     pub allowed_ips_number: Histogram<10>,
-
-    /// Number of cache hits/misses for VPC endpoint IDs.
-    pub vpc_endpoint_id_cache_stats: CounterVec<StaticLabelSet<CacheOutcome>>,
-
-    /// Number of cache hits/misses for access blocker flags.
-    pub access_blocker_flags_cache_stats: CounterVec<StaticLabelSet<CacheOutcome>>,
 
     /// Number of allowed VPC endpoints IDs
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0]))]
@@ -139,20 +124,11 @@ pub struct ProxyMetrics {
     /// Number of TLS handshake failures
     pub tls_handshake_failures: Counter,
 
-    /// Number of connection requests affected by authentication rate limits
-    pub requests_auth_rate_limits_total: Counter,
-
     /// HLL approximate cardinality of endpoints that are connecting
     pub connecting_endpoints: HyperLogLogVec<StaticLabelSet<Protocol>, 32>,
 
     /// Number of endpoints affected by errors of a given classification
     pub endpoints_affected_by_errors: HyperLogLogVec<StaticLabelSet<crate::error::ErrorKind>, 32>,
-
-    /// Number of endpoints affected by authentication rate limits
-    pub endpoints_auth_rate_limits: HyperLogLog<32>,
-
-    /// Number of invalid endpoints (per protocol, per rejected).
-    pub invalid_endpoints_total: CounterVec<InvalidEndpointsSet>,
 
     /// Number of retries (per outcome, per retry_type).
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]))]
@@ -234,13 +210,6 @@ impl std::fmt::Display for Protocol {
 pub enum Bool {
     True,
     False,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "outcome")]
-pub enum Outcome {
-    Success,
-    Failed,
 }
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]

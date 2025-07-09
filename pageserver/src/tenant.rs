@@ -86,7 +86,7 @@ use crate::context;
 use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
-use crate::feature_resolver::FeatureResolver;
+use crate::feature_resolver::{FeatureResolver, TenantFeatureResolver};
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
@@ -141,6 +141,9 @@ pub mod size;
 mod gc_block;
 mod gc_result;
 pub(crate) mod throttle;
+
+#[cfg(test)]
+pub mod debug;
 
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
@@ -388,7 +391,7 @@ pub struct TenantShard {
 
     l0_flush_global_state: L0FlushGlobalState,
 
-    pub(crate) feature_resolver: FeatureResolver,
+    pub(crate) feature_resolver: Arc<TenantFeatureResolver>,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -3265,7 +3268,7 @@ impl TenantShard {
                 };
                 let gc_compaction_strategy = self
                     .feature_resolver
-                    .evaluate_multivariate("gc-comapction-strategy", self.tenant_shard_id.tenant_id)
+                    .evaluate_multivariate("gc-comapction-strategy")
                     .ok();
                 let span = if let Some(gc_compaction_strategy) = gc_compaction_strategy {
                     info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id, strategy = %gc_compaction_strategy)
@@ -3287,7 +3290,10 @@ impl TenantShard {
                     .or_else(|err| match err {
                         // Ignore this, we likely raced with unarchival.
                         OffloadError::NotArchived => Ok(()),
-                        err => Err(err),
+                        OffloadError::AlreadyInProgress => Ok(()),
+                        OffloadError::Cancelled => Err(CompactionError::ShuttingDown),
+                        // don't break the anyhow chain
+                        OffloadError::Other(err) => Err(CompactionError::Other(err)),
                     })?;
             }
 
@@ -3318,23 +3324,12 @@ impl TenantShard {
         match err {
             err if err.is_cancel() => {}
             CompactionError::ShuttingDown => (),
-            // Offload failures don't trip the circuit breaker, since they're cheap to retry and
-            // shouldn't block compaction.
-            CompactionError::Offload(_) => {}
-            CompactionError::CollectKeySpaceError(err) => {
-                // CollectKeySpaceError::Cancelled and PageRead::Cancelled are handled in `err.is_cancel` branch.
-                self.compaction_circuit_breaker
-                    .lock()
-                    .unwrap()
-                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
-            }
             CompactionError::Other(err) => {
                 self.compaction_circuit_breaker
                     .lock()
                     .unwrap()
                     .fail(&CIRCUIT_BREAKERS_BROKEN, err);
             }
-            CompactionError::AlreadyRunning(_) => {}
         }
     }
 
@@ -3410,6 +3405,9 @@ impl TenantShard {
         if let Some(ref walredo_mgr) = self.walredo_mgr {
             walredo_mgr.maybe_quiesce(WALREDO_IDLE_TIMEOUT);
         }
+
+        // Update the feature resolver with the latest tenant-spcific data.
+        self.feature_resolver.refresh_properties_and_flags(self);
     }
 
     pub fn timeline_has_no_attached_children(&self, timeline_id: TimelineId) -> bool {
@@ -4498,7 +4496,10 @@ impl TenantShard {
             gc_block: Default::default(),
             l0_flush_global_state,
             basebackup_cache,
-            feature_resolver,
+            feature_resolver: Arc::new(TenantFeatureResolver::new(
+                feature_resolver,
+                tenant_shard_id.tenant_id,
+            )),
         }
     }
 
@@ -6010,12 +6011,11 @@ pub(crate) mod harness {
         }
 
         #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
-        pub(crate) async fn do_try_load(
+        pub(crate) async fn do_try_load_with_redo(
             &self,
+            walredo_mgr: Arc<WalRedoManager>,
             ctx: &RequestContext,
         ) -> anyhow::Result<Arc<TenantShard>> {
-            let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
-
             let (basebackup_cache, _) = BasebackupCache::new(Utf8PathBuf::new(), None);
 
             let tenant = Arc::new(TenantShard::new(
@@ -6051,6 +6051,14 @@ pub(crate) mod harness {
                 timeline.set_state(TimelineState::Active);
             }
             Ok(tenant)
+        }
+
+        pub(crate) async fn do_try_load(
+            &self,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<Arc<TenantShard>> {
+            let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
+            self.do_try_load_with_redo(walredo_mgr, ctx).await
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> Utf8PathBuf {
@@ -6129,7 +6137,7 @@ mod tests {
     use pageserver_api::keyspace::KeySpace;
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
-    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
+    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings, LsnLease};
     use pageserver_compaction::helpers::overlaps_with;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
@@ -9391,6 +9399,14 @@ mod tests {
             .unwrap()
             .load()
             .await;
+        // set a non-zero lease length to test the feature
+        tenant
+            .update_tenant_config(|mut conf| {
+                conf.lsn_lease_length = Some(LsnLease::DEFAULT_LENGTH);
+                Ok(conf)
+            })
+            .unwrap();
+
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);

@@ -15,6 +15,7 @@ neon.iml
 /.neon
 /integration_tests/.neon
 compaction-suite-results.*
+docker-compose/docker-compose-parallel.yml
 
 # Coverage
 *.profraw

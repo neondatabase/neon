@@ -386,6 +386,7 @@ pub enum NodeSchedulingPolicy {
     Pause,
     PauseForRestart,
     Draining,
+    Deleting,
 }
 
 impl FromStr for NodeSchedulingPolicy {
@@ -398,6 +399,7 @@ impl FromStr for NodeSchedulingPolicy {
             "pause" => Ok(Self::Pause),
             "pause_for_restart" => Ok(Self::PauseForRestart),
             "draining" => Ok(Self::Draining),
+            "deleting" => Ok(Self::Deleting),
             _ => Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
         }
     }
@@ -412,6 +414,7 @@ impl From<NodeSchedulingPolicy> for String {
             Pause => "pause",
             PauseForRestart => "pause_for_restart",
             Draining => "draining",
+            Deleting => "deleting",
         }
         .to_string()
     }
@@ -420,6 +423,7 @@ impl From<NodeSchedulingPolicy> for String {
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum SkSchedulingPolicy {
     Active,
+    Activating,
     Pause,
     Decomissioned,
 }
@@ -430,6 +434,7 @@ impl FromStr for SkSchedulingPolicy {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "active" => Self::Active,
+            "activating" => Self::Activating,
             "pause" => Self::Pause,
             "decomissioned" => Self::Decomissioned,
             _ => {
@@ -446,6 +451,7 @@ impl From<SkSchedulingPolicy> for String {
         use SkSchedulingPolicy::*;
         match value {
             Active => "active",
+            Activating => "activating",
             Pause => "pause",
             Decomissioned => "decomissioned",
         }

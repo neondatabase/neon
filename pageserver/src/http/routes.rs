@@ -61,6 +61,7 @@ use crate::context;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::feature_resolver::FeatureResolver;
+use crate::metrics::LOCAL_DATA_LOSS_SUSPECTED;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationConf;
@@ -2438,6 +2439,7 @@ async fn timeline_offload_handler(
             .map_err(|e| {
                 match e {
                     OffloadError::Cancelled => ApiError::ResourceUnavailable("Timeline shutting down".into()),
+                    OffloadError::AlreadyInProgress => ApiError::Conflict("Timeline already being offloaded or deleted".into()),
                     _ => ApiError::InternalServerError(anyhow!(e))
                 }
             })?;
@@ -2500,10 +2502,7 @@ async fn timeline_checkpoint_handler(
                 .map_err(|e|
                     match e {
                         CompactionError::ShuttingDown => ApiError::ShuttingDown,
-                        CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
-                        CompactionError::CollectKeySpaceError(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::Other(e) => ApiError::InternalServerError(e),
-                        CompactionError::AlreadyRunning(_) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                     }
                 )?;
         }
@@ -3629,6 +3628,17 @@ async fn activate_post_import_handler(
     .await
 }
 
+// [Hadron] Reset gauge metrics that are used to raised alerts. We need this API as a stop-gap measure to reset alerts
+// after we manually rectify situations such as local SSD data loss. We will eventually automate this.
+async fn hadron_reset_alert_gauges(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    LOCAL_DATA_LOSS_SUSPECTED.set(0);
+    json_response(StatusCode::OK, ())
+}
+
 /// Read the end of a tar archive.
 ///
 /// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
@@ -3697,23 +3707,25 @@ async fn tenant_evaluate_feature_flag(
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
-        let properties = tenant.feature_resolver.collect_properties(tenant_shard_id.tenant_id);
+        // TODO: the properties we get here might be stale right after it is collected. But such races are rare (updated every 10s)
+        // and we don't need to worry about it for now.
+        let properties = tenant.feature_resolver.collect_properties();
         if as_type.as_deref() == Some("boolean") {
-            let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+            let result = tenant.feature_resolver.evaluate_boolean(&flag);
             let result = result.map(|_| true).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else if as_type.as_deref() == Some("multivariate") {
-            let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+            let result = tenant.feature_resolver.evaluate_multivariate(&flag).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else {
             // Auto infer the type of the feature flag.
             let is_boolean = tenant.feature_resolver.is_feature_flag_boolean(&flag).map_err(|e| ApiError::InternalServerError(anyhow::anyhow!("{e}")))?;
             if is_boolean {
-                let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+                let result = tenant.feature_resolver.evaluate_boolean(&flag);
                 let result = result.map(|_| true).map_err(|e| e.to_string());
                 json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             } else {
-                let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+                let result = tenant.feature_resolver.evaluate_multivariate(&flag).map_err(|e| e.to_string());
                 json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             }
         }
@@ -4152,6 +4164,9 @@ pub fn make_router(
         })
         .post("/v1/feature_flag_spec", |r| {
             api_handler(r, update_feature_flag_spec)
+        })
+        .post("/hadron-internal/reset_alert_gauges", |r| {
+            api_handler(r, hadron_reset_alert_gauges)
         })
         .any(handler_404))
 }

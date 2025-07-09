@@ -16,44 +16,6 @@ use super::LeakyBucketConfig;
 use crate::ext::LockExt;
 use crate::intern::EndpointIdInt;
 
-pub struct GlobalRateLimiter {
-    data: Vec<RateBucket>,
-    info: Vec<RateBucketInfo>,
-}
-
-impl GlobalRateLimiter {
-    pub fn new(info: Vec<RateBucketInfo>) -> Self {
-        Self {
-            data: vec![
-                RateBucket {
-                    start: Instant::now(),
-                    count: 0,
-                };
-                info.len()
-            ],
-            info,
-        }
-    }
-
-    /// Check that number of connections is below `max_rps` rps.
-    pub fn check(&mut self) -> bool {
-        let now = Instant::now();
-
-        let should_allow_request = self
-            .data
-            .iter_mut()
-            .zip(&self.info)
-            .all(|(bucket, info)| bucket.should_allow_request(info, now, 1));
-
-        if should_allow_request {
-            // only increment the bucket counts if the request will actually be accepted
-            self.data.iter_mut().for_each(|b| b.inc(1));
-        }
-
-        should_allow_request
-    }
-}
-
 // Simple per-endpoint rate limiter.
 //
 // Check that number of connections to the endpoint is below `max_rps` rps.
@@ -211,7 +173,11 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
         //    = 30MB
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
+        if self
+            .access_count
+            .fetch_add(1, Ordering::AcqRel)
+            .is_multiple_of(2048)
+        {
             self.do_gc();
         }
 

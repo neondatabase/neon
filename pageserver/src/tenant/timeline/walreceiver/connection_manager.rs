@@ -100,6 +100,7 @@ pub(super) async fn connection_manager_loop_step(
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
     let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id, cancel).await?;
+    let mut broker_reset_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
     debug!("Subscribed for broker timeline updates");
 
     loop {
@@ -156,7 +157,10 @@ pub(super) async fn connection_manager_loop_step(
             // Got a new update from the broker
             broker_update = broker_subscription.message() /* TODO: review cancellation-safety */ => {
                 match broker_update {
-                    Ok(Some(broker_update)) => connection_manager_state.register_timeline_update(broker_update),
+                    Ok(Some(broker_update)) => {
+                        broker_reset_interval.reset();
+                        connection_manager_state.register_timeline_update(broker_update);
+                    },
                     Err(status) => {
                         match status.code() {
                             Code::Unknown if status.message().contains("stream closed because of a broken pipe") || status.message().contains("connection reset") || status.message().contains("error reading a body from connection") => {
@@ -175,6 +179,21 @@ pub(super) async fn connection_manager_loop_step(
                         error!("broker subscription stream ended"); // can't happen
                         return Ok(());
                     }
+                }
+            },
+
+            // If we've not received any updates from the broker from a while, are waiting for WAL
+            // and have no safekeeper connection or connection candidates, then it might be that
+            // the broker subscription is wedged. Drop the currrent subscription and re-subscribe
+            // with the goal of unblocking it.
+            _ = broker_reset_interval.tick() => {
+                let awaiting_lsn = wait_lsn_status.borrow().is_some();
+                let no_candidates = connection_manager_state.wal_stream_candidates.is_empty();
+                let no_connection = connection_manager_state.wal_connection.is_none();
+
+                if awaiting_lsn && no_candidates && no_connection {
+                    tracing::warn!("No broker updates received for a while, but waiting for WAL. Re-setting stream ...");
+                    broker_subscription = subscribe_for_timeline_updates(broker_client, id, cancel).await?;
                 }
             },
 

@@ -1,61 +1,122 @@
 import random
 import threading
-import time
-from enum import Enum
+from enum import StrEnum
+from typing import Any
 
 import pytest
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import USE_LFC
+from fixtures.utils import USE_LFC, wait_until
 from prometheus_client.parser import text_string_to_metric_families as prom_parse_impl
+from psycopg2.extensions import cursor as Cursor
 
 
-class LfcQueryMethod(Enum):
-    COMPUTE_CTL = False
-    POSTGRES = True
+class PrewarmMethod(StrEnum):
+    POSTGRES = "postgres"
+    COMPUTE_CTL = "compute-ctl"
+    AUTOPREWARM = "autoprewarm"
 
 
-PREWARM_LABEL = "compute_ctl_lfc_prewarm_requests_total"
-OFFLOAD_LABEL = "compute_ctl_lfc_offload_requests_total"
-QUERY_OPTIONS = LfcQueryMethod.POSTGRES, LfcQueryMethod.COMPUTE_CTL
+PREWARM_LABEL = "compute_ctl_lfc_prewarms_total"
+PREWARM_ERR_LABEL = "compute_ctl_lfc_prewarm_errors_total"
+OFFLOAD_LABEL = "compute_ctl_lfc_offloads_total"
+OFFLOAD_ERR_LABEL = "compute_ctl_lfc_offload_errors_total"
+METHOD_VALUES = [e for e in PrewarmMethod]
+METHOD_IDS = [e.value for e in PrewarmMethod]
 
 
-def check_pinned_entries(cur):
-    # some LFC buffer can be temporary locked by autovacuum or background writer
-    for _ in range(10):
+def check_pinned_entries(cur: Cursor):
+    """
+    Wait till none of LFC buffers are pinned
+    """
+
+    def none_pinned():
         cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_chunks_pinned'")
-        n_pinned = cur.fetchall()[0][0]
-        if n_pinned == 0:
-            break
-        time.sleep(1)
-    assert n_pinned == 0
+        assert cur.fetchall()[0][0] == 0
+
+    wait_until(none_pinned)
 
 
 def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
+    labels = PREWARM_LABEL, OFFLOAD_LABEL, PREWARM_ERR_LABEL, OFFLOAD_ERR_LABEL
     return {
-        sample.name: sample.value
+        sample.name: int(sample.value)
         for family in prom_parse_impl(client.metrics())
         for sample in family.samples
-        if sample.name in (PREWARM_LABEL, OFFLOAD_LABEL)
+        if sample.name in labels
     }
 
 
+def offload_lfc(method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor) -> Any:
+    if method == PrewarmMethod.AUTOPREWARM:
+        client.offload_lfc_wait()
+    elif method == PrewarmMethod.COMPUTE_CTL:
+        status = client.prewarm_lfc_status()
+        assert status["status"] == "not_prewarmed"
+        assert "error" not in status
+        client.offload_lfc()
+        assert client.prewarm_lfc_status()["status"] == "not_prewarmed"
+        parsed = prom_parse(client)
+        desired = {OFFLOAD_LABEL: 1, PREWARM_LABEL: 0, OFFLOAD_ERR_LABEL: 0, PREWARM_ERR_LABEL: 0}
+        assert parsed == desired, f"{parsed=} != {desired=}"
+    elif method == PrewarmMethod.POSTGRES:
+        cur.execute("select get_local_cache_state()")
+        return cur.fetchall()[0][0]
+    else:
+        raise AssertionError(f"{method} not in PrewarmMethod")
+
+
+def prewarm_endpoint(
+    method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor, lfc_state: str | None
+):
+    if method == PrewarmMethod.AUTOPREWARM:
+        client.prewarm_lfc_wait()
+    elif method == PrewarmMethod.COMPUTE_CTL:
+        client.prewarm_lfc()
+    elif method == PrewarmMethod.POSTGRES:
+        cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
+
+
+def check_prewarmed(
+    method: PrewarmMethod, client: EndpointHttpClient, desired_status: dict[str, str | int]
+):
+    if method == PrewarmMethod.AUTOPREWARM:
+        assert client.prewarm_lfc_status() == desired_status
+        assert prom_parse(client)[PREWARM_LABEL] == 1
+    elif method == PrewarmMethod.COMPUTE_CTL:
+        assert client.prewarm_lfc_status() == desired_status
+        desired = {OFFLOAD_LABEL: 0, PREWARM_LABEL: 1, PREWARM_ERR_LABEL: 0, OFFLOAD_ERR_LABEL: 0}
+        assert prom_parse(client) == desired
+
+
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-@pytest.mark.parametrize("query", QUERY_OPTIONS, ids=["postgres", "compute-ctl"])
-def test_lfc_prewarm(neon_simple_env: NeonEnv, query: LfcQueryMethod):
+@pytest.mark.parametrize("method", METHOD_VALUES, ids=METHOD_IDS)
+def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
+    """
+    Test we can offload endpoint's LFC cache to endpoint storage.
+    Test we can prewarm endpoint with LFC cache loaded from endpoint storage.
+    """
     env = neon_simple_env
     n_records = 1000000
-    endpoint = env.endpoints.create_start(
-        branch_name="main",
-        config_lines=[
-            "autovacuum = off",
-            "shared_buffers=1MB",
-            "neon.max_file_cache_size=1GB",
-            "neon.file_cache_size_limit=1GB",
-            "neon.file_cache_prewarm_limit=1000",
-        ],
-    )
+    cfg = [
+        "autovacuum = off",
+        "shared_buffers=1MB",
+        "neon.max_file_cache_size=1GB",
+        "neon.file_cache_size_limit=1GB",
+        "neon.file_cache_prewarm_limit=1000",
+    ]
+    offload_secs = 2
+
+    if method == PrewarmMethod.AUTOPREWARM:
+        endpoint = env.endpoints.create_start(
+            branch_name="main",
+            config_lines=cfg,
+            autoprewarm=True,
+            offload_lfc_interval_seconds=offload_secs,
+        )
+    else:
+        endpoint = env.endpoints.create_start(branch_name="main", config_lines=cfg)
 
     pg_conn = endpoint.connect()
     pg_cur = pg_conn.cursor()
@@ -69,75 +130,64 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, query: LfcQueryMethod):
     lfc_cur.execute(f"insert into t (pk) values (generate_series(1,{n_records}))")
     log.info(f"Inserted {n_records} rows")
 
-    http_client = endpoint.http_client()
-    if query is LfcQueryMethod.COMPUTE_CTL:
-        status = http_client.prewarm_lfc_status()
-        assert status["status"] == "not_prewarmed"
-        assert "error" not in status
-        http_client.offload_lfc()
-        assert http_client.prewarm_lfc_status()["status"] == "not_prewarmed"
-        assert prom_parse(http_client) == {OFFLOAD_LABEL: 1, PREWARM_LABEL: 0}
-    else:
-        pg_cur.execute("select get_local_cache_state()")
-        lfc_state = pg_cur.fetchall()[0][0]
+    client = endpoint.http_client()
+    lfc_state = offload_lfc(method, client, pg_cur)
 
     endpoint.stop()
-    endpoint.start()
+    if method == PrewarmMethod.AUTOPREWARM:
+        endpoint.start(autoprewarm=True, offload_lfc_interval_seconds=offload_secs)
+    else:
+        endpoint.start()
 
     pg_conn = endpoint.connect()
     pg_cur = pg_conn.cursor()
 
     lfc_conn = endpoint.connect(dbname="lfc")
     lfc_cur = lfc_conn.cursor()
-
-    if query is LfcQueryMethod.COMPUTE_CTL:
-        http_client.prewarm_lfc()
-    else:
-        pg_cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
+    prewarm_endpoint(method, client, pg_cur, lfc_state)
 
     pg_cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_used_pages'")
     lfc_used_pages = pg_cur.fetchall()[0][0]
     log.info(f"Used LFC size: {lfc_used_pages}")
     pg_cur.execute("select * from get_prewarm_info()")
-    prewarm_info = pg_cur.fetchall()[0]
-    log.info(f"Prewarm info: {prewarm_info}")
-    total, prewarmed, skipped, _ = prewarm_info
+    total, prewarmed, skipped, _ = pg_cur.fetchall()[0]
+    log.info(f"Prewarm info: {total=} {prewarmed=} {skipped=}")
     progress = (prewarmed + skipped) * 100 // total
     log.info(f"Prewarm progress: {progress}%")
-
     assert lfc_used_pages > 10000
-    assert (
-        prewarm_info[0] > 0
-        and prewarm_info[1] > 0
-        and prewarm_info[0] == prewarm_info[1] + prewarm_info[2]
-    )
+    assert total > 0
+    assert prewarmed > 0
+    assert total == prewarmed + skipped
 
     lfc_cur.execute("select sum(pk) from t")
     assert lfc_cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
 
     check_pinned_entries(pg_cur)
-
     desired = {"status": "completed", "total": total, "prewarmed": prewarmed, "skipped": skipped}
-    if query is LfcQueryMethod.COMPUTE_CTL:
-        assert http_client.prewarm_lfc_status() == desired
-        assert prom_parse(http_client) == {OFFLOAD_LABEL: 0, PREWARM_LABEL: 1}
+    check_prewarmed(method, client, desired)
+
+
+# autoprewarm isn't needed as we prewarm manually
+WORKLOAD_VALUES = METHOD_VALUES[:-1]
+WORKLOAD_IDS = METHOD_IDS[:-1]
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
-@pytest.mark.parametrize("query", QUERY_OPTIONS, ids=["postgres", "compute-ctl"])
-def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMethod):
+@pytest.mark.parametrize("method", WORKLOAD_VALUES, ids=WORKLOAD_IDS)
+def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMethod):
+    """
+    Test continiously prewarming endpoint when there is a write-heavy workload going in parallel
+    """
     env = neon_simple_env
     n_records = 10000
     n_threads = 4
-    endpoint = env.endpoints.create_start(
-        branch_name="main",
-        config_lines=[
-            "shared_buffers=1MB",
-            "neon.max_file_cache_size=1GB",
-            "neon.file_cache_size_limit=1GB",
-            "neon.file_cache_prewarm_limit=1000000",
-        ],
-    )
+    cfg = [
+        "shared_buffers=1MB",
+        "neon.max_file_cache_size=1GB",
+        "neon.file_cache_size_limit=1GB",
+        "neon.file_cache_prewarm_limit=1000000",
+    ]
+    endpoint = env.endpoints.create_start(branch_name="main", config_lines=cfg)
 
     pg_conn = endpoint.connect()
     pg_cur = pg_conn.cursor()
@@ -154,12 +204,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMet
     log.info(f"Inserted {n_records} rows")
 
     http_client = endpoint.http_client()
-    if query is LfcQueryMethod.COMPUTE_CTL:
-        http_client.offload_lfc()
-    else:
-        pg_cur.execute("select get_local_cache_state()")
-        lfc_state = pg_cur.fetchall()[0][0]
-
+    lfc_state = offload_lfc(method, http_client, pg_cur)
     running = True
     n_prewarms = 0
 
@@ -170,8 +215,8 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMet
         while running:
             src = random.randint(1, n_records)
             dst = random.randint(1, n_records)
-            lfc_cur.execute("update accounts set balance=balance-100 where id=%s", (src,))
-            lfc_cur.execute("update accounts set balance=balance+100 where id=%s", (dst,))
+            lfc_cur.execute(f"update accounts set balance=balance-100 where id={src}")
+            lfc_cur.execute(f"update accounts set balance=balance+100 where id={dst}")
             n_transfers += 1
         log.info(f"Number of transfers: {n_transfers}")
 
@@ -183,13 +228,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMet
             pg_cur.execute("select pg_reload_conf()")
             pg_cur.execute("alter system set neon.file_cache_size_limit='1GB'")
             pg_cur.execute("select pg_reload_conf()")
-
-            if query is LfcQueryMethod.COMPUTE_CTL:
-                # Same thing as prewarm_lfc(), testing other method
-                http_client.prewarm_lfc(endpoint.endpoint_id)
-            else:
-                pg_cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
-
+            prewarm_endpoint(method, http_client, pg_cur, lfc_state)
             nonlocal n_prewarms
             n_prewarms += 1
         log.info(f"Number of prewarms: {n_prewarms}")
@@ -203,7 +242,10 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMet
     prewarm_thread = threading.Thread(target=prewarm)
     prewarm_thread.start()
 
-    time.sleep(20)
+    def prewarmed():
+        assert n_prewarms > 5
+
+    wait_until(prewarmed)
 
     running = False
     for t in workload_threads:
@@ -215,5 +257,12 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, query: LfcQueryMet
     assert total_balance == 0
 
     check_pinned_entries(pg_cur)
-    if query is LfcQueryMethod.COMPUTE_CTL:
-        assert prom_parse(http_client) == {OFFLOAD_LABEL: 1, PREWARM_LABEL: n_prewarms}
+    if method == PrewarmMethod.POSTGRES:
+        return
+    desired = {
+        OFFLOAD_LABEL: 1,
+        PREWARM_LABEL: n_prewarms,
+        OFFLOAD_ERR_LABEL: 0,
+        PREWARM_ERR_LABEL: 0,
+    }
+    assert prom_parse(http_client) == desired

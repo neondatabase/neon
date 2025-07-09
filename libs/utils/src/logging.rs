@@ -24,9 +24,25 @@ macro_rules! critical {
         if cfg!(debug_assertions) {
             panic!($($arg)*);
         }
+        // Increment both metrics
         $crate::logging::TRACING_EVENT_COUNT_METRIC.inc_critical();
         let backtrace = std::backtrace::Backtrace::capture();
         tracing::error!("CRITICAL: {}\n{backtrace}", format!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! critical_timeline {
+    ($tenant_shard_id:expr, $timeline_id:expr, $($arg:tt)*) => {{
+        if cfg!(debug_assertions) {
+            panic!($($arg)*);
+        }
+        // Increment both metrics
+        $crate::logging::TRACING_EVENT_COUNT_METRIC.inc_critical();
+        $crate::logging::HADRON_CRITICAL_STORAGE_EVENT_COUNT_METRIC.inc(&$tenant_shard_id.to_string(), &$timeline_id.to_string());
+        let backtrace = std::backtrace::Backtrace::capture();
+        tracing::error!("CRITICAL: [tenant_shard_id: {}, timeline_id: {}] {}\n{backtrace}",
+                       $tenant_shard_id, $timeline_id, format!($($arg)*));
     }};
 }
 
@@ -60,6 +76,36 @@ pub struct TracingEventCountMetric {
     debug: IntCounter,
     trace: IntCounter,
 }
+
+// Begin Hadron: Add a HadronCriticalStorageEventCountMetric metric that is sliced by tenant_id and timeline_id
+pub struct HadronCriticalStorageEventCountMetric {
+    critical: IntCounterVec,
+}
+
+pub static HADRON_CRITICAL_STORAGE_EVENT_COUNT_METRIC: Lazy<HadronCriticalStorageEventCountMetric> =
+    Lazy::new(|| {
+        let vec = metrics::register_int_counter_vec!(
+            "hadron_critical_storage_event_count",
+            "Number of critical storage events, by tenant_id and timeline_id",
+            &["tenant_shard_id", "timeline_id"]
+        )
+        .expect("failed to define metric");
+        HadronCriticalStorageEventCountMetric::new(vec)
+    });
+
+impl HadronCriticalStorageEventCountMetric {
+    fn new(vec: IntCounterVec) -> Self {
+        Self { critical: vec }
+    }
+
+    // Allow public access from `critical!` macro.
+    pub fn inc(&self, tenant_shard_id: &str, timeline_id: &str) {
+        self.critical
+            .with_label_values(&[tenant_shard_id, timeline_id])
+            .inc();
+    }
+}
+// End Hadron
 
 pub static TRACING_EVENT_COUNT_METRIC: Lazy<TracingEventCountMetric> = Lazy::new(|| {
     let vec = metrics::register_int_counter_vec!(
