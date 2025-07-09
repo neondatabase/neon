@@ -740,6 +740,10 @@ def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
         "pitr_interval": "0s" if zero_gc else "3600s",
         "gc_period": "0s",
         "compaction_period": "0s",
+        # The test exercises leases API, so we need non-zero lease length.
+        # If this tests ever does GC, we need to accomodate for the initial lease deadline
+        # after tenant attach, which is also controlled by this variable.
+        "lsn_lease_length": "600s",
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=conf)
@@ -824,9 +828,7 @@ def insert_with_action(
         log.info(f"initial size: {initial_size}")
 
         with ep.cursor() as cur:
-            cur.execute(
-                "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
-            )
+            cur.execute("CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
         last_flush_lsn = wait_for_last_flush_lsn(env, ep, tenant, timeline)
 
         if action == "lease":
@@ -841,15 +843,9 @@ def insert_with_action(
             raise AssertionError("Invalid action type, only `lease` and `branch`are accepted")
 
         with ep.cursor() as cur:
-            cur.execute(
-                "CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
-            )
-            cur.execute(
-                "CREATE TABLE t2 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
-            )
-            cur.execute(
-                "CREATE TABLE t3 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
-            )
+            cur.execute("CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
+            cur.execute("CREATE TABLE t2 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
+            cur.execute("CREATE TABLE t3 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
 
         last_flush_lsn = wait_for_last_flush_lsn(env, ep, tenant, timeline)
 

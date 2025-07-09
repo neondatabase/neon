@@ -34,7 +34,7 @@ use once_cell::sync::Lazy;
 pub use pageserver_api::models::TenantState;
 use pageserver_api::models::{self, RelSizeMigration};
 use pageserver_api::models::{
-    CompactInfoResponse, LsnLease, TimelineArchivalState, TimelineState, TopTenantShardItem,
+    CompactInfoResponse, TimelineArchivalState, TimelineState, TopTenantShardItem,
     WalRedoManagerStatus,
 };
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize, TenantShardId};
@@ -180,6 +180,7 @@ pub(super) struct AttachedTenantConf {
 
 impl AttachedTenantConf {
     fn new(
+        conf: &'static PageServerConf,
         tenant_conf: pageserver_api::models::TenantConfig,
         location: AttachedLocationConfig,
     ) -> Self {
@@ -191,9 +192,7 @@ impl AttachedTenantConf {
         let lsn_lease_deadline = if location.attach_mode == AttachmentMode::Single {
             Some(
                 tokio::time::Instant::now()
-                    + tenant_conf
-                        .lsn_lease_length
-                        .unwrap_or(LsnLease::DEFAULT_LENGTH),
+                    + TenantShard::get_lsn_lease_length_impl(conf, &tenant_conf),
             )
         } else {
             // We don't use `lsn_lease_deadline` to delay GC in AttachedMulti and AttachedStale
@@ -208,10 +207,13 @@ impl AttachedTenantConf {
         }
     }
 
-    fn try_from(location_conf: LocationConf) -> anyhow::Result<Self> {
+    fn try_from(
+        conf: &'static PageServerConf,
+        location_conf: LocationConf,
+    ) -> anyhow::Result<Self> {
         match &location_conf.mode {
             LocationMode::Attached(attach_conf) => {
-                Ok(Self::new(location_conf.tenant_conf, *attach_conf))
+                Ok(Self::new(conf, location_conf.tenant_conf, *attach_conf))
             }
             LocationMode::Secondary(_) => {
                 anyhow::bail!(
@@ -4205,10 +4207,16 @@ impl TenantShard {
     }
 
     pub fn get_lsn_lease_length(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        Self::get_lsn_lease_length_impl(self.conf, &self.tenant_conf.load().tenant_conf)
+    }
+
+    pub fn get_lsn_lease_length_impl(
+        conf: &'static PageServerConf,
+        tenant_conf: &pageserver_api::models::TenantConfig,
+    ) -> Duration {
         tenant_conf
             .lsn_lease_length
-            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+            .unwrap_or(conf.default_tenant_conf.lsn_lease_length)
     }
 
     pub fn get_timeline_offloading_enabled(&self) -> bool {
@@ -6020,11 +6028,14 @@ pub(crate) mod harness {
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
                 self.conf,
-                AttachedTenantConf::try_from(LocationConf::attached_single(
-                    self.tenant_conf.clone(),
-                    self.generation,
-                    ShardParameters::default(),
-                ))
+                AttachedTenantConf::try_from(
+                    self.conf,
+                    LocationConf::attached_single(
+                        self.tenant_conf.clone(),
+                        self.generation,
+                        ShardParameters::default(),
+                    ),
+                )
                 .unwrap(),
                 self.shard_identity,
                 Some(walredo_mgr),
@@ -6125,7 +6136,7 @@ mod tests {
     use pageserver_api::keyspace::KeySpace;
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
-    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
+    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings, LsnLease};
     use pageserver_compaction::helpers::overlaps_with;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
@@ -6675,17 +6686,13 @@ mod tests {
         tline.freeze_and_flush().await.map_err(|e| e.into())
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
         let (tenant, ctx) =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")
                 .await?
                 .load()
                 .await;
-        // Advance to the lsn lease deadline so that GC is not blocked by
-        // initial transition into AttachedSingle.
-        tokio::time::advance(tenant.get_lsn_lease_length()).await;
-        tokio::time::resume();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -9384,17 +9391,21 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_lsn_lease() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_lsn_lease")
             .await
             .unwrap()
             .load()
             .await;
-        // Advance to the lsn lease deadline so that GC is not blocked by
-        // initial transition into AttachedSingle.
-        tokio::time::advance(tenant.get_lsn_lease_length()).await;
-        tokio::time::resume();
+        // set a non-zero lease length to test the feature
+        tenant
+            .update_tenant_config(|mut conf| {
+                conf.lsn_lease_length = Some(LsnLease::DEFAULT_LENGTH);
+                Ok(conf)
+            })
+            .unwrap();
+
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);
