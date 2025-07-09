@@ -1348,6 +1348,7 @@ dependencies = [
  "p256 0.13.2",
  "pageserver_page_api",
  "postgres",
+ "postgres-types",
  "postgres_initdb",
  "postgres_versioninfo",
  "regex",

@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState, TlsConfig,
+    LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverProtocol, PgIdent,
@@ -29,8 +29,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
-use tokio::task::JoinHandle;
-use tokio::{spawn, time};
+use tokio::{spawn, sync::watch, task::JoinHandle, time};
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
@@ -175,6 +174,7 @@ pub struct ComputeState {
     /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
     /// mode == ComputeMode::Primary. None otherwise
     pub terminate_flush_lsn: Option<Lsn>,
+    pub promote_state: Option<watch::Receiver<PromoteState>>,
 
     pub metrics: ComputeMetrics,
 }
@@ -192,6 +192,7 @@ impl ComputeState {
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
             terminate_flush_lsn: None,
+            promote_state: None,
         }
     }
 
