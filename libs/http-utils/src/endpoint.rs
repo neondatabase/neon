@@ -253,12 +253,26 @@ impl std::io::Write for ChannelWriter {
 
 pub async fn prometheus_metrics_handler(
     req: Request<Body>,
-    use_latest_default: bool,
+    force_metric_collection_on_scrape: bool,
 ) -> Result<Response<Body>, ApiError> {
     SERVE_METRICS_COUNT.inc();
 
     // HADRON
-    let use_latest = parse_query_param(&req, "use_latest")?.unwrap_or(use_latest_default);
+    let requested_use_latest = parse_query_param(&req, "use_latest")?;
+
+    let use_latest = match requested_use_latest {
+        None => force_metric_collection_on_scrape,
+        Some(true) => true,
+        Some(false) => {
+            if force_metric_collection_on_scrape {
+                // We don't cache in this case
+                true
+            } else {
+                false
+            }
+        }
+    };
+
     let started_at = std::time::Instant::now();
 
     let (tx, rx) = mpsc::channel(1);
@@ -285,7 +299,8 @@ pub async fn prometheus_metrics_handler(
 
         // HADRON
         if use_latest {
-            METRICS_COLLECTOR.run_once();
+            // Skip caching the results if we always force metric collection on scrape.
+            METRICS_COLLECTOR.run_once(!force_metric_collection_on_scrape);
         }
 
         let collected = METRICS_COLLECTOR.last_collected();

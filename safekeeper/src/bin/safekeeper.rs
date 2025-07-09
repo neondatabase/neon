@@ -648,21 +648,23 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
     tasks_handles.push(Box::pin(broker_task_handle));
 
     /* BEGIN_HADRON */
-    let metrics_handle = current_thread_rt
-        .as_ref()
-        .unwrap_or_else(|| BACKGROUND_RUNTIME.handle())
-        .spawn(async move {
-            let mut interval: tokio::time::Interval =
-                tokio::time::interval(METRICS_COLLECTION_INTERVAL);
-            loop {
-                interval.tick().await;
-                tokio::task::spawn_blocking(|| {
-                    METRICS_COLLECTOR.run_once();
-                });
-            }
-        })
-        .map(|res| ("broker main".to_owned(), res));
-    tasks_handles.push(Box::pin(metrics_handle));
+    if conf.force_metric_collection_on_scrape {
+        let metrics_handle = current_thread_rt
+            .as_ref()
+            .unwrap_or_else(|| BACKGROUND_RUNTIME.handle())
+            .spawn(async move {
+                let mut interval: tokio::time::Interval =
+                    tokio::time::interval(METRICS_COLLECTION_INTERVAL);
+                loop {
+                    interval.tick().await;
+                    tokio::task::spawn_blocking(|| {
+                        METRICS_COLLECTOR.run_once(true);
+                    });
+                }
+            })
+            .map(|res| ("broker main".to_owned(), res));
+        tasks_handles.push(Box::pin(metrics_handle));
+    }
     /* END_HADRON */
 
     set_build_info_metric(GIT_VERSION, BUILD_TAG);

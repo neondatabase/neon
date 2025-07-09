@@ -771,6 +771,10 @@ fn start_pageserver(
             let cancel = cancel.clone();
             let background_jobs_barrier = background_jobs_barrier.clone();
             async move {
+                if conf.force_metric_collection_on_scrape {
+                    return;
+                }
+
                 // first wait until background jobs are cleared to launch.
                 tokio::select! {
                     _ = cancel.cancelled() => { return; },
@@ -786,7 +790,7 @@ fn start_pageserver(
                         _ = interval.tick() => {}
                     }
                     tokio::task::spawn_blocking(|| {
-                        METRICS_COLLECTOR.run_once();
+                        METRICS_COLLECTOR.run_once(true);
                     });
                 }
             }

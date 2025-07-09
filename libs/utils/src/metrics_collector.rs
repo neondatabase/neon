@@ -42,11 +42,11 @@ impl MetricsCollector {
     }
 
     #[tracing::instrument(name = "metrics_collector", skip_all)]
-    pub fn run_once(&self) -> Arc<CollectedMetrics> {
+    pub fn run_once(&self, cache_metrics: bool) -> Arc<CollectedMetrics> {
         let started = Instant::now();
         let metrics = metrics::gather();
         let collected = Arc::new(CollectedMetrics::new(metrics));
-        {
+        if cache_metrics {
             let mut guard = self.last_collected.write().unwrap();
             *guard = collected.clone();
         }
