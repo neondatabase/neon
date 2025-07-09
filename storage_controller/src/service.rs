@@ -1677,22 +1677,16 @@ impl Service {
             .collect::<anyhow::Result<Vec<_>>>()?;
         let safekeepers: HashMap<NodeId, Safekeeper> =
             safekeepers.into_iter().map(|n| (n.get_id(), n)).collect();
-        let active_sk_count = safekeepers
-            .iter()
-            .filter(|sk| sk.1.scheduling_policy() == SkSchedulingPolicy::Active)
-            .count();
-        let activating_sk_count = safekeepers
-            .iter()
-            .filter(|sk| sk.1.scheduling_policy() == SkSchedulingPolicy::Activating)
-            .count();
-        let pause_sk_count = safekeepers
-            .iter()
-            .filter(|sk| sk.1.scheduling_policy() == SkSchedulingPolicy::Pause)
-            .count();
-        let decom_sk_count = safekeepers
-            .iter()
-            .filter(|sk| sk.1.scheduling_policy() == SkSchedulingPolicy::Decomissioned)
-            .count();
+        let count_policy = |policy| {
+            safekeepers
+                .iter()
+                .filter(|sk| sk.1.scheduling_policy() == policy)
+                .count()
+        };
+        let active_sk_count = count_policy(SkSchedulingPolicy::Active);
+        let activating_sk_count = count_policy(SkSchedulingPolicy::Activating);
+        let pause_sk_count = count_policy(SkSchedulingPolicy::Pause);
+        let decom_sk_count = count_policy(SkSchedulingPolicy::Decomissioned);
         tracing::info!(
             "Loaded {} safekeepers from database. Active {active_sk_count}, activating {activating_sk_count}, \
             paused {pause_sk_count}, decomissioned {decom_sk_count}.",
