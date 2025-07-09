@@ -853,6 +853,30 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 		 forkNum);
 
+	/*
+	 * Newly created relation is empty, remember that in the relsize cache.
+	 *
+	 * Note that in REDO, this is called to make sure the relation fork
+	 * exists, but it does not truncate the relation. So, we can only update
+	 * the relsize if it didn't exist before.
+	 *
+	 * Also, in redo, we must make sure to update the cached size of the
+	 * relation, as that is the primary source of truth for REDO's file length
+	 * considerations, and as file extension isn't (perfectly) logged, we need
+	 * to take care of that before we hit file size checks.
+	 *
+	 * FIXME: This is currently not just an optimization, but required for
+	 * correctness. Postgres can call smgrnblocks() on the newly-created
+	 * relation. Currently, we don't call SetLastWrittenLSN() when a new
+	 * relation created, so if we didn't remember the size in the relsize
+	 * cache, we might call smgrnblocks() on the newly-created relation before
+	 * the creation WAL record has been received by the page server.
+	 *
+	 * XXX: with the new communicator, similar considerations apply. However,
+	 * during replay, neon_get_write_lsn() returns the (end-)LSN of the record
+	 * that's being replayed, so we should not have the correctness issue
+	 * mentioned in previous paragraph.
+	 */
 	if (neon_enable_new_communicator)
 	{
 		XLogRecPtr	lsn = neon_get_write_lsn();
@@ -867,25 +891,6 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	}
 	else
 	{
-		/*
-		 * Newly created relation is empty, remember that in the relsize cache.
-		 *
-		 * Note that in REDO, this is called to make sure the relation fork
-		 * exists, but it does not truncate the relation. So, we can only update
-		 * the relsize if it didn't exist before.
-		 *
-		 * Also, in redo, we must make sure to update the cached size of the
-		 * relation, as that is the primary source of truth for REDO's file length
-		 * considerations, and as file extension isn't (perfectly) logged, we need
-		 * to take care of that before we hit file size checks.
-		 *
-		 * FIXME: This is currently not just an optimization, but required for
-		 * correctness. Postgres can call smgrnblocks() on the newly-created
-		 * relation. Currently, we don't call SetLastWrittenLSN() when a new
-		 * relation created, so if we didn't remember the size in the relsize
-		 * cache, we might call smgrnblocks() on the newly-created relation before
-		 * the creation WAL record hass been received by the page server.
-		 */
 		if (isRedo)
 		{
 			update_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0);

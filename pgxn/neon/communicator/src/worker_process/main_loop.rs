@@ -259,9 +259,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
         // Is it possible that the last-written LSN is ahead of last flush LSN? Generally not, we
         // shouldn't evict a page from the buffer cache before all its modifications have been
-        // safely flushed. That's the "WAL before data" rule. However, such case does exist at index
-        // building: _bt_blwritepage logs the full page without flushing WAL before smgrextend
-        // (files are fsynced before build ends).
+        // safely flushed. That's the "WAL before data" rule. However, there are a few exceptions:
+        //
+        // - when creation an index: _bt_blwritepage logs the full page without flushing WAL before
+        // smgrextend (files are fsynced before build ends).
         //
         // XXX: If we make a request LSN greater than the current WAL flush LSN, the pageserver would
         // block waiting for the WAL arrive, until we flush it and it propagates through the
