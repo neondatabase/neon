@@ -1498,7 +1498,7 @@ impl Timeline {
 
         let image_layer_force_creation_period = image_layer_force_creation_period.unwrap();
         let force_image_creation_lsn_computed_at =
-            self.force_image_creation_lsn_computed_at.lock().await;
+            *self.force_image_creation_lsn_computed_at.lock().unwrap();
         if force_image_creation_lsn_computed_at.is_none()
             || force_image_creation_lsn_computed_at.unwrap().elapsed()
                 > FORCE_IMAGE_CREATION_LSN_COMPUTE_INTERVAL
@@ -1528,6 +1528,7 @@ impl Timeline {
             };
             self.force_image_creation_lsn
                 .store(force_image_creation_lsn);
+            *self.force_image_creation_lsn_computed_at.lock().unwrap() = Some(Instant::now());
             tracing::info!(
                 "computed force image creation LSN: {}",
                 force_image_creation_lsn

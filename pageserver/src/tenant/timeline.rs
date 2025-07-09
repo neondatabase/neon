@@ -356,8 +356,7 @@ pub struct Timeline {
     /// on this key range.
     force_image_creation_lsn: AtomicLsn,
     /// The last time instant when force_image_creation_lsn is computed.
-    // TODO: this is never updated
-    force_image_creation_lsn_computed_at: tokio::sync::Mutex<Option<Instant>>,
+    force_image_creation_lsn_computed_at: std::sync::Mutex<Option<Instant>>,
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
