@@ -1985,21 +1985,11 @@ impl Service {
 
         // Check that there is enough safekeepers configured that we can create new timelines
         let test_sk_res = this.safekeepers_for_new_timeline().await;
-        if config.timelines_onto_safekeepers
-            && let Err(e) = &test_sk_res
-        {
-            tracing::error!(
-                timeline_safekeeper_count = config.timeline_safekeeper_count,
-                timelines_onto_safekeepers = config.timelines_onto_safekeepers,
-                "viability test: configured with --timelines-onto-safekeepers but no available set of safekeepers for new timelines: {e}"
-            );
-        } else {
-            tracing::info!(
-                timeline_safekeeper_count = config.timeline_safekeeper_count,
-                timelines_onto_safekeepers = config.timelines_onto_safekeepers,
-                "viability test result (test timeline creation on safekeepers): {test_sk_res:?}",
-            )
-        }
+        tracing::info!(
+            timeline_safekeeper_count = config.timeline_safekeeper_count,
+            timelines_onto_safekeepers = config.timelines_onto_safekeepers,
+            "viability test result (test timeline creation on safekeepers): {test_sk_res:?}",
+        );
 
         Ok(this)
     }
