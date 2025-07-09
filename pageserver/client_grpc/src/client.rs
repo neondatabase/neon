@@ -193,7 +193,7 @@ impl PageserverClient {
         }
 
         while let Some((shard_id, shard_response)) = shard_requests.next().await.transpose()? {
-            splitter.add_response(shard_id, shard_response);
+            splitter.add_response(shard_id, shard_response)?;
         }
 
         splitter.assemble_response()
@@ -219,7 +219,7 @@ impl PageserverClient {
         // Check that we received the expected number of pages.
         let actual = resp.page_images.len();
         if expected != actual {
-            return Err(tonic::Status::data_loss(format!(
+            return Err(tonic::Status::internal(format!(
                 "expected {expected} pages, got {actual}",
             )));
         }
