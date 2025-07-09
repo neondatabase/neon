@@ -2357,6 +2357,7 @@ impl TenantManager {
         gc_req: TimelineGcRequest,
         cancel: CancellationToken,
         ctx: &RequestContext,
+        skip_precond_checks: bool,
     ) -> Result<GcResult, ApiError> {
         let tenant = {
             let guard = self.tenants.read().unwrap();
@@ -2383,7 +2384,14 @@ impl TenantManager {
 
         #[allow(unused_mut)]
         let mut result = tenant
-            .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
+            .gc_iteration_inner(
+                Some(timeline_id),
+                gc_horizon,
+                pitr,
+                &cancel,
+                &ctx,
+                skip_precond_checks,
+            )
             .await;
         // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
         // better once the types support it.

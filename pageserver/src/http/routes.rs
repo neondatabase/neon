@@ -2221,6 +2221,9 @@ async fn timeline_gc_handler(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let skip_precond_checks =
+        parse_query_param::<_, bool>(&request, "skip_precond_checks")?.unwrap_or(false);
+
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
@@ -2230,7 +2233,14 @@ async fn timeline_gc_handler(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let gc_result = state
         .tenant_manager
-        .immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx)
+        .immediate_gc(
+            tenant_shard_id,
+            timeline_id,
+            gc_req,
+            cancel,
+            &ctx,
+            skip_precond_checks,
+        )
         .await?;
 
     json_response(StatusCode::OK, gc_result)
