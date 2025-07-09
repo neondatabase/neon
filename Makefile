@@ -212,7 +212,7 @@ neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
 		FIND_TYPEDEF=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/find_typedef \
 		INDENT=$(BUILD_DIR)/v17/src/tools/pg_bsd_indent/pg_bsd_indent \
 		PGINDENT_SCRIPT=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/pgindent/pgindent \
-		-C $(BUILD_DIR)/neon-v17 \
+		-C $(BUILD_DIR)/pgxn-v17/neon \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile pgindent
 
 
