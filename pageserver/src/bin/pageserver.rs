@@ -889,8 +889,11 @@ async fn create_remote_storage_client(
             "Simulating remote failures for first {} attempts of each op",
             conf.test_remote_failures
         );
-        remote_storage =
-            GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
+        remote_storage = GenericRemoteStorage::unreliable_wrapper(
+            remote_storage,
+            conf.test_remote_failures,
+            conf.test_remote_failures_probability,
+        );
     }
 
     Ok(remote_storage)
