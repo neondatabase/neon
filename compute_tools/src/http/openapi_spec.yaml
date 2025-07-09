@@ -127,7 +127,7 @@ paths:
         429:
           description: LFC prewarm ongoing
     get:
-      tags
+      tags:
         - Prewarm
       summary: Get LFC prewarm state
       description: ""
@@ -151,7 +151,7 @@ paths:
         429:
           description: LFC offload ongoing
     get:
-      tags
+      tags:
         - Prewarm
       summary: Get LFC offloading state
       description: ""
