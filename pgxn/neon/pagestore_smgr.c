@@ -531,6 +531,29 @@ neon_get_write_lsn(void)
 	else
 		lsn = GetXLogInsertRecPtr();
 
+	/*
+	 * If the insert LSN points to just after page header, round it down to
+	 * the beginning of the page, because the page header might not have been
+	 * inserted to the WAL yet, and if we tried to flush it, the WAL flushing
+	 * code gets upset.
+	 */
+	{
+		int			segoff;
+
+		segoff = XLogSegmentOffset(lsn, wal_segment_size);
+		if (segoff == SizeOfXLogLongPHD)
+		{
+			lsn = lsn - segoff;
+		}
+		else
+		{
+			int			offset = lsn % XLOG_BLCKSZ;
+
+			if (offset == SizeOfXLogShortPHD)
+				lsn = lsn - offset;
+		}
+	}
+
 	return lsn;
 }
 
@@ -2287,8 +2310,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 			if (neon_enable_new_communicator)
 			{
-				/* TODO: we could update the cache with the size, since we have it at hand */
-				communicator_new_forget_cache(InfoFromSMgrRel(reln), forknum, nblocks, recptr);
+				communicator_new_update_cached_rel_size(InfoFromSMgrRel(reln), forknum, nblocks, recptr);
 			}
 			else
 			{

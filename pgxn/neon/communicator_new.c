@@ -1107,6 +1107,9 @@ communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr l
 	};
 	NeonIOResult result;
 
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(lsn);
+
 	perform_request(&request, &result);
 	switch (result.tag)
 	{
@@ -1141,6 +1144,9 @@ communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 	};
 	NeonIOResult result;
 
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(lsn);
+
 	perform_request(&request, &result);
 	switch (result.tag)
 	{
@@ -1174,6 +1180,9 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr l
 	};
 	NeonIOResult result;
 
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(lsn);
+
 	perform_request(&request, &result);
 	switch (result.tag)
 	{
@@ -1192,11 +1201,11 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr l
 }
 
 void
-communicator_new_forget_cache(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks, XLogRecPtr lsn)
+communicator_new_update_cached_rel_size(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks, XLogRecPtr lsn)
 {
 	NeonIORequest request = {
-		.tag = NeonIORequest_ForgetCache,
-		.forget_cache = {
+		.tag = NeonIORequest_UpdateCachedRelSize,
+		.update_cached_rel_size = {
 			.request_id = assign_request_id(),
 			.spc_oid = NInfoGetSpcOid(rinfo),
 			.db_oid = NInfoGetDbOid(rinfo),
@@ -1216,11 +1225,11 @@ communicator_new_forget_cache(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 		case NeonIOResult_Error:
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not forget cache for rel %u/%u/%u.%u: %s",
+					 errmsg("could not update cached size for rel %u/%u/%u.%u: %s",
 							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
 			break;
 		default:
-			elog(ERROR, "unexpected result for ForgetCache operation: %d", result.tag);
+			elog(ERROR, "unexpected result for UpdateCachedRelSize operation: %d", result.tag);
 			break;
 	}
 }
@@ -1338,11 +1347,11 @@ print_neon_io_request(NeonIORequest *request)
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
 				return buf;
 			}
-		case NeonIORequest_ForgetCache:
+		case NeonIORequest_UpdateCachedRelSize:
 			{
-				CForgetCacheRequest *r = &request->forget_cache;
+				CUpdateCachedRelSizeRequest *r = &request->update_cached_rel_size;
 
-				snprintf(buf, sizeof(buf), "ForgetCache: req " UINT64_FORMAT " rel %u/%u/%u.%u blocks: %u",
+				snprintf(buf, sizeof(buf), "UpdateCachedRelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u blocks: %u",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number,
 					r->nblocks);

@@ -505,10 +505,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.cache.forget_rel(&req.reltag(), None, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
-            NeonIORequest::ForgetCache(req) => {
+            NeonIORequest::UpdateCachedRelSize(req) => {
                 // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache
-                    .forget_rel(&req.reltag(), Some(req.nblocks), Lsn(req.lsn));
+                    .remember_rel_size(&req.reltag(), req.nblocks, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
         }
@@ -597,6 +597,12 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     );
                     return Err(-1);
                 }
+
+                info!(
+                    "received getpage response for blocks {:?} in rel {:?} lsns {}",
+                    block_numbers, rel, read_lsn
+                );
+
                 for (page_image, (blkno, _lsn, dest, _guard)) in
                     resp.page_images.into_iter().zip(cache_misses)
                 {

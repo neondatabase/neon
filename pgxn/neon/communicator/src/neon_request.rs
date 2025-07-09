@@ -30,7 +30,7 @@ pub enum NeonIORequest {
     RelUnlink(CRelUnlinkRequest),
 
     // Other requests
-    ForgetCache(CForgetCacheRequest),
+    UpdateCachedRelSize(CUpdateCachedRelSizeRequest),
 }
 
 #[repr(C)]
@@ -75,7 +75,7 @@ impl NeonIORequest {
             RelCreate(req) => req.request_id,
             RelTruncate(req) => req.request_id,
             RelUnlink(req) => req.request_id,
-            ForgetCache(req) => req.request_id,
+            UpdateCachedRelSize(req) => req.request_id,
         }
     }
 }
@@ -382,7 +382,7 @@ impl CRelUnlinkRequest {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-pub struct CForgetCacheRequest {
+pub struct CUpdateCachedRelSizeRequest {
     pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
@@ -392,7 +392,7 @@ pub struct CForgetCacheRequest {
     pub lsn: CLsn,
 }
 
-impl CForgetCacheRequest {
+impl CUpdateCachedRelSizeRequest {
     pub fn reltag(&self) -> page_api::RelTag {
         page_api::RelTag {
             spcnode: self.spc_oid,
