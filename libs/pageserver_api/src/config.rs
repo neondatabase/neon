@@ -565,6 +565,7 @@ pub struct TenantConfigToml {
     // HADRON
     // When the timeout is reached, PageServer will (1) force compact any remaining L0 deltas and
     // (2) create image layers if there are any L1 deltas.
+    #[serde(with = "humantime_serde")]
     pub image_layer_force_creation_period: Option<Duration>,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
