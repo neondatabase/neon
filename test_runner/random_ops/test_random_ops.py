@@ -97,6 +97,13 @@ class NeonBranch:
         )
         self.benchmark: subprocess.Popen[Any] | None = None
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
+        # XXX for debug only, remove before merge
+        log.info("%s", branch["branch"])
+        self.parent_timestamp: datetime = (
+            datetime.fromisoformat(branch["branch"]["parent_timestamp"])
+            if "parent_timestamp" in branch["branch"]
+            else datetime.fromtimestamp(0, tz=UTC)
+        )
         self.connect_env: dict[str, str] | None = None
         if self.connection_parameters:
             self.connect_env = {
@@ -115,8 +122,13 @@ class NeonBranch:
         return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''}, parent: {self.parent}"
 
     def random_time(self) -> datetime:
-        min_time = self.updated_at + timedelta(seconds=1)
+        min_time = max(
+            self.updated_at + timedelta(seconds=1),
+            self.project.min_time,
+            self.parent_timestamp + timedelta(seconds=1),
+        )
         max_time = datetime.now(UTC) - timedelta(seconds=1)
+        log.info("min_time: %s, max_time: %s", min_time, max_time)
         return (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
 
     def create_child_branch(self, parent_timestamp: datetime | None = None) -> NeonBranch | None:
@@ -142,6 +154,20 @@ class NeonBranch:
     def terminate_benchmark(self) -> None:
         self.project.terminate_benchmark(self.id)
 
+    def reset_to_parent(self) -> None:
+        for ep in self.project.endpoints.values():
+            if ep.type == "read_only":
+                ep.terminate_benchmark()
+        self.terminate_benchmark()
+        res = self.neon_api.reset_to_parent(self.project_id, self.id)
+        self.updated_at = datetime.fromisoformat(res["branch"]["updated_at"])
+        self.parent_timestamp = datetime.fromisoformat(res["branch"]["parent_timestamp"])
+        self.project.wait()
+        self.start_benchmark()
+        for ep in self.project.endpoints.values():
+            if ep.type == "read_only":
+                ep.start_benchmark()
+
     def restore_random_time(self) -> None:
         """
         Does PITR, i.e. calls the reset API call on the same branch to the random time in the past
@@ -154,6 +180,7 @@ class NeonBranch:
         if res is None:
             return
         self.updated_at = datetime.fromisoformat(res["branch"]["updated_at"])
+        self.parent_timestamp = datetime.fromisoformat(res["branch"]["parent_timestamp"])
         parent_id: str = res["branch"]["parent_id"]
         # XXX Retry get parent details to work around the issue
         # https://databricks.atlassian.net/browse/LKB-279
@@ -243,6 +270,7 @@ class NeonProject:
         self.restart_pgbench_on_console_errors: bool = False
         self.limits: dict[str, Any] = self.get_limits()["limits"]
         self.read_only_endpoints_total: int = 0
+        self.min_time: datetime = datetime.now(UTC)
 
     def get_limits(self) -> dict[str, Any]:
         return self.neon_api.get_project_limits(self.id)
@@ -275,6 +303,8 @@ class NeonProject:
         self.wait()
         if not self.check_limit_branches():
             return None
+        if parent_timestamp:
+            log.info("Timestamp: %s", parent_timestamp)
         parent_timestamp_str: str | None = None
         if parent_timestamp:
             parent_timestamp_str = parent_timestamp.isoformat().replace("+00:00", "Z")
@@ -312,6 +342,14 @@ class NeonProject:
         self.wait()
         if parent.id in self.reset_branches:
             parent.delete()
+
+    def get_random_leaf_branch(self) -> NeonBranch | None:
+        target: NeonBranch | None = None
+        if self.leaf_branches:
+            target = random.choice(list(self.leaf_branches.values()))
+        else:
+            log.info("No leaf branches found")
+        return target
 
     def delete_endpoint(self, endpoint_id: str) -> None:
         self.terminate_benchmark(endpoint_id)
@@ -427,13 +465,10 @@ def do_action(project: NeonProject, action: str) -> bool:
         log.info("Created branch %s", child)
         child.start_benchmark()
     elif action == "delete_branch":
-        if project.leaf_branches:
-            target: NeonBranch = random.choice(list(project.leaf_branches.values()))
-            log.info("Trying to delete branch %s", target)
-            target.delete()
-        else:
-            log.info("Leaf branches not found, skipping")
+        if (target := project.get_random_leaf_branch()) is None:
             return False
+        log.info("Trying to delete branch %s", target)
+        target.delete()
     elif action == "new_ro_endpoint":
         ep = random.choice(
             [br for br in project.branches.values() if br.id not in project.reset_branches]
@@ -453,13 +488,15 @@ def do_action(project: NeonProject, action: str) -> bool:
         target_ep.delete()
         log.info("endpoint %s deleted", target_ep.id)
     elif action == "restore_random_time":
-        if project.leaf_branches:
-            br: NeonBranch = random.choice(list(project.leaf_branches.values()))
-            log.info("Restore %s", br)
-            br.restore_random_time()
-        else:
-            log.info("No leaf branches found")
+        if (target := project.get_random_leaf_branch()) is None:
             return False
+        log.info("Restore %s", target)
+        target.restore_random_time()
+    elif action == "reset_to_parent":
+        if (target := project.get_random_leaf_branch()) is None:
+            return False
+        log.info("Reset to parent %s", target)
+        target.reset_to_parent()
     else:
         raise ValueError(f"The action {action} is unknown")
     return True
@@ -491,13 +528,17 @@ def test_api_random(
         ("new_ro_endpoint", 1.4),
         ("delete_ro_endpoint", 0.8),
         ("delete_branch", 1.2),
-        ("restore_random_time", 1.2),
+        ("restore_random_time", 0.9),
+        ("reset_to_parent", 0.3),
     )
     if num_ops_env := os.getenv("NUM_OPERATIONS"):
         num_operations = int(num_ops_env)
     else:
         num_operations = 250
     pg_bin.run(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env)
+    # To not go to the past where pgbench tables do not exist
+    time.sleep(1)
+    project.min_time = datetime.now(UTC)
     for _ in range(num_operations):
         log.info("Starting action #%s", _ + 1)
         while not do_action(
