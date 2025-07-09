@@ -1247,3 +1247,10 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
         return res.json()
+
+    def force_refresh_feature_flag(self, tenant_id: TenantId | TenantShardId):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/force_refresh_feature_flag",
+        )
+        self.verbose_error(res)
+        return res.json()
