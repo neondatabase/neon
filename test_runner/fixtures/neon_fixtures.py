@@ -5655,7 +5655,6 @@ def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint, primary_cursor
             return
         time.sleep(1)
 
-
 def log_replica_lag(primary: Endpoint, secondary: Endpoint):
     last_replay_lsn = Lsn(
         secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
