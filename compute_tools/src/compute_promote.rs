@@ -1,9 +1,7 @@
 use crate::compute::ComputeNode;
 use anyhow::{Context, Result, bail};
-use compute_api::{
-    responses::{LfcPrewarmState, PromoteState, SafekeepersLsn},
-    spec::ComputeMode,
-};
+use compute_api::responses::{LfcPrewarmState, PromoteState, PromoteConfig};
+use compute_api::spec::ComputeMode;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
 use utils::lsn::Lsn;
@@ -13,12 +11,12 @@ impl ComputeNode {
     /// and http client disconnects, this does not stop promotion, and subsequent
     /// calls block until promote finishes.
     /// Called by control plane on secondary after primary endpoint is terminated
-    pub async fn promote(self: &Arc<Self>, safekeepers_lsn: SafekeepersLsn) -> PromoteState {
+    pub async fn promote(self: &Arc<Self>, cfg: PromoteConfig) -> PromoteState {
         let cloned = self.clone();
         let start_promotion = || {
             let (tx, rx) = tokio::sync::watch::channel(PromoteState::NotPromoted);
             tokio::spawn(async move {
-                tx.send(match cloned.promote_impl(safekeepers_lsn).await {
+                tx.send(match cloned.promote_impl(cfg).await {
                     Ok(_) => PromoteState::Completed,
                     Err(err) => {
                         tracing::error!(%err, "promoting");
@@ -47,9 +45,7 @@ impl ComputeNode {
         task.borrow().clone()
     }
 
-    // Why do we have to supply safekeepers?
-    // For secondary we use primary_connection_conninfo so safekeepers field is empty
-    async fn promote_impl(&self, safekeepers_lsn: SafekeepersLsn) -> Result<()> {
+    async fn promote_impl(&self, cfg: PromoteConfig) -> Result<()> {
         {
             let state = self.state.lock().unwrap();
             let mode = &state.pspec.as_ref().unwrap().spec.mode;
@@ -73,7 +69,7 @@ impl ComputeNode {
             .await
             .context("connecting to postgres")?;
 
-        let primary_lsn = safekeepers_lsn.wal_flush_lsn;
+        let primary_lsn = cfg.wal_flush_lsn;
         let mut last_wal_replay_lsn: Lsn = Lsn::INVALID;
         const RETRIES: i32 = 20;
         for i in 0..=RETRIES {
@@ -96,7 +92,7 @@ impl ComputeNode {
         // using $1 doesn't work with ALTER SYSTEM SET
         let safekeepers_sql = format!(
             "ALTER SYSTEM SET neon.safekeepers='{}'",
-            safekeepers_lsn.safekeepers
+            cfg.compute_spec.safekeeper_connstrings.join(",")
         );
         client
             .query(&safekeepers_sql, &[])
