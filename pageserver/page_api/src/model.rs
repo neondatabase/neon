@@ -502,22 +502,30 @@ impl From<GetPageClass> for i32 {
 pub struct GetPageResponse {
     /// The original request's ID.
     pub request_id: RequestID,
-    /// The response status code.
+    /// The response status code. If not OK, the `rel` and `pages` fields will be empty.
     pub status_code: GetPageStatusCode,
     /// A string describing the status, if any.
     pub reason: Option<String>,
-    /// The 8KB page images, in the same order as the request. Empty if status != OK.
-    pub page_images: Vec<Bytes>,
+    /// The relation that the pages belong to.
+    pub rel: RelTag,
+    // The page(s), in the same order as the request.
+    pub pages: Vec<Page>,
 }
 
-impl From<proto::GetPageResponse> for GetPageResponse {
-    fn from(pb: proto::GetPageResponse) -> Self {
-        Self {
-            request_id: pb.request_id.unwrap_or_default().into(),
+impl TryFrom<proto::GetPageResponse> for GetPageResponse {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::GetPageResponse) -> Result<Self, ProtocolError> {
+        Ok(Self {
+            request_id: pb
+                .request_id
+                .ok_or(ProtocolError::Missing("request_id"))?
+                .into(),
             status_code: pb.status_code.into(),
             reason: Some(pb.reason).filter(|r| !r.is_empty()),
-            page_images: pb.page_image,
-        }
+            rel: pb.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
+            pages: pb.page.into_iter().map(Page::from).collect(),
+        })
     }
 }
 
@@ -527,7 +535,8 @@ impl From<GetPageResponse> for proto::GetPageResponse {
             request_id: Some(response.request_id.into()),
             status_code: response.status_code.into(),
             reason: response.reason.unwrap_or_default(),
-            page_image: response.page_images,
+            rel: Some(response.rel.into()),
+            page: response.pages.into_iter().map(proto::Page::from).collect(),
         }
     }
 }
@@ -560,8 +569,36 @@ impl GetPageResponse {
             request_id,
             status_code,
             reason: Some(status.message().to_string()),
-            page_images: Vec::new(),
+            rel: RelTag::default(),
+            pages: Vec::new(),
         })
+    }
+}
+
+// A page.
+#[derive(Clone, Debug)]
+pub struct Page {
+    /// The page number.
+    pub block_number: u32,
+    /// The materialized page image, as an 8KB byte vector.
+    pub image: Bytes,
+}
+
+impl From<proto::Page> for Page {
+    fn from(pb: proto::Page) -> Self {
+        Self {
+            block_number: pb.block_number,
+            image: pb.image,
+        }
+    }
+}
+
+impl From<Page> for proto::Page {
+    fn from(page: Page) -> Self {
+        Self {
+            block_number: page.block_number,
+            image: page.image,
+        }
     }
 }
 

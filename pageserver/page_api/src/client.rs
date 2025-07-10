@@ -1,4 +1,5 @@
 use anyhow::Context as _;
+use futures::future::ready;
 use futures::{Stream, StreamExt as _, TryStreamExt as _};
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
@@ -110,7 +111,7 @@ impl Client {
     ) -> tonic::Result<impl Stream<Item = tonic::Result<GetPageResponse>> + Send + 'static> {
         let reqs = reqs.map(proto::GetPageRequest::from);
         let resps = self.inner.get_pages(reqs).await?.into_inner();
-        Ok(resps.map_ok(GetPageResponse::from))
+        Ok(resps.and_then(|resp| ready(GetPageResponse::try_from(resp).map_err(|err| err.into()))))
     }
 
     /// Returns the size of a relation, as # of blocks.
