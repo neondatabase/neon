@@ -298,12 +298,12 @@ pub async fn prometheus_metrics_handler(
         let _span = span.entered();
 
         // HADRON
-        if use_latest {
+        let collected = if use_latest {
             // Skip caching the results if we always force metric collection on scrape.
-            METRICS_COLLECTOR.run_once(!force_metric_collection_on_scrape);
-        }
-
-        let collected = METRICS_COLLECTOR.last_collected();
+            METRICS_COLLECTOR.run_once(!force_metric_collection_on_scrape)
+        } else {
+            METRICS_COLLECTOR.last_collected()
+        };
 
         let gathered_at = std::time::Instant::now();
 
