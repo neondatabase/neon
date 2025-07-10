@@ -10,7 +10,7 @@ from performance.test_perf_pgbench import utc_now_timestamp
 
 if TYPE_CHECKING:
     from fixtures.compare_fixtures import NeonCompare
-    from fixtures.neon_fixtures import Endpoint
+    from fixtures.neon_fixtures import Endpoint, NeonApiEndpoint
 
 
 # These tests compare performance for a write-heavy and read-heavy workloads of an ordinary endpoint
@@ -48,6 +48,15 @@ def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
         )
         name: str = cast("str", ep.branch_name)
         neon_compare.zenbenchmark.record_pg_bench_result(name, res)
+
+@pytest.mark.remote_cluster
+def test_compare_prewarmed_pgbench_perf_benchmark(
+    pg_bin: PgBin,
+    benchmark_project_pub: NeonApiEndpoint,
+    benchmark_project_sub: NeonApiEndpoint,
+    zenbenchmark: NeonBenchmarker
+):
+    ep_normal: Endpoint = benchmark_project_pub.__slots__
 
 
 def test_compare_prewarmed_read_perf(neon_compare: NeonCompare):
