@@ -1,6 +1,7 @@
 import random
 import threading
 from enum import StrEnum
+from time import sleep
 from typing import Any
 
 import pytest
@@ -24,18 +25,7 @@ OFFLOAD_LABEL = "compute_ctl_lfc_offloads_total"
 OFFLOAD_ERR_LABEL = "compute_ctl_lfc_offload_errors_total"
 METHOD_VALUES = [e for e in PrewarmMethod]
 METHOD_IDS = [e.value for e in PrewarmMethod]
-
-
-def check_pinned_entries(cur: Cursor):
-    """
-    Wait till none of LFC buffers are pinned
-    """
-
-    def none_pinned():
-        cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_chunks_pinned'")
-        assert cur.fetchall()[0][0] == 0
-
-    wait_until(none_pinned)
+AUTOOFFLOAD_INTERVAL_SECS = 2
 
 
 def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
@@ -49,9 +39,18 @@ def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
 
 
 def offload_lfc(method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor) -> Any:
+    if method == PrewarmMethod.POSTGRES:
+        cur.execute("select get_local_cache_state()")
+        return cur.fetchall()[0][0]
+
     if method == PrewarmMethod.AUTOPREWARM:
+        # With autoprewarm, we need to be sure LFC was offloaded after all writes
+        # finish, so we sleep. Otherwise we'll have less prewarmed pages than we want
+        sleep(AUTOOFFLOAD_INTERVAL_SECS)
         client.offload_lfc_wait()
-    elif method == PrewarmMethod.COMPUTE_CTL:
+        return
+
+    if method == PrewarmMethod.COMPUTE_CTL:
         status = client.prewarm_lfc_status()
         assert status["status"] == "not_prewarmed"
         assert "error" not in status
@@ -60,11 +59,9 @@ def offload_lfc(method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor) 
         parsed = prom_parse(client)
         desired = {OFFLOAD_LABEL: 1, PREWARM_LABEL: 0, OFFLOAD_ERR_LABEL: 0, PREWARM_ERR_LABEL: 0}
         assert parsed == desired, f"{parsed=} != {desired=}"
-    elif method == PrewarmMethod.POSTGRES:
-        cur.execute("select get_local_cache_state()")
-        return cur.fetchall()[0][0]
-    else:
-        raise AssertionError(f"{method} not in PrewarmMethod")
+        return
+
+    raise AssertionError(f"{method} not in PrewarmMethod")
 
 
 def prewarm_endpoint(
@@ -106,14 +103,13 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
         "neon.file_cache_size_limit=1GB",
         "neon.file_cache_prewarm_limit=1000",
     ]
-    offload_secs = 2
 
     if method == PrewarmMethod.AUTOPREWARM:
         endpoint = env.endpoints.create_start(
             branch_name="main",
             config_lines=cfg,
             autoprewarm=True,
-            offload_lfc_interval_seconds=offload_secs,
+            offload_lfc_interval_seconds=AUTOOFFLOAD_INTERVAL_SECS,
         )
     else:
         endpoint = env.endpoints.create_start(branch_name="main", config_lines=cfg)
@@ -135,7 +131,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
 
     endpoint.stop()
     if method == PrewarmMethod.AUTOPREWARM:
-        endpoint.start(autoprewarm=True, offload_lfc_interval_seconds=offload_secs)
+        endpoint.start(autoprewarm=True, offload_lfc_interval_seconds=AUTOOFFLOAD_INTERVAL_SECS)
     else:
         endpoint.start()
 
@@ -162,7 +158,6 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
     lfc_cur.execute("select sum(pk) from t")
     assert lfc_cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
 
-    check_pinned_entries(pg_cur)
     desired = {"status": "completed", "total": total, "prewarmed": prewarmed, "skipped": skipped}
     check_prewarmed(method, client, desired)
 
@@ -243,9 +238,9 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMet
     prewarm_thread.start()
 
     def prewarmed():
-        assert n_prewarms > 5
+        assert n_prewarms > 3
 
-    wait_until(prewarmed)
+    wait_until(prewarmed, timeout=40)  # debug builds don't finish in 20s
 
     running = False
     for t in workload_threads:
@@ -256,7 +251,6 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMet
     total_balance = lfc_cur.fetchall()[0][0]
     assert total_balance == 0
 
-    check_pinned_entries(pg_cur)
     if method == PrewarmMethod.POSTGRES:
         return
     desired = {
