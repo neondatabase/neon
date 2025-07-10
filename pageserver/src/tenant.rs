@@ -4171,6 +4171,15 @@ impl TenantShard {
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
+    // HADRON
+    pub fn get_image_creation_timeout(&self) -> Option<Duration> {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf.image_layer_force_creation_period.or(self
+            .conf
+            .default_tenant_conf
+            .image_layer_force_creation_period)
+    }
+
     pub fn get_pitr_interval(&self) -> Duration {
         let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
         tenant_conf

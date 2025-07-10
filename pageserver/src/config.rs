@@ -252,6 +252,10 @@ pub struct PageServerConf {
     pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
 
     pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
+
+    /// Defines what is a big tenant for the purpose of image layer generation.
+    /// See Timeline::should_check_if_image_layers_required
+    pub image_layer_generation_large_timeline_threshold: Option<u64>,
 }
 
 /// Token for authentication to safekeepers
@@ -432,6 +436,7 @@ impl PageServerConf {
             posthog_config,
             timeline_import_config,
             basebackup_cache_config,
+            image_layer_generation_large_timeline_threshold,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -490,6 +495,7 @@ impl PageServerConf {
             dev_mode,
             timeline_import_config,
             basebackup_cache_config,
+            image_layer_generation_large_timeline_threshold,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
