@@ -5719,6 +5719,16 @@ impl TenantShard {
             .unwrap_or(0)
     }
 
+    /// HADRON
+    /// Return the visible size of all timelines in this tenant.
+    pub(crate) fn get_visible_size(&self) -> u64 {
+        let timelines = self.timelines.lock().unwrap();
+        timelines
+            .values()
+            .map(|t| t.metrics.visible_physical_size_gauge.get())
+            .sum()
+    }
+
     /// Builds a new tenant manifest, and uploads it if it differs from the last-known tenant
     /// manifest in `Self::remote_tenant_manifest`.
     ///

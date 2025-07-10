@@ -1,14 +1,16 @@
 use std::str::FromStr;
 
-use anyhow::Context;
+use anyhow::{Context, Ok};
 use camino::Utf8PathBuf;
 use pageserver::tenant::{
     IndexPart,
     layer_map::{LayerMap, SearchResult},
-    remote_timeline_client::remote_layer_path,
-    storage_layer::{PersistentLayerDesc, ReadableLayerWeak},
+    remote_timeline_client::{index::LayerFileMetadata, remote_layer_path},
+    storage_layer::{LayerName, LayerVisibilityHint, PersistentLayerDesc, ReadableLayerWeak},
 };
 use pageserver_api::key::Key;
+use serde::Serialize;
+use std::collections::BTreeMap;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -33,6 +35,31 @@ pub(crate) enum IndexPartCmd {
         #[arg(long)]
         lsn: String,
     },
+    /// List all visible delta and image layers at the latest LSN.
+    ListVisibleLayers {
+        #[arg(long)]
+        path: Utf8PathBuf,
+    },
+}
+
+fn create_layer_map_from_index_part(
+    index_part: &IndexPart,
+    tenant_shard_id: TenantShardId,
+    timeline_id: TimelineId,
+) -> LayerMap {
+    let mut layer_map = LayerMap::default();
+    {
+        let mut updates = layer_map.batch_update();
+        for (key, value) in index_part.layer_metadata.iter() {
+            updates.insert_historic(PersistentLayerDesc::from_filename(
+                tenant_shard_id,
+                timeline_id,
+                key.clone(),
+                value.file_size,
+            ));
+        }
+    }
+    layer_map
 }
 
 async fn search_layers(
@@ -49,18 +76,7 @@ async fn search_layers(
         let bytes = tokio::fs::read(path).await?;
         IndexPart::from_json_bytes(&bytes).unwrap()
     };
-    let mut layer_map = LayerMap::default();
-    {
-        let mut updates = layer_map.batch_update();
-        for (key, value) in index_json.layer_metadata.iter() {
-            updates.insert_historic(PersistentLayerDesc::from_filename(
-                tenant_shard_id,
-                timeline_id,
-                key.clone(),
-                value.file_size,
-            ));
-        }
-    }
+    let layer_map = create_layer_map_from_index_part(&index_json, tenant_shard_id, timeline_id);
     let key = Key::from_hex(key)?;
 
     let lsn = Lsn::from_str(lsn).unwrap();
@@ -98,6 +114,69 @@ async fn search_layers(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct VisibleLayers {
+    pub total_images: u64,
+    pub total_image_bytes: u64,
+    pub total_deltas: u64,
+    pub total_delta_bytes: u64,
+    pub layer_metadata: BTreeMap<LayerName, LayerFileMetadata>,
+}
+
+impl VisibleLayers {
+    pub fn new() -> Self {
+        Self {
+            layer_metadata: BTreeMap::new(),
+            total_images: 0,
+            total_image_bytes: 0,
+            total_deltas: 0,
+            total_delta_bytes: 0,
+        }
+    }
+
+    pub fn add_layer(&mut self, name: LayerName, layer: LayerFileMetadata) {
+        match name {
+            LayerName::Image(_) => {
+                self.total_images += 1;
+                self.total_image_bytes += layer.file_size;
+            }
+            LayerName::Delta(_) => {
+                self.total_deltas += 1;
+                self.total_delta_bytes += layer.file_size;
+            }
+        }
+        self.layer_metadata.insert(name, layer);
+    }
+}
+
+async fn list_visible_layers(path: &Utf8PathBuf) -> anyhow::Result<()> {
+    let tenant_id = TenantId::generate();
+    let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+    let timeline_id = TimelineId::generate();
+
+    let bytes = tokio::fs::read(path).await.context("read file")?;
+    let index_part = IndexPart::from_json_bytes(&bytes).context("deserialize")?;
+    let layer_map = create_layer_map_from_index_part(&index_part, tenant_shard_id, timeline_id);
+    let mut visible_layers = VisibleLayers::new();
+    let (layers, _key_space) = layer_map.get_visibility(Vec::new());
+    for (layer, visibility) in layers {
+        if visibility == LayerVisibilityHint::Visible {
+            visible_layers.add_layer(
+                layer.layer_name(),
+                index_part
+                    .layer_metadata
+                    .get(&layer.layer_name())
+                    .unwrap()
+                    .clone(),
+            );
+        }
+    }
+    let output = serde_json::to_string_pretty(&visible_layers).context("serialize output")?;
+    println!("{output}");
+
+    Ok(())
+}
+
 pub(crate) async fn main(cmd: &IndexPartCmd) -> anyhow::Result<()> {
     match cmd {
         IndexPartCmd::Dump { path } => {
@@ -114,5 +193,6 @@ pub(crate) async fn main(cmd: &IndexPartCmd) -> anyhow::Result<()> {
             key,
             lsn,
         } => search_layers(tenant_id, timeline_id, path, key, lsn).await,
+        IndexPartCmd::ListVisibleLayers { path } => list_visible_layers(path).await,
     }
 }
