@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [features]
-default = ["rest_broker"]
+default = []
 testing = ["dep:tokio-postgres"]
 rest_broker = ["subzero-core", "jsonpath_lib", "ouroboros"]
 
