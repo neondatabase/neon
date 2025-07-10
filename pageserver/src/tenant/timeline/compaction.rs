@@ -1485,9 +1485,7 @@ impl Timeline {
     pub(crate) fn get_force_image_creation_lsn(self: &Arc<Self>) -> Option<Lsn> {
         let image_creation_period = self.get_image_layer_force_creation_period()?;
         let current_lsn: Lsn = self.get_last_record_lsn();
-        let Some(pitr_lsn) = self.gc_info.read().unwrap().cutoffs.time else {
-            return None;
-        };
+        let pitr_lsn = self.gc_info.read().unwrap().cutoffs.time?;
         let pitr_interval = self.get_pitr_interval();
         if pitr_interval.is_zero() {
             tracing::warn!(

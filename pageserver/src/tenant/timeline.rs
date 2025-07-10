@@ -7146,7 +7146,10 @@ impl Timeline {
 
     /* BEGIN_HADRON */
     pub(crate) async fn compute_image_consistent_lsn(&self) -> anyhow::Result<Lsn> {
-        let guard = self.layers.read(LayerManagerLockHolder::ComputeImageConsistentLsn).await;
+        let guard = self
+            .layers
+            .read(LayerManagerLockHolder::ComputeImageConsistentLsn)
+            .await;
         let layer_map = guard.layer_map()?;
         let disk_consistent_lsn = self.get_disk_consistent_lsn();
 
