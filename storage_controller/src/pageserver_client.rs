@@ -14,8 +14,6 @@ use reqwest::StatusCode;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 
-use crate::hadron_utils::TenantShardSizeMap;
-
 /// Thin wrapper around [`pageserver_client::mgmt_api::Client`]. It allows the storage
 /// controller to collect metrics in a non-intrusive manner.
 #[derive(Debug, Clone)]
@@ -87,62 +85,6 @@ impl PageserverClient {
                 .await
         )
     }
-
-    #[allow(dead_code)]
-    pub(crate) async fn tenant_timeline_compact(
-        &self,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-        force_image_layer_creation: bool,
-        must_force_image_layer_creation: bool,
-        scheduled: bool,
-        wait_until_done: bool,
-    ) -> Result<()> {
-        measured_request!(
-            "tenant_timeline_compact",
-            crate::metrics::Method::Put,
-            &self.node_id_label,
-            self.inner
-                .tenant_timeline_compact(
-                    tenant_shard_id,
-                    timeline_id,
-                    force_image_layer_creation,
-                    must_force_image_layer_creation,
-                    scheduled,
-                    wait_until_done,
-                )
-                .await
-        )
-    }
-
-    /* BEGIN_HADRON */
-    #[allow(dead_code)]
-    pub(crate) async fn tenant_timeline_describe(
-        &self,
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-    ) -> Result<TimelineInfo> {
-        measured_request!(
-            "tenant_timeline_describe",
-            crate::metrics::Method::Get,
-            &self.node_id_label,
-            self.inner
-                .tenant_timeline_describe(tenant_shard_id, timeline_id,)
-                .await
-        )
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn list_tenant_visible_size(&self) -> Result<TenantShardSizeMap> {
-        measured_request!(
-            "list_tenant_visible_size",
-            crate::metrics::Method::Get,
-            &self.node_id_label,
-            self.inner.list_tenant_visible_size().await
-        )
-        .map(TenantShardSizeMap::new)
-    }
-    /* END_HADRON */
 
     pub(crate) async fn tenant_scan_remote_storage(
         &self,
