@@ -15,7 +15,9 @@ pub type COid = u32;
 // This conveniently matches PG_IOV_MAX
 pub const MAX_GETPAGEV_PAGES: usize = 32;
 
-use pageserver_page_api as page_api;
+use std::ffi::CStr;
+
+use pageserver_page_api::{self as page_api, SlruKind};
 
 /// Request from a Postgres backend to the communicator process
 #[allow(clippy::large_enum_variant)]
@@ -29,6 +31,7 @@ pub enum NeonIORequest {
     RelExists(CRelExistsRequest),
     RelSize(CRelSizeRequest),
     GetPageV(CGetPageVRequest),
+    ReadSlruSegment(CReadSlruSegmentRequest),
     PrefetchV(CPrefetchVRequest),
     DbSize(CDbSizeRequest),
 
@@ -54,6 +57,9 @@ pub enum NeonIOResult {
 
     /// the result pages are written to the shared memory addresses given in the request
     GetPageV,
+    /// The result is written to the file, path to which is provided
+    /// in the request. The [`u64`] value here is the number of blocks.
+    ReadSlruSegment(u64),
 
     /// A prefetch request returns as soon as the request has been received by the communicator.
     /// It is processed in the background.
@@ -83,6 +89,7 @@ impl NeonIORequest {
             RelExists(req) => req.request_id,
             RelSize(req) => req.request_id,
             GetPageV(req) => req.request_id,
+            ReadSlruSegment(req) => req.request_id,
             PrefetchV(req) => req.request_id,
             DbSize(req) => req.request_id,
             WritePage(req) => req.request_id,
@@ -191,6 +198,28 @@ pub struct CGetPageVRequest {
 
     // These fields define where the result is written. Must point into a buffer in shared memory!
     pub dest: [ShmemBuf; MAX_GETPAGEV_PAGES],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CReadSlruSegmentRequest {
+    pub request_id: u64,
+    pub slru_kind: SlruKind,
+    pub segment_number: u32,
+    pub request_lsn: CLsn,
+    /// Must be a null-terminated C string containing the file path
+    /// where the communicator will write the SLRU segment.
+    pub destination_file_path: ShmemBuf,
+}
+
+impl CReadSlruSegmentRequest {
+    /// Returns the file path where the communicator will write the
+    /// SLRU segment.
+    pub(crate) fn destination_file_path(&self) -> String {
+        unsafe { CStr::from_ptr(self.destination_file_path.as_mut_ptr() as *const _) }
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 #[repr(C)]

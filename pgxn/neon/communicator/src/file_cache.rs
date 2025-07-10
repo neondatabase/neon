@@ -22,6 +22,7 @@ pub type CacheBlock = u64;
 
 pub const INVALID_CACHE_BLOCK: CacheBlock = u64::MAX;
 
+#[derive(Debug)]
 pub struct FileCache {
     file: Arc<File>,
 
@@ -35,6 +36,7 @@ pub struct FileCache {
 // TODO: We keep track of all free blocks in this vec. That doesn't really scale.
 // Idea: when free_blocks fills up with more than 1024 entries, write them all to
 // one block on disk.
+#[derive(Debug)]
 struct FreeList {
     next_free_block: CacheBlock,
     max_blocks: u64,

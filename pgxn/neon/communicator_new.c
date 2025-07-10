@@ -997,10 +997,58 @@ communicator_new_dbsize(Oid dbNode)
 }
 
 int
-communicator_new_read_slru_segment(SlruKind kind, int64 segno, void *buffer)
+communicator_new_read_slru_segment(
+	SlruKind kind,
+	uint32_t segno,
+	neon_request_lsns *request_lsns,
+	const char* path)
 {
-	/* TODO */
-	elog(ERROR, "not implemented");
+	NeonIOResult result = {};
+	NeonIORequest request = {
+		.tag = NeonIORequest_ReadSlruSegment,
+		.read_slru_segment = {
+			.request_id = assign_request_id(),
+			.slru_kind = kind,
+			.segment_number = segno,
+			.request_lsn = request_lsns->request_lsn,
+		}
+	};
+	int nblocks = -1;
+	char *temp_path = bounce_buf();
+
+	if (path == NULL) {
+		elog(ERROR, "read_slru_segment called with NULL path");
+		return -1;
+	}
+
+	strlcpy(temp_path, path, BLCKSZ);
+	request.read_slru_segment.destination_file_path.ptr = (uint8_t *) temp_path;
+
+	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u, file_path=\"%s\"",
+		kind, segno, request.read_slru_segment.destination_file_path.ptr);
+
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(request_lsns->request_lsn);
+
+	perform_request(&request, &result);
+
+	switch (result.tag)
+	{
+		case NeonIOResult_ReadSlruSegment:
+			nblocks = result.read_slru_segment;
+			break;
+		case NeonIOResult_Error:
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read slru segment, kind=%u, segno=%u: %s",
+							kind, segno, pg_strerror(result.error))));
+			break;
+		default:
+			elog(ERROR, "unexpected result for read SLRU operation: %d", result.tag);
+			break;
+	}
+
+	return nblocks;
 }
 
 /* Write requests */
@@ -1303,6 +1351,18 @@ print_neon_io_request(NeonIORequest *request)
 				snprintf(buf, sizeof(buf), "GetPageV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+				return buf;
+			}
+		case NeonIORequest_ReadSlruSegment:
+			{
+				CReadSlruSegmentRequest *r = &request->read_slru_segment;
+
+				snprintf(buf, sizeof(buf), "ReadSlruSegment: req " UINT64_FORMAT " slrukind=%u, segno=%u, lsn=%X/%X, file_path=\"%s\"",
+								r->request_id,
+								r->slru_kind,
+								r->segment_number,
+								LSN_FORMAT_ARGS(r->request_lsn),
+								r->destination_file_path.ptr);
 				return buf;
 			}
 		case NeonIORequest_PrefetchV:

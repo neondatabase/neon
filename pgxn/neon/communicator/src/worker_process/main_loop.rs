@@ -24,7 +24,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::callbacks::{get_request_lsn, notify_proc};
 
-use tracing::{error, info, info_span, trace};
+use tracing::{debug, error, info, info_span, trace};
 
 use utils::lsn::Lsn;
 
@@ -58,6 +58,7 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     request_rel_exists_counter: IntCounter,
     request_rel_size_counter: IntCounter,
     request_get_pagev_counter: IntCounter,
+    request_read_slru_segment_counter: IntCounter,
     request_prefetchv_counter: IntCounter,
     request_db_size_counter: IntCounter,
     request_write_page_counter: IntCounter,
@@ -106,6 +107,8 @@ pub(super) async fn init(
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
 
+    debug!("Initialised integrated cache: {cache:?}");
+
     let tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
     let timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
     let shard_spec = ShardSpec::new(shard_map, stripe_size).expect("invalid shard spec");
@@ -123,6 +126,8 @@ pub(super) async fn init(
     let request_rel_exists_counter = request_counters.with_label_values(&["rel_exists"]);
     let request_rel_size_counter = request_counters.with_label_values(&["rel_size"]);
     let request_get_pagev_counter = request_counters.with_label_values(&["get_pagev"]);
+    let request_read_slru_segment_counter =
+        request_counters.with_label_values(&["read_slru_segment"]);
     let request_prefetchv_counter = request_counters.with_label_values(&["prefetchv"]);
     let request_db_size_counter = request_counters.with_label_values(&["db_size"]);
     let request_write_page_counter = request_counters.with_label_values(&["write_page"]);
@@ -173,6 +178,7 @@ pub(super) async fn init(
         request_rel_exists_counter,
         request_rel_size_counter,
         request_get_pagev_counter,
+        request_read_slru_segment_counter,
         request_prefetchv_counter,
         request_db_size_counter,
         request_write_page_counter,
@@ -416,6 +422,36 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 match self.handle_get_pagev_request(req).await {
                     Ok(()) => NeonIOResult::GetPageV,
                     Err(errno) => NeonIOResult::Error(errno),
+                }
+            }
+            NeonIORequest::ReadSlruSegment(req) => {
+                self.request_read_slru_segment_counter.inc();
+                let lsn = Lsn(req.request_lsn);
+                let file_path = req.destination_file_path();
+
+                match self
+                    .client
+                    .get_slru_segment(page_api::GetSlruSegmentRequest {
+                        read_lsn: self.request_lsns(lsn),
+                        kind: req.slru_kind,
+                        segno: req.segment_number,
+                    })
+                    .await
+                {
+                    Ok(slru_bytes) => {
+                        if let Err(e) = tokio::fs::write(&file_path, &slru_bytes).await {
+                            info!("could not write slru segment to file {file_path}: {e}");
+                            return NeonIOResult::Error(e.raw_os_error().unwrap_or(libc::EIO));
+                        }
+
+                        let blocks_count = slru_bytes.len() / crate::BLCKSZ;
+
+                        NeonIOResult::ReadSlruSegment(blocks_count as _)
+                    }
+                    Err(err) => {
+                        info!("tonic error: {err:?}");
+                        NeonIOResult::Error(0)
+                    }
                 }
             }
             NeonIORequest::PrefetchV(req) => {

@@ -23,9 +23,7 @@
 #include "utils/dynahash.h"
 #include "utils/guc.h"
 
-#if PG_VERSION_NUM >= 150000
 #include "miscadmin.h"
-#endif
 
 typedef struct
 {
@@ -100,7 +98,7 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 {
 	bool		found = false;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (relsize_hash_size > 0)
 	{
@@ -133,7 +131,7 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 void
 set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (relsize_hash_size > 0)
 	{
@@ -183,7 +181,7 @@ set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 void
 update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (relsize_hash_size > 0)
 	{
@@ -219,7 +217,7 @@ update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 void
 forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
 {
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (relsize_hash_size > 0)
 	{

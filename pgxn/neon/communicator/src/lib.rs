@@ -21,5 +21,5 @@ mod worker_process;
 
 mod global_allocator;
 
-// FIXME get this from postgres headers somehow
+// FIXME: get this from postgres headers somehow
 pub const BLCKSZ: usize = 8192;
