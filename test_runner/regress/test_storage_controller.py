@@ -2621,7 +2621,7 @@ def test_storage_controller_node_deletion(
         wait_until(assert_shards_migrated)
 
     log.info(f"Deleting pageserver {victim.id}")
-    env.storage_controller.node_delete_old(victim.id)
+    env.storage_controller.node_delete(victim.id, force=True)
 
     if not while_offline:
 
@@ -2634,7 +2634,10 @@ def test_storage_controller_node_deletion(
         wait_until(assert_victim_evacuated)
 
     # The node should be gone from the list API
-    assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+    def assert_victim_gone():
+        assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+
+    wait_until(assert_victim_gone)
 
     # No tenants should refer to the node in their intent
     for tenant_id in tenant_ids:
@@ -3265,10 +3268,10 @@ def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
     assert_nodes_count(3)
 
     ps = env.pageservers[0]
-    env.storage_controller.node_delete_old(ps.id)
+    env.storage_controller.node_delete(ps.id, force=True)
 
     # After deletion, the node count must be reduced
-    assert_nodes_count(2)
+    wait_until(lambda: assert_nodes_count(2))
 
     # Running pageserver CLI init in a separate thread
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
