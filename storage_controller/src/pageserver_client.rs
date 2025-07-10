@@ -86,33 +86,6 @@ impl PageserverClient {
         )
     }
 
-    #[allow(unused)]
-    pub(crate) async fn tenant_timeline_compact(
-        &self,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-        force_image_layer_creation: bool,
-        must_force_image_layer_creation: bool,
-        scheduled: bool,
-        wait_until_done: bool,
-    ) -> Result<()> {
-        measured_request!(
-            "tenant_timeline_compact",
-            crate::metrics::Method::Put,
-            &self.node_id_label,
-            self.inner
-                .tenant_timeline_compact(
-                    tenant_shard_id,
-                    timeline_id,
-                    force_image_layer_creation,
-                    must_force_image_layer_creation,
-                    scheduled,
-                    wait_until_done,
-                )
-                .await
-        )
-    }
-
     /* BEGIN_HADRON */
     pub(crate) async fn tenant_timeline_describe(
         &self,
