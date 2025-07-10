@@ -1826,6 +1826,7 @@ impl ComputeNode {
 
                 Ok(())
             })?;
+            self.pg_reload_conf()?;
         }
 
         let unknown_op = "unknown".to_string();
