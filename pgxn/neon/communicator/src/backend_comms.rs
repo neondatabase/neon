@@ -6,7 +6,6 @@
 //! to launch threads or use tokio tasks!
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::fence;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::neon_request::{NeonIORequest, NeonIOResult};
@@ -136,11 +135,13 @@ impl NeonIORequestSlot {
             panic!("unexpected state in request slot: {s:?}");
         }
 
-        // This fence synchronizes-with store/swap in `communicator_process_main_loop`.
-        fence(Ordering::Acquire);
-
+        // Fill in the request details
         self.owner_procno.store(proc_number, Ordering::Relaxed);
         unsafe { *self.request.get() = *request }
+
+        // This synchronizes-with store/swap in [`start_processing_request`].
+        // Note that this ensures that the previous non-atomic writes visible
+        // to other threads too.
         self.state
             .store(NeonIORequestSlotState::Submitted, Ordering::Release);
     }
@@ -150,13 +151,12 @@ impl NeonIORequestSlot {
     }
 
     pub fn try_get_result(&self) -> Option<NeonIOResult> {
-        // FIXME: ordering?
-        let state = self.state.load(Ordering::Relaxed);
+        // This synchronizes-with the store/swap in [`RequestProcessingGuard::completed`]
+        let state = self.state.load(Ordering::Acquire);
         if state == NeonIORequestSlotState::Completed {
-            // This fence synchronizes-with store/swap in `communicator_process_main_loop`.
-            fence(Ordering::Acquire);
             let result = unsafe { *self.result.get() };
-            self.state.store(NeonIORequestSlotState::Idle, Ordering::Relaxed);
+            self.state
+                .store(NeonIORequestSlotState::Idle, Ordering::Relaxed);
             Some(result)
         } else {
             None
@@ -165,14 +165,16 @@ impl NeonIORequestSlot {
 
     /// Read the IO request from the slot indicated in the wakeup
     pub fn start_processing_request<'a>(&'a self) -> Option<RequestProcessingGuard<'a>> {
-        // XXX: using compare_exchange for this is not strictly necessary, as long as
-        // the communicator process has _some_ means of tracking which requests it's
-        // already processing. That could be a flag somewhere in communicator's private
-        // memory, for example.
+        // XXX: using atomic load rather than compare_exchange would be
+        // sufficient here, as long as the communicator process has _some_ means
+        // of tracking which requests it's already processing. That could be a
+        // flag somewhere in communicator's private memory, for example.
+        //
+        // This synchronizes-with the store in [`submit_request`].
         if let Err(s) = self.state.compare_exchange(
             NeonIORequestSlotState::Submitted,
             NeonIORequestSlotState::Processing,
-            Ordering::Relaxed,
+            Ordering::Acquire,
             Ordering::Relaxed,
         ) {
             // FIXME surprising state. This is unexpected at the moment, but if we
@@ -180,7 +182,6 @@ impl NeonIORequestSlot {
             // read from the pipe, then this could happen
             panic!("unexpected state in request slot: {s:?}");
         }
-        fence(Ordering::Acquire);
 
         Some(RequestProcessingGuard(self))
     }
