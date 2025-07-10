@@ -1036,10 +1036,8 @@ def test_image_layer_force_creation_period(neon_env_builder: NeonEnvBuilder):
         "image_layer_force_creation_period": "1s",
         "pitr_interval": "10s",
         "gc_period": "1s",
-        # The lsn for forced image layer creations is calculated once every 10 minutes.
-        # Hence, drive compaction manually such that the test doesn't compute it at the
-        # wrong time.
-        "compaction_period": "0s",
+        "compaction_period": "1s",
+        "lsn_lease_length": "1s",
     }
 
     # consider every tenant large to run the image layer generation check more eagerly
