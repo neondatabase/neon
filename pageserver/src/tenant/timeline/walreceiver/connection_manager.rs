@@ -750,7 +750,7 @@ impl ConnectionManagerState {
 
         WALRECEIVER_BROKER_UPDATES.inc();
 
-        trace!(
+        info!(
             "safekeeper info update: standby_horizon(cutoff)={}",
             timeline_update.standby_horizon
         );
