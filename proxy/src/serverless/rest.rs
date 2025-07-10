@@ -1,39 +1,21 @@
-use super::backend::HttpConnError;
-use super::backend::{LocalProxyConnError, PoolingBackend};
-use super::conn_pool::AuthData;
-use super::conn_pool_lib::ConnInfo;
-use super::error::{ConnInfoError, Credentials, HttpCodeError, ReadPayloadError};
-use super::http_conn_pool::{self, Send};
-use super::http_util::{
-    ALLOW_POOL, CONN_STRING, NEON_REQUEST_ID, RAW_TEXT_OUTPUT, TXN_ISOLATION_LEVEL, TXN_READ_ONLY,
-    get_conn_info, json_response, uuid_to_header_value,
-};
-use super::json::JsonConversionError;
-use crate::auth::backend::ComputeCredentialKeys;
-use crate::cache::TimedLru;
-use crate::config::ProxyConfig;
-use crate::context::RequestContext;
-use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::http::read_body_with_limit;
-use crate::metrics::Metrics;
-use crate::types::EndpointCacheKey;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use bytes::Bytes;
 use http::Method;
 use http::header::AUTHORIZATION;
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
 use http_utils::error::ApiError;
-use hyper::{
-    Request, Response, StatusCode,
-    body::Incoming,
-    http::{HeaderName, HeaderValue},
-};
+use hyper::body::Incoming;
+use hyper::http::{HeaderName, HeaderValue};
+use hyper::{Request, Response, StatusCode};
 use indexmap::IndexMap;
 use jsonpath_lib::select;
 use ouroboros::self_referencing;
 use serde::{Deserialize, Deserializer};
-use serde_json::{Value as JsonValue, value::RawValue};
-use std::collections::HashMap;
-use std::sync::Arc;
+use serde_json::Value as JsonValue;
+use serde_json::value::RawValue;
 use subzero_core::{
     api::{
         ApiResponse,
@@ -66,6 +48,25 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use typed_json::json;
 use url::form_urlencoded;
+
+use super::backend::{HttpConnError, LocalProxyConnError, PoolingBackend};
+use super::conn_pool::AuthData;
+use super::conn_pool_lib::ConnInfo;
+use super::error::{ConnInfoError, Credentials, HttpCodeError, ReadPayloadError};
+use super::http_conn_pool::{self, Send};
+use super::http_util::{
+    ALLOW_POOL, CONN_STRING, NEON_REQUEST_ID, RAW_TEXT_OUTPUT, TXN_ISOLATION_LEVEL, TXN_READ_ONLY,
+    get_conn_info, json_response, uuid_to_header_value,
+};
+use super::json::JsonConversionError;
+use crate::auth::backend::ComputeCredentialKeys;
+use crate::cache::TimedLru;
+use crate::config::ProxyConfig;
+use crate::context::RequestContext;
+use crate::error::{ErrorKind, ReportableError, UserFacingError};
+use crate::http::read_body_with_limit;
+use crate::metrics::Metrics;
+use crate::types::EndpointCacheKey;
 
 static EMPTY_JSON_SCHEMA: &str = r#"{"schemas":[]}"#;
 const INTROSPECTION_SQL: &str = POSTGRESQL_INTROSPECTION_SQL;
