@@ -1,5 +1,6 @@
 //! Simple hash table with chaining.
 
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::mem::MaybeUninit;
 
@@ -17,6 +18,19 @@ pub(crate) struct Bucket<K, V> {
     pub(crate) inner: Option<(K, V)>,
 }
 
+impl<K, V> Debug for Bucket<K, V>
+where
+    K: Debug,
+    V: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bucket")
+            .field("next", &self.next)
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
 /// Core hash table implementation.
 pub(crate) struct CoreHashMap<'a, K, V> {
     /// Dictionary used to map hashes to bucket indices.
@@ -32,6 +46,22 @@ pub(crate) struct CoreHashMap<'a, K, V> {
     // pub(crate) lock: libc::pthread_mutex_t,
     // Unclear what the purpose of this is.
     pub(crate) _user_list_head: u32,
+}
+
+impl<'a, K, V> Debug for CoreHashMap<'a, K, V>
+where
+    K: Debug,
+    V: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoreHashMap")
+            .field("dictionary", &self.dictionary)
+            .field("buckets", &self.buckets)
+            .field("free_head", &self.free_head)
+            .field("alloc_limit", &self.alloc_limit)
+            .field("buckets_in_use", &self.buckets_in_use)
+            .finish()
+    }
 }
 
 /// Error for when there are no empty buckets left but one is needed.

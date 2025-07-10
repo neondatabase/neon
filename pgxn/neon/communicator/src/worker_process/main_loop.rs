@@ -107,6 +107,9 @@ pub(super) async fn init(
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
 
+    info!("Initialised integrated cache: {cache:?}");
+
+    // TODO: plumb through the stripe size.
     let tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
     let timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
     let shard_spec = ShardSpec::new(shard_map, stripe_size).expect("invalid shard spec");
@@ -444,7 +447,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                             std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
                         };
 
-                        NeonIOResult::ReadSlruSegment
+                        let blocks_count = len / (crate::BLCKSZ * crate::SLRU_PAGES_PER_SEGMENT);
+
+                        NeonIOResult::ReadSlruSegment(blocks_count as _)
                     }
                     Err(err) => {
                         info!("tonic error: {err:?}");

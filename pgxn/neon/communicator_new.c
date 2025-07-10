@@ -997,7 +997,12 @@ communicator_new_dbsize(Oid dbNode)
 }
 
 int
-communicator_new_read_slru_segment(SlruKind kind, uint32_t segno, void *buffer)
+// communicator_new_read_slru_segment(SlruKind kind, uint32_t segno, void *buffer)
+communicator_new_read_slru_segment(
+	SlruKind kind,
+	uint32_t segno,
+	neon_request_lsns *request_lsns,
+	void *buffer)
 {
 	NeonIOResult result = {};
 	NeonIORequest request = {
@@ -1012,11 +1017,14 @@ communicator_new_read_slru_segment(SlruKind kind, uint32_t segno, void *buffer)
 
 	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u", kind, segno);
 
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(request_lsns->request_lsn);
+
 	perform_request(&request, &result);
 	switch (result.tag)
 	{
 		case NeonIOResult_ReadSlruSegment:
-			return 0;
+			return result.read_slru_segment;
 		case NeonIOResult_Error:
 			ereport(ERROR,
 					(errcode_for_file_access(),

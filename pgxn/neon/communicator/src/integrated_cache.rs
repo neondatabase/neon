@@ -46,6 +46,7 @@ pub struct IntegratedCacheInitStruct<'t> {
 }
 
 /// Represents write-access to the integrated cache. This is used by the communicator process.
+#[derive(Debug)]
 pub struct IntegratedCacheWriteAccess<'t> {
     relsize_cache: neon_shmem::hash::HashMapAccess<'t, RelKey, RelEntry>,
     block_map: neon_shmem::hash::HashMapAccess<'t, BlockKey, BlockEntry>,

@@ -2385,7 +2385,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	request_lsns.effective_request_lsn = request_lsn;
 
 	if (neon_enable_new_communicator)
-		n_blocks = communicator_new_read_slru_segment(kind, (uint32_t)segno, buffer);
+		n_blocks = communicator_new_read_slru_segment(kind, (uint32_t)segno, &request_lsns, buffer);
 	else
 		n_blocks = communicator_read_slru_segment(kind, segno, &request_lsns, buffer);
 

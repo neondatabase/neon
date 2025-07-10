@@ -44,8 +44,8 @@ pub enum NeonIOResult {
     /// the result pages are written to the shared memory addresses given in the request
     GetPageV,
     /// The result is written to the shared memory address given in the
-    /// request.
-    ReadSlruSegment,
+    /// request. The [`u64`] value here is the number of blocks.
+    ReadSlruSegment(u64),
 
     /// A prefetch request returns as soon as the request has been received by the communicator.
     /// It is processed in the background.
