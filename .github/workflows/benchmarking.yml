@@ -469,7 +469,6 @@ jobs:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
         NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
-        BENCHMARK_PROJECT_ID: ${{ vars.BENCHMARK_PROJECT_ID }}
 
     - name: Create Allure report
       id: create-allure-report

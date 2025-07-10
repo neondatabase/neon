@@ -66,7 +66,7 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
     pgbench_size = 3424
     offload_secs = 20
     test_duration_min = 5
-    pgbench_duration = f"-T{test_duration_min * 60 * 2}"
+    pgbench_duration = f"-T{test_duration_min * 60}"
 
     name = f"Test prewarmed pgbench performance, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}"
     normal = neon_api.create_project(pg_version, name)
