@@ -32,8 +32,8 @@ impl GetPageSplitter {
             return Some(ShardIndex::unsharded());
         }
 
-        // Find the base shard index for the first page, and compare with the rest. If there are
-        // no pages, just return the first shard.
+        // Find the first page's shard, for comparison. If there are no pages, just return the first
+        // shard (caller likely checked already, otherwise the server will reject it).
         let Some(&first_page) = req.block_numbers.first() else {
             return Some(ShardIndex::new(ShardNumber(0), count));
         };
