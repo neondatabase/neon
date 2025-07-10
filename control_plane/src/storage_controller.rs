@@ -660,7 +660,7 @@ impl StorageController {
             ));
         }
 
-        println!("Starting storage controller");
+        println!("Starting storage controller at {scheme}://{host}:{listen_port}");
 
         background_process::start_process(
             COMMAND,

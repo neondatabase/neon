@@ -11,7 +11,7 @@ use pageserver_api::controller_api::{
     PlacementPolicy, SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest,
     ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
     SkSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
-    TenantShardMigrateRequest, TenantShardMigrateResponse,
+    TenantShardMigrateRequest, TenantShardMigrateResponse, TimelineSafekeeperMigrateRequest,
 };
 use pageserver_api::models::{
     EvictionPolicy, EvictionPolicyLayerAccessThreshold, ShardParameters, TenantConfig,
@@ -278,6 +278,22 @@ enum Command {
         /// Optional: Maximum download concurrency (default is 16)
         #[arg(long)]
         concurrency: Option<usize>,
+    },
+    /// Locate a timeline on a safekeeper.
+    // TimelineSafekeeperLocate {
+    //     #[arg(long)]
+    //     tenant_id: TenantId,
+    //     #[arg(long)]
+    //     timeline_id: TimelineId,
+    // },
+    /// Migrate a timeline to a new set of safekeepers
+    TimelineSafekeeperMigrate {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        timeline_id: TimelineId,
+        #[arg(long)]
+        new_sk_set: Vec<NodeId>,
     },
 }
 
@@ -1333,6 +1349,21 @@ async fn main() -> anyhow::Result<()> {
 
             storcon_client
                 .dispatch::<(), ()>(Method::POST, path, None)
+                .await?;
+        }
+        Command::TimelineSafekeeperMigrate {
+            tenant_id,
+            timeline_id,
+            new_sk_set,
+        } => {
+            let path = format!("/v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate");
+
+            storcon_client
+                .dispatch::<_, ()>(
+                    Method::POST,
+                    path,
+                    Some(TimelineSafekeeperMigrateRequest { new_sk_set }),
+                )
                 .await?;
         }
     }

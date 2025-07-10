@@ -303,7 +303,7 @@ impl PageServerNode {
     async fn start_node(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
-        print!(
+        println!(
             "Starting pageserver node {} at '{}' in {:?}, retrying for {:?}",
             self.conf.id,
             self.pg_connection_config.raw_address(),
