@@ -9,7 +9,7 @@ use futures::FutureExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use postgres_client::RawCancelToken;
 use postgres_client::tls::MakeTlsConnect;
-use redis::{Cmd, FromRedisValue, Value};
+use redis::{Cmd, FromRedisValue, SetExpiry, SetOptions, Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -43,6 +43,9 @@ pub enum CancelKeyOp {
         expire: std::time::Duration,
     },
     GetCancelData {
+        key: CancelKeyData,
+    },
+    GetCancelDataOld {
         key: CancelKeyData,
     },
 }
@@ -94,13 +97,9 @@ impl Pipeline {
         }
     }
 
-    fn add_command_with_reply(&mut self, cmd: Cmd) {
+    fn add_command(&mut self, cmd: Cmd) {
         self.inner.add_command(cmd);
         self.replies += 1;
-    }
-
-    fn add_command_no_reply(&mut self, cmd: Cmd) {
-        self.inner.add_command(cmd).ignore();
     }
 }
 
@@ -109,12 +108,19 @@ impl CancelKeyOp {
         match self {
             CancelKeyOp::StoreCancelKey { key, value, expire } => {
                 let key = KeyPrefix::Cancel(*key).build_redis_key();
-                pipe.add_command_with_reply(Cmd::hset(&key, "data", &**value));
-                pipe.add_command_no_reply(Cmd::expire(&key, expire.as_secs() as i64));
+                pipe.add_command(Cmd::set_options(
+                    &key,
+                    &**value,
+                    SetOptions::default().with_expiration(SetExpiry::EX(expire.as_secs())),
+                ));
+            }
+            CancelKeyOp::GetCancelDataOld { key } => {
+                let key = KeyPrefix::Cancel(*key).build_redis_key();
+                pipe.add_command(Cmd::hget(key, "data"));
             }
             CancelKeyOp::GetCancelData { key } => {
                 let key = KeyPrefix::Cancel(*key).build_redis_key();
-                pipe.add_command_with_reply(Cmd::hget(key, "data"));
+                pipe.add_command(Cmd::get(key));
             }
         }
     }
@@ -244,18 +250,18 @@ impl CancellationHandler {
         &self,
         key: CancelKeyData,
     ) -> Result<Option<CancelClosure>, CancelError> {
-        let guard = Metrics::get()
-            .proxy
-            .cancel_channel_size
-            .guard(RedisMsgKind::HGet);
-        let op = CancelKeyOp::GetCancelData { key };
+        const TIMEOUT: Duration = Duration::from_secs(5);
 
         let Some(tx) = self.tx.get() else {
             tracing::warn!("cancellation handler is not available");
             return Err(CancelError::InternalError);
         };
 
-        const TIMEOUT: Duration = Duration::from_secs(5);
+        let guard = Metrics::get()
+            .proxy
+            .cancel_channel_size
+            .guard(RedisMsgKind::Get);
+        let op = CancelKeyOp::GetCancelData { key };
         let result = timeout(
             TIMEOUT,
             tx.call((guard, op), std::future::pending::<Infallible>()),
@@ -266,8 +272,34 @@ impl CancellationHandler {
             CancelError::RateLimit
         })?
         // cannot be cancelled
-        .unwrap_or_else(|x| match x {})
-        .map_err(|e| {
+        .unwrap_or_else(|x| match x {});
+
+        // We may still have cancel keys set with HSET <key> "data".
+        // Check error type and retry with HGET.
+        let result = if let Err(err) = result.as_ref()
+            && let Some(err) = err.downcast_ref::<redis::RedisError>()
+            && err.kind() == redis::ErrorKind::TypeError
+        {
+            let guard = Metrics::get()
+                .proxy
+                .cancel_channel_size
+                .guard(RedisMsgKind::HGet);
+            let op = CancelKeyOp::GetCancelDataOld { key };
+            timeout(
+                TIMEOUT,
+                tx.call((guard, op), std::future::pending::<Infallible>()),
+            )
+            .await
+            .map_err(|_| {
+                tracing::warn!("timed out waiting to receive GetCancelData response");
+                CancelError::RateLimit
+            })? // cannot be cancelled
+            .unwrap_or_else(|x| match x {})
+        } else {
+            result
+        };
+
+        let result = result.map_err(|e| {
             tracing::warn!("failed to receive GetCancelData response: {e}");
             CancelError::InternalError
         })?;
@@ -442,7 +474,7 @@ impl Session {
             let guard = Metrics::get()
                 .proxy
                 .cancel_channel_size
-                .guard(RedisMsgKind::HSet);
+                .guard(RedisMsgKind::Set);
             let op = CancelKeyOp::StoreCancelKey {
                 key: self.key,
                 value: closure_json.clone(),
