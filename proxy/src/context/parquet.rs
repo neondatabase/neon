@@ -267,7 +267,7 @@ async fn worker_inner(
 ) -> anyhow::Result<()> {
     #[cfg(any(test, feature = "testing"))]
     let storage = if config.test_remote_failures > 0 {
-        GenericRemoteStorage::unreliable_wrapper(storage, config.test_remote_failures)
+        GenericRemoteStorage::unreliable_wrapper(storage, config.test_remote_failures, 100)
     } else {
         storage
     };

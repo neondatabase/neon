@@ -220,6 +220,15 @@ neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
 setup-pre-commit-hook:
 	ln -s -f $(ROOT_PROJECT_DIR)/pre-commit.py .git/hooks/pre-commit
 
+.PHONY: lint-openapi-spec
+lint-openapi-spec:
+	# operation-2xx-response: pageserver timeline delete returns 404 on success
+	find . -iname "openapi_spec.y*ml" -exec\
+		docker run --rm -v ${PWD}:/spec ghcr.io/redocly/cli:1.34.4\
+			--skip-rule=operation-operationId --skip-rule=operation-summary --extends=minimal\
+			--skip-rule=no-server-example.com --skip-rule=operation-2xx-response\
+			lint {} \+
+
 # Targets for building PostgreSQL are defined in postgres.mk.
 #
 # But if the caller has indicated that PostgreSQL is already

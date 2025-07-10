@@ -1348,6 +1348,7 @@ dependencies = [
  "p256 0.13.2",
  "pageserver_page_api",
  "postgres",
+ "postgres-types",
  "postgres_initdb",
  "postgres_versioninfo",
  "regex",
@@ -4498,10 +4499,14 @@ name = "pageserver_client_grpc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "compute_api",
  "futures",
+ "pageserver_api",
  "pageserver_page_api",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic 0.13.1",
  "tracing",
  "utils",

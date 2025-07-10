@@ -409,11 +409,12 @@ impl TenantFeatureResolver {
 
     /// Refresh the cached properties and flags on the critical path.
     pub fn refresh_properties_and_flags(&self, tenant_shard: &TenantShard) {
-        let mut remote_size_mb = None;
+        let mut remote_size_mb = Some(0.0);
         for timeline in tenant_shard.list_timelines() {
             let size = timeline.metrics.resident_physical_size_get();
             if size == 0 {
                 remote_size_mb = None;
+                break;
             }
             if let Some(ref mut remote_size_mb) = remote_size_mb {
                 *remote_size_mb += size as f64 / 1024.0 / 1024.0;
