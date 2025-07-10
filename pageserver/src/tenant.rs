@@ -12812,8 +12812,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_force_image_creation_lsn() -> anyhow::Result<()> {
-        let tenant_conf = TenantConf {
-            pitr_interval: Duration::from_secs(7 * 3600),
+        let tenant_conf = pageserver_api::models::TenantConfig {
+            pitr_interval: Some(Duration::from_secs(7 * 3600)),
             image_layer_force_creation_period: Some(Duration::from_secs(3600)),
             ..Default::default()
         };
@@ -12832,7 +12832,7 @@ mod tests {
         let timeline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        timeline.gc_info.write().unwrap().cutoffs.time = Lsn(100);
+        timeline.gc_info.write().unwrap().cutoffs.time = Some(Lsn(100));
         {
             let writer = timeline.writer().await;
             writer.finish_write(Lsn(5000));
