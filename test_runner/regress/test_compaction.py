@@ -1013,5 +1013,9 @@ def test_image_creation_timeout(neon_env_builder: NeonEnvBuilder):
 
     endpoint.stop_and_destroy()
 
+    env.pageserver.allowed_errors.append(
+        ".*created delta file of size.*larger than double of target.*"
+    )
+
 
 # END_HADRON
