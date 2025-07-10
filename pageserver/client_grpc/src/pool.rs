@@ -40,6 +40,7 @@ use futures::StreamExt as _;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{error, warn};
 
@@ -242,6 +243,8 @@ pub struct ClientPool {
     shard_id: ShardIndex,
     /// Authentication token, if any.
     auth_token: Option<String>,
+    /// Compression to use.
+    compression: Option<CompressionEncoding>,
     /// Channel pool to acquire channels from.
     channel_pool: Arc<ChannelPool>,
     /// Limits the max number of concurrent clients for this pool. None if the pool is unbounded.
@@ -281,6 +284,7 @@ impl ClientPool {
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
         max_clients: Option<NonZero<usize>>,
     ) -> Arc<Self> {
         let pool = Arc::new(Self {
@@ -288,6 +292,7 @@ impl ClientPool {
             timeline_id,
             shard_id,
             auth_token,
+            compression,
             channel_pool,
             idle: Mutex::default(),
             idle_reaper: Reaper::new(REAP_IDLE_THRESHOLD, REAP_IDLE_INTERVAL),
@@ -331,7 +336,7 @@ impl ClientPool {
             self.timeline_id,
             self.shard_id,
             self.auth_token.clone(),
-            None,
+            self.compression,
         )?;
 
         Ok(ClientGuard {
@@ -586,6 +591,10 @@ impl StreamPool {
 
         // Track caller response channels by request ID. If the task returns early, these response
         // channels will be dropped and the waiting callers will receive an error.
+        //
+        // NB: this will leak entries if the server doesn't respond to a request (by request ID).
+        // It shouldn't happen, and if it does it will often hold onto queue depth quota anyway and
+        // block further use. But we could consider reaping closed channels after some time.
         let mut callers = HashMap::new();
 
         // Process requests and responses.
@@ -690,6 +699,15 @@ impl Drop for StreamGuard {
 
         // Release the queue depth reservation on drop. This can prematurely decrement it if dropped
         // before the response is received, but that's okay.
+        //
+        // TODO: actually, it's probably not okay. Queue depth release should be moved into the
+        // stream task, such that it continues to account for the queue depth slot until the server
+        // responds. Otherwise, if a slow request times out and keeps blocking the stream, the
+        // server will keep waiting on it and we can pile on subsequent requests (including the
+        // timeout retry) in the same stream and get blocked. But we may also want to avoid blocking
+        // requests on e.g. LSN waits and layer downloads, instead returning early to free up the
+        // stream. Or just scale out streams with a queue depth of 1 to sidestep all head-of-line
+        // blocking. TBD.
         let mut streams = pool.streams.lock().unwrap();
         let entry = streams.get_mut(&self.id).expect("unknown stream");
         assert!(entry.idle_since.is_none(), "active stream marked idle");

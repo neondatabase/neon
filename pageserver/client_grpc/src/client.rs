@@ -6,6 +6,7 @@ use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
+use tonic::codec::CompressionEncoding;
 use tracing::instrument;
 
 use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
@@ -62,6 +63,8 @@ pub struct PageserverClient {
     timeline_id: TimelineId,
     /// The JWT auth token for this tenant, if any.
     auth_token: Option<String>,
+    /// The compression to use, if any.
+    compression: Option<CompressionEncoding>,
     /// The shards for this tenant.
     shards: ArcSwap<Shards>,
     /// The retry configuration.
@@ -76,12 +79,20 @@ impl PageserverClient {
         timeline_id: TimelineId,
         shard_spec: ShardSpec,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
     ) -> anyhow::Result<Self> {
-        let shards = Shards::new(tenant_id, timeline_id, shard_spec, auth_token.clone())?;
+        let shards = Shards::new(
+            tenant_id,
+            timeline_id,
+            shard_spec,
+            auth_token.clone(),
+            compression,
+        )?;
         Ok(Self {
             tenant_id,
             timeline_id,
             auth_token,
+            compression,
             shards: ArcSwap::new(Arc::new(shards)),
             retry: Retry,
         })
@@ -119,6 +130,7 @@ impl PageserverClient {
             self.timeline_id,
             shard_spec,
             self.auth_token.clone(),
+            self.compression,
         )?;
         self.shards.store(Arc::new(shards));
         Ok(())
@@ -131,7 +143,7 @@ impl PageserverClient {
         req: page_api::CheckRelExistsRequest,
     ) -> tonic::Result<page_api::CheckRelExistsResponse> {
         self.retry
-            .with(async || {
+            .with(async |_| {
                 // Relation metadata is only available on shard 0.
                 let mut client = self.shards.load_full().get_zero().client().await?;
                 client.check_rel_exists(req).await
@@ -146,7 +158,7 @@ impl PageserverClient {
         req: page_api::GetDbSizeRequest,
     ) -> tonic::Result<page_api::GetDbSizeResponse> {
         self.retry
-            .with(async || {
+            .with(async |_| {
                 // Relation metadata is only available on shard 0.
                 let mut client = self.shards.load_full().get_zero().client().await?;
                 client.get_db_size(req).await
@@ -154,8 +166,9 @@ impl PageserverClient {
             .await
     }
 
-    /// Fetches pages. The `request_id` must be unique across all in-flight requests. Automatically
-    /// splits requests that straddle shard boundaries, and assembles the responses.
+    /// Fetches pages. The `request_id` must be unique across all in-flight requests, and the
+    /// `attempt` must be 0 (incremented on retry). Automatically splits requests that straddle
+    /// shard boundaries, and assembles the responses.
     ///
     /// Unlike `page_api::Client`, this automatically converts `status_code` into `tonic::Status`
     /// errors. All responses will have `GetPageStatusCode::Ok`.
@@ -175,6 +188,10 @@ impl PageserverClient {
         if req.block_numbers.is_empty() {
             return Err(tonic::Status::invalid_argument("no block number"));
         }
+        // The request attempt must be 0. The client will increment it internally.
+        if req.request_id.attempt != 0 {
+            return Err(tonic::Status::invalid_argument("request attempt must be 0"));
+        }
 
         // The shards may change while we're fetching pages. We execute the request using a stable
         // view of the shards (especially important for requests that span shards), but retry the
@@ -185,7 +202,11 @@ impl PageserverClient {
         // TODO: the gRPC server and client doesn't yet properly support shard splits. Revisit this
         // once we figure out how to handle these.
         self.retry
-            .with(async || Self::get_page_with_shards(req.clone(), &self.shards.load_full()).await)
+            .with(async |attempt| {
+                let mut req = req.clone();
+                req.request_id.attempt = attempt as u32;
+                Self::get_page_with_shards(req, &self.shards.load_full()).await
+            })
             .await
     }
 
@@ -255,7 +276,7 @@ impl PageserverClient {
         req: page_api::GetRelSizeRequest,
     ) -> tonic::Result<page_api::GetRelSizeResponse> {
         self.retry
-            .with(async || {
+            .with(async |_| {
                 // Relation metadata is only available on shard 0.
                 let mut client = self.shards.load_full().get_zero().client().await?;
                 client.get_rel_size(req).await
@@ -270,7 +291,7 @@ impl PageserverClient {
         req: page_api::GetSlruSegmentRequest,
     ) -> tonic::Result<page_api::GetSlruSegmentResponse> {
         self.retry
-            .with(async || {
+            .with(async |_| {
                 // SLRU segments are only available on shard 0.
                 let mut client = self.shards.load_full().get_zero().client().await?;
                 client.get_slru_segment(req).await
@@ -364,13 +385,21 @@ impl Shards {
         timeline_id: TimelineId,
         shard_spec: ShardSpec,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
     ) -> anyhow::Result<Self> {
         // NB: the shard spec has already been validated when constructed.
         let mut shards = HashMap::with_capacity(shard_spec.urls.len());
         for (shard_id, url) in shard_spec.urls {
             shards.insert(
                 shard_id,
-                Shard::new(url, tenant_id, timeline_id, shard_id, auth_token.clone())?,
+                Shard::new(
+                    url,
+                    tenant_id,
+                    timeline_id,
+                    shard_id,
+                    auth_token.clone(),
+                    compression,
+                )?,
             );
         }
 
@@ -422,6 +451,7 @@ impl Shard {
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
     ) -> anyhow::Result<Self> {
         // Common channel pool for unary and stream requests. Bounded by client/stream pools.
         let channel_pool = ChannelPool::new(url.clone(), MAX_CLIENTS_PER_CHANNEL)?;
@@ -433,6 +463,7 @@ impl Shard {
             timeline_id,
             shard_id,
             auth_token.clone(),
+            compression,
             Some(MAX_UNARY_CLIENTS),
         );
 
@@ -445,6 +476,7 @@ impl Shard {
                 timeline_id,
                 shard_id,
                 auth_token.clone(),
+                compression,
                 None, // unbounded, limited by stream pool
             ),
             Some(MAX_STREAMS),
@@ -460,6 +492,7 @@ impl Shard {
                 timeline_id,
                 shard_id,
                 auth_token,
+                compression,
                 None, // unbounded, limited by stream pool
             ),
             Some(MAX_BULK_STREAMS),

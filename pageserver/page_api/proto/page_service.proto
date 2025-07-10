@@ -153,7 +153,7 @@ message GetDbSizeResponse {
 message GetPageRequest {
   // A request ID. Will be included in the response. Should be unique for
   // in-flight requests on the stream.
-  uint64 request_id = 1;
+  RequestID request_id = 1;
   // The request class.
   GetPageClass request_class = 2;
   // The LSN to read at.
@@ -175,6 +175,14 @@ message GetPageRequest {
   // are always in order. But we can't currenly rely on this on the server, because
   // of compatibility with the libpq protocol handler.
   repeated uint32 block_number = 5;
+}
+
+// A Request ID. Should be unique for in-flight requests on a stream. Included in the response.
+message RequestID {
+  // The base request ID.
+  uint64 id = 1;
+  // The request attempt. Starts at 0, incremented on each retry.
+  uint32 attempt = 2;
 }
 
 // A GetPageRequest class. Primarily intended for observability, but may also be
@@ -199,7 +207,7 @@ enum GetPageClass {
 // the entire batch is ready, so no one can make use of the individual pages.
 message GetPageResponse {
   // The original request's ID.
-  uint64 request_id = 1;
+  RequestID request_id = 1;
   // The response status code.
   GetPageStatusCode status_code = 2;
   // A string describing the status, if any.

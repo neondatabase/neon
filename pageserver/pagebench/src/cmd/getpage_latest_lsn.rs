@@ -10,12 +10,14 @@ use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;
 use camino::Utf8PathBuf;
+use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt as _};
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::pagestream_api::{PagestreamGetPageRequest, PagestreamRequest};
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::TenantShardId;
+use pageserver_client_grpc::{self as client_grpc, ShardSpec};
 use pageserver_page_api as page_api;
 use rand::prelude::*;
 use tokio::task::JoinSet;
@@ -37,6 +39,10 @@ pub(crate) struct Args {
     /// Pageserver connection string. Supports postgresql:// and grpc:// protocols.
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
     page_service_connstring: String,
+    /// Use the rich gRPC Pageserver client `client_grpc::PageserverClient`, rather than the basic
+    /// no-frills `page_api::Client`. Only valid with grpc:// connstrings.
+    #[clap(long)]
+    rich_client: bool,
     #[clap(long)]
     pageserver_jwt: Option<String>,
     #[clap(long, default_value = "1")]
@@ -332,12 +338,23 @@ async fn main_impl(
             let client: Box<dyn Client> = match scheme.as_str() {
                 "postgresql" | "postgres" => {
                     assert!(!args.compression, "libpq does not support compression");
+                    assert!(!args.rich_client, "rich client requires grpc://");
                     Box::new(
                         LibpqClient::new(&args.page_service_connstring, worker_id.timeline)
                             .await
                             .unwrap(),
                     )
                 }
+
+                "grpc" if args.rich_client => Box::new(
+                    RichGrpcClient::new(
+                        &args.page_service_connstring,
+                        worker_id.timeline,
+                        args.compression,
+                    )
+                    .await
+                    .unwrap(),
+                ),
 
                 "grpc" => Box::new(
                     GrpcClient::new(
@@ -657,7 +674,7 @@ impl Client for GrpcClient {
         blks: Vec<u32>,
     ) -> anyhow::Result<()> {
         let req = page_api::GetPageRequest {
-            request_id: req_id,
+            request_id: req_id.into(),
             request_class: page_api::GetPageClass::Normal,
             read_lsn: page_api::ReadLsn {
                 request_lsn: req_lsn,
@@ -677,6 +694,73 @@ impl Client for GrpcClient {
             "unexpected status code: {}",
             resp.status_code,
         );
-        Ok((resp.request_id, resp.page_images))
+        Ok((resp.request_id.id, resp.page_images))
+    }
+}
+
+/// A rich gRPC Pageserver client.
+struct RichGrpcClient {
+    inner: Arc<client_grpc::PageserverClient>,
+    requests: FuturesUnordered<
+        Pin<Box<dyn Future<Output = anyhow::Result<page_api::GetPageResponse>> + Send>>,
+    >,
+}
+
+impl RichGrpcClient {
+    async fn new(
+        connstring: &str,
+        ttid: TenantTimelineId,
+        compression: bool,
+    ) -> anyhow::Result<Self> {
+        let inner = Arc::new(client_grpc::PageserverClient::new(
+            ttid.tenant_id,
+            ttid.timeline_id,
+            ShardSpec::new(
+                [(ShardIndex::unsharded(), connstring.to_string())].into(),
+                None,
+            )?,
+            None,
+            compression.then_some(tonic::codec::CompressionEncoding::Zstd),
+        )?);
+        Ok(Self {
+            inner,
+            requests: FuturesUnordered::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl Client for RichGrpcClient {
+    async fn send_get_page(
+        &mut self,
+        req_id: u64,
+        req_lsn: Lsn,
+        mod_lsn: Lsn,
+        rel: RelTag,
+        blks: Vec<u32>,
+    ) -> anyhow::Result<()> {
+        let req = page_api::GetPageRequest {
+            request_id: req_id.into(),
+            request_class: page_api::GetPageClass::Normal,
+            read_lsn: page_api::ReadLsn {
+                request_lsn: req_lsn,
+                not_modified_since_lsn: Some(mod_lsn),
+            },
+            rel,
+            block_numbers: blks,
+        };
+        let inner = self.inner.clone();
+        self.requests.push(Box::pin(async move {
+            inner
+                .get_page(req)
+                .await
+                .map_err(|err| anyhow::anyhow!("{err}"))
+        }));
+        Ok(())
+    }
+
+    async fn recv_get_page(&mut self) -> anyhow::Result<(u64, Vec<Bytes>)> {
+        let resp = self.requests.next().await.unwrap()?;
+        Ok((resp.request_id.id, resp.page_images))
     }
 }
