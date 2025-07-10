@@ -233,6 +233,7 @@ impl WalSenders {
                 })
             }
         }
+        shared.update_reply_feedback();
     }
 
     /// Record hot standby feedback, update aggregated value.
