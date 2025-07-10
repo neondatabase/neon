@@ -889,6 +889,9 @@ retry:
 			elog(DEBUG1, "read from local cache file was superseded by concurrent update");
 			goto retry;
 		}
+
+		pgBufferUsage.file_cache.hits += nblocks;
+
 		return;
 	}
 	Assert(request_idx == my_next_slot_idx);
@@ -897,6 +900,12 @@ retry:
 		my_next_slot_idx = my_start_slot_idx;
 	inflight_requests[num_inflight_requests] = request_idx;
 	num_inflight_requests++;
+
+	/*
+	 * XXX: If some blocks were in cache but not others, we count all blocks
+	 * as a cache miss.
+	 */
+	pgBufferUsage.file_cache.misses += nblocks;
 
 	wait_request_completion(request_idx, &result);
 	Assert(num_inflight_requests == 1);
