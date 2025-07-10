@@ -5619,24 +5619,25 @@ impl Timeline {
 
         let distance_based_decision = distance.0 >= min_distance;
 
-        let mut time_based_decision = false;
         let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
+        let mut check_required_after = self.get_checkpoint_timeout();
+
         if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
-            let check_required_after =
+            check_required_after =
                 if Some(Into::<u64>::into(&logical_size)) >= large_timeline_threshold {
                     self.get_checkpoint_timeout()
                 } else {
                     Duration::from_secs(3600 * 48)
                 };
-
-            time_based_decision = match *last_check_instant {
-                Some(last_check) => {
-                    let elapsed = last_check.elapsed();
-                    elapsed >= check_required_after
-                }
-                None => true,
-            };
         }
+        // HADRON: we removed the check on self.current_logical_size non shard-0 because only shard 0 computes exact size.
+        let time_based_decision = match *last_check_instant {
+            Some(last_check) => {
+                let elapsed = last_check.elapsed();
+                elapsed >= check_required_after
+            }
+            None => true,
+        };
 
         // Do the expensive delta layer counting only if this timeline has ingested sufficient
         // WAL since the last check or a checkpoint timeout interval has elapsed since the last
