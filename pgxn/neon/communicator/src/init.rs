@@ -23,7 +23,7 @@ use std::mem;
 use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
 
-use crate::backend_comms::NeonIOHandle;
+use crate::backend_comms::NeonIORequestSlot;
 use crate::integrated_cache::IntegratedCacheInitStruct;
 
 /// This struct is created in the postmaster process, and inherited to
@@ -36,7 +36,7 @@ pub struct CommunicatorInitStruct {
     // Shared memory data structures
     pub num_neon_request_slots: u32,
 
-    pub neon_request_slots: &'static [NeonIOHandle],
+    pub neon_request_slots: &'static [NeonIORequestSlot],
 
     pub integrated_cache_init_struct: IntegratedCacheInitStruct<'static>,
 }
@@ -56,7 +56,7 @@ impl std::fmt::Debug for CommunicatorInitStruct {
 pub extern "C" fn rcommunicator_shmem_size(num_neon_request_slots: u32) -> u64 {
     let mut size = 0;
 
-    size += mem::size_of::<NeonIOHandle>() * num_neon_request_slots as usize;
+    size += mem::size_of::<NeonIORequestSlot>() * num_neon_request_slots as usize;
 
     // For integrated_cache's Allocator. TODO: make this adjustable
     size += IntegratedCacheInitStruct::shmem_size();
@@ -80,16 +80,16 @@ pub extern "C" fn rcommunicator_shmem_init(
         unsafe { std::slice::from_raw_parts_mut(shmem_area_ptr, shmem_area_len as usize) };
 
     let (neon_request_slots, remaining_area) =
-        alloc_array_from_slice::<NeonIOHandle>(shmem_area, num_neon_request_slots as usize);
+        alloc_array_from_slice::<NeonIORequestSlot>(shmem_area, num_neon_request_slots as usize);
 
     for slot in neon_request_slots.iter_mut() {
-        slot.write(NeonIOHandle::default());
+        slot.write(NeonIORequestSlot::default());
     }
 
     // 'neon_request_slots' is initialized now. (MaybeUninit::slice_assume_init_mut() is nightly-only
     // as of this writing.)
     let neon_request_slots = unsafe {
-        std::mem::transmute::<&mut [MaybeUninit<NeonIOHandle>], &mut [NeonIOHandle]>(
+        std::mem::transmute::<&mut [MaybeUninit<NeonIORequestSlot>], &mut [NeonIORequestSlot]>(
             neon_request_slots,
         )
     };

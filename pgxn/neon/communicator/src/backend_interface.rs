@@ -3,7 +3,7 @@
 
 use std::os::fd::OwnedFd;
 
-use crate::backend_comms::NeonIOHandle;
+use crate::backend_comms::NeonIORequestSlot;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{BackendCacheReadOp, IntegratedCacheReadAccess};
 use crate::neon_request::{CCachedGetPageVResult, COid};
@@ -12,7 +12,7 @@ use crate::neon_request::{NeonIORequest, NeonIOResult};
 pub struct CommunicatorBackendStruct<'t> {
     my_proc_number: i32,
 
-    neon_request_slots: &'t [NeonIOHandle],
+    neon_request_slots: &'t [NeonIORequestSlot],
 
     submission_pipe_write_fd: OwnedFd,
 
@@ -152,10 +152,10 @@ pub extern "C" fn bcomm_get_request_slot_status(
     bs: &mut CommunicatorBackendStruct,
     request_slot_idx: u32,
 ) -> bool {
-    use crate::backend_comms::NeonIOHandleState;
+    use crate::backend_comms::NeonIORequestSlotState;
     match bs.neon_request_slots[request_slot_idx as usize].get_state() {
-        NeonIOHandleState::Idle => false,
-        NeonIOHandleState::Filling => {
+        NeonIORequestSlotState::Idle => false,
+        NeonIORequestSlotState::Filling => {
             // 'false' would be the right result here. However, this
             // is a very transient state. The C code should never
             // leave a slot in this state, so if it sees that,
@@ -166,9 +166,9 @@ pub extern "C" fn bcomm_get_request_slot_status(
                 request_slot_idx
             );
         }
-        NeonIOHandleState::Submitted => true,
-        NeonIOHandleState::Processing => true,
-        NeonIOHandleState::Completed => true,
+        NeonIORequestSlotState::Submitted => true,
+        NeonIORequestSlotState::Processing => true,
+        NeonIORequestSlotState::Completed => true,
     }
 }
 

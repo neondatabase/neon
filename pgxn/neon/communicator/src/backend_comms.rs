@@ -51,9 +51,9 @@ use atomic_enum::atomic_enum;
 /// has been submitted or when a response is ready. We only store the 'owner_procno'
 /// which can be used for waking up the backend on completion, but the wakeups are
 /// performed elsewhere.
-pub struct NeonIOHandle {
+pub struct NeonIORequestSlot {
     /// similar to PgAioHandleState
-    state: AtomicNeonIOHandleState,
+    state: AtomicNeonIORequestSlotState,
 
     /// The owning process's ProcNumber. The worker process uses this to set the process's
     /// latch on completion.
@@ -77,23 +77,23 @@ pub struct NeonIOHandle {
 
 // The protocol described in the "Lifecycle of a request" section above ensures
 // the safe access to the fields
-unsafe impl Send for NeonIOHandle {}
-unsafe impl Sync for NeonIOHandle {}
+unsafe impl Send for NeonIORequestSlot {}
+unsafe impl Sync for NeonIORequestSlot {}
 
-impl Default for NeonIOHandle {
-    fn default() -> NeonIOHandle {
-        NeonIOHandle {
+impl Default for NeonIORequestSlot {
+    fn default() -> NeonIORequestSlot {
+        NeonIORequestSlot {
             owner_procno: AtomicI32::new(-1),
             request: UnsafeCell::new(NeonIORequest::Empty),
             result: UnsafeCell::new(NeonIOResult::Empty),
-            state: AtomicNeonIOHandleState::new(NeonIOHandleState::Idle),
+            state: AtomicNeonIORequestSlotState::new(NeonIORequestSlotState::Idle),
         }
     }
 }
 
 #[atomic_enum]
 #[derive(Eq, PartialEq)]
-pub enum NeonIOHandleState {
+pub enum NeonIORequestSlotState {
     Idle,
 
     /// backend is filling in the request
@@ -111,7 +111,7 @@ pub enum NeonIOHandleState {
     Completed,
 }
 
-impl NeonIOHandle {
+impl NeonIORequestSlot {
     pub fn fill_request(&self, request: &NeonIORequest, proc_number: i32) {
         // Verify that the slot is in Idle state previously, and start filling it.
         //
@@ -119,8 +119,8 @@ impl NeonIOHandle {
         // and try to use a slot that's already in use, we could fill the slot and
         // switch it directly from Idle to Submitted state.
         if let Err(s) = self.state.compare_exchange(
-            NeonIOHandleState::Idle,
-            NeonIOHandleState::Filling,
+            NeonIORequestSlotState::Idle,
+            NeonIORequestSlotState::Filling,
             Ordering::Relaxed,
             Ordering::Relaxed,
         ) {
@@ -133,21 +133,21 @@ impl NeonIOHandle {
         self.owner_procno.store(proc_number, Ordering::Relaxed);
         unsafe { *self.request.get() = *request }
         self.state
-            .store(NeonIOHandleState::Submitted, Ordering::Release);
+            .store(NeonIORequestSlotState::Submitted, Ordering::Release);
     }
 
-    pub fn get_state(&self) -> NeonIOHandleState {
+    pub fn get_state(&self) -> NeonIORequestSlotState {
         self.state.load(Ordering::Relaxed)
     }
 
     pub fn try_get_result(&self) -> Option<NeonIOResult> {
         // FIXME: ordering?
         let state = self.state.load(Ordering::Relaxed);
-        if state == NeonIOHandleState::Completed {
+        if state == NeonIORequestSlotState::Completed {
             // This fence synchronizes-with store/swap in `communicator_process_main_loop`.
             fence(Ordering::Acquire);
             let result = unsafe { *self.result.get() };
-            self.state.store(NeonIOHandleState::Idle, Ordering::Relaxed);
+            self.state.store(NeonIORequestSlotState::Idle, Ordering::Relaxed);
             Some(result)
         } else {
             None
@@ -161,8 +161,8 @@ impl NeonIOHandle {
         // already processing. That could be a flag somewhere in communicator's private
         // memory, for example.
         if let Err(s) = self.state.compare_exchange(
-            NeonIOHandleState::Submitted,
-            NeonIOHandleState::Processing,
+            NeonIORequestSlotState::Submitted,
+            NeonIORequestSlotState::Processing,
             Ordering::Relaxed,
             Ordering::Relaxed,
         ) {
@@ -177,7 +177,7 @@ impl NeonIOHandle {
     }
 }
 
-pub struct RequestProcessingGuard<'a>(&'a NeonIOHandle);
+pub struct RequestProcessingGuard<'a>(&'a NeonIORequestSlot);
 
 unsafe impl<'a> Send for RequestProcessingGuard<'a> {}
 unsafe impl<'a> Sync for RequestProcessingGuard<'a> {}
@@ -201,7 +201,7 @@ impl<'a> RequestProcessingGuard<'a> {
         let old_state = self
             .0
             .state
-            .swap(NeonIOHandleState::Completed, Ordering::Release);
-        assert!(old_state == NeonIOHandleState::Processing);
+            .swap(NeonIORequestSlotState::Completed, Ordering::Release);
+        assert!(old_state == NeonIORequestSlotState::Processing);
     }
 }

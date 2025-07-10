@@ -4,7 +4,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::str::FromStr as _;
 
-use crate::backend_comms::NeonIOHandle;
+use crate::backend_comms::NeonIORequestSlot;
 use crate::file_cache::FileCache;
 use crate::global_allocator::MyAllocatorCollector;
 use crate::init::CommunicatorInitStruct;
@@ -36,7 +36,7 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     client: PageserverClient,
 
     /// Request slots that backends use to send IO requests to the communicator.
-    neon_request_slots: &'a [NeonIOHandle],
+    neon_request_slots: &'a [NeonIORequestSlot],
 
     /// Notification pipe. Backends use this to notify the communicator that a request is waiting to
     /// be processed in one of the request slots.
