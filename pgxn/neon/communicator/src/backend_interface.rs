@@ -232,6 +232,6 @@ impl<'t> CommunicatorBackendStruct<'t> {
     pub(crate) fn start_neon_io_request(&mut self, request_slot_idx: i32, request: &NeonIORequest) {
         let my_proc_number = self.my_proc_number;
 
-        self.neon_request_slots[request_slot_idx as usize].fill_request(request, my_proc_number);
+        self.neon_request_slots[request_slot_idx as usize].submit_request(request, my_proc_number);
     }
 }
