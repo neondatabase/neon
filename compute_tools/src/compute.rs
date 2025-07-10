@@ -1805,6 +1805,8 @@ impl ComputeNode {
             tls_config,
         )?;
 
+        self.pg_reload_conf()?;
+
         if !spec.skip_pg_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
             // Temporarily reset max_cluster_size in config
@@ -1825,8 +1827,6 @@ impl ComputeNode {
                 Ok(())
             })?;
         }
-
-        self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
