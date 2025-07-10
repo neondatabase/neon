@@ -276,7 +276,7 @@ impl PageserverClient {
                 req.block_numbers,
                 resp.pages
                     .iter()
-                    .map(|pape| pape.block_number)
+                    .map(|page| page.block_number)
                     .collect::<Vec<_>>()
             )));
         }
