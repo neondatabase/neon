@@ -958,12 +958,18 @@ impl ComputeNode {
 
         let mut state = self.state.lock().unwrap();
         state.terminate_flush_lsn = lsn;
-        let mut delay_exit = false;
-        if state.status == ComputeStatus::TerminationPendingFast {
-            self.set_status(ComputeStatus::Terminated);
-            delay_exit = true
-        } else if state.status == ComputeStatus::TerminationPendingImmediate {
-            self.set_status(ComputeStatus::Terminated);
+
+        let delay_exit = state.status == ComputeStatus::TerminationPendingFast;
+        if state.status == ComputeStatus::TerminationPendingFast
+            || state.status == ComputeStatus::TerminationPendingImmediate
+        {
+            info!(
+                "Changing compute status from {} to {}",
+                state.status,
+                ComputeStatus::Terminated
+            );
+            state.status = ComputeStatus::Terminated;
+            self.state_changed.notify_all();
         }
         drop(state);
 
