@@ -20,7 +20,6 @@ use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::local::LocalBackend;
 use crate::auth::{self};
 use crate::cancellation::CancellationHandler;
-
 #[cfg(feature = "rest_broker")]
 use crate::config::RestConfig;
 use crate::config::{
