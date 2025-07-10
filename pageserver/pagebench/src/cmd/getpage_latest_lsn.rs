@@ -694,7 +694,10 @@ impl Client for GrpcClient {
             "unexpected status code: {}",
             resp.status_code,
         );
-        Ok((resp.request_id.id, resp.page_images))
+        Ok((
+            resp.request_id.id,
+            resp.pages.into_iter().map(|p| p.image).collect(),
+        ))
     }
 }
 
