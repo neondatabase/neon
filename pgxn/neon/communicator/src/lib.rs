@@ -1,9 +1,7 @@
-//!
 //! Three main parts:
 //! - async tokio communicator core, which receives requests and processes them.
 //! - Main loop and requests queues, which routes requests from backends to the core
 //! - the per-backend glue code, which submits requests
-//!
 
 mod backend_comms;
 
