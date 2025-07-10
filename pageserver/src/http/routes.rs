@@ -3635,6 +3635,7 @@ async fn activate_post_import_handler(
         let timeline_info = build_timeline_info(
             &timeline, false, // include_non_incremental_logical_size,
             false, // force_await_initial_logical_size
+            false, // include_image_consistent_lsn
             &ctx,
         )
         .await

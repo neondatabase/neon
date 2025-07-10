@@ -86,6 +86,7 @@ impl PageserverClient {
         )
     }
 
+    #[allow(unused)]
     pub(crate) async fn tenant_timeline_compact(
         &self,
         tenant_shard_id: TenantShardId,

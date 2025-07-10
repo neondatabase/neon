@@ -8,6 +8,7 @@ use std::cmp::min;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::layer_manager::LayerManagerLockHolder;
 use super::{
@@ -33,7 +34,6 @@ use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use pageserver_compaction::helpers::{fully_contains, overlaps_with};
 use pageserver_compaction::interface::*;
-use postgres_ffi::to_pg_timestamp;
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -1485,7 +1485,9 @@ impl Timeline {
     pub(crate) fn get_force_image_creation_lsn(self: &Arc<Self>) -> Option<Lsn> {
         let image_creation_period = self.get_image_layer_force_creation_period()?;
         let current_lsn: Lsn = self.get_last_record_lsn();
-        let pitr_lsn: Lsn = self.gc_info.read().unwrap().cutoffs.time;
+        let Some(pitr_lsn) = self.gc_info.read().unwrap().cutoffs.time else {
+            return None;
+        };
         let pitr_interval = self.get_pitr_interval();
         if pitr_interval.is_zero() {
             tracing::warn!(
