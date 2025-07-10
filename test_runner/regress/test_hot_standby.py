@@ -7,6 +7,7 @@ import time
 from functools import partial
 
 import pytest
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -133,6 +134,9 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
     tenant_conf = {
         # set PITR interval to be small, so we can do GC
         "pitr_interval": "0 s",
+        # this test is largely about PS GC behavior, we control it manually
+        "gc_period": "0s",
+        "compaction_period": "0s",
     }
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
     timeline_id = env.initial_timeline
@@ -162,6 +166,11 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
             s_cur.execute("SELECT 1 WHERE pg_is_in_recovery()")
             res = s_cur.fetchone()
             assert res is not None
+
+            s_cur.execute("SHOW hot_standby_feedback")
+            res = s_cur.fetchone()
+            assert res is not None
+            assert res[0] == "off"
 
             s_cur.execute("SELECT COUNT(*) FROM test")
             res = s_cur.fetchone()
@@ -197,6 +206,44 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
             log_replica_lag(primary, secondary)
             res = s_cur.fetchone()
             assert res == (10000,)
+
+            if pause_apply:
+                s_cur.execute("SELECT pg_wal_replay_resume()")
+
+            wait_replica_caughtup(primary, secondary)
+
+            # Wait for PS's view of standby horizon to catch up.
+            # (When we switch to leases (LKB-88) we need to change this to watch the lease lsn move.)
+            # (TODO: instead of checking impl details here, somehow assert that gc can delete layers now.
+            #        Tricky to do that without flakiness though.)
+            # We already waited for replica to catch up, so, this timeout is strictly on
+            # a few few in-memory only RPCs to propagate standby_horizon.
+            timeout_secs = 10
+            started_at = time.time()
+            shards = tenant_get_shards(env, tenant_id, None)
+            for tenant_shard_id, pageserver in shards:
+                client = pageserver.http_client()
+                while True:
+                    secondary_apply_lsn = Lsn(
+                        secondary.safe_psql_scalar(
+                            "SELECT pg_last_wal_replay_lsn()", log_query=False
+                        )
+                    )
+                    standby_horizon_metric = client.get_metrics().query_one(
+                        "pageserver_standby_horizon",
+                        {
+                            "tenant_id": str(tenant_shard_id.tenant_id),
+                            "shard_id": str(tenant_shard_id.shard_index),
+                            "timeline_id": str(timeline_id),
+                        },
+                    )
+                    standby_horizon_at_ps = Lsn(int(standby_horizon_metric.value))
+                    log.info(f"{tenant_shard_id.shard_index=}: {standby_horizon_at_ps=} {secondary_apply_lsn=}")
+                    if secondary_apply_lsn == standby_horizon_at_ps:
+                        break
+                    if time.time() - started_at > timeout_secs:
+                        pytest.fail(f"standby_horizon didn't propagate within {timeout_secs=}, this is holding up gc on secondary")
+                    time.sleep(1)
 
 
 def run_pgbench(connstr: str, pg_bin: PgBin):
