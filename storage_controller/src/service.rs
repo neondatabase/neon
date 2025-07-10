@@ -6325,8 +6325,18 @@ impl Service {
             if let Some(env::DeploymentMode::Local) = env::get_deployment_mode() {
                 Duration::from_secs(30)
             } else {
-                Duration::from_secs(5 * 60)
+                Duration::MAX
             };
+        let mut http_client_builder = reqwest::ClientBuilder::new()
+            .pool_max_idle_per_host(0)
+            .timeout(shard_split_timeout);
+
+        for ssl_ca_cert in &self.config.ssl_ca_certs {
+            http_client_builder = http_client_builder.add_root_certificate(ssl_ca_cert.clone());
+        }
+        let http_client = http_client_builder
+            .build()
+            .expect("Failed to construct HTTP client");
         for target in &targets {
             let ShardSplitTarget {
                 parent_id,
@@ -6334,20 +6344,9 @@ impl Service {
                 child_ids,
             } = target;
 
-            let http_client = reqwest::ClientBuilder::new()
-                // .client
-                .timeout(shard_split_timeout)
-                .build()
-                .expect("Failed to construct HTTP client");
-
-            // http_client = http_client.pool_max_idle_per_host(0);
-            // for ssl_ca_cert in &config.ssl_ca_certs {
-            //     http_client = http_client.add_root_certificate(ssl_ca_cert.clone());
-            // }
-
             let client = PageserverClient::new(
                 node.get_id(),
-                http_client,
+                http_client.clone(),
                 node.base_url(),
                 self.config.pageserver_jwt_token.as_deref(),
             );

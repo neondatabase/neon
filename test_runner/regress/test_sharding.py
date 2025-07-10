@@ -1674,6 +1674,7 @@ def test_shard_resolve_during_split_abort(neon_env_builder: NeonEnvBuilder):
 
 
 # HADRON
+@pytest.mark.skip(reason="The backpressure change has not been merged yet.")
 def test_back_pressure_per_shard(neon_env_builder: NeonEnvBuilder):
     """
     Tests back pressure knobs are enforced on the per shard basis instead of at the tenant level.

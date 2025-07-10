@@ -103,6 +103,8 @@ where
         fill_rust_env_vars(background_command),
     ));
     filled_cmd.envs(envs);
+    // HADRON: set deployment mode to dev
+    filled_cmd.env("DEPLOYMENT_MODE", "local");
 
     let pid_file_to_check = match &initial_pid_file {
         InitialPidFile::Create(path) => {
