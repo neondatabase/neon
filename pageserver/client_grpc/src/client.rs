@@ -93,6 +93,27 @@ impl PageserverClient {
     /// TODO: verify that in-flight requests are allowed to complete, and that the old pools are
     /// properly spun down and dropped afterwards.
     pub fn update_shards(&self, shard_spec: ShardSpec) -> anyhow::Result<()> {
+        // Validate the shard spec. We should really use `ArcSwap::rcu` for this, to avoid races
+        // with concurrent updates, but that involves creating a new `Shards` on every attempt,
+        // which spins up a bunch of Tokio tasks and such. These should already be checked elsewhere
+        // in the stack, and if they're violated then we already have problems elsewhere, so a
+        // best-effort but possibly-racy check is okay here.
+        let old = self.shards.load_full();
+        if shard_spec.count < old.count {
+            return Err(anyhow!(
+                "can't reduce shard count from {} to {}",
+                old.count,
+                shard_spec.count
+            ));
+        }
+        if !old.count.is_unsharded() && shard_spec.stripe_size != old.stripe_size {
+            return Err(anyhow!(
+                "can't change stripe size from {} to {}",
+                old.stripe_size,
+                shard_spec.stripe_size
+            ));
+        }
+
         let shards = Shards::new(
             self.tenant_id,
             self.timeline_id,
