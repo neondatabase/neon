@@ -11,7 +11,7 @@ use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
 
-use crate::membership::Configuration;
+use crate::membership::{Configuration, SafekeeperGeneration};
 use crate::{ServerInfo, Term};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -310,4 +310,13 @@ pub struct PullTimelineResponse {
     /// None if no pull happened because the timeline already exists.
     pub safekeeper_host: Option<String>,
     // TODO: add more fields?
+}
+
+/// Response to timeline locate safekeepers request.
+/// Storcon-only API.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TimelineLocateResponse {
+    pub generation: SafekeeperGeneration,
+    pub sk_set: Vec<NodeId>,
+    pub new_sk_set: Option<Vec<NodeId>>,
 }
