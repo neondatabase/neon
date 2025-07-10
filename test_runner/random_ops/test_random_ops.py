@@ -117,6 +117,7 @@ class NeonBranch:
     def random_time(self) -> datetime:
         min_time = self.updated_at + timedelta(seconds=1)
         max_time = datetime.now(UTC) - timedelta(seconds=1)
+        log.info("min_time: %s, max_time: %s", min_time, max_time)
         return (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
 
     def create_child_branch(self, parent_timestamp: datetime | None = None) -> NeonBranch | None:
@@ -287,6 +288,8 @@ class NeonProject:
         self.wait()
         if not self.check_limit_branches():
             return None
+        if parent_timestamp:
+            log.info("Timestamp: %s", parent_timestamp)
         parent_timestamp_str: str | None = None
         if parent_timestamp:
             parent_timestamp_str = parent_timestamp.isoformat().replace("+00:00", "Z")
