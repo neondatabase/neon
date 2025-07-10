@@ -45,13 +45,13 @@ pub struct TimelineLocateResponse {
 }
 
 impl Service {
-    fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, ApiError> {
+    fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, anyhow::Error> {
         let members = safekeepers
             .iter()
             .map(|sk| sk.get_safekeeper_id())
             .collect::<Vec<_>>();
 
-        MemberSet::new(members).map_err(ApiError::InternalServerError)
+        MemberSet::new(members)
     }
 
     fn get_safekeepers(&self, ids: &[i64]) -> Result<Vec<Safekeeper>, ApiError> {
@@ -86,7 +86,7 @@ impl Service {
     ) -> Result<Vec<NodeId>, ApiError> {
         let safekeepers = self.get_safekeepers(&timeline_persistence.sk_set)?;
 
-        let mset = Self::make_member_set(&safekeepers)?;
+        let mset = Self::make_member_set(&safekeepers).map_err(ApiError::InternalServerError)?;
         let mconf = safekeeper_api::membership::Configuration::new(mset);
 
         let req = safekeeper_api::models::TimelineCreateRequest {
@@ -1111,6 +1111,19 @@ impl Service {
             }
         }
 
+        if new_sk_set.len() < self.config.timeline_safekeeper_count {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "new safekeeper set must have at least {} safekeepers",
+                self.config.timeline_safekeeper_count
+            )));
+        }
+
+        let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
+        let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
+        // Construct new member set in advance to validate it.
+        let new_sk_member_set =
+            Self::make_member_set(&new_safekeepers).map_err(ApiError::BadRequest)?;
+
         // TODO(diko): per-tenant lock is too wide. Consider introducing per-timeline locks.
         let _tenant_lock = trace_shared_lock(
             &self.tenant_op_locks,
@@ -1183,11 +1196,8 @@ impl Service {
         }
 
         let cur_safekeepers = self.get_safekeepers(&timeline.sk_set)?;
-        let cur_sk_member_set = Self::make_member_set(&cur_safekeepers)?;
-
-        let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
-        let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
-        let new_sk_member_set = Self::make_member_set(&new_safekeepers)?;
+        let cur_sk_member_set =
+            Self::make_member_set(&cur_safekeepers).map_err(ApiError::InternalServerError)?;
 
         let joint_config = membership::Configuration {
             generation,

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+from fixtures.neon_fixtures import StorageControllerApiException
+
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
@@ -75,3 +78,29 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
     ep.start(safekeeper_generation=1, safekeepers=[3])
 
     assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 4)]
+
+
+def test_new_sk_set_validation(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that safekeeper_migrate validates the new_sk_set before starting the migration.
+    """
+    neon_env_builder.num_safekeepers = 2
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+        "timeline_safekeeper_count": 2,
+    }
+    env = neon_env_builder.init_start()
+
+    def expect_fail(sk_set: list[int], match: str):
+        with pytest.raises(StorageControllerApiException, match=match):
+            env.storage_controller.migrate_safekeepers(
+                env.initial_tenant, env.initial_timeline, sk_set
+            )
+        # Check that we failed before commiting to the database.
+        mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+        assert mconf["generation"] == 1
+
+    expect_fail([], "must have at least 2 safekeepers")
+    expect_fail([1], "must have at least 2 safekeepers")
+    expect_fail([1, 1], "duplicate")
+    expect_fail([1, 100500], "does not exist")
