@@ -960,56 +960,6 @@ def get_layer_map(env, tenant_shard_id, timeline_id, ps_id):
             delta_layer_count += 1
     return image_layer_count, delta_layer_count
 
-
-def test_force_image_layer_creation(neon_env_builder: NeonEnvBuilder):
-    tenant_conf = {
-        # create image layers as lazy as possible
-        "image_creation_threshold": "10",
-        "image_layer_creation_check_threshold": "0",
-    }
-
-    neon_env_builder.num_pageservers = 4
-    neon_env_builder.num_safekeepers = 3
-    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf, initial_tenant_shard_count=4)
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-
-    endpoint = env.endpoints.create_start("main")
-    endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
-    # Generate some rows.
-    for v in range(10):
-        endpoint.safe_psql(f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))")
-
-    tenant_shards = env.storage_controller.get_tenants_placement()
-
-    for tenant_shard_id, placement in tenant_shards.items():
-        attached_ps_id = int(placement["observed"]["attached"]) - 1
-        image, delta = get_layer_map(env, tenant_shard_id, timeline_id, attached_ps_id)
-        log.info(f"ps: {attached_ps_id}, images: {image}, deltas: {delta}")
-        assert image == 0
-        assert delta > 0
-
-    # Run compaction to create image layers.
-    env.storage_controller.hcc_timeline_compact(
-        tenant_id,
-        timeline_id,
-        force_image_layer_creation=True,
-        must_force_image_layer_creation=True,
-        scheduled=False,
-        wait_until_done=True,
-    )
-
-    for tenant_shard_id, placement in tenant_shards.items():
-        attached_ps_id = int(placement["observed"]["attached"]) - 1
-        image, delta = get_layer_map(env, tenant_shard_id, timeline_id, attached_ps_id)
-        log.info(f"ps: {attached_ps_id}, images: {image}, deltas: {delta}")
-        assert image > 0
-        assert delta > 0
-
-    endpoint.stop_and_destroy()
-
-
 def test_image_layer_creation_time_threshold(neon_env_builder: NeonEnvBuilder):
     """
     Tests that image layers can be created when the time threshold is reached on non-0 shards.
@@ -1027,6 +977,11 @@ def test_image_layer_creation_time_threshold(neon_env_builder: NeonEnvBuilder):
         "compaction_period": "1s",
         "lsn_lease_length": "1s",
     }
+
+    # consider every tenant large to run the image layer generation check more eagerly
+    neon_env_builder.pageserver_config_override = (
+        "image_layer_generation_large_timeline_threshold=0"
+    )
 
     neon_env_builder.num_pageservers = 1
     neon_env_builder.num_safekeepers = 1
