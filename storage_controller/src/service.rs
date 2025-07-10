@@ -6323,7 +6323,7 @@ impl Service {
         // partially split shards correctly.
         let shard_split_timeout =
             if let Some(env::DeploymentMode::Local) = env::get_deployment_mode() {
-                Duration::from_secs(30)
+                Duration::MAX
             } else {
                 Duration::MAX
             };

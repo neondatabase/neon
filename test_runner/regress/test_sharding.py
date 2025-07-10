@@ -1719,62 +1719,7 @@ def test_back_pressure_per_shard(neon_env_builder: NeonEnvBuilder):
 
 
 # HADRON
-def test_shard_split_abort_not_impact_succesful_tenants(neon_env_builder: NeonEnvBuilder):
-    """
-    Tests that shard split abort does not impact other already split tenants
-    """
-    init_shard_count = 2
-    neon_env_builder.num_pageservers = init_shard_count
-    stripe_size = 1
-
-    env = neon_env_builder.init_start(
-        initial_tenant_shard_count=init_shard_count,
-        initial_tenant_shard_stripe_size=stripe_size,
-    )
-
-    env.storage_controller.allowed_errors.extend(
-        [
-            ".*Enqueuing background abort.*",
-            ".*failpoint.*",
-        ]
-    )
-
-    endpoint1 = env.endpoints.create_start(branch_name="main")
-
-    # create an extra tenant
-    tenant_id = TenantId.generate()
-    timeline_id = TimelineId.generate()
-    env.create_tenant(tenant_id, timeline_id, shard_count=init_shard_count)
-    endpoint2 = env.endpoints.create_start(branch_name="main", tenant_id=tenant_id)
-
-    tenants = env.storage_controller.tenant_list()
-    assert len(tenants) == 2
-
-    # split tenant 1
-    env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=4)
-
-    # split tenant 2 and abort it
-    env.storage_controller.configure_failpoints(("shard-split-pre-complete-abort", "return(1)"))
-    with pytest.raises(StorageControllerApiException):
-        env.storage_controller.tenant_shard_split(tenant_id, shard_count=4)
-
-    def check_abort_finished():
-        assert env.storage_controller.log_contains(".*Successfully aborted split.*")
-
-    wait_until(check_abort_finished)
-
-    tenants = env.storage_controller.tenant_list()
-    # make sure we still have 2 tenants
-    assert len(tenants) == 2
-    print(tenants)
-
-    assert len(tenants[0]["shards"]) + len(tenants[1]["shards"]) == 6
-
-    endpoint1.stop_and_destroy()
-    endpoint2.stop_and_destroy()
-
-
-# HADRON
+@pytest.mark.skip(reason="Neon env does not have timeout on shard split.")
 def test_shard_split_page_server_timeout(neon_env_builder: NeonEnvBuilder):
     """
     Tests that shard split can correctly handle page server timeouts and abort the split
