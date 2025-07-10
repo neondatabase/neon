@@ -23,12 +23,13 @@ use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
 };
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse};
 use crate::control_plane::{
     AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, EndpointAccessControl, NodeInfo,
     RoleAccessControl,
 };
 use crate::metrics::Metrics;
+use crate::proxy::retry::CouldRetry;
 use crate::rate_limiter::WakeComputeRateLimiter;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
 use crate::{compute, http, scram};
@@ -434,42 +435,31 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                 Ok(cached.map(|()| node))
             }
             Err(err) => match err {
-                WakeComputeError::ControlPlane(ControlPlaneError::Message(err)) => {
-                    let Some(status) = &err.status else {
-                        return Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
-                            err,
-                        )));
-                    };
-
-                    let reason = status
-                        .details
-                        .error_info
-                        .map_or(Reason::Unknown, |x| x.reason);
-
+                WakeComputeError::ControlPlane(ControlPlaneError::Message(ref msg)) => {
                     // if we can retry this error, do not cache it.
-                    if reason.can_retry() {
-                        return Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
-                            err,
-                        )));
+                    if msg.could_retry() {
+                        return Err(err);
                     }
 
-                    // at this point, we should only have quota errors.
+                    // at this point, we should only have quota errors and other non-transient failures.
                     debug!(
                         key = &*key,
                         "created a cache entry for the wake compute error"
                     );
 
-                    self.caches.node_info.insert_ttl(
-                        key,
-                        Err(err.clone()),
-                        Duration::from_secs(30),
-                    );
+                    let ttl = msg
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.details.retry_info)
+                        .map_or(Duration::from_secs(30), |r| {
+                            Duration::from_millis(r.retry_delay_ms)
+                        });
 
-                    Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
-                        err,
-                    )))
+                    self.caches.node_info.insert_ttl(key, Err(msg.clone()), ttl);
+
+                    Err(err)
                 }
-                err => return Err(err),
+                err => Err(err),
             },
         }
     }
