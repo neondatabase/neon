@@ -143,7 +143,7 @@ impl PageserverClient {
         req: page_api::CheckRelExistsRequest,
     ) -> tonic::Result<page_api::CheckRelExistsResponse> {
         self.retry
-            .with(async || {
+            .with(async |_| {
                 // Relation metadata is only available on shard 0.
                 let mut client = self.shards.load_full().get_zero().client().await?;
                 client.check_rel_exists(req).await
@@ -158,7 +158,7 @@ impl PageserverClient {
         req: page_api::GetDbSizeRequest,
     ) -> tonic::Result<page_api::GetDbSizeResponse> {
         self.retry
-            .with(async || {
+            .with(async |_| {
                 // Relation metadata is only available on shard 0.
                 let mut client = self.shards.load_full().get_zero().client().await?;
                 client.get_db_size(req).await
@@ -166,8 +166,9 @@ impl PageserverClient {
             .await
     }
 
-    /// Fetches pages. The `request_id` must be unique across all in-flight requests. Automatically
-    /// splits requests that straddle shard boundaries, and assembles the responses.
+    /// Fetches pages. The `request_id` must be unique across all in-flight requests, and the
+    /// `attempt` must be 0 (incremented on retry). Automatically splits requests that straddle
+    /// shard boundaries, and assembles the responses.
     ///
     /// Unlike `page_api::Client`, this automatically converts `status_code` into `tonic::Status`
     /// errors. All responses will have `GetPageStatusCode::Ok`.
@@ -187,6 +188,10 @@ impl PageserverClient {
         if req.block_numbers.is_empty() {
             return Err(tonic::Status::invalid_argument("no block number"));
         }
+        // The request attempt must be 0. The client will increment it internally.
+        if req.request_id.attempt != 0 {
+            return Err(tonic::Status::invalid_argument("request attempt must be 0"));
+        }
 
         // The shards may change while we're fetching pages. We execute the request using a stable
         // view of the shards (especially important for requests that span shards), but retry the
@@ -197,7 +202,11 @@ impl PageserverClient {
         // TODO: the gRPC server and client doesn't yet properly support shard splits. Revisit this
         // once we figure out how to handle these.
         self.retry
-            .with(async || Self::get_page_with_shards(req.clone(), &self.shards.load_full()).await)
+            .with(async |attempt| {
+                let mut req = req.clone();
+                req.request_id.attempt = attempt as u32;
+                Self::get_page_with_shards(req, &self.shards.load_full()).await
+            })
             .await
     }
 
@@ -267,7 +276,7 @@ impl PageserverClient {
         req: page_api::GetRelSizeRequest,
     ) -> tonic::Result<page_api::GetRelSizeResponse> {
         self.retry
-            .with(async || {
+            .with(async |_| {
                 // Relation metadata is only available on shard 0.
                 let mut client = self.shards.load_full().get_zero().client().await?;
                 client.get_rel_size(req).await
@@ -282,7 +291,7 @@ impl PageserverClient {
         req: page_api::GetSlruSegmentRequest,
     ) -> tonic::Result<page_api::GetSlruSegmentResponse> {
         self.retry
-            .with(async || {
+            .with(async |_| {
                 // SLRU segments are only available on shard 0.
                 let mut client = self.shards.load_full().get_zero().client().await?;
                 client.get_slru_segment(req).await

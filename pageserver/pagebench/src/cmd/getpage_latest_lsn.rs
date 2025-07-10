@@ -674,7 +674,7 @@ impl Client for GrpcClient {
         blks: Vec<u32>,
     ) -> anyhow::Result<()> {
         let req = page_api::GetPageRequest {
-            request_id: req_id,
+            request_id: req_id.into(),
             request_class: page_api::GetPageClass::Normal,
             read_lsn: page_api::ReadLsn {
                 request_lsn: req_lsn,
@@ -694,7 +694,7 @@ impl Client for GrpcClient {
             "unexpected status code: {}",
             resp.status_code,
         );
-        Ok((resp.request_id, resp.page_images))
+        Ok((resp.request_id.id, resp.page_images))
     }
 }
 
@@ -740,7 +740,7 @@ impl Client for RichGrpcClient {
         blks: Vec<u32>,
     ) -> anyhow::Result<()> {
         let req = page_api::GetPageRequest {
-            request_id: req_id,
+            request_id: req_id.into(),
             request_class: page_api::GetPageClass::Normal,
             read_lsn: page_api::ReadLsn {
                 request_lsn: req_lsn,
@@ -761,6 +761,6 @@ impl Client for RichGrpcClient {
 
     async fn recv_get_page(&mut self) -> anyhow::Result<(u64, Vec<Bytes>)> {
         let resp = self.requests.next().await.unwrap()?;
-        Ok((resp.request_id, resp.page_images))
+        Ok((resp.request_id.id, resp.page_images))
     }
 }

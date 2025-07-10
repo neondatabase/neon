@@ -3338,9 +3338,12 @@ impl GrpcPageServiceHandler {
     }
 
     /// Generates a PagestreamRequest header from a ReadLsn and request ID.
-    fn make_hdr(read_lsn: page_api::ReadLsn, req_id: u64) -> PagestreamRequest {
+    fn make_hdr(
+        read_lsn: page_api::ReadLsn,
+        req_id: Option<page_api::RequestID>,
+    ) -> PagestreamRequest {
         PagestreamRequest {
-            reqid: req_id,
+            reqid: req_id.map(|r| r.id).unwrap_or_default(),
             request_lsn: read_lsn.request_lsn,
             not_modified_since: read_lsn
                 .not_modified_since_lsn
@@ -3450,7 +3453,7 @@ impl GrpcPageServiceHandler {
 
             batch.push(BatchedGetPageRequest {
                 req: PagestreamGetPageRequest {
-                    hdr: Self::make_hdr(req.read_lsn, req.request_id),
+                    hdr: Self::make_hdr(req.read_lsn, Some(req.request_id)),
                     rel: req.rel,
                     blkno,
                 },
@@ -3528,7 +3531,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         span_record!(rel=%req.rel, lsn=%req.read_lsn);
 
         let req = PagestreamExistsRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             rel: req.rel,
         };
 
@@ -3678,7 +3681,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         span_record!(db_oid=%req.db_oid, lsn=%req.read_lsn);
 
         let req = PagestreamDbSizeRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             dbnode: req.db_oid,
         };
 
@@ -3728,7 +3731,7 @@ impl proto::PageService for GrpcPageServiceHandler {
                 .await?
                 .downgrade();
             while let Some(req) = reqs.message().await? {
-                let req_id = req.request_id;
+                let req_id = req.request_id.map(page_api::RequestID::from).unwrap_or_default();
                 let result = Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
                     .instrument(span.clone()) // propagate request span
                     .await;
@@ -3767,7 +3770,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         span_record!(rel=%req.rel, lsn=%req.read_lsn);
 
         let req = PagestreamNblocksRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             rel: req.rel,
         };
 
@@ -3800,7 +3803,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         span_record!(kind=%req.kind, segno=%req.segno, lsn=%req.read_lsn);
 
         let req = PagestreamGetSlruSegmentRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             kind: req.kind as u8,
             segno: req.segno,
         };
