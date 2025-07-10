@@ -29,17 +29,31 @@ use tracing::{error, info, info_span, trace};
 use utils::lsn::Lsn;
 
 pub struct CommunicatorWorkerProcessStruct<'a> {
-    neon_request_slots: &'a [NeonIOHandle],
+    /// Tokio runtime that the main loop and any other related tasks runs in.
+    runtime: tokio::runtime::Handle,
 
+    /// Client to communicate with the pageserver
     client: PageserverClient,
 
-    pub(crate) cache: IntegratedCacheWriteAccess<'a>,
+    /// Request slots that backends use to send IO requests to the communicator.
+    neon_request_slots: &'a [NeonIOHandle],
 
+    /// Notification pipe. Backends use this to notify the communicator that a request is waiting to
+    /// be processed in one of the request slots.
     submission_pipe_read_fd: OwnedFd,
 
+    /// Locking table for all in-progress IO requests.
     in_progress_table: RequestInProgressTable,
 
-    // Metrics
+    /// Local File Cache, relation size tracking, last-written LSN tracking
+    pub(crate) cache: IntegratedCacheWriteAccess<'a>,
+
+    /*** Static configuration ***/
+    /// Stripe size doesn't change after startup. (The shard map is not stored here, it's passed
+    /// directly to the client)
+    stripe_size: Option<ShardStripeSize>,
+
+    /*** Metrics ***/
     request_counters: IntCounterVec,
     request_rel_exists_counter: IntCounter,
     request_rel_size_counter: IntCounter,
@@ -146,6 +160,8 @@ pub(super) async fn init(
         request_nblocks_counters.with_label_values(&["rel_zero_extend"]);
 
     CommunicatorWorkerProcessStruct {
+        runtime: tokio::runtime::Handle::current(),
+        stripe_size,
         neon_request_slots: cis.neon_request_slots,
         client,
         cache,
@@ -179,6 +195,22 @@ pub(super) async fn init(
 }
 
 impl<'t> CommunicatorWorkerProcessStruct<'t> {
+    /// Update the configuration
+    pub(super) fn update_shard_map(
+        &self,
+        new_shard_map: HashMap<utils::shard::ShardIndex, String>,
+    ) {
+        let shard_spec =
+            ShardSpec::new(new_shard_map, self.stripe_size.clone()).expect("invalid shard spec");
+
+        {
+            let _in_runtime = self.runtime.enter();
+            if let Err(err) = self.client.update_shards(shard_spec) {
+                tracing::error!("could not update shard map: {err:?}");
+            }
+        }
+    }
+
     /// Main loop of the worker process. Receive requests from the backends and process them.
     pub(super) async fn run(&'static self) {
         let mut idxbuf: [u8; 4] = [0; 4];

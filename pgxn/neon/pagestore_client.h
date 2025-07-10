@@ -246,7 +246,13 @@ extern int32 max_cluster_size;
 extern int  neon_protocol_version;
 extern int	neon_stripe_size;
 
-extern void get_shard_map(char ***connstrs_p, shardno_t *num_shards_p);
+typedef struct
+{
+	char		connstring[MAX_SHARDS][MAX_PAGESERVER_CONNSTRING_SIZE];
+	size_t		num_shards;
+} ShardMap;
+
+extern bool parse_shard_map(const char *connstr, ShardMap *result);
 extern shardno_t get_shard_number(BufferTag* tag);
 
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);

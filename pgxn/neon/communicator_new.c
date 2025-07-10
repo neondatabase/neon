@@ -292,8 +292,8 @@ communicator_new_shmem_startup(void)
 void
 communicator_new_bgworker_main(Datum main_arg)
 {
-	char	  **connstrs;
-	shardno_t	num_shards;
+	char	  **connstrings;
+	ShardMap	shard_map;
 	struct LoggingState *logging;
 	char		errbuf[1000];
 	int			elevel;
@@ -325,7 +325,14 @@ communicator_new_bgworker_main(Datum main_arg)
 
 	BackgroundWorkerUnblockSignals();
 
-	get_shard_map(&connstrs, &num_shards);
+	if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
+	{
+		/* shouldn't happen, as the GUC was verified already */
+		elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
+	}
+	connstrings = palloc(shard_map.num_shards * sizeof(char *));
+	for (int i = 0; i < shard_map.num_shards; i++)
+		connstrings[i] = shard_map.connstring[i];
 
 	logging = configure_logging();
 
@@ -334,11 +341,12 @@ communicator_new_bgworker_main(Datum main_arg)
 									   neon_tenant,
 									   neon_timeline,
 									   neon_auth_token,
-									   connstrs,
-									   num_shards,
+									   connstrings,
+									   shard_map.num_shards,
 									   neon_stripe_size,
 									   lfc_path,
 									   file_cache_size);
+	pfree(connstrings);
 	cis = NULL;
 
 	elog(LOG, "communicator threads started");
@@ -357,7 +365,22 @@ communicator_new_bgworker_main(Datum main_arg)
 			file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
 			if (file_cache_size < 100)
 				file_cache_size = 100;
-			communicator_worker_config_reload(proc_handle, file_cache_size);
+
+			/* Reload pageserver URLs */
+			if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
+			{
+				/* shouldn't happen, as the GUC was verified already */
+				elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
+			}
+			connstrings = palloc(shard_map.num_shards * sizeof(char *));
+			for (int i = 0; i < shard_map.num_shards; i++)
+				connstrings[i] = shard_map.connstring[i];
+
+			communicator_worker_config_reload(proc_handle,
+											  file_cache_size,
+											  connstrings,
+											  shard_map.num_shards);
+			pfree(connstrings);
 		}
 
 		for (;;)

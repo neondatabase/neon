@@ -51,7 +51,7 @@ pub extern "C" fn communicator_worker_process_launch(
             Some(PathBuf::from(c_str.to_str().unwrap()))
         }
     };
-    let shard_map = parse_shard_map(nshards, shard_map);
+    let shard_map = shard_map_to_hash(nshards, shard_map);
 
     // start main loop
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -92,7 +92,7 @@ pub extern "C" fn communicator_worker_process_launch(
 }
 
 /// Convert the "shard map" from an array of C strings, indexed by shard no to a rust HashMap
-fn parse_shard_map(
+fn shard_map_to_hash(
     nshards: u32,
     shard_map: *mut *mut c_char,
 ) -> HashMap<utils::shard::ShardIndex, String> {
@@ -124,6 +124,11 @@ fn parse_shard_map(
 pub extern "C" fn communicator_worker_config_reload(
     proc_handle: &'static CommunicatorWorkerProcessStruct<'static>,
     file_cache_size: u64,
+    shard_map: *mut *mut c_char,
+    nshards: u32,
 ) {
     proc_handle.cache.resize_file_cache(file_cache_size as u32);
+
+    let shard_map = shard_map_to_hash(nshards, shard_map);
+    proc_handle.update_shard_map(shard_map);
 }
