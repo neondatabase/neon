@@ -956,18 +956,14 @@ impl ComputeNode {
             None
         };
 
-        let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
         state.terminate_flush_lsn = lsn;
+        let mut delay_exit = false;
         if state.status == ComputeStatus::TerminationPendingFast {
-            state.status = ComputeStatus::Terminated;
-            self.state_changed.notify_all();
+            self.set_status(ComputeStatus::Terminated);
             delay_exit = true
         } else if state.status == ComputeStatus::TerminationPendingImmediate {
-            state.status = ComputeStatus::Terminated;
-            self.state_changed.notify_all();
-            // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = false
+            self.set_status(ComputeStatus::Terminated);
         }
         drop(state);
 

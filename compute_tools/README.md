@@ -40,25 +40,23 @@ compute moves between states.
 ```mermaid
 %% https://mermaid.js.org/syntax/stateDiagram.html
 stateDiagram-v2
-  terminating: TerminationPendingFast TerminationPendingImmediate
   [*] --> Empty : Compute spawned
   Empty --> ConfigurationPending : Waiting for compute spec
   ConfigurationPending --> Configuration : Received compute spec
   Configuration --> Failed : Failed to configure the compute
   Configuration --> Running : Compute has been configured
   Empty --> Init : Compute spec is immediately available
-  Empty --> terminating : Requested termination
+  Empty --> TerminationPendingFast : Requested termination
+  Empty --> TerminationPendingImmediate : Requested termination
   Init --> Failed : Failed to start Postgres
   Init --> Running : Started Postgres
-  Running --> terminating : Requested termination
-  terminating --> Terminated : Terminated compute
+  Running --> TerminationPendingFast : Requested termination
+  Running --> TerminationPendingImmediate : Requested termination
+  TerminationPendingFast --> Terminated compute with 30s delay for cplane to inspect status
+  TerminationPendingImmediate --> Terminated : Terminated compute immediately
   Failed --> [*] : Compute exited
   Terminated --> [*] : Compute exited
 ```
-
-> Note: TerminationPending is actually two values in ComputeStatus:
-> TerminationPendingFast and TerminationPendingImmediate, to reflect
-> whether we should wait 30s before returning from /terminate
 
 ## Tests
 
