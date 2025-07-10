@@ -425,6 +425,9 @@ impl From<TimelineError> for ApiError {
             TimelineError::NotFound(ttid) => {
                 ApiError::NotFound(anyhow!("timeline {} not found", ttid).into())
             }
+            TimelineError::Deleted(ttid) => {
+                ApiError::NotFound(anyhow!("timeline {} deleted", ttid).into())
+            }
             _ => ApiError::InternalServerError(anyhow!("{}", te)),
         }
     }

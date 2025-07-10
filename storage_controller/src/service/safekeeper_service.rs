@@ -1071,6 +1071,12 @@ impl Service {
 
         let mut reconcile_requests = Vec::new();
 
+        fail::fail_point!("sk-migration-step-9-mid-exclude", |_| {
+            Err(ApiError::BadRequest(anyhow::anyhow!(
+                "failpoint sk-migration-step-9-mid-exclude"
+            )))
+        });
+
         for (idx, res) in results.iter().enumerate() {
             let sk_id = safekeepers[idx].skp.id;
             let generation = mconf.generation.into_inner();
@@ -1217,7 +1223,9 @@ impl Service {
                 .await?;
 
             fail::fail_point!("sk-migration-after-step-3", |_| {
-                Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+                Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "failpoint sk-migration-after-step-3"
+                )))
             });
         }
 
@@ -1269,7 +1277,9 @@ impl Service {
         );
 
         fail::fail_point!("sk-migration-after-step-4", |_| {
-            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+            Err(ApiError::BadRequest(anyhow::anyhow!(
+                "failpoint sk-migration-after-step-4"
+            )))
         });
 
         // 5. Initialize timeline on safekeeper(s) from new_sk_set where it doesn't exist yet
@@ -1292,7 +1302,9 @@ impl Service {
         .await?;
 
         fail::fail_point!("sk-migration-after-step-5", |_| {
-            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+            Err(ApiError::BadRequest(anyhow::anyhow!(
+                "failpoint sk-migration-after-step-5"
+            )))
         });
 
         // 6. Call POST bump_term(sync_term) on safekeepers from the new set. Success on majority is enough.
@@ -1315,7 +1327,9 @@ impl Service {
         .await?;
 
         fail::fail_point!("sk-migration-after-step-7", |_| {
-            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+            Err(ApiError::BadRequest(anyhow::anyhow!(
+                "failpoint sk-migration-after-step-7"
+            )))
         });
 
         // 8. Create new_conf: Configuration incrementing joint_conf generation and
@@ -1357,7 +1371,9 @@ impl Service {
             .await?;
 
         fail::fail_point!("sk-migration-after-step-8", |_| {
-            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+            Err(ApiError::BadRequest(anyhow::anyhow!(
+                "failpoint sk-migration-after-step-8"
+            )))
         });
 
         // At this point we have already updated the timeline in the database, so the final
@@ -1456,7 +1472,9 @@ impl Service {
         .await?;
 
         fail::fail_point!("sk-migration-step-9-after-set-membership", |_| {
-            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+            Err(ApiError::BadRequest(anyhow::anyhow!(
+                "failpoint sk-migration-step-9-after-set-membership"
+            )))
         });
 
         self.tenant_timeline_safekeeper_exclude_reconcile(
@@ -1468,7 +1486,9 @@ impl Service {
         .await?;
 
         fail::fail_point!("sk-migration-step-9-after-exclude", |_| {
-            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+            Err(ApiError::BadRequest(anyhow::anyhow!(
+                "failpoint sk-migration-step-9-after-exclude"
+            )))
         });
 
         // Notify cplane/compute about the membership change AFTER changing the membership on safekeepers.
@@ -1478,7 +1498,9 @@ impl Service {
             .await?;
 
         fail::fail_point!("sk-migration-after-step-9", |_| {
-            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+            Err(ApiError::BadRequest(anyhow::anyhow!(
+                "failpoint sk-migration-after-step-9"
+            )))
         });
 
         Ok(())
