@@ -143,7 +143,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
 
     def get_metrics_str(self) -> str:
         """You probably want to use get_metrics() instead."""
-        request_result = self.get(f"http://localhost:{self.port}/metrics")
+        request_result = self.get(f"http://localhost:{self.port}/metrics?use_latest=true")
         request_result.raise_for_status()
         return request_result.text
 

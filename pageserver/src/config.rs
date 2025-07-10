@@ -256,6 +256,10 @@ pub struct PageServerConf {
     /// Defines what is a big tenant for the purpose of image layer generation.
     /// See Timeline::should_check_if_image_layers_required
     pub image_layer_generation_large_timeline_threshold: Option<u64>,
+
+    /// Controls whether to collect all metrics on each scrape or to return potentially stale
+    /// results.
+    pub force_metric_collection_on_scrape: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -437,6 +441,7 @@ impl PageServerConf {
             timeline_import_config,
             basebackup_cache_config,
             image_layer_generation_large_timeline_threshold,
+            force_metric_collection_on_scrape,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -496,6 +501,7 @@ impl PageServerConf {
             timeline_import_config,
             basebackup_cache_config,
             image_layer_generation_large_timeline_threshold,
+            force_metric_collection_on_scrape,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling

@@ -274,6 +274,7 @@ pub struct ConfigToml {
     pub basebackup_cache_config: Option<BasebackupCacheConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_layer_generation_large_timeline_threshold: Option<u64>,
+    pub force_metric_collection_on_scrape: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -831,6 +832,7 @@ impl Default for ConfigToml {
             basebackup_cache_config: None,
             posthog_config: None,
             image_layer_generation_large_timeline_threshold: Some(2 * 1024 * 1024 * 1024),
+            force_metric_collection_on_scrape: true,
         }
     }
 }
