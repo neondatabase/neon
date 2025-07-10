@@ -115,7 +115,7 @@ class NeonBranch:
         return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''}, parent: {self.parent}"
 
     def random_time(self) -> datetime:
-        min_time = self.updated_at + timedelta(seconds=1)
+        min_time = max(self.updated_at + timedelta(seconds=1), self.project.min_time)
         max_time = datetime.now(UTC) - timedelta(seconds=1)
         log.info("min_time: %s, max_time: %s", min_time, max_time)
         return (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
@@ -256,6 +256,7 @@ class NeonProject:
         self.restart_pgbench_on_console_errors: bool = False
         self.limits: dict[str, Any] = self.get_limits()["limits"]
         self.read_only_endpoints_total: int = 0
+        self.min_time: datetime = datetime.now(UTC)
 
     def get_limits(self) -> dict[str, Any]:
         return self.neon_api.get_project_limits(self.id)
@@ -521,6 +522,9 @@ def test_api_random(
     else:
         num_operations = 250
     pg_bin.run(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env)
+    # To not go to the past where pgbench tables do not exist
+    time.sleep(1)
+    project.min_time = datetime.now(UTC)
     for _ in range(num_operations):
         log.info("Starting action #%s", _ + 1)
         while not do_action(
