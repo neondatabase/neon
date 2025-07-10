@@ -61,6 +61,7 @@ use crate::context;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::feature_resolver::FeatureResolver;
+use crate::metrics::LOCAL_DATA_LOSS_SUSPECTED;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationConf;
@@ -78,8 +79,8 @@ use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerNa
 use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
-    CompactFlags, CompactOptions, CompactRequest, CompactionError, MarkInvisibleRequest, Timeline,
-    WaitLsnTimeout, WaitLsnWaiter, import_pgdata,
+    CompactFlags, CompactOptions, CompactRequest, MarkInvisibleRequest, Timeline, WaitLsnTimeout,
+    WaitLsnWaiter, import_pgdata,
 };
 use crate::tenant::{
     GetTimelineError, LogicalSizeCalculationCause, OffloadedTimeline, PageReconstructError,
@@ -2499,12 +2500,10 @@ async fn timeline_checkpoint_handler(
                 .compact(&cancel, flags, &ctx)
                 .await
                 .map_err(|e|
-                    match e {
-                        CompactionError::ShuttingDown => ApiError::ShuttingDown,
-                        CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
-                        CompactionError::CollectKeySpaceError(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
-                        CompactionError::Other(e) => ApiError::InternalServerError(e),
-                        CompactionError::AlreadyRunning(_) => ApiError::InternalServerError(anyhow::anyhow!(e)),
+                    if e.is_cancel() {
+                        ApiError::ShuttingDown
+                    } else {
+                        ApiError::InternalServerError(e.into_anyhow())
                     }
                 )?;
         }
@@ -3630,6 +3629,17 @@ async fn activate_post_import_handler(
     .await
 }
 
+// [Hadron] Reset gauge metrics that are used to raised alerts. We need this API as a stop-gap measure to reset alerts
+// after we manually rectify situations such as local SSD data loss. We will eventually automate this.
+async fn hadron_reset_alert_gauges(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    LOCAL_DATA_LOSS_SUSPECTED.set(0);
+    json_response(StatusCode::OK, ())
+}
+
 /// Read the end of a tar archive.
 ///
 /// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
@@ -3682,6 +3692,23 @@ async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow
     Ok(())
 }
 
+async fn force_refresh_feature_flag(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant
+        .feature_resolver
+        .refresh_properties_and_flags(&tenant);
+    json_response(StatusCode::OK, ())
+}
+
 async fn tenant_evaluate_feature_flag(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -3698,7 +3725,7 @@ async fn tenant_evaluate_feature_flag(
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
-        // TODO: the properties we get here might be stale right after it is collected. But such races are rare (updated every 10s) 
+        // TODO: the properties we get here might be stale right after it is collected. But such races are rare (updated every 10s)
         // and we don't need to worry about it for now.
         let properties = tenant.feature_resolver.collect_properties();
         if as_type.as_deref() == Some("boolean") {
@@ -4147,6 +4174,9 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_shard_id/feature_flag/:flag_key", |r| {
             api_handler(r, tenant_evaluate_feature_flag)
         })
+        .post("/v1/tenant/:tenant_shard_id/force_refresh_feature_flag", |r| {
+            api_handler(r, force_refresh_feature_flag)
+        })
         .put("/v1/feature_flag/:flag_key", |r| {
             testing_api_handler("force override feature flag - put", r, force_override_feature_flag_for_testing_put)
         })
@@ -4155,6 +4185,9 @@ pub fn make_router(
         })
         .post("/v1/feature_flag_spec", |r| {
             api_handler(r, update_feature_flag_spec)
+        })
+        .post("/hadron-internal/reset_alert_gauges", |r| {
+            api_handler(r, hadron_reset_alert_gauges)
         })
         .any(handler_404))
 }

@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState, TlsConfig,
+    LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverProtocol, PgIdent,
@@ -29,8 +29,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
-use tokio::task::JoinHandle;
-use tokio::{spawn, time};
+use tokio::{spawn, sync::watch, task::JoinHandle, time};
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
@@ -175,6 +174,7 @@ pub struct ComputeState {
     /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
     /// mode == ComputeMode::Primary. None otherwise
     pub terminate_flush_lsn: Option<Lsn>,
+    pub promote_state: Option<watch::Receiver<PromoteState>>,
 
     pub metrics: ComputeMetrics,
 }
@@ -192,6 +192,7 @@ impl ComputeState {
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
             terminate_flush_lsn: None,
+            promote_state: None,
         }
     }
 
@@ -1057,7 +1058,7 @@ impl ComputeNode {
         };
 
         let (reader, connected) = tokio::runtime::Handle::current().block_on(async move {
-            let mut client = page_api::Client::new(
+            let mut client = page_api::Client::connect(
                 shard0_connstr,
                 spec.tenant_id,
                 spec.timeline_id,
@@ -2433,19 +2434,11 @@ LIMIT 100",
         // If the value is -1, we never suspend so set the value to default collection.
         // If the value is 0, it means default, we will just continue to use the default.
         if spec.suspend_timeout_seconds == -1 || spec.suspend_timeout_seconds == 0 {
-            info!(
-                "[NEON_EXT_INT_UPD] Spec Timeout: {}, New Timeout: {}",
-                spec.suspend_timeout_seconds, DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL
-            );
             self.params.installed_extensions_collection_interval.store(
                 DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL,
                 std::sync::atomic::Ordering::SeqCst,
             );
         } else {
-            info!(
-                "[NEON_EXT_INT_UPD] Spec Timeout: {}",
-                spec.suspend_timeout_seconds
-            );
             self.params.installed_extensions_collection_interval.store(
                 spec.suspend_timeout_seconds as u64,
                 std::sync::atomic::Ordering::SeqCst,
