@@ -196,7 +196,6 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         self, tenant_id: TenantId, timeline_id: TimelineId
     ) -> SafekeeperTimelineStatus:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}")
-        log.info(f"timeline_status response: {res.text}")
         res.raise_for_status()
         resj = res.json()
         walreceivers = [Walreceiver(wr["conn_id"], wr["status"]) for wr in resj["walreceivers"]]
