@@ -1034,6 +1034,8 @@ def test_image_layer_force_creation_period(neon_env_builder: NeonEnvBuilder):
         "checkpoint_distance": 10 * 1024,
         "checkpoint_timeout": "1s",
         "image_layer_force_creation_period": "1s",
+        "pitr_interval": "10s",
+        "gc_period": "1s",
         # The lsn for forced image layer creations is calculated once every 10 minutes.
         # Hence, drive compaction manually such that the test doesn't compute it at the
         # wrong time.

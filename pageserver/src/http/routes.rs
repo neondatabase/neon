@@ -4164,7 +4164,7 @@ pub fn make_router(
         })
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/getpage",
-            |r| testing_api_handler("getpage@lsn", r, getpage_at_lsn_handler),
+            |r|  api_handler(r, getpage_at_lsn_handler),
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/touchpage",
