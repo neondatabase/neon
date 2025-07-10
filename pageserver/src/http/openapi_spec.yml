@@ -271,6 +271,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LsnLease"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc:
     parameters:
