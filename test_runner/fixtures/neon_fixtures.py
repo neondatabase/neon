@@ -5631,14 +5631,24 @@ def tenant_get_shards(
     ]
 
 
-def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
-    primary_lsn = Lsn(
-        primary.safe_psql_scalar("SELECT pg_current_wal_flush_lsn()", log_query=False)
-    )
-    while True:
-        secondary_lsn = Lsn(
-            secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
+def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint, primary_cursor=None, secondary_cursor=None):
+    if primary_cursor is not None:
+        primary_cursor.execute("SELECT pg_current_wal_flush_lsn()")
+        [res] = primary_cursor.fetchone()
+        primary_lsn = Lsn(res)
+    else:
+        primary_lsn = Lsn(
+            primary.safe_psql_scalar("SELECT pg_current_wal_flush_lsn()", log_query=False)
         )
+    while True:
+        if secondary_cursor is not None:
+            secondary_cursor.execute("SELECT pg_last_wal_replay_lsn()")
+            [res] = secondary_cursor.fetchone()
+            secondary_lsn = Lsn(res)
+        else:
+            secondary_lsn = Lsn(
+                secondary.safe_psql_scalar("SELECT pg_last_wal_replay_lsn()", log_query=False)
+            )
         caught_up = secondary_lsn >= primary_lsn
         log.info(f"caughtup={caught_up}, primary_lsn={primary_lsn}, secondary_lsn={secondary_lsn}")
         if caught_up:
