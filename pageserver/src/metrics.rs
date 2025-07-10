@@ -720,15 +720,6 @@ static TIMELINE_ARCHIVE_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static STANDBY_HORIZON: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_standby_horizon",
-        "Standby apply LSN for which GC is hold off, by timeline.",
-        &["tenant_id", "shard_id", "timeline_id"]
-    )
-    .expect("failed to define a metric")
-});
-
 static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_resident_physical_size",
@@ -3246,7 +3237,6 @@ pub(crate) struct TimelineMetrics {
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
     pub layers_per_read: Histogram,
-    pub standby_horizon_gauge: IntGauge,
     pub resident_physical_size_gauge: UIntGauge,
     pub visible_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -3348,9 +3338,6 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
-        let standby_horizon_gauge = STANDBY_HORIZON
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
         let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -3434,7 +3421,6 @@ impl TimelineMetrics {
             pitr_history_size,
             archival_size,
             layers_per_read,
-            standby_horizon_gauge,
             resident_physical_size_gauge,
             visible_physical_size_gauge,
             current_logical_size_gauge,
@@ -3577,7 +3563,6 @@ impl TimelineMetrics {
         let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = DISK_CONSISTENT_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
-        let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
             let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
