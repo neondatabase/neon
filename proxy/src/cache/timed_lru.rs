@@ -204,6 +204,7 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
         self.insert_raw_ttl(key, value, ttl, false);
     }
 
+    #[cfg(feature = "rest_broker")]
     pub(crate) fn insert(&self, key: K, value: V) {
         self.insert_raw_ttl(key, value, self.ttl, self.update_ttl_on_retrieval);
     }
@@ -219,6 +220,7 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
         (old, cached)
     }
 
+    #[cfg(feature = "rest_broker")]
     pub(crate) fn flush(&self) {
         let now = Instant::now();
         let mut cache = self.cache.lock();
