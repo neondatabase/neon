@@ -764,6 +764,9 @@ impl Client for RichGrpcClient {
 
     async fn recv_get_page(&mut self) -> anyhow::Result<(u64, Vec<Bytes>)> {
         let resp = self.requests.next().await.unwrap()?;
-        Ok((resp.request_id.id, resp.page_images))
+        Ok((
+            resp.request_id.id,
+            resp.pages.into_iter().map(|p| p.image).collect(),
+        ))
     }
 }
