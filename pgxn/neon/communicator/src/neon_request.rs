@@ -4,7 +4,7 @@ pub type COid = u32;
 // This conveniently matches PG_IOV_MAX
 pub const MAX_GETPAGEV_PAGES: usize = 32;
 
-use pageserver_page_api as page_api;
+use pageserver_page_api::{self as page_api, SlruKind};
 
 #[allow(clippy::large_enum_variant)]
 #[repr(C)]
@@ -17,6 +17,7 @@ pub enum NeonIORequest {
     RelExists(CRelExistsRequest),
     RelSize(CRelSizeRequest),
     GetPageV(CGetPageVRequest),
+    ReadSlruSegment(CReadSlruSegmentRequest),
     PrefetchV(CPrefetchVRequest),
     DbSize(CDbSizeRequest),
 
@@ -42,6 +43,9 @@ pub enum NeonIOResult {
 
     /// the result pages are written to the shared memory addresses given in the request
     GetPageV,
+    /// The result is written to the shared memory address given in the
+    /// request.
+    ReadSlruSegment,
 
     /// A prefetch request returns as soon as the request has been received by the communicator.
     /// It is processed in the background.
@@ -67,6 +71,7 @@ impl NeonIORequest {
             RelExists(req) => req.request_id,
             RelSize(req) => req.request_id,
             GetPageV(req) => req.request_id,
+            ReadSlruSegment(req) => req.request_id,
             PrefetchV(req) => req.request_id,
             DbSize(req) => req.request_id,
             WritePage(req) => req.request_id,
@@ -172,6 +177,23 @@ pub struct CGetPageVRequest {
 
     // These fields define where the result is written. Must point into a buffer in shared memory!
     pub dest: [ShmemBuf; MAX_GETPAGEV_PAGES],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CReadSlruSegmentRequest {
+    pub request_id: u64,
+    pub slru_kind: SlruKind,
+    pub segment_number: u32,
+
+    // pub spc_oid: COid,
+    // pub db_oid: COid,
+    // pub rel_number: u32,
+    // pub fork_number: u8,
+    // pub block_number: u32,
+
+    // These fields define where the result is written. Must point into a buffer in shared memory!
+    pub dest: ShmemBuf,
 }
 
 #[repr(C)]

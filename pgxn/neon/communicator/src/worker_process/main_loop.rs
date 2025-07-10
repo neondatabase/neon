@@ -58,6 +58,7 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     request_rel_exists_counter: IntCounter,
     request_rel_size_counter: IntCounter,
     request_get_pagev_counter: IntCounter,
+    request_read_slru_segment_counter: IntCounter,
     request_prefetchv_counter: IntCounter,
     request_db_size_counter: IntCounter,
     request_write_page_counter: IntCounter,
@@ -123,6 +124,8 @@ pub(super) async fn init(
     let request_rel_exists_counter = request_counters.with_label_values(&["rel_exists"]);
     let request_rel_size_counter = request_counters.with_label_values(&["rel_size"]);
     let request_get_pagev_counter = request_counters.with_label_values(&["get_pagev"]);
+    let request_read_slru_segment_counter =
+        request_counters.with_label_values(&["read_slru_segment"]);
     let request_prefetchv_counter = request_counters.with_label_values(&["prefetchv"]);
     let request_db_size_counter = request_counters.with_label_values(&["db_size"]);
     let request_write_page_counter = request_counters.with_label_values(&["write_page"]);
@@ -173,6 +176,7 @@ pub(super) async fn init(
         request_rel_exists_counter,
         request_rel_size_counter,
         request_get_pagev_counter,
+        request_read_slru_segment_counter,
         request_prefetchv_counter,
         request_db_size_counter,
         request_write_page_counter,
@@ -416,6 +420,36 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 match self.handle_get_pagev_request(req).await {
                     Ok(()) => NeonIOResult::GetPageV,
                     Err(errno) => NeonIOResult::Error(errno),
+                }
+            }
+            NeonIORequest::ReadSlruSegment(req) => {
+                self.request_read_slru_segment_counter.inc();
+                let lsn = self.cache.get_lsn();
+
+                match self
+                    .client
+                    .get_slru_segment(page_api::GetSlruSegmentRequest {
+                        read_lsn: self.request_lsns(lsn),
+                        kind: req.slru_kind,
+                        segno: req.segment_number,
+                    })
+                    .await
+                {
+                    Ok(slru_bytes) => {
+                        let src: &[u8] = &slru_bytes.as_ref();
+                        let dest = req.dest;
+                        let len = std::cmp::min(src.len(), dest.bytes_total());
+
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
+                        };
+
+                        NeonIOResult::ReadSlruSegment
+                    }
+                    Err(err) => {
+                        info!("tonic error: {err:?}");
+                        NeonIOResult::Error(0)
+                    }
                 }
             }
             NeonIORequest::PrefetchV(req) => {

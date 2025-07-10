@@ -1276,7 +1276,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	tag.dbOid = reln->smgr_rlocator.locator.dbOid;
 	tag.relNumber = reln->smgr_rlocator.locator.relNumber;
 	tag.forkNum = forknum;
-	
+
 	while (nblocks > 0)
 	{
 		int		iterblocks = Min(nblocks, PG_IOV_MAX);
@@ -1664,7 +1664,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	{
 		neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
 							  request_lsns, nblocks);
-		
+
 		prefetch_result = communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forknum,
 														blocknum, request_lsns, nblocks,
 														buffers, read_pages);
@@ -2385,7 +2385,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	request_lsns.effective_request_lsn = request_lsn;
 
 	if (neon_enable_new_communicator)
-		n_blocks = communicator_new_read_slru_segment(kind, segno, buffer);
+		n_blocks = communicator_new_read_slru_segment(kind, (uint32_t)segno, buffer);
 	else
 		n_blocks = communicator_read_slru_segment(kind, segno, &request_lsns, buffer);
 
