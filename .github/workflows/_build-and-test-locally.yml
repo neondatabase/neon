@@ -120,7 +120,7 @@ jobs:
           ARCH: ${{ inputs.arch }}
           SANITIZERS: ${{ inputs.sanitizers }}
         run: |
-          CARGO_FLAGS="--locked --features 'testing rest_broker'"
+          CARGO_FLAGS="--locked --features testing,rest_broker"
           if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_PROFILE=""
