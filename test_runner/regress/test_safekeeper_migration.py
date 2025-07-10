@@ -6,6 +6,12 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
 
+ALLOWED_PAGESERVER_ERRORS = [
+    ".*Timeline .* was cancelled and cannot be used anymore.*",
+    ".*Timeline .* has been deleted.*",
+    ".*wal receiver task finished with an error.*",
+]
+
 def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
     """
     Simple safekeeper migration test.
@@ -79,3 +85,28 @@ def test_safekeeper_migration_simple(neon_env_builder: NeonEnvBuilder):
     ep.start(safekeeper_generation=1, safekeepers=[3])
 
     assert ep.safe_psql("SELECT * FROM t") == [(i,) for i in range(1, 4)]
+
+
+def test_safekeeper_migration_retries(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that safekeeper migration retries on failure.
+    """
+    neon_env_builder.num_safekeepers = 2
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+        "timeline_safekeeper_count": 1,
+    }
+    env = neon_env_builder.init_start()
+
+    failpoints = [
+        "sk-migration-after-step-3",
+        "sk-migration-after-step-4",
+        "sk-migration-after-step-5",
+        "sk-migration-after-step-7",
+        "sk-migration-after-step-8",
+        "sk-migration-step-9-after-set-membership",
+        "sk-migration-step-9-after-exclude",
+        "sk-migration-after-step-9",
+    ]
+
+

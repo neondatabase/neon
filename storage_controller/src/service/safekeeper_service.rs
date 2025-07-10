@@ -1215,6 +1215,10 @@ impl Service {
                     &[],
                 )
                 .await?;
+
+            fail::fail_point!("sk-migration-after-step-3", |_| {
+                Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+            });
         }
 
         let cur_safekeepers = self.get_safekeepers(&timeline.sk_set)?;
@@ -1264,6 +1268,10 @@ impl Service {
             "safekeepers set membership updated",
         );
 
+        fail::fail_point!("sk-migration-after-step-4", |_| {
+            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+        });
+
         // 5. Initialize timeline on safekeeper(s) from new_sk_set where it doesn't exist yet
         // by doing pull_timeline from the majority of the current set.
 
@@ -1283,6 +1291,10 @@ impl Service {
         )
         .await?;
 
+        fail::fail_point!("sk-migration-after-step-5", |_| {
+            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+        });
+
         // 6. Call POST bump_term(sync_term) on safekeepers from the new set. Success on majority is enough.
 
         // TODO(diko): do we need to bump timeline term?
@@ -1301,6 +1313,10 @@ impl Service {
             false, // we're just waiting for sync position, don't update notified generation
         )
         .await?;
+
+        fail::fail_point!("sk-migration-after-step-7", |_| {
+            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+        });
 
         // 8. Create new_conf: Configuration incrementing joint_conf generation and
         // having new safekeeper set as sk_set and None new_sk_set.
@@ -1339,6 +1355,10 @@ impl Service {
                 &exclude_requests,
             )
             .await?;
+
+        fail::fail_point!("sk-migration-after-step-8", |_| {
+            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+        });
 
         // At this point we have already updated the timeline in the database, so the final
         // membership configuration is commited and the migration is not abortable anymore.
@@ -1422,6 +1442,9 @@ impl Service {
         new_conf: &membership::Configuration,
         exclude_safekeepers: &[Safekeeper],
     ) -> Result<(), ApiError> {
+        // 9. Call PUT configuration on safekeepers from the new set, delivering them new_conf.
+        // Also try to exclude safekeepers and notify cplane about the membership change.
+
         self.tenant_timeline_set_membership_quorum(
             tenant_id,
             timeline_id,
@@ -1432,6 +1455,10 @@ impl Service {
         )
         .await?;
 
+        fail::fail_point!("sk-migration-step-9-after-set-membership", |_| {
+            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+        });
+
         self.tenant_timeline_safekeeper_exclude_reconcile(
             tenant_id,
             timeline_id,
@@ -1440,11 +1467,19 @@ impl Service {
         )
         .await?;
 
+        fail::fail_point!("sk-migration-step-9-after-exclude", |_| {
+            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+        });
+
         // Notify cplane/compute about the membership change AFTER changing the membership on safekeepers.
         // This way the compute will stop talking to excluded safekeepers only after we stop requiring to
         // collect a quorum from them.
         self.cplane_notify_safekeepers(tenant_id, timeline_id, new_conf)
             .await?;
+
+        fail::fail_point!("sk-migration-after-step-9", |_| {
+            Err(ApiError::InternalServerError(anyhow::anyhow!("failpoint")))
+        });
 
         Ok(())
     }
