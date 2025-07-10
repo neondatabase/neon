@@ -312,7 +312,7 @@ pub struct PullTimelineResponse {
     // TODO: add more fields?
 }
 
-/// Response to timeline locate safekeepers request.
+/// Response to a timeline locate request.
 /// Storcon-only API.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TimelineLocateResponse {

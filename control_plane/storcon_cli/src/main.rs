@@ -287,7 +287,6 @@ enum Command {
         #[arg(long)]
         timeline_id: TimelineId,
     },
-    // TODO(diko): add a command to migrate a timeline to a new set of safekeepers.
     /// Migrate a timeline to a new set of safekeepers
     TimelineSafekeeperMigrate {
         #[arg(long)]
