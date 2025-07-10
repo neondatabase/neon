@@ -1002,7 +1002,7 @@ async fn timeline_detail_handler(
             include_non_incremental_logical_size.unwrap_or(false),
             force_await_initial_logical_size.unwrap_or(false),
             include_image_consistent_lsn.unwrap_or(false),
-            &ctx,
+            ctx,
         )
         .await
         .context("get local timeline info")
