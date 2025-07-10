@@ -377,6 +377,16 @@ typedef struct PageserverFeedback
 } PageserverFeedback;
 
 /* BEGIN_HADRON */
+/**
+ * WAL proposer is the only backend that will update `sent_bytes` and `last_recorded_time_us`.
+ * Once the `sent_bytes` reaches the limit, it puts backpressure on PG backends.
+ *
+ * A PG backend checks `should_limit` to see if it should hit backpressure.
+ * - If yes, it also checks the `last_recorded_time_us` to see
+ *   if it's time to push more WALs. This is because the WAL proposer
+ *   only resets `should_limit` to 0 after it is notified about new WALs
+ *   which might take a while.
+ */
 typedef struct WalRateLimiter
 {
 	/* If the value is 1, PG backends will hit backpressure. */
@@ -384,7 +394,7 @@ typedef struct WalRateLimiter
 	/* The number of bytes sent in the current second. */
 	uint64		sent_bytes;
 	/* The last recorded time in microsecond. */
-	TimestampTz last_recorded_time_us;
+	pg_atomic_uint64 last_recorded_time_us;
 } WalRateLimiter;
 /* END_HADRON */
 

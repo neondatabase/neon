@@ -431,7 +431,7 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
     let empty_wal_rate_limiter = crate::bindings::WalRateLimiter {
         should_limit: crate::bindings::pg_atomic_uint32 { value: 0 },
         sent_bytes: 0,
-        last_recorded_time_us: 0,
+        last_recorded_time_us: crate::bindings::pg_atomic_uint64 { value: 0 },
     };
 
     crate::bindings::WalproposerShmemState {
