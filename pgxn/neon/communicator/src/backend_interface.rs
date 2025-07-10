@@ -76,9 +76,6 @@ pub extern "C" fn bcomm_start_io_request(
     // Create neon request and submit it
     bs.start_neon_io_request(slot_idx, request);
 
-    // Tell the communicator about it
-    bs.submit_request(slot_idx);
-
     slot_idx
 }
 
@@ -117,9 +114,6 @@ pub extern "C" fn bcomm_start_get_page_v_request(
 
     // Create neon request and submit it
     bs.start_neon_io_request(slot_idx, request);
-
-    // Tell the communicator about it
-    bs.submit_request(slot_idx);
 
     slot_idx
 }
@@ -208,10 +202,21 @@ pub extern "C" fn bcomm_cache_contains(
 }
 
 impl<'t> CommunicatorBackendStruct<'t> {
+    /// The slot must be free, or this panics.
+    pub(crate) fn start_neon_io_request(&mut self, request_slot_idx: i32, request: &NeonIORequest) {
+        let my_proc_number = self.my_proc_number;
+
+        self.neon_request_slots[request_slot_idx as usize].submit_request(request, my_proc_number);
+
+        // Tell the communicator about it
+        self.notify_about_request(request_slot_idx);
+    }
+
     /// Send a wakeup to the communicator process
-    fn submit_request(self: &CommunicatorBackendStruct<'t>, request_slot_idx: i32) {
+    fn notify_about_request(self: &CommunicatorBackendStruct<'t>, request_slot_idx: i32) {
         // wake up communicator by writing the idx to the submission pipe
         //
+
         // This can block, if the pipe is full. That should be very rare,
         // because the communicator tries hard to drain the pipe to prevent
         // that. Also, there's a natural upper bound on how many wakeups can be
@@ -223,15 +228,5 @@ impl<'t> CommunicatorBackendStruct<'t> {
 
         let _res = nix::unistd::write(&self.submission_pipe_write_fd, &idxbuf);
         // FIXME: check result, return any errors
-    }
-
-    /// Note: there's no guarantee on when the communicator might pick it up. You should ring
-    /// the doorbell. But it might pick it up immediately.
-    ///
-    /// The slot must be free, or this panics.
-    pub(crate) fn start_neon_io_request(&mut self, request_slot_idx: i32, request: &NeonIORequest) {
-        let my_proc_number = self.my_proc_number;
-
-        self.neon_request_slots[request_slot_idx as usize].submit_request(request, my_proc_number);
     }
 }
