@@ -6628,7 +6628,7 @@ impl Timeline {
         let standby_horizon = self.standby_horizon.load();
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
-        if standby_horizon != Lsn::INVALID {
+        if true && standby_horizon != Lsn::INVALID {
             if let Some(standby_lag) = new_gc_cutoff.checked_sub(standby_horizon) {
                 const MAX_ALLOWED_STANDBY_LAG: u64 = 10u64 << 30; // 10 GB
                 if standby_lag.0 < MAX_ALLOWED_STANDBY_LAG {
