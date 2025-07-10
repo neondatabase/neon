@@ -143,7 +143,16 @@ class NeonBranch:
         self.project.terminate_benchmark(self.id)
 
     def reset_to_parent(self) -> None:
+        for ep in self.project.endpoints.values():
+            if ep.type == "read_only":
+                ep.terminate_benchmark()
+        self.terminate_benchmark()
         self.neon_api.reset_to_parent(self.project_id, self.id)
+        self.project.wait()
+        self.start_benchmark()
+        for ep in self.project.endpoints.values():
+            if ep.type == "read_only":
+                ep.start_benchmark()
 
     def restore_random_time(self) -> None:
         """
