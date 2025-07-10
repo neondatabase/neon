@@ -250,6 +250,19 @@ CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 static void
 AssignPageserverConnstring(const char *newval, void *extra)
 {
+	UpdatePageserverShardMap(newval, stripe_size);
+}
+
+static void
+AssignPageserverStripeSize(const int newval, void *extra)
+{
+	UpdatePageserverShardMap(page_server_connstring, newval);
+}
+
+
+static void
+UpdatePageserverShardMap(const char *connstring, int stripe_size)
+{
 	ShardMap	shard_map;
 
 	/*
@@ -258,13 +271,20 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	if (!PagestoreShmemIsValid() || IsUnderPostmaster)
 		return;
 
-	if (!ParseShardMap(newval, &shard_map))
+	if (!ParseShardMap(connstring, &shard_map))
 	{
 		/*
 		 * shouldn't happen, because we already checked the value in
 		 * CheckPageserverConnstring
 		 */
 		elog(ERROR, "could not parse shard map");
+		return;
+	}
+
+	if (shard_map.num_shards > 1 && stripe_size == 0)
+	{
+		elog(ERROR, "stripe_size not available yet, not updating the shard map");
+		return;
 	}
 
 	if (memcmp(&pagestore_shared->shard_map, &shard_map, sizeof(ShardMap)) != 0)
@@ -1407,13 +1427,13 @@ pg_init_libpagestore(void)
 							   NULL, NULL, NULL);
 
 	DefineCustomIntVariable("neon.stripe_size",
-							"sharding stripe size",
+							"sharding stripe size, 0 or unset if not sharded",
 							NULL,
 							&stripe_size,
-							32768, 1, INT_MAX,
+							0, 0, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_BLOCKS,
-							NULL, NULL, NULL);
+							NULL, AssignPageserverStripeSize, NULL);
 
 	DefineCustomIntVariable("neon.max_cluster_size",
 							"cluster size limit",
