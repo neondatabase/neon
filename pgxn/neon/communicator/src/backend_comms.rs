@@ -111,35 +111,6 @@ pub enum NeonIOHandleState {
     Completed,
 }
 
-pub struct RequestProcessingGuard<'a>(&'a NeonIOHandle);
-
-unsafe impl<'a> Send for RequestProcessingGuard<'a> {}
-unsafe impl<'a> Sync for RequestProcessingGuard<'a> {}
-
-impl<'a> RequestProcessingGuard<'a> {
-    pub fn get_request(&self) -> &NeonIORequest {
-        unsafe { &*self.0.request.get() }
-    }
-
-    pub fn get_owner_procno(&self) -> i32 {
-        self.0.owner_procno.load(Ordering::Relaxed)
-    }
-
-    pub fn completed(self, result: NeonIOResult) {
-        unsafe {
-            *self.0.result.get() = result;
-        };
-
-        // Ok, we have completed the IO. Mark the request as completed. After that,
-        // we no longer have ownership of the slot, and must not modify it.
-        let old_state = self
-            .0
-            .state
-            .swap(NeonIOHandleState::Completed, Ordering::Release);
-        assert!(old_state == NeonIOHandleState::Processing);
-    }
-}
-
 impl NeonIOHandle {
     pub fn fill_request(&self, request: &NeonIORequest, proc_number: i32) {
         // Verify that the slot is in Idle state previously, and start filling it.
@@ -203,5 +174,34 @@ impl NeonIOHandle {
         fence(Ordering::Acquire);
 
         Some(RequestProcessingGuard(self))
+    }
+}
+
+pub struct RequestProcessingGuard<'a>(&'a NeonIOHandle);
+
+unsafe impl<'a> Send for RequestProcessingGuard<'a> {}
+unsafe impl<'a> Sync for RequestProcessingGuard<'a> {}
+
+impl<'a> RequestProcessingGuard<'a> {
+    pub fn get_request(&self) -> &NeonIORequest {
+        unsafe { &*self.0.request.get() }
+    }
+
+    pub fn get_owner_procno(&self) -> i32 {
+        self.0.owner_procno.load(Ordering::Relaxed)
+    }
+
+    pub fn completed(self, result: NeonIOResult) {
+        unsafe {
+            *self.0.result.get() = result;
+        };
+
+        // Ok, we have completed the IO. Mark the request as completed. After that,
+        // we no longer have ownership of the slot, and must not modify it.
+        let old_state = self
+            .0
+            .state
+            .swap(NeonIOHandleState::Completed, Ordering::Release);
+        assert!(old_state == NeonIOHandleState::Processing);
     }
 }
