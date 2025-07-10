@@ -59,6 +59,15 @@ pub static FLUSH_WAL_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     .expect("Failed to register safekeeper_flush_wal_seconds histogram")
 });
 /* BEGIN_HADRON */
+// Counter of all ProposerAcceptorMessage requests received
+pub static PROPOSER_ACCEPTOR_MESSAGES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_proposer_acceptor_messages_total",
+        "Total number of ProposerAcceptorMessage requests received by the Safekeeper.",
+        &["outcome"]
+    )
+    .expect("Failed to register safekeeper_proposer_acceptor_messages_total counter")
+});
 pub static WAL_DISK_IO_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "safekeeper_wal_disk_io_errors",

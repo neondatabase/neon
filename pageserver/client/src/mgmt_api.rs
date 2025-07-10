@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error as _;
 use std::time::Duration;
 
@@ -306,6 +306,12 @@ impl Client {
         let response: reqwest::Response = self.request(Method::GET, path, ()).await?;
         let body = response.json().await.map_err(Error::ReceiveBody)?;
         Ok(body)
+    }
+
+    pub async fn list_tenant_visible_size(&self) -> Result<BTreeMap<TenantShardId, u64>> {
+        let uri = format!("{}/v1/list_tenant_visible_size", self.mgmt_api_endpoint);
+        let resp = self.get(&uri).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
     }
     /* END_HADRON */
 

@@ -70,7 +70,7 @@ use crate::context::{
 };
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, GetPageBatchBreakReason, LIVE_CONNECTIONS,
-    MISROUTED_PAGESTREAM_REQUESTS, SmgrOpTimer, TimelineMetrics,
+    MISROUTED_PAGESTREAM_REQUESTS, PAGESTREAM_HANDLER_RESULTS_TOTAL, SmgrOpTimer, TimelineMetrics,
 };
 use crate::pgdatadir_mapping::{LsnRange, Version};
 use crate::span::{
@@ -1441,20 +1441,57 @@ impl PageServerHandler {
             let (response_msg, ctx) = match handler_result {
                 Err(e) => match &e.err {
                     PageStreamError::Shutdown => {
+                        // BEGIN HADRON
+                        PAGESTREAM_HANDLER_RESULTS_TOTAL
+                            .with_label_values(&[metrics::PAGESTREAM_HANDLER_OUTCOME_OTHER_ERROR])
+                            .inc();
+                        // END HADRON
+
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
                         // shutdown, then do not send the error to the client.  Instead just drop the
                         // connection.
                         span.in_scope(|| info!("dropping connection due to shutdown"));
                         return Err(QueryError::Shutdown);
                     }
-                    PageStreamError::Reconnect(reason) => {
-                        span.in_scope(|| info!("handler requested reconnect: {reason}"));
+                    PageStreamError::Reconnect(_reason) => {
+                        span.in_scope(|| {
+                            // BEGIN HADRON
+                            // We can get here because the compute node is pointing at the wrong PS. We
+                            // already have a metric to keep track of this so suppressing this log to
+                            // reduce log spam. The information in this log message is not going to be that
+                            // helpful given the volume of logs that can be generated.
+                            // info!("handler requested reconnect: {reason}")
+                            // END HADRON
+                        });
+                        // BEGIN HADRON
+                        PAGESTREAM_HANDLER_RESULTS_TOTAL
+                            .with_label_values(&[
+                                metrics::PAGESTREAM_HANDLER_OUTCOME_INTERNAL_ERROR,
+                            ])
+                            .inc();
+                        // END HADRON
                         return Err(QueryError::Reconnect);
                     }
                     PageStreamError::Read(_)
                     | PageStreamError::LsnTimeout(_)
                     | PageStreamError::NotFound(_)
                     | PageStreamError::BadRequest(_) => {
+                        // BEGIN HADRON
+                        if let PageStreamError::Read(_) | PageStreamError::LsnTimeout(_) = &e.err {
+                            PAGESTREAM_HANDLER_RESULTS_TOTAL
+                                .with_label_values(&[
+                                    metrics::PAGESTREAM_HANDLER_OUTCOME_INTERNAL_ERROR,
+                                ])
+                                .inc();
+                        } else {
+                            PAGESTREAM_HANDLER_RESULTS_TOTAL
+                                .with_label_values(&[
+                                    metrics::PAGESTREAM_HANDLER_OUTCOME_OTHER_ERROR,
+                                ])
+                                .inc();
+                        }
+                        // END HADRON
+
                         // print the all details to the log with {:#}, but for the client the
                         // error message is enough.  Do not log if shutting down, as the anyhow::Error
                         // here includes cancellation which is not an error.
@@ -1472,7 +1509,15 @@ impl PageServerHandler {
                         )
                     }
                 },
-                Ok((response_msg, _op_timer_already_observed, ctx)) => (response_msg, Some(ctx)),
+                Ok((response_msg, _op_timer_already_observed, ctx)) => {
+                    // BEGIN HADRON
+                    PAGESTREAM_HANDLER_RESULTS_TOTAL
+                        .with_label_values(&[metrics::PAGESTREAM_HANDLER_OUTCOME_SUCCESS])
+                        .inc();
+                    // END HADRON
+
+                    (response_msg, Some(ctx))
+                }
             };
 
             let ctx = ctx.map(|req_ctx| {

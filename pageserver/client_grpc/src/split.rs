@@ -97,7 +97,8 @@ impl GetPageSplitter {
         self.requests.drain()
     }
 
-    /// Adds a response from the given shard.
+    /// Adds a response from the given shard. The response must match the request ID and have an OK
+    /// status code. A response must not already exist for the given shard ID.
     #[allow(clippy::result_large_err)]
     pub fn add_response(
         &mut self,
@@ -105,24 +106,30 @@ impl GetPageSplitter {
         response: page_api::GetPageResponse,
     ) -> tonic::Result<()> {
         // The caller should already have converted status codes into tonic::Status.
-        assert_eq!(response.status_code, page_api::GetPageStatusCode::Ok);
+        if response.status_code != page_api::GetPageStatusCode::Ok {
+            return Err(tonic::Status::internal(format!(
+                "unexpected non-OK response for shard {shard_id}: {:?}",
+                response.status_code
+            )));
+        }
 
-        // Make sure the response matches the request ID.
+        // The stream pool ensures the response matches the request ID.
         if response.request_id != self.request_id {
             return Err(tonic::Status::internal(format!(
-                "response ID {} does not match request ID {}",
-                response.request_id, self.request_id
+                "response ID mismatch for shard {shard_id}: expected {}, got {}",
+                self.request_id, response.request_id
+            )));
+        }
+
+        // We only dispatch one request per shard.
+        if self.responses.contains_key(&shard_id) {
+            return Err(tonic::Status::internal(format!(
+                "duplicate response for shard {shard_id}"
             )));
         }
 
         // Add the response data to the map.
-        let old = self.responses.insert(shard_id, response.page_images);
-
-        if old.is_some() {
-            return Err(tonic::Status::internal(format!(
-                "duplicate response for shard {shard_id}",
-            )));
-        }
+        self.responses.insert(shard_id, response.page_images);
 
         Ok(())
     }
