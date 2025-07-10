@@ -1984,11 +1984,14 @@ impl Service {
         });
 
         // Check that there is enough safekeepers configured that we can create new timelines
-        let test_sk_res = this.safekeepers_for_new_timeline().await;
+        let test_sk_res_str = match this.safekeepers_for_new_timeline().await {
+            Ok(v) => format!("Ok({v:?})"),
+            Err(v) => format!("Err({v:})"),
+        };
         tracing::info!(
             timeline_safekeeper_count = config.timeline_safekeeper_count,
             timelines_onto_safekeepers = config.timelines_onto_safekeepers,
-            "viability test result (test timeline creation on safekeepers): {test_sk_res:?}",
+            "viability test result (test timeline creation on safekeepers): {test_sk_res_str}",
         );
 
         Ok(this)
