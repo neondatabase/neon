@@ -1,7 +1,7 @@
 {
-  "name": "neon-compute",
+  "name": "build-tools",
   "private": true,
   "dependencies": {
     "@sourcemeta/jsonschema": "9.3.4"
   }
-} 
+}
