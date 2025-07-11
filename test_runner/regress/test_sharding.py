@@ -1728,7 +1728,7 @@ def test_shard_split_page_server_timeout(neon_env_builder: NeonEnvBuilder):
     stripe_size = 1
 
     if neon_env_builder.storage_controller_config is None:
-        neon_env_builder.storage_controller_config = {"shard_split_request_timeout: 5s"}
+        neon_env_builder.storage_controller_config = {"shard_split_request_timeout": "5s"}
     else:
         neon_env_builder.storage_controller_config["shard_split_request_timeout"] = "5s"
 
