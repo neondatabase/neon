@@ -169,8 +169,31 @@ RUN case $DEBIAN_VERSION in \
 #########################################################################################
 FROM build-deps AS pg-build
 ARG PG_VERSION
+WORKDIR /pg-src
 COPY vendor/postgres-${PG_VERSION:?} postgres
+COPY compute/patches/postgres_fdw.patch .
+COPY compute/patches/pg_stat_statements_pg14-16.patch .
+COPY compute/patches/pg_stat_statements_pg17.patch .
 RUN cd postgres && \
+    # Apply patches to some contrib extensions
+    # For example, we need to grant EXECUTE on pg_stat_statements_reset() to {privileged_role_name}.
+    # In vanilla Postgres this function is limited to Postgres role superuser.
+    # In Neon we have {privileged_role_name} role that is not a superuser but replaces superuser in some cases.
+    # We could add the additional grant statements to the Postgres repository but it would be hard to maintain,
+    # whenever we need to pick up a new Postgres version and we want to limit the changes in our Postgres fork,
+    # so we do it here.
+    case "${PG_VERSION}" in \
+    "v14" | "v15" | "v16") \
+    patch -p1 < /pg-src/pg_stat_statements_pg14-16.patch; \
+    ;; \
+    "v17") \
+    patch -p1 < /pg-src/pg_stat_statements_pg17.patch; \
+    ;; \
+    *) \
+    # To do not forget to migrate patches to the next major version
+    echo "No contrib patches for this PostgreSQL version" && exit 1;; \
+    esac && \
+    patch -p1 < /pg-src/postgres_fdw.patch && \
     export CONFIGURE_CMD="./configure CFLAGS='-O2 -g3 -fsigned-char' --enable-debug --with-openssl --with-uuid=ossp \
     --with-icu --with-libxml --with-libxslt --with-lz4" && \
     if [ "${PG_VERSION:?}" != "v14" ]; then \
@@ -184,9 +207,6 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/dblink.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgres_fdw.control && \
-    file=/usr/local/pgsql/share/extension/postgres_fdw--1.0.sql && [ -e $file ] && \
-    # TODO: switch to patch and use neon.privileged_role_name
-    echo 'GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO neon_superuser;' >> $file && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/earthdistance.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/insert_username.control && \
@@ -196,35 +216,7 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrowlocks.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/refint.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control && \
-    # We need to grant EXECUTE on pg_stat_statements_reset() to {privileged_role_name}.
-    # In vanilla postgres this function is limited to Postgres role superuser.
-    # In neon we have {privileged_role_name} role that is not a superuser but replaces superuser in some cases.
-    # We could add the additional grant statements to the postgres repository but it would be hard to maintain,
-    # whenever we need to pick up a new postgres version and we want to limit the changes in our postgres fork,
-    # so we do it here.
-    for file in /usr/local/pgsql/share/extension/pg_stat_statements--*.sql; do \
-        filename=$(basename "$file"); \
-        # Note that there are no downgrade scripts for pg_stat_statements, so we \
-        # don't have to modify any downgrade paths or (much) older versions: we only \
-        # have to make sure every creation of the pg_stat_statements_reset function \
-        # also adds execute permissions to the {privileged_role_name}.
-        # TODO: switch to patch and use neon.privileged_role_name
-        case $filename in \
-          pg_stat_statements--1.4.sql) \
-            # pg_stat_statements_reset is first created with 1.4
-            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset() TO neon_superuser;' >> $file; \
-            ;; \
-          pg_stat_statements--1.6--1.7.sql) \
-            # Then with the 1.6-1.7 migration it is re-created with a new signature, thus add the permissions back
-            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint) TO neon_superuser;' >> $file; \
-            ;; \
-          pg_stat_statements--1.10--1.11.sql) \
-            # Then with the 1.10-1.11 migration it is re-created with a new signature again, thus add the permissions back
-            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint, boolean) TO neon_superuser;' >> $file; \
-            ;; \
-        esac; \
-    done;
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control
 
 # Set PATH for all the subsequent build steps
 ENV PATH="/usr/local/pgsql/bin:$PATH"
@@ -1526,7 +1518,7 @@ WORKDIR /ext-src
 COPY compute/patches/pg_duckdb_v031.patch .
 COPY compute/patches/duckdb_v120.patch .
 # pg_duckdb build requires source dir to be a git repo to get submodules
-# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only:
+# allow {privileged_role_name} to execute some functions that in pg_duckdb are available to superuser only:
 # - extension management function duckdb.install_extension()
 # - access to duckdb.extensions table and its sequence
 RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \

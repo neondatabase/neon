@@ -167,7 +167,7 @@ impl Cli {
         let pattern = Regex::new(r"^[a-z_]+$").unwrap();
 
         if !pattern.is_match(value) {
-            bail!("weak superuser name can only contain lowercase letters and underscores")
+            bail!("--privileged-role-name can only contain lowercase letters and underscores")
         }
 
         Ok(value.to_string())

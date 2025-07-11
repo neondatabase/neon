@@ -21,14 +21,14 @@ index 3235cc8..6b892bc 100644
  include Makefile.global
  
 diff --git a/sql/pg_duckdb--0.2.0--0.3.0.sql b/sql/pg_duckdb--0.2.0--0.3.0.sql
-index d777d76..af60106 100644
+index d777d76..3b54396 100644
 --- a/sql/pg_duckdb--0.2.0--0.3.0.sql
 +++ b/sql/pg_duckdb--0.2.0--0.3.0.sql
-@@ -1056,3 +1056,6 @@ GRANT ALL ON FUNCTION duckdb.cache(TEXT, TEXT) TO PUBLIC;
+@@ -1056,3 +1056,14 @@ GRANT ALL ON FUNCTION duckdb.cache(TEXT, TEXT) TO PUBLIC;
  GRANT ALL ON FUNCTION duckdb.cache_info() TO PUBLIC;
  GRANT ALL ON FUNCTION duckdb.cache_delete(TEXT) TO PUBLIC;
  GRANT ALL ON PROCEDURE duckdb.recycle_ddb() TO PUBLIC;
-
++
 +DO $$
 +DECLARE
 +  privileged_role_name text;
@@ -38,4 +38,4 @@ index d777d76..af60106 100644
 +  EXECUTE format('GRANT ALL ON FUNCTION duckdb.install_extension(TEXT) TO %I', privileged_role_name);
 +  EXECUTE format('GRANT ALL ON TABLE duckdb.extensions TO %I', privileged_role_name);
 +  EXECUTE format('GRANT ALL ON SEQUENCE duckdb.extensions_table_seq TO %I', privileged_role_name);
-+END$$;
++END $$;

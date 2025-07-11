@@ -1,0 +1,34 @@
+diff --git a/contrib/pg_stat_statements/pg_stat_statements--1.4.sql b/contrib/pg_stat_statements/pg_stat_statements--1.4.sql
+index 58cdf600fce..8be57a996f6 100644
+--- a/contrib/pg_stat_statements/pg_stat_statements--1.4.sql
++++ b/contrib/pg_stat_statements/pg_stat_statements--1.4.sql
+@@ -46,3 +46,12 @@ GRANT SELECT ON pg_stat_statements TO PUBLIC;
+ 
+ -- Don't want this to be available to non-superusers.
+ REVOKE ALL ON FUNCTION pg_stat_statements_reset() FROM PUBLIC;
++
++DO $$
++DECLARE
++  privileged_role_name text;
++BEGIN
++  privileged_role_name := current_setting('neon.privileged_role_name');
++
++  EXECUTE format('GRANT EXECUTE ON FUNCTION pg_stat_statements_reset() TO %I', privileged_role_name);
++END $$;
+diff --git a/contrib/pg_stat_statements/pg_stat_statements--1.6--1.7.sql b/contrib/pg_stat_statements/pg_stat_statements--1.6--1.7.sql
+index 6fc3fed4c93..256345a8f79 100644
+--- a/contrib/pg_stat_statements/pg_stat_statements--1.6--1.7.sql
++++ b/contrib/pg_stat_statements/pg_stat_statements--1.6--1.7.sql
+@@ -20,3 +20,12 @@ LANGUAGE C STRICT PARALLEL SAFE;
+ 
+ -- Don't want this to be available to non-superusers.
+ REVOKE ALL ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint) FROM PUBLIC;
++
++DO $$
++DECLARE
++  privileged_role_name text;
++BEGIN
++  privileged_role_name := current_setting('neon.privileged_role_name');
++
++  EXECUTE format('GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint) TO %I', privileged_role_name);
++END $$;
