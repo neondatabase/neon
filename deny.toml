@@ -52,6 +52,7 @@ exceptions = [
     # Zlib license has some restrictions if we decide to change sth
     { allow = ["Zlib"], name = "const_format_proc_macros", version = "*" },
     { allow = ["Zlib"], name = "const_format", version = "*" },
+    { allow = ["Zlib"], name = "foldhash", version = "*" },
 ]
 
 [licenses.private]

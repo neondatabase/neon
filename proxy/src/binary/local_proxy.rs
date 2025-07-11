@@ -192,6 +192,7 @@ pub async fn run() -> anyhow::Result<()> {
             jemalloc,
             neon_metrics,
             proxy: crate::metrics::Metrics::get(),
+            tokio: measured_tokio::RuntimeCollector::current(),
         },
     ));
 

@@ -194,7 +194,7 @@ impl ProjectInfoCacheImpl {
         &self,
         endpoint_id: &EndpointId,
     ) -> Option<Ref<'_, EndpointIdInt, EndpointInfo>> {
-        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
+        let endpoint_id = EndpointIdInt::try_new_existing(endpoint_id)?;
         self.cache.get(&endpoint_id)
     }
 
@@ -204,7 +204,7 @@ impl ProjectInfoCacheImpl {
         role_name: &RoleName,
     ) -> Option<RoleAccessControl> {
         let valid_since = self.get_cache_times();
-        let role_name = RoleNameInt::get(role_name)?;
+        let role_name = RoleNameInt::try_new_existing(role_name)?;
         let endpoint_info = self.get_endpoint_cache(endpoint_id)?;
         endpoint_info.get_role_secret(role_name, valid_since)
     }
@@ -297,10 +297,10 @@ impl ProjectInfoCacheImpl {
     }
 
     pub fn maybe_invalidate_role_secret(&self, endpoint_id: &EndpointId, role_name: &RoleName) {
-        let Some(endpoint_id) = EndpointIdInt::get(endpoint_id) else {
+        let Some(endpoint_id) = EndpointIdInt::try_new_existing(endpoint_id) else {
             return;
         };
-        let Some(role_name) = RoleNameInt::get(role_name) else {
+        let Some(role_name) = RoleNameInt::try_new_existing(role_name) else {
             return;
         };
 

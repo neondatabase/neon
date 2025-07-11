@@ -128,11 +128,11 @@ itertools = "0.10"
 itoa = "1.0.11"
 jemalloc_pprof = { version = "0.7", features = ["symbolize", "flamegraph"] }
 jsonwebtoken = "9"
-lasso = "0.7"
 libc = "0.2"
 md5 = "0.7.0"
-measured = { version = "0.0.22", features=["lasso"] }
-measured-process = { version = "0.0.22" }
+measured = { version = "0.0.23", features = ["paracord"] }
+measured-process = { version = "0.0.23" }
+measured-tokio = { version = "0.0.23" }
 memoffset = "0.9"
 nix = { version = "0.30.1", features = ["dir", "fs", "mman", "process", "socket", "signal", "poll"] }
 # Do not update to >= 7.0.0, at least. The update will have a significant impact
@@ -145,6 +145,7 @@ opentelemetry = "0.27"
 opentelemetry_sdk = "0.27"
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "trace", "http", "reqwest-client"] }
 opentelemetry-semantic-conventions = "0.27"
+paracord = { version = "0.1.0", features = ["serde"] }
 parking_lot = "0.12"
 parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"

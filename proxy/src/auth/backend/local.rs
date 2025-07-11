@@ -12,7 +12,7 @@ use crate::context::RequestContext;
 use crate::control_plane::NodeInfo;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
 use crate::http;
-use crate::intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag};
+use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
 use crate::types::EndpointId;
 use crate::url::ApiUrl;
 
@@ -38,9 +38,9 @@ impl LocalBackend {
                 },
                 // TODO(conrad): make this better reflect compute info rather than endpoint info.
                 aux: MetricsAuxInfo {
-                    endpoint_id: EndpointIdTag::get_interner().get_or_intern("local"),
-                    project_id: ProjectIdTag::get_interner().get_or_intern("local"),
-                    branch_id: BranchIdTag::get_interner().get_or_intern("local"),
+                    endpoint_id: EndpointIdInt::new("local"),
+                    project_id: ProjectIdInt::new("local"),
+                    branch_id: BranchIdInt::new("local"),
                     compute_id: "local".into(),
                     cold_start_info: ColdStartInfo::WarmCached,
                 },

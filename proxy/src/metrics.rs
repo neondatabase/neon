@@ -1,6 +1,5 @@
 use std::sync::{Arc, OnceLock};
 
-use lasso::ThreadedRodeo;
 use measured::label::{
     FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet,
 };
@@ -11,6 +10,7 @@ use measured::{
     MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogVec};
+use paracord::ParaCord;
 use tokio::time::{self, Instant};
 
 use crate::control_plane::messages::ColdStartInfo;
@@ -222,7 +222,7 @@ pub enum CacheOutcome {
 #[derive(LabelGroup)]
 #[label(set = ConsoleRequestSet)]
 pub struct ConsoleRequest<'a> {
-    #[label(dynamic_with = ThreadedRodeo, default)]
+    #[label(dynamic_with = ParaCord, default)]
     pub request: &'a str,
 }
 
@@ -345,7 +345,7 @@ pub struct ConnectionFailuresBreakdownGroup {
 #[derive(LabelGroup, Copy, Clone)]
 #[label(set = RedisErrorsSet)]
 pub struct RedisErrors<'a> {
-    #[label(dynamic_with = ThreadedRodeo, default)]
+    #[label(dynamic_with = ParaCord, default)]
     pub channel: &'a str,
 }
 

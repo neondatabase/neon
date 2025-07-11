@@ -183,9 +183,9 @@ impl Default for StorageControllerMetrics {
 #[derive(measured::LabelGroup, Clone)]
 #[label(set = NodeLabelGroupSet)]
 pub(crate) struct NodeLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) az: &'a str,
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) node_id: &'a str,
 }
 
@@ -198,7 +198,7 @@ pub(crate) struct ReconcileCompleteLabelGroup {
 #[derive(measured::LabelGroup)]
 #[label(set = HttpRequestStatusLabelGroupSet)]
 pub(crate) struct HttpRequestStatusLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) path: &'a str,
     pub(crate) method: Method,
     pub(crate) status: StatusCode,
@@ -207,7 +207,7 @@ pub(crate) struct HttpRequestStatusLabelGroup<'a> {
 #[derive(measured::LabelGroup)]
 #[label(set = HttpRequestLatencyLabelGroupSet)]
 pub(crate) struct HttpRequestLatencyLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) path: &'a str,
     pub(crate) method: Method,
 }
@@ -215,9 +215,9 @@ pub(crate) struct HttpRequestLatencyLabelGroup<'a> {
 #[derive(measured::LabelGroup, Clone)]
 #[label(set = PageserverRequestLabelGroupSet)]
 pub(crate) struct PageserverRequestLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) pageserver_id: &'a str,
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) path: &'a str,
     pub(crate) method: Method,
 }
@@ -225,9 +225,9 @@ pub(crate) struct PageserverRequestLabelGroup<'a> {
 #[derive(measured::LabelGroup, Clone)]
 #[label(set = SafekeeperRequestLabelGroupSet)]
 pub(crate) struct SafekeeperRequestLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) safekeeper_id: &'a str,
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) path: &'a str,
     pub(crate) method: Method,
 }
@@ -254,11 +254,11 @@ pub(crate) struct LeadershipStatusGroup {
 #[derive(measured::LabelGroup, Clone)]
 #[label(set = ReconcileLongRunningLabelGroupSet)]
 pub(crate) struct ReconcileLongRunningLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) tenant_id: &'a str,
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) shard_number: &'a str,
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) sequence: &'a str,
 }
 
@@ -282,11 +282,11 @@ pub(crate) enum Method {
 #[derive(measured::LabelGroup, Clone)]
 #[label(set = SafekeeperReconcilerLabelGroupSet)]
 pub(crate) struct SafekeeperReconcilerLabelGroup<'a> {
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) sk_az: &'a str,
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) sk_node_id: &'a str,
-    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    #[label(dynamic_with = paracord::ParaCord, default)]
     pub(crate) sk_hostname: &'a str,
 }
 

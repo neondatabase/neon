@@ -1010,6 +1010,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "boxcar"
+version = "0.2.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26c4925bc979b677330a8c7fe7a8c94af2dbb4a2d37b4a20a80d884400f46baa"
+
+[[package]]
 name = "bstr"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1242,14 +1248,14 @@ checksum = "afb84c814227b90d6895e01398aee0d8033c00e7466aca416fb6a8e0eb19d8a7"
 
 [[package]]
 name = "clashmap"
-version = "1.0.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93bd59c81e2bd87a775ae2de75f070f7e2bfe97363a6ad652f46824564c23e4d"
+checksum = "e8a055b1f1bf558eae4959f6dd77cf2d7d50ae1483928e60ef21ca5a24fd4321"
 dependencies = [
  "crossbeam-utils",
  "hashbrown 0.15.2",
  "lock_api",
- "parking_lot_core 0.9.8",
+ "parking_lot_core 0.9.10",
  "polonius-the-crab",
  "replace_with",
 ]
@@ -1755,19 +1761,6 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
-version = "5.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6943ae99c34386c84a470c499d3414f66502a41340aa895406e0d2e4a207b91d"
-dependencies = [
- "cfg-if",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core 0.9.8",
-]
-
-[[package]]
-name = "dashmap"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
@@ -1777,7 +1770,7 @@ dependencies = [
  "hashbrown 0.14.5",
  "lock_api",
  "once_cell",
- "parking_lot_core 0.9.8",
+ "parking_lot_core 0.9.10",
 ]
 
 [[package]]
@@ -2344,6 +2337,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2582,7 +2581,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "842dc78579ce01e6a1576ad896edc92fca002dd60c9c3746b7fc2bec6fb429d0"
 dependencies = [
  "cfg-if",
- "dashmap 6.1.0",
+ "dashmap",
  "futures-sink",
  "futures-timer",
  "futures-util",
@@ -3288,7 +3287,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "crossbeam-utils",
- "dashmap 6.1.0",
+ "dashmap",
  "env_logger",
  "indexmap 2.9.0",
  "itoa",
@@ -3546,16 +3545,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lasso"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4644821e1c3d7a560fe13d842d13f587c07348a1a05d3a797152d41c90c56df2"
-dependencies = [
- "dashmap 5.5.0",
- "hashbrown 0.13.2",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3674,17 +3663,17 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "measured"
-version = "0.0.22"
+version = "0.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3051f3a030d55d680cdef6ca50e80abd1182f8da29f2344a7c9cb575721138f0"
+checksum = "d22ae866c28b9c59afaeb488ad6e3bd148570cf5a2bacf6c4845def5b9a03470"
 dependencies = [
  "bytes",
  "crossbeam-utils",
  "hashbrown 0.14.5",
  "itoa",
- "lasso",
  "measured-derive",
  "memchr",
+ "paracord",
  "parking_lot 0.12.1",
  "rustc-hash 1.1.0",
  "ryu",
@@ -3692,9 +3681,9 @@ dependencies = [
 
 [[package]]
 name = "measured-derive"
-version = "0.0.22"
+version = "0.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9e6777fc80a575f9503d908c8b498782a6c3ee88a06cb416dc3941401e43b94"
+checksum = "16d734ed9dbca22d87d56b54d220f254ce921cb5cce97d4a960075af0131d076"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3704,13 +3693,24 @@ dependencies = [
 
 [[package]]
 name = "measured-process"
-version = "0.0.22"
+version = "0.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c4b80445aeb08e832d87bf1830049a924cdc1d6b7ef40b6b9b365bff17bf8ec"
+checksum = "f71a318d2b9edcded1e5e0ccf3c9e1e1614217d7f07933631c771daa717743aa"
 dependencies = [
  "libc",
  "measured",
  "procfs",
+]
+
+[[package]]
+name = "measured-tokio"
+version = "0.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e79a936051c484268e2d71a5dd01219096c62c8ff09afad95f07c14a3b0c580"
+dependencies = [
+ "itoa",
+ "measured",
+ "tokio",
 ]
 
 [[package]]
@@ -4572,6 +4572,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "paracord"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e41e924113f9a05eecd561c6e695648f243a03b3ad8d9b3eff689342b95023b"
+dependencies = [
+ "boxcar",
+ "clashmap",
+ "foldhash",
+ "hashbrown 0.15.2",
+ "serde",
+ "sync_wrapper 1.0.1",
+ "typed-arena",
+]
+
+[[package]]
 name = "parking"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4595,7 +4610,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3742b2c103b9f06bc9fff0a37ff4912935851bee6d36f3c02bcc755bcfec228f"
 dependencies = [
  "lock_api",
- "parking_lot_core 0.9.8",
+ "parking_lot_core 0.9.10",
 ]
 
 [[package]]
@@ -4614,15 +4629,15 @@ dependencies = [
 
 [[package]]
 name = "parking_lot_core"
-version = "0.9.8"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93f00c865fe7cabf650081affecd3871070f26767e7b2070a3ffae14c654b447"
+checksum = "1e401f977ab385c9e4e3ab30627d6f26d00e2c73eef317493c4ec6d468726cf8"
 dependencies = [
  "cfg-if",
  "libc",
- "redox_syscall 0.3.5",
+ "redox_syscall 0.5.10",
  "smallvec",
- "windows-targets 0.48.0",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -5328,13 +5343,14 @@ dependencies = [
  "itoa",
  "jose-jwa",
  "jose-jwk",
- "lasso",
  "measured",
+ "measured-tokio",
  "metrics",
  "once_cell",
  "opentelemetry",
  "p256 0.13.2",
  "papaya",
+ "paracord",
  "parking_lot 0.12.1",
  "parquet",
  "parquet_derive",
@@ -5635,6 +5651,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4722d768eff46b75989dd134e5c353f0d6296e5aaa3132e776cbdb56be7731aa"
 dependencies = [
  "bitflags 1.3.2",
+]
+
+[[package]]
+name = "redox_syscall"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b8c0c260b63a8219631167be35e6a988e9554dbd323f8bd08439c8ed1302bd1"
+dependencies = [
+ "bitflags 2.8.0",
 ]
 
 [[package]]
@@ -6897,12 +6922,12 @@ dependencies = [
  "hyper 0.14.30",
  "itertools 0.10.5",
  "json-structural-diff",
- "lasso",
  "measured",
  "metrics",
  "once_cell",
  "pageserver_api",
  "pageserver_client",
+ "paracord",
  "postgres_connection",
  "posthog_client_lite",
  "rand 0.8.5",
@@ -8018,6 +8043,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-arena"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6af6ae20167a9ece4bcb41af5b80f8a1f1df981f6391189ce00fd257af04126a"
+
+[[package]]
 name = "typed-json"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8761,6 +8792,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "p256 0.13.2",
+ "paracord",
  "parquet",
  "prettyplease",
  "proc-macro2",

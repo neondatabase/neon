@@ -513,6 +513,7 @@ pub async fn run() -> anyhow::Result<()> {
             jemalloc,
             neon_metrics,
             proxy: crate::metrics::Metrics::get(),
+            tokio: measured_tokio::RuntimeCollector::current(),
         },
     ));
     maintenance_tasks.spawn(control_plane::mgmt::task_main(mgmt_listener));
