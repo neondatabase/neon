@@ -11,7 +11,7 @@ use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use indexmap::IndexMap;
-use jsonpath_lib::select;
+
 use ouroboros::self_referencing;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value as JsonValue;
@@ -114,8 +114,9 @@ pub struct ApiConfig {
     pub db_max_rows: Option<String>,
     #[serde(default = "db_allowed_select_functions")]
     pub db_allowed_select_functions: Vec<String>,
-    //#[serde(deserialize_with = "to_tuple", default)]
-    //pub db_pre_request: Option<(String, String)>,
+    // #[serde(deserialize_with = "to_tuple", default)]
+    // pub db_pre_request: Option<(String, String)>,
+    #[allow(dead_code)]
     #[serde(default = "role_claim_key")]
     pub role_claim_key: String,
     #[serde(default, deserialize_with = "deserialize_comma_separated_option")]
@@ -763,8 +764,9 @@ async fn handle_rest_inner(
 
     let db_schemas = &api_config.db_schemas; // list of schemas available for the api
     let db_extra_search_path = &api_config.db_extra_search_path;
-    let role_claim_key = &api_config.role_claim_key;
-    let role_claim_path = format!("${role_claim_key}");
+    // TODO: use this when we get a replacement for jsonpath_lib
+    // let role_claim_key = &api_config.role_claim_key;
+    // let role_claim_path = format!("${role_claim_key}");
     let db_anon_role = &api_config.db_anon_role;
     let max_rows = api_config.db_max_rows.as_deref();
     let db_allowed_select_functions = api_config
@@ -784,20 +786,18 @@ async fn handle_rest_inner(
         }
         ComputeCredentialKeys::AuthKeys(_) => None,
     };
-    //TODO: check if the token is properly cached in the backend (should we cache the parsed claims?)
+    
     // read the role from the jwt claims (and set it to the "anon" role if not present)
     let (role, authenticated) = match &jwt_claims {
-        Some(claims) => match select(claims, &role_claim_path) {
-            Ok(v) => match &v[..] {
-                [JsonValue::String(s)] => Ok((Some(s), true)),
-                _ => Ok((db_anon_role.as_ref(), true)),
-            },
-            Err(e) => Err(RestError::SubzeroCore(JwtTokenInvalid {
-                message: format!("{e}"),
-            })),
+        Some(claims) => {
+            
+            match claims.get("role") {
+                Some(JsonValue::String(r)) => (Some(r), true),
+                _ => (db_anon_role.as_ref(), true),
+            }
         },
-        None => Ok((db_anon_role.as_ref(), false)),
-    }?;
+        None => (db_anon_role.as_ref(), false),
+    };
 
     // do not allow unauthenticated requests when there is no anonymous role setup
     if let (None, false) = (role, authenticated) {

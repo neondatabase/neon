@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = []
 testing = ["dep:tokio-postgres"]
-rest_broker = ["dep:subzero-core", "dep:jsonpath_lib", "dep:ouroboros"]
+rest_broker = ["dep:subzero-core", "dep:ouroboros"]
 
 [dependencies]
 ahash.workspace = true
@@ -107,7 +107,6 @@ x509-cert.workspace = true
 redis.workspace = true
 zerocopy.workspace = true
 subzero-core = { git = "https://github.com/neondatabase/subzero", rev = "4b87b463515f3f0cc408f592b3c0e55f23fc22dd", features = ["postgresql"], optional = true }
-jsonpath_lib = { version = "0.3.0", optional = true }
 ouroboros = { version = "0.18", optional = true }
 
 # jwt stuff
