@@ -62,7 +62,6 @@ static const char *jwt_token = NULL;
 static char *ConsoleURL = NULL;
 static bool ForwardDDL = true;
 static bool RegressTestMode = false;
-char *privileged_role_name;
 
 /*
  * CURL docs say that this buffer must exist until we call curl_easy_cleanup
@@ -929,7 +928,7 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 	 */
 	if (event == FHET_START
 		&& !neon_event_triggers
-		&& is_neon_superuser())
+		&& is_privileged_role())
 	{
 		Oid weak_superuser_oid = get_role_oid(privileged_role_name, false);
 
@@ -1159,7 +1158,7 @@ ProcessCreateEventTrigger(
 	 * For that we give superuser membership to the role for the execution of
 	 * the command.
 	 */
-	if (IsTransactionState() && is_neon_superuser())
+	if (IsTransactionState() && is_privileged_role())
 	{
 		/* Find the Event Trigger function Oid */
 		Oid func_oid = LookupFuncName(stmt->funcname, 0, NULL, false);
@@ -1236,7 +1235,7 @@ ProcessCreateEventTrigger(
 		 *
 		 * That way [ ALTER | DROP ] EVENT TRIGGER commands just work.
 		 */
-		if (IsTransactionState() && is_neon_superuser())
+		if (IsTransactionState() && is_privileged_role())
 		{
 			if (!current_user_is_super)
 			{
@@ -1361,7 +1360,7 @@ NeonProcessUtility(
 static void
 neon_event_triggers_assign_hook(bool newval, void *extra)
 {
-	if (IsTransactionState() && !is_neon_superuser())
+	if (IsTransactionState() && !is_privileged_role())
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
