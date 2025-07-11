@@ -1719,7 +1719,6 @@ def test_back_pressure_per_shard(neon_env_builder: NeonEnvBuilder):
 
 
 # HADRON
-@pytest.mark.skip(reason="Neon env does not have timeout on shard split.")
 def test_shard_split_page_server_timeout(neon_env_builder: NeonEnvBuilder):
     """
     Tests that shard split can correctly handle page server timeouts and abort the split
@@ -1727,6 +1726,11 @@ def test_shard_split_page_server_timeout(neon_env_builder: NeonEnvBuilder):
     init_shard_count = 2
     neon_env_builder.num_pageservers = 1
     stripe_size = 1
+
+    if neon_env_builder.storage_controller_config is None:
+        neon_env_builder.storage_controller_config = {"shard_split_request_timeout": "5s"}
+    else:
+        neon_env_builder.storage_controller_config["shard_split_request_timeout"] = "5s"
 
     env = neon_env_builder.init_start(
         initial_tenant_shard_count=init_shard_count,

@@ -1269,7 +1269,7 @@ impl Timeline {
         // Define partitioning schema if needed
 
         // HADRON
-        let force_image_creation_lsn = self.get_or_compute_force_image_creation_lsn().await;
+        let force_image_creation_lsn = self.get_force_image_creation_lsn();
 
         // 1. L0 Compact
         let l0_outcome = {
@@ -1479,9 +1479,11 @@ impl Timeline {
     }
 
     /* BEGIN_HADRON */
-    // Get the force image creation LSN. Compute it if the last computed LSN is too old.
-    async fn get_or_compute_force_image_creation_lsn(self: &Arc<Self>) -> Option<Lsn> {
-        let image_creation_period = self.get_image_creation_timeout()?;
+    // Get the force image creation LSN based on gc_cutoff_lsn.
+    // Note that this is an estimation and the workload rate may suddenly change. When that happens,
+    // the force image creation may be too early or too late, but eventually it should be able to catch up.
+    pub(crate) fn get_force_image_creation_lsn(self: &Arc<Self>) -> Option<Lsn> {
+        let image_creation_period = self.get_image_layer_force_creation_period()?;
         let current_lsn = self.get_last_record_lsn();
         let pitr_lsn = self.gc_info.read().unwrap().cutoffs.time?;
         let pitr_interval = self.get_pitr_interval();

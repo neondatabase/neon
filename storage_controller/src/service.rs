@@ -32,7 +32,7 @@ use pageserver_api::controller_api::{
     ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
     SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
     TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
-    TenantShardMigrateRequest, TenantShardMigrateResponse,
+    TenantShardMigrateRequest, TenantShardMigrateResponse, TenantTimelineDescribeResponse,
 };
 use pageserver_api::models::{
     self, DetachBehavior, LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease,
@@ -484,6 +484,9 @@ pub struct Config {
 
     /// When set, actively checks and initiates heatmap downloads/uploads.
     pub kick_secondary_downloads: bool,
+
+    /// Timeout used for HTTP client of split requests. [`Duration::MAX`] if None.
+    pub shard_split_request_timeout: Duration,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -5487,6 +5490,92 @@ impl Service {
         .ok_or_else(|| ApiError::NotFound(anyhow::anyhow!("Tenant {tenant_id} not found").into()))
     }
 
+    /* BEGIN_HADRON */
+    pub(crate) async fn tenant_timeline_describe(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<TenantTimelineDescribeResponse, ApiError> {
+        self.tenant_remote_mutation(tenant_id, |locations| async move {
+            if locations.0.is_empty() {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant not found").into(),
+                ));
+            };
+
+            let locations: Vec<(TenantShardId, Node)> = locations
+                .0
+                .iter()
+                .map(|t| (*t.0, t.1.latest.node.clone()))
+                .collect();
+            let mut futs = FuturesUnordered::new();
+
+            for (shard_id, node) in locations {
+                futs.push({
+                    async move {
+                        let result = node
+                            .with_client_retries(
+                                |client| async move {
+                                    client
+                                        .tenant_timeline_describe(&shard_id, &timeline_id)
+                                        .await
+                                },
+                                &self.http_client,
+                                &self.config.pageserver_jwt_token,
+                                3,
+                                3,
+                                Duration::from_secs(30),
+                                &self.cancel,
+                            )
+                            .await;
+                        (result, shard_id, node.get_id())
+                    }
+                });
+            }
+
+            let mut results: Vec<TimelineInfo> = Vec::new();
+            while let Some((result, tenant_shard_id, node_id)) = futs.next().await {
+                match result {
+                    Some(Ok(timeline_info)) => results.push(timeline_info),
+                    Some(Err(e)) => {
+                        tracing::warn!(
+                            "Failed to describe tenant {} timeline {} for pageserver {}: {e}",
+                            tenant_shard_id,
+                            timeline_id,
+                            node_id,
+                        );
+                        return Err(ApiError::ResourceUnavailable(format!("{e}").into()));
+                    }
+                    None => return Err(ApiError::Cancelled),
+                }
+            }
+            let mut image_consistent_lsn: Option<Lsn> = Some(Lsn::MAX);
+            for timeline_info in &results {
+                if let Some(tline_image_consistent_lsn) = timeline_info.image_consistent_lsn {
+                    image_consistent_lsn = Some(std::cmp::min(
+                        image_consistent_lsn.unwrap(),
+                        tline_image_consistent_lsn,
+                    ));
+                } else {
+                    tracing::warn!(
+                        "Timeline {} on shard {} does not have image consistent lsn",
+                        timeline_info.timeline_id,
+                        timeline_info.tenant_id
+                    );
+                    image_consistent_lsn = None;
+                    break;
+                }
+            }
+
+            Ok(TenantTimelineDescribeResponse {
+                shards: results,
+                image_consistent_lsn,
+            })
+        })
+        .await?
+    }
+    /* END_HADRON */
+
     /// limit & offset are pagination parameters. Since we are walking an in-memory HashMap, `offset` does not
     /// avoid traversing data, it just avoid returning it. This is suitable for our purposes, since our in memory
     /// maps are small enough to traverse fast, our pagination is just to avoid serializing huge JSON responses
@@ -6323,9 +6412,9 @@ impl Service {
         // partially split shards correctly.
         let shard_split_timeout =
             if let Some(env::DeploymentMode::Local) = env::get_deployment_mode() {
-                Duration::MAX
+                Duration::from_secs(30)
             } else {
-                Duration::MAX
+                self.config.shard_split_request_timeout
             };
         let mut http_client_builder = reqwest::ClientBuilder::new()
             .pool_max_idle_per_host(0)

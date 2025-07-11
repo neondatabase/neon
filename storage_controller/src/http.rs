@@ -850,6 +850,31 @@ async fn handle_tenant_describe(
     json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
 }
 
+/* BEGIN_HADRON */
+async fn handle_tenant_timeline_describe(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Scrubber)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_timeline_describe(tenant_id, timeline_id)
+            .await?,
+    )
+}
+/* END_HADRON */
+
 async fn handle_tenant_list(
     service: Arc<Service>,
     req: Request<Body>,
@@ -2480,6 +2505,13 @@ pub fn make_router(
             )
         })
         // Timeline operations
+        .get("/control/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+            tenant_service_handler(
+                r,
+                handle_tenant_timeline_describe,
+                RequestName("v1_tenant_timeline_describe"),
+            )
+        })
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             tenant_service_handler(
                 r,

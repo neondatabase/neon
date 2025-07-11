@@ -218,7 +218,7 @@ impl PageserverClient {
     ) -> tonic::Result<page_api::GetPageResponse> {
         // Fast path: request is for a single shard.
         if let Some(shard_id) =
-            GetPageSplitter::is_single_shard(&req, shards.count, shards.stripe_size)
+            GetPageSplitter::for_single_shard(&req, shards.count, shards.stripe_size)
         {
             return Self::get_page_with_shard(req, shards.get(shard_id)?).await;
         }
@@ -238,7 +238,7 @@ impl PageserverClient {
             splitter.add_response(shard_id, shard_response)?;
         }
 
-        splitter.assemble_response()
+        splitter.get_response()
     }
 
     /// Fetches pages on the given shard. Does not retry internally.
@@ -246,9 +246,8 @@ impl PageserverClient {
         req: page_api::GetPageRequest,
         shard: &Shard,
     ) -> tonic::Result<page_api::GetPageResponse> {
-        let expected = req.block_numbers.len();
         let stream = shard.stream(req.request_class.is_bulk()).await;
-        let resp = stream.send(req).await?;
+        let resp = stream.send(req.clone()).await?;
 
         // Convert per-request errors into a tonic::Status.
         if resp.status_code != page_api::GetPageStatusCode::Ok {
@@ -258,11 +257,27 @@ impl PageserverClient {
             ));
         }
 
-        // Check that we received the expected number of pages.
-        let actual = resp.page_images.len();
-        if expected != actual {
+        // Check that we received the expected pages.
+        if req.rel != resp.rel {
             return Err(tonic::Status::internal(format!(
-                "expected {expected} pages, got {actual}",
+                "shard {} returned wrong relation, expected {} got {}",
+                shard.id, req.rel, resp.rel
+            )));
+        }
+        if !req
+            .block_numbers
+            .iter()
+            .copied()
+            .eq(resp.pages.iter().map(|p| p.block_number))
+        {
+            return Err(tonic::Status::internal(format!(
+                "shard {} returned wrong pages, expected {:?} got {:?}",
+                shard.id,
+                req.block_numbers,
+                resp.pages
+                    .iter()
+                    .map(|page| page.block_number)
+                    .collect::<Vec<_>>()
             )));
         }
 
@@ -435,6 +450,8 @@ impl Shards {
 ///   * Bulk client pool: unbounded.
 ///     * Bulk stream pool: MAX_BULK_STREAMS and MAX_BULK_STREAM_QUEUE_DEPTH.
 struct Shard {
+    /// The shard ID.
+    id: ShardIndex,
     /// Unary gRPC client pool.
     client_pool: Arc<ClientPool>,
     /// GetPage stream pool.
@@ -500,6 +517,7 @@ impl Shard {
         );
 
         Ok(Self {
+            id: shard_id,
             client_pool,
             stream_pool,
             bulk_stream_pool,
