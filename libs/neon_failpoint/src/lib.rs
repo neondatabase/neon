@@ -45,7 +45,7 @@ pub enum FailpointAction {
     /// Sleep for a specified duration in milliseconds
     Sleep(u64),
     /// Return a value (for failpoints that support it)
-    Return(String),
+    Return(Option<String>),
     /// Exit the process immediately
     Exit,
 }
@@ -59,7 +59,7 @@ pub enum FailpointResult {
     /// Continue normal execution
     Continue,
     /// Return early with a value
-    Return(String),
+    Return(Option<String>),
     /// Cancelled by cancellation token
     Cancelled,
 }
@@ -264,7 +264,7 @@ pub async fn failpoint_with_cancellation(
             result
         }
         FailpointAction::Return(value) => {
-            tracing::info!("Failpoint {} returning: {}", name, value);
+            tracing::info!("Failpoint {} returning: {:?}", name, value);
             FailpointResult::Return(value)
         }
         FailpointAction::Exit => {
@@ -280,12 +280,12 @@ fn parse_action(actions: &str) -> Result<FailpointAction> {
         "off" => Ok(FailpointAction::Off),
         "pause" => Ok(FailpointAction::Pause),
         "exit" => Ok(FailpointAction::Exit),
-        "return" => Ok(FailpointAction::Return(String::new())),
+        "return" => Ok(FailpointAction::Return(None)),
         _ => {
             // Try to parse return(value) format
             if let Some(captures) = regex::Regex::new(r"^return\(([^)]*)\)$")?.captures(actions) {
                 let value = captures.get(1).unwrap().as_str().to_string();
-                Ok(FailpointAction::Return(value))
+                Ok(FailpointAction::Return(Some(value)))
             }
             // Try to parse sleep(millis) format
             else if let Some(captures) = regex::Regex::new(r"^sleep\((\d+)\)$")?.captures(actions) {

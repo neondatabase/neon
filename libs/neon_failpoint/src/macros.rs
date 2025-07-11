@@ -7,10 +7,11 @@ macro_rules! fail_point {
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, None).await {
                 $crate::FailpointResult::Continue => {},
-                $crate::FailpointResult::Return(value) => {
-                    // For compatibility with fail crate, we need to handle the return value
-                    // This will be used in closures like |x| x pattern
-                    return Ok(value.parse().unwrap_or_default());
+                $crate::FailpointResult::Return(None) => {
+                    return;
+                },
+                $crate::FailpointResult::Return(Some(value)) => {
+                    panic!("failpoint was configured with return(X) but Rust code does not pass a closure to map X to a return value");
                 },
                 $crate::FailpointResult::Cancelled => {},
             }
@@ -22,7 +23,7 @@ macro_rules! fail_point {
                 $crate::FailpointResult::Continue => {},
                 $crate::FailpointResult::Return(value) => {
                     let closure = $closure;
-                    return closure(value.as_str());
+                    return closure(value);
                 },
                 $crate::FailpointResult::Cancelled => {},
             }

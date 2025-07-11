@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use fail::fail_point;
+use neon_failpoint::fail_point;
 use tokio_postgres::{Client, Transaction};
 use tracing::{error, info};
 
@@ -40,13 +40,13 @@ impl<'m> MigrationRunner<'m> {
         // middle of applying a series of migrations fails in an expected
         // manner
         if cfg!(feature = "testing") {
-            let fail = (|| {
-                fail_point!("compute-migration", |fail_migration_id| {
+            let fail = async {
+                fail_point!("compute-migration", |fail_migration_id: Option<String>| {
                     migration_id == fail_migration_id.unwrap().parse::<i64>().unwrap()
                 });
 
                 false
-            })();
+            }.await;
 
             if fail {
                 return Err(anyhow::anyhow!(format!(

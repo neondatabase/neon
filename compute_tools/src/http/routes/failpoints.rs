@@ -24,7 +24,7 @@ use crate::http::extract::Json;
 pub(in crate::http) async fn configure_failpoints(
     failpoints: Json<ConfigureFailpointsRequest>,
 ) -> Response {
-    if !fail::has_failpoints() {
+    if !neon_failpoint::has_failpoints() {
         return JsonResponse::error(
             StatusCode::PRECONDITION_FAILED,
             "Cannot manage failpoints because neon was compiled without failpoints support",
