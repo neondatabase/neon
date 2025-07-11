@@ -97,6 +97,9 @@ class NeonBranch:
         )
         self.benchmark: subprocess.Popen[Any] | None = None
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
+        self.parent_timestamp: datetime = datetime.fromisoformat(
+            branch["branch"]["parent_timestamp"]
+        )
         self.connect_env: dict[str, str] | None = None
         if self.connection_parameters:
             self.connect_env = {
@@ -115,7 +118,11 @@ class NeonBranch:
         return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''}, parent: {self.parent}"
 
     def random_time(self) -> datetime:
-        min_time = max(self.updated_at + timedelta(seconds=1), self.project.min_time)
+        min_time = max(
+            self.updated_at + timedelta(seconds=1),
+            self.project.min_time,
+            self.parent_timestamp + timedelta(seconds=1),
+        )
         max_time = datetime.now(UTC) - timedelta(seconds=1)
         log.info("min_time: %s, max_time: %s", min_time, max_time)
         return (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
