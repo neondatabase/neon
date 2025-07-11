@@ -492,8 +492,8 @@ async fn request_handler(
         #[cfg(feature = "rest_broker")]
         {
             if config.rest_config.is_rest_broker && {
-                let path_parts: Vec<&str> = request.uri().path().split('/').collect();
-                path_parts.len() >= 3 && path_parts[2].starts_with("rest")
+                let path_parts: Vec<&str> = request.uri().path().splitn(3, '/').collect();
+                path_parts.len() == 3 && path_parts[2].starts_with("rest")
             } {
                 let ctx =
                     RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
@@ -506,7 +506,7 @@ async fn request_handler(
                     .map(|s| s.to_string());
 
                 if let Some(query_id) = testodrome_id {
-                    info!(parent: &ctx.span(), "testodrome query ID: {query_id}");
+                    info!(parent: &span, "testodrome query ID: {query_id}");
                     ctx.set_testodrome_id(query_id.into());
                 }
 

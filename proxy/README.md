@@ -185,7 +185,7 @@ cargo run --bin local_proxy --features testing -- \
 
 Start the auth broker:
 ```sh
-LOGFMT=text OTEL_SDK_DISABLED=true cargo run --bin proxy --features testing -- \
+LOGFMT=text OTEL_SDK_DISABLED=true cargo run --bin proxy --features testing,rest_broker -- \
   -c server.crt -k server.key \
   --is-auth-broker true \
   --is-rest-broker true \

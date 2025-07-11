@@ -113,8 +113,6 @@ allow-git = [
     # Crate pinned to commit in origin repo due to opentelemetry version.
     # TODO: Remove this once crate is fetched from crates.io again.
     "https://github.com/mattiapenati/tower-otel",
-    # Subzero integration
-    "https://github.com/neondatabase/subzero",
 ]
 
 [sources.allow-org]
