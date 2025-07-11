@@ -8,7 +8,6 @@ use utils::backoff::exponential_backoff_duration;
 /// A retry handler for Pageserver gRPC requests.
 ///
 /// This is used instead of backoff::retry for better control and observability.
-#[derive(Clone, Copy)]
 pub struct Retry;
 
 impl Retry {
@@ -24,14 +23,14 @@ impl Retry {
     /// If true, log successful requests. For debugging.
     const LOG_SUCCESS: bool = false;
 
-    /// Runs the given async closure with timeouts and retries (exponential backoff). Logs errors,
-    /// using the current tracing span for context.
+    /// Runs the given async closure with timeouts and retries (exponential backoff), passing the
+    /// attempt number starting at 0. Logs errors, using the current tracing span for context.
     ///
     /// Only certain gRPC status codes are retried, see [`Self::should_retry`]. For default
     /// timeouts, see [`Self::REQUEST_TIMEOUT`] and [`Self::TOTAL_TIMEOUT`].
     pub async fn with<T, F, O>(&self, mut f: F) -> tonic::Result<T>
     where
-        F: FnMut() -> O,
+        F: FnMut(usize) -> O, // takes attempt number, starting at 0
         O: Future<Output = tonic::Result<T>>,
     {
         let started = Instant::now();
@@ -48,7 +47,7 @@ impl Retry {
                 }
 
                 let request_started = Instant::now();
-                tokio::time::timeout(Self::REQUEST_TIMEOUT, f())
+                tokio::time::timeout(Self::REQUEST_TIMEOUT, f(retries))
                     .await
                     .map_err(|_| {
                         tonic::Status::deadline_exceeded(format!(
@@ -132,7 +131,6 @@ impl Retry {
             tonic::Code::Aborted => true,
             tonic::Code::Cancelled => true,
             tonic::Code::DeadlineExceeded => true, // maybe transient slowness
-            tonic::Code::Internal => true,         // maybe transient failure?
             tonic::Code::ResourceExhausted => true,
             tonic::Code::Unavailable => true,
 
@@ -140,6 +138,10 @@ impl Retry {
             tonic::Code::AlreadyExists => false,
             tonic::Code::DataLoss => false,
             tonic::Code::FailedPrecondition => false,
+            // NB: don't retry Internal. It is intended for serious errors such as invariant
+            // violations, and is also used for client-side invariant checks that would otherwise
+            // result in retry loops.
+            tonic::Code::Internal => false,
             tonic::Code::InvalidArgument => false,
             tonic::Code::NotFound => false,
             tonic::Code::OutOfRange => false,

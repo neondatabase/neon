@@ -70,7 +70,7 @@ impl ComputeNode {
             }
         };
         let row = match client
-            .query_one("select * from get_prewarm_info()", &[])
+            .query_one("select * from neon.get_prewarm_info()", &[])
             .await
         {
             Ok(row) => row,
@@ -105,7 +105,8 @@ impl ComputeNode {
                 cloned.state.lock().unwrap().lfc_prewarm_state = LfcPrewarmState::Completed;
                 return;
             };
-            error!(%err);
+            crate::metrics::LFC_PREWARM_ERRORS.inc();
+            error!(%err, "prewarming lfc");
             cloned.state.lock().unwrap().lfc_prewarm_state = LfcPrewarmState::Failed {
                 error: err.to_string(),
             };
@@ -145,7 +146,7 @@ impl ComputeNode {
         ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
             .context("connecting to postgres")?
-            .query_one("select prewarm_local_cache($1)", &[&uncompressed])
+            .query_one("select neon.prewarm_local_cache($1)", &[&uncompressed])
             .await
             .context("loading LFC state into postgres")
             .map(|_| ())
@@ -180,7 +181,8 @@ impl ComputeNode {
             self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Completed;
             return;
         };
-        error!(%err);
+        crate::metrics::LFC_OFFLOAD_ERRORS.inc();
+        error!(%err, "offloading lfc");
         self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
             error: err.to_string(),
         };
@@ -194,7 +196,7 @@ impl ComputeNode {
         ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
             .context("connecting to postgres")?
-            .query_one("select get_local_cache_state()", &[])
+            .query_one("select neon.get_local_cache_state()", &[])
             .await
             .context("querying LFC state")?
             .try_get::<usize, &[u8]>(0)

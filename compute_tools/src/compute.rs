@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState, TlsConfig,
+    LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverConnectionInfo,
@@ -30,8 +30,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
-use tokio::task::JoinHandle;
-use tokio::{spawn, time};
+use tokio::{spawn, sync::watch, task::JoinHandle, time};
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
@@ -176,6 +175,7 @@ pub struct ComputeState {
     /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
     /// mode == ComputeMode::Primary. None otherwise
     pub terminate_flush_lsn: Option<Lsn>,
+    pub promote_state: Option<watch::Receiver<PromoteState>>,
 
     pub metrics: ComputeMetrics,
 }
@@ -193,6 +193,7 @@ impl ComputeState {
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
             terminate_flush_lsn: None,
+            promote_state: None,
         }
     }
 
@@ -983,14 +984,20 @@ impl ComputeNode {
             None
         };
 
-        let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
         state.terminate_flush_lsn = lsn;
-        if let ComputeStatus::TerminationPending { mode } = state.status {
+
+        let delay_exit = state.status == ComputeStatus::TerminationPendingFast;
+        if state.status == ComputeStatus::TerminationPendingFast
+            || state.status == ComputeStatus::TerminationPendingImmediate
+        {
+            info!(
+                "Changing compute status from {} to {}",
+                state.status,
+                ComputeStatus::Terminated
+            );
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
-            // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = mode == compute_api::responses::TerminateMode::Fast
         }
         drop(state);
 
@@ -1826,6 +1833,8 @@ impl ComputeNode {
             tls_config,
         )?;
 
+        self.pg_reload_conf()?;
+
         if !spec.skip_pg_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
             // Temporarily reset max_cluster_size in config
@@ -1845,9 +1854,8 @@ impl ComputeNode {
 
                 Ok(())
             })?;
+            self.pg_reload_conf()?;
         }
-
-        self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
@@ -1921,7 +1929,8 @@ impl ComputeNode {
 
                             // exit loop
                             ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending { .. }
+                            | ComputeStatus::TerminationPendingFast
+                            | ComputeStatus::TerminationPendingImmediate
                             | ComputeStatus::Terminated => break 'cert_update,
 
                             // wait
@@ -2455,19 +2464,11 @@ LIMIT 100",
         // If the value is -1, we never suspend so set the value to default collection.
         // If the value is 0, it means default, we will just continue to use the default.
         if spec.suspend_timeout_seconds == -1 || spec.suspend_timeout_seconds == 0 {
-            info!(
-                "[NEON_EXT_INT_UPD] Spec Timeout: {}, New Timeout: {}",
-                spec.suspend_timeout_seconds, DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL
-            );
             self.params.installed_extensions_collection_interval.store(
                 DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL,
                 std::sync::atomic::Ordering::SeqCst,
             );
         } else {
-            info!(
-                "[NEON_EXT_INT_UPD] Spec Timeout: {}",
-                spec.suspend_timeout_seconds
-            );
             self.params.installed_extensions_collection_interval.store(
                 spec.suspend_timeout_seconds as u64,
                 std::sync::atomic::Ordering::SeqCst,

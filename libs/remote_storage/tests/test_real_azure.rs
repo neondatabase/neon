@@ -219,6 +219,9 @@ async fn create_azure_client(
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
             conn_pool_size: 8,
+            /* BEGIN_HADRON */
+            put_block_size_mb: Some(1),
+            /* END_HADRON */
         }),
         timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
         small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,

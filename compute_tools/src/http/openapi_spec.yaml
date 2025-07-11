@@ -83,6 +83,87 @@ paths:
               schema:
                 $ref: "#/components/schemas/DbsAndRoles"
 
+  /promote:
+    post:
+      tags:
+        - Promotion
+      summary: Promote secondary replica to primary
+      description: ""
+      operationId: promoteReplica
+      requestBody:
+        description: Promote requests data
+        required: true
+        content:
+          application/json:
+            schema:
+                $ref: "#/components/schemas/SafekeepersLsn"
+      responses:
+        200:
+          description: Promote succeeded or wasn't started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromoteState"
+        500:
+          description: Promote failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromoteState"
+
+  /lfc/prewarm:
+    post:
+      summary: Request LFC Prewarm
+      parameters:
+        - name: from_endpoint
+          in: query
+          schema:
+            type: string
+      description: ""
+      operationId: lfcPrewarm
+      responses:
+        202:
+          description: LFC prewarm started
+        429:
+          description: LFC prewarm ongoing
+    get:
+      tags:
+        - Prewarm
+      summary: Get LFC prewarm state
+      description: ""
+      operationId: getLfcPrewarmState
+      responses:
+        200:
+          description: Prewarm state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LfcPrewarmState"
+
+  /lfc/offload:
+    post:
+      summary: Request LFC offload
+      description: ""
+      operationId: lfcOffload
+      responses:
+        202:
+          description: LFC offload started
+        429:
+          description: LFC offload ongoing
+    get:
+      tags:
+        - Prewarm
+      summary: Get LFC offloading state
+      description: ""
+      operationId: getLfcOffloadState
+      responses:
+        200:
+          description: Offload state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LfcOffloadState"
+
   /database_schema:
     get:
       tags:
@@ -290,9 +371,28 @@ paths:
       summary: Terminate Postgres and wait for it to exit
       description: ""
       operationId: terminate
+      parameters:
+        - name: mode
+          in: query
+          description: "Terminate mode: fast (wait 30s before returning) and immediate"
+          required: false
+          schema:
+            type: string
+            enum: ["fast", "immediate"]
+            default: fast
       responses:
         200:
           description: Result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TerminateResponse"
+        201:
+          description: Result if compute is already terminated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TerminateResponse"
         412:
           description: "wrong state"
           content:
@@ -333,15 +433,6 @@ components:
         config_ms:
           type: integer
         total_startup_ms:
-          type: integer
-
-    Info:
-      type: object
-      description: Information about VM/Pod.
-      required:
-        - num_cpus
-      properties:
-        num_cpus:
           type: integer
 
     DbsAndRoles:
@@ -458,11 +549,14 @@ components:
       type: string
       enum:
         - empty
-        - init
-        - failed
-        - running
         - configuration_pending
+        - init
+        - running
         - configuration
+        - failed
+        - termination_pending_fast
+        - termination_pending_immediate
+        - terminated
       example: running
 
     ExtensionInstallRequest:
@@ -497,25 +591,69 @@ components:
           type: string
           example: "1.0.0"
 
-    InstalledExtensions:
+    SafekeepersLsn:
       type: object
+      required:
+        - safekeepers
+        - wal_flush_lsn
       properties:
-        extensions:
-          description: Contains list of installed extensions.
-          type: array
-          items:
-            type: object
-            properties:
-              extname:
-                type: string
-              version:
-                type: string
-                items:
-                  type: string
-              n_databases:
-                type: integer
-              owned_by_superuser:
-                type: integer
+        safekeepers:
+          description: Primary replica safekeepers
+          type: string
+        wal_flush_lsn:
+          description: Primary last WAL flush LSN
+          type: string
+
+    LfcPrewarmState:
+      type: object
+      required:
+        - status
+        - total
+        - prewarmed
+        - skipped
+      properties:
+        status:
+          description: Lfc prewarm status
+          enum: [not_prewarmed, prewarming, completed, failed]
+          type: string
+        error:
+          description: Lfc prewarm error, if any
+          type: string
+        total:
+          description: Total pages processed
+          type: integer
+        prewarmed:
+          description: Total pages prewarmed
+          type: integer
+        skipped:
+          description: Pages processed but not prewarmed
+          type: integer
+
+    LfcOffloadState:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          description: Lfc offload status
+          enum: [not_offloaded, offloading, completed, failed]
+          type: string
+        error:
+          description: Lfc offload error, if any
+          type: string
+
+    PromoteState:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          description: Promote result
+          enum: [not_promoted, completed, failed]
+          type: string
+        error:
+          description: Promote error, if any
+          type: string
 
     SetRoleGrantsRequest:
       type: object
@@ -543,6 +681,17 @@ components:
           type: string
           description: Role name.
           example: "neon"
+
+    TerminateResponse:
+      type: object
+      required:
+        - lsn
+      properties:
+        lsn:
+          type: string
+          nullable: true
+          description: "last WAL flush LSN"
+          example: "0/028F10D8"
 
     SetRoleGrantsResponse:
       type: object

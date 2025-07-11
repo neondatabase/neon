@@ -40,6 +40,7 @@ use futures::StreamExt as _;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{error, warn};
 
@@ -242,6 +243,8 @@ pub struct ClientPool {
     shard_id: ShardIndex,
     /// Authentication token, if any.
     auth_token: Option<String>,
+    /// Compression to use.
+    compression: Option<CompressionEncoding>,
     /// Channel pool to acquire channels from.
     channel_pool: Arc<ChannelPool>,
     /// Limits the max number of concurrent clients for this pool. None if the pool is unbounded.
@@ -281,6 +284,7 @@ impl ClientPool {
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
         max_clients: Option<NonZero<usize>>,
     ) -> Arc<Self> {
         let pool = Arc::new(Self {
@@ -288,6 +292,7 @@ impl ClientPool {
             timeline_id,
             shard_id,
             auth_token,
+            compression,
             channel_pool,
             idle: Mutex::default(),
             idle_reaper: Reaper::new(REAP_IDLE_THRESHOLD, REAP_IDLE_INTERVAL),
@@ -331,7 +336,7 @@ impl ClientPool {
             self.timeline_id,
             self.shard_id,
             self.auth_token.clone(),
-            None,
+            self.compression,
         )?;
 
         Ok(ClientGuard {
@@ -574,20 +579,22 @@ impl StreamPool {
         // Acquire a client from the pool and create a stream.
         let mut client = client_pool.get().await?;
 
-        let (req_tx, req_rx) = mpsc::channel(1);
-        let req_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
+        // NB: use an unbounded channel such that the stream send never blocks. Otherwise, we could
+        // theoretically deadlock if both the client and server block on sends (since we're not
+        // reading responses while sending). This is unlikely to happen due to gRPC/TCP buffers and
+        // low queue depths, but it was seen to happen with the libpq protocol so better safe than
+        // sorry. It should never buffer more than the queue depth anyway, but using an unbounded
+        // channel guarantees that it will never block.
+        let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let req_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(req_rx);
         let mut resp_stream = client.get_pages(req_stream).await?;
 
         // Track caller response channels by request ID. If the task returns early, these response
         // channels will be dropped and the waiting callers will receive an error.
         //
-        // TODO: on timeouts, retries will send additional requests for the same request ID, which
-        // get piled up behind the already sent request. We should, at the very least, add deadlines
-        // for the request such that it's cancelled on the server side. This also means that only
-        // the last caller gets the response, and it may get a response for an earlier attempt. This
-        // needs rethinking.
-        //
-        // TODO: consider allocating separate request IDs for each retry.
+        // NB: this will leak entries if the server doesn't respond to a request (by request ID).
+        // It shouldn't happen, and if it does it will often hold onto queue depth quota anyway and
+        // block further use. But we could consider reaping closed channels after some time.
         let mut callers = HashMap::new();
 
         // Process requests and responses.
@@ -601,10 +608,17 @@ impl StreamPool {
                     };
 
                     // Store the response channel by request ID.
+                    if callers.contains_key(&req.request_id) {
+                        // Error on request ID duplicates. Ignore callers that went away.
+                        _ = resp_tx.send(Err(tonic::Status::invalid_argument(
+                            format!("duplicate request ID: {}", req.request_id),
+                        )));
+                        continue;
+                    }
                     callers.insert(req.request_id, resp_tx);
 
-                    // Send the request on the stream. Bail out if the send fails.
-                    req_tx.send(req).await.map_err(|_| {
+                    // Send the request on the stream. Bail out if the stream is closed.
+                    req_tx.send(req).map_err(|_| {
                         tonic::Status::unavailable("stream closed")
                     })?;
                 }
@@ -616,10 +630,9 @@ impl StreamPool {
                         return Ok(())
                     };
 
-                    // Send the response to the caller. Ignore errors if the caller went away.  This
-                    // may have happened with e.g. a timeout retry, where multiple requests may have
-                    // been sent for the same ID.
+                    // Send the response to the caller. Ignore errors if the caller went away.
                     let Some(resp_tx) = callers.remove(&resp.request_id) else {
+                        warn!("received response for unknown request ID: {}", resp.request_id);
                         continue;
                     };
                     _ = resp_tx.send(Ok(resp));
@@ -686,6 +699,15 @@ impl Drop for StreamGuard {
 
         // Release the queue depth reservation on drop. This can prematurely decrement it if dropped
         // before the response is received, but that's okay.
+        //
+        // TODO: actually, it's probably not okay. Queue depth release should be moved into the
+        // stream task, such that it continues to account for the queue depth slot until the server
+        // responds. Otherwise, if a slow request times out and keeps blocking the stream, the
+        // server will keep waiting on it and we can pile on subsequent requests (including the
+        // timeout retry) in the same stream and get blocked. But we may also want to avoid blocking
+        // requests on e.g. LSN waits and layer downloads, instead returning early to free up the
+        // stream. Or just scale out streams with a queue depth of 1 to sidestep all head-of-line
+        // blocking. TBD.
         let mut streams = pool.streams.lock().unwrap();
         let entry = streams.get_mut(&self.id).expect("unknown stream");
         assert!(entry.idle_since.is_none(), "active stream marked idle");

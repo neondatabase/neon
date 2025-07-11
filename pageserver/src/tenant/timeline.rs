@@ -40,7 +40,6 @@ use layer_manager::{
     Shutdown,
 };
 
-use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 use pageserver_api::key::{
@@ -119,7 +118,6 @@ use crate::pgdatadir_mapping::{
     MAX_AUX_FILE_V2_DELTAS, MetricsUpdate,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::config::AttachmentMode;
 use crate::tenant::gc_result::GcResult;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::metadata::TimelineMetadata;
@@ -202,7 +200,7 @@ pub struct TimelineResources {
     pub l0_compaction_trigger: Arc<Notify>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
     pub basebackup_cache: Arc<BasebackupCache>,
-    pub feature_resolver: TenantFeatureResolver,
+    pub feature_resolver: Arc<TenantFeatureResolver>,
 }
 
 pub struct Timeline {
@@ -353,6 +351,13 @@ pub struct Timeline {
     last_image_layer_creation_check_at: AtomicLsn,
     last_image_layer_creation_check_instant: std::sync::Mutex<Option<Instant>>,
 
+    // HADRON
+    /// If a key range has writes with LSN > force_image_creation_lsn, then we should force image layer creation
+    /// on this key range.
+    force_image_creation_lsn: AtomicLsn,
+    /// The last time instant when force_image_creation_lsn is computed.
+    force_image_creation_lsn_computed_at: std::sync::Mutex<Option<Instant>>,
+
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
 
@@ -450,7 +455,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
-    feature_resolver: TenantFeatureResolver,
+    feature_resolver: Arc<TenantFeatureResolver>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -585,6 +590,28 @@ pub(crate) enum PageReconstructError {
 
     #[error("{0}")]
     MissingKey(Box<MissingKeyError>),
+}
+
+impl PageReconstructError {
+    pub(crate) fn is_cancel(&self) -> bool {
+        match self {
+            PageReconstructError::Other(_) => false,
+            PageReconstructError::AncestorLsnTimeout(e) => e.is_cancel(),
+            PageReconstructError::Cancelled => true,
+            PageReconstructError::WalRedo(_) => false,
+            PageReconstructError::MissingKey(_) => false,
+        }
+    }
+    #[allow(dead_code)] // we use the is_cancel + into_anyhow pattern in quite a few places, this one will follow soon enough
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            PageReconstructError::Other(e) => e,
+            PageReconstructError::AncestorLsnTimeout(e) => e.into_anyhow(),
+            PageReconstructError::Cancelled => anyhow::Error::new(self),
+            PageReconstructError::WalRedo(e) => e,
+            PageReconstructError::MissingKey(_) => anyhow::Error::new(self),
+        }
+    }
 }
 
 impl From<anyhow::Error> for PageReconstructError {
@@ -737,17 +764,6 @@ impl std::fmt::Display for MissingKeyError {
         }
 
         Ok(())
-    }
-}
-
-impl PageReconstructError {
-    /// Returns true if this error indicates a tenant/timeline shutdown alike situation
-    pub(crate) fn is_stopping(&self) -> bool {
-        use PageReconstructError::*;
-        match self {
-            Cancelled => true,
-            Other(_) | AncestorLsnTimeout(_) | WalRedo(_) | MissingKey(_) => false,
-        }
     }
 }
 
@@ -953,13 +969,35 @@ pub enum WaitLsnError {
     Timeout(String),
 }
 
+impl WaitLsnError {
+    pub(crate) fn is_cancel(&self) -> bool {
+        match self {
+            WaitLsnError::Shutdown => true,
+            WaitLsnError::BadState(timeline_state) => match timeline_state {
+                TimelineState::Loading => false,
+                TimelineState::Active => false,
+                TimelineState::Stopping => true,
+                TimelineState::Broken { .. } => false,
+            },
+            WaitLsnError::Timeout(_) => false,
+        }
+    }
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            WaitLsnError::Shutdown => anyhow::Error::new(self),
+            WaitLsnError::BadState(_) => anyhow::Error::new(self),
+            WaitLsnError::Timeout(_) => anyhow::Error::new(self),
+        }
+    }
+}
+
 impl From<WaitLsnError> for tonic::Status {
     fn from(err: WaitLsnError) -> Self {
         use tonic::Code;
-        let code = match &err {
-            WaitLsnError::Timeout(_) => Code::Internal,
-            WaitLsnError::BadState(_) => Code::Internal,
-            WaitLsnError::Shutdown => Code::Unavailable,
+        let code = if err.is_cancel() {
+            Code::Unavailable
+        } else {
+            Code::Internal
         };
         tonic::Status::new(code, err.to_string())
     }
@@ -971,7 +1009,7 @@ impl From<WaitLsnError> for tonic::Status {
 impl From<CreateImageLayersError> for CompactionError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
-            CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            CreateImageLayersError::Cancelled => CompactionError::new_cancelled(),
             CreateImageLayersError::Other(e) => {
                 CompactionError::Other(e.context("create image layers"))
             }
@@ -1084,6 +1122,26 @@ enum ImageLayerCreationOutcome {
     /// (Only used in metadata image layer creation), after reading the metadata keys, we decide to skip
     /// the image layer creation.
     Skip,
+}
+
+enum RepartitionError {
+    Other(anyhow::Error),
+    CollectKeyspace(CollectKeySpaceError),
+}
+
+impl RepartitionError {
+    fn is_cancel(&self) -> bool {
+        match self {
+            RepartitionError::Other(_) => false,
+            RepartitionError::CollectKeyspace(e) => e.is_cancel(),
+        }
+    }
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            RepartitionError::Other(e) => e,
+            RepartitionError::CollectKeyspace(e) => e.into_anyhow(),
+        }
+    }
 }
 
 /// Public interface functions
@@ -1772,30 +1830,31 @@ impl Timeline {
                     existing_lease.clone()
                 }
                 Entry::Vacant(vacant) => {
-                    // Reject already GC-ed LSN if we are in AttachedSingle and
-                    // not blocked by the lsn lease deadline.
+                    // Never allow a lease to be requested for an LSN below the applied GC cutoff. The data could have been deleted.
+                    let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
+                    if lsn < *latest_gc_cutoff_lsn {
+                        bail!(
+                            "tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}",
+                            lsn,
+                            *latest_gc_cutoff_lsn
+                        );
+                    }
+
+                    // We allow create lease for those below the planned gc cutoff if we are still within the grace period
+                    // of GC blocking.
                     let validate = {
                         let conf = self.tenant_conf.load();
-                        conf.location.attach_mode == AttachmentMode::Single
-                            && !conf.is_gc_blocked_by_lsn_lease_deadline()
+                        !conf.is_gc_blocked_by_lsn_lease_deadline()
                     };
 
-                    if init || validate {
-                        let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
-                        if lsn < *latest_gc_cutoff_lsn {
-                            bail!(
-                                "tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}",
-                                lsn,
-                                *latest_gc_cutoff_lsn
-                            );
-                        }
-                        if lsn < planned_cutoff {
-                            bail!(
-                                "tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}",
-                                lsn,
-                                planned_cutoff
-                            );
-                        }
+                    // Do not allow initial lease creation to be below the planned gc cutoff. The client (compute_ctl) determines
+                    // whether it is a initial lease creation or a renewal.
+                    if (init || validate) && lsn < planned_cutoff {
+                        bail!(
+                            "tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}",
+                            lsn,
+                            planned_cutoff
+                        );
                     }
 
                     let dt: DateTime<Utc> = valid_until.into();
@@ -2065,22 +2124,7 @@ impl Timeline {
         match &result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
             Err(e) if e.is_cancel() => {}
-            Err(CompactionError::ShuttingDown) => {
-                // Covered by the `Err(e) if e.is_cancel()` branch.
-            }
-            Err(CompactionError::AlreadyRunning(_)) => {
-                // Covered by the `Err(e) if e.is_cancel()` branch.
-            }
-            Err(CompactionError::Other(_)) => {
-                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
-            }
-            Err(CompactionError::CollectKeySpaceError(_)) => {
-                // Cancelled errors are covered by the `Err(e) if e.is_cancel()` branch.
-                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
-            }
-            // Don't change the current value on offload failure or shutdown. We don't want to
-            // abruptly stall nor resume L0 flushes in these cases.
-            Err(CompactionError::Offload(_)) => {}
+            Err(_) => self.compaction_failed.store(true, AtomicOrdering::Relaxed),
         };
 
         result
@@ -2809,6 +2853,18 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
+    // HADRON
+    fn get_image_creation_timeout(&self) -> Option<Duration> {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .image_layer_force_creation_period
+            .or(self
+                .conf
+                .default_tenant_conf
+                .image_layer_force_creation_period)
+    }
+
     fn get_compaction_algorithm_settings(&self) -> CompactionAlgorithmSettings {
         let tenant_conf = &self.tenant_conf.load();
         tenant_conf
@@ -3078,7 +3134,9 @@ impl Timeline {
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
                 last_image_layer_creation_check_instant: Mutex::new(None),
-
+                // HADRON
+                force_image_creation_lsn: AtomicLsn::new(0),
+                force_image_creation_lsn_computed_at: std::sync::Mutex::new(None),
                 last_received_wal: Mutex::new(None),
                 rel_size_latest_cache: RwLock::new(HashMap::new()),
                 rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),
@@ -3129,7 +3187,7 @@ impl Timeline {
 
                 basebackup_cache: resources.basebackup_cache,
 
-                feature_resolver: resources.feature_resolver,
+                feature_resolver: resources.feature_resolver.clone(),
             };
 
             result.repartition_threshold =
@@ -4970,7 +5028,7 @@ impl Timeline {
                     ctx,
                 )
                 .await
-                .map_err(|e| FlushLayerError::from_anyhow(self, e.into()))?;
+                .map_err(|e| FlushLayerError::from_anyhow(self, e.into_anyhow()))?;
 
             if self.cancel.is_cancelled() {
                 return Err(FlushLayerError::Cancelled);
@@ -4999,6 +5057,7 @@ impl Timeline {
                 .create_image_layers(
                     &partitions,
                     self.initdb_lsn,
+                    None,
                     ImageLayerCreationMode::Initial,
                     ctx,
                     LastImageLayerCreationStatus::Initial,
@@ -5220,18 +5279,18 @@ impl Timeline {
         partition_size: u64,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), CompactionError> {
+    ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), RepartitionError> {
         let Ok(mut guard) = self.partitioning.try_write_guard() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
-            return Err(CompactionError::Other(anyhow!(
+            return Err(RepartitionError::Other(anyhow!(
                 "repartition() called concurrently"
             )));
         };
         let ((dense_partition, sparse_partition), partition_lsn) = &*guard.read();
         if lsn < *partition_lsn {
-            return Err(CompactionError::Other(anyhow!(
+            return Err(RepartitionError::Other(anyhow!(
                 "repartition() called with LSN going backwards, this should not happen"
             )));
         }
@@ -5252,7 +5311,10 @@ impl Timeline {
             ));
         }
 
-        let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
+        let (dense_ks, sparse_ks) = self
+            .collect_keyspace(lsn, ctx)
+            .await
+            .map_err(RepartitionError::CollectKeyspace)?;
         let dense_partitioning = dense_ks.partition(
             &self.shard_identity,
             partition_size,
@@ -5267,14 +5329,19 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition? True if we want to generate.
-    async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
+    async fn time_for_new_image_layer(
+        &self,
+        partition: &KeySpace,
+        lsn: Lsn,
+        force_image_creation_lsn: Option<Lsn>,
+    ) -> bool {
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
         let Ok(layers) = guard.layer_map() else {
             return false;
         };
-
+        let mut min_image_lsn: Lsn = Lsn::MAX;
         let mut max_deltas = 0;
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn);
@@ -5309,7 +5376,20 @@ impl Timeline {
                         return true;
                     }
                 }
+                min_image_lsn = min(min_image_lsn, img_lsn);
             }
+        }
+
+        // HADRON
+        if min_image_lsn < force_image_creation_lsn.unwrap_or(Lsn(0)) && max_deltas > 0 {
+            info!(
+                "forcing image creation for partitioned range {}-{}. Min image LSN: {}, force image creation LSN: {}",
+                partition.ranges[0].start,
+                partition.ranges[0].end,
+                min_image_lsn,
+                force_image_creation_lsn.unwrap()
+            );
+            return true;
         }
 
         debug!(
@@ -5537,7 +5617,7 @@ impl Timeline {
     ///        suffer from the lack of image layers
     ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
-        const LARGE_TENANT_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
+        let large_timeline_threshold = self.conf.image_layer_generation_large_timeline_threshold;
 
         let last_checks_at = self.last_image_layer_creation_check_at.load();
         let distance = lsn
@@ -5551,12 +5631,12 @@ impl Timeline {
         let mut time_based_decision = false;
         let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
         if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
-            let check_required_after = if Into::<u64>::into(&logical_size) >= LARGE_TENANT_THRESHOLD
-            {
-                self.get_checkpoint_timeout()
-            } else {
-                Duration::from_secs(3600 * 48)
-            };
+            let check_required_after =
+                if Some(Into::<u64>::into(&logical_size)) >= large_timeline_threshold {
+                    self.get_checkpoint_timeout()
+                } else {
+                    Duration::from_secs(3600 * 48)
+                };
 
             time_based_decision = match *last_check_instant {
                 Some(last_check) => {
@@ -5584,10 +5664,12 @@ impl Timeline {
     /// true = we have generate all image layers, false = we preempt the process for L0 compaction.
     ///
     /// `partition_mode` is only for logging purpose and is not used anywhere in this function.
+    #[allow(clippy::too_many_arguments)]
     async fn create_image_layers(
         self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,
         lsn: Lsn,
+        force_image_creation_lsn: Option<Lsn>,
         mode: ImageLayerCreationMode,
         ctx: &RequestContext,
         last_status: LastImageLayerCreationStatus,
@@ -5691,7 +5773,11 @@ impl Timeline {
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
-                if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
+                if !check_for_image_layers
+                    || !self
+                        .time_for_new_image_layer(partition, lsn, force_image_creation_lsn)
+                        .await
+                {
                     start = img_range.end;
                     continue;
                 }
@@ -6012,57 +6098,88 @@ impl Drop for Timeline {
     }
 }
 
-/// Top-level failure to compact.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum CompactionError {
-    #[error("The timeline or pageserver is shutting down")]
-    ShuttingDown,
-    /// Compaction tried to offload a timeline and failed
-    #[error("Failed to offload timeline: {0}")]
-    Offload(OffloadError),
-    /// Compaction cannot be done right now; page reconstruction and so on.
-    #[error("Failed to collect keyspace: {0}")]
-    CollectKeySpaceError(#[from] CollectKeySpaceError),
-    #[error(transparent)]
-    Other(anyhow::Error),
-    #[error("Compaction already running: {0}")]
-    AlreadyRunning(&'static str),
-}
+pub(crate) use compaction_error::CompactionError;
+/// In a private mod to enforce that [`CompactionError::is_cancel`] is used
+/// instead of `match`ing on [`CompactionError::ShuttingDown`].
+mod compaction_error {
+    use utils::sync::gate::GateError;
 
-impl CompactionError {
-    /// Errors that can be ignored, i.e., cancel and shutdown.
-    pub fn is_cancel(&self) -> bool {
-        matches!(
-            self,
-            Self::ShuttingDown
-                | Self::AlreadyRunning(_)
-                | Self::CollectKeySpaceError(CollectKeySpaceError::Cancelled)
-                | Self::CollectKeySpaceError(CollectKeySpaceError::PageRead(
-                    PageReconstructError::Cancelled
-                ))
-                | Self::Offload(OffloadError::Cancelled)
-        )
+    use crate::{
+        pgdatadir_mapping::CollectKeySpaceError,
+        tenant::{PageReconstructError, blob_io::WriteBlobError, upload_queue::NotInitialized},
+        virtual_file::owned_buffers_io::write::FlushTaskError,
+    };
+
+    /// Top-level failure to compact. Use [`Self::is_cancel`].
+    #[derive(Debug, thiserror::Error)]
+    pub(crate) enum CompactionError {
+        /// Use [`Self::is_cancel`] instead of checking for this variant.
+        #[error("The timeline or pageserver is shutting down")]
+        #[allow(private_interfaces)]
+        ShuttingDown(ForbidMatching), // private ForbidMatching enforces use of [`Self::is_cancel`].
+        #[error(transparent)]
+        Other(anyhow::Error),
     }
 
-    /// Critical errors that indicate data corruption.
-    pub fn is_critical(&self) -> bool {
-        matches!(
-            self,
-            Self::CollectKeySpaceError(
-                CollectKeySpaceError::Decode(_)
-                    | CollectKeySpaceError::PageRead(
-                        PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
-                    )
-            )
-        )
-    }
-}
+    #[derive(Debug)]
+    struct ForbidMatching;
 
-impl From<OffloadError> for CompactionError {
-    fn from(e: OffloadError) -> Self {
-        match e {
-            OffloadError::Cancelled => Self::ShuttingDown,
-            _ => Self::Offload(e),
+    impl CompactionError {
+        pub fn new_cancelled() -> Self {
+            Self::ShuttingDown(ForbidMatching)
+        }
+        /// Errors that can be ignored, i.e., cancel and shutdown.
+        pub fn is_cancel(&self) -> bool {
+            let other = match self {
+                CompactionError::ShuttingDown(_) => return true,
+                CompactionError::Other(other) => other,
+            };
+
+            // The write path of compaction in particular often lacks differentiated
+            // handling errors stemming from cancellation from other errors.
+            // So, if requested, we also check the ::Other variant by downcasting.
+            // The list below has been found empirically from flaky tests and production logs.
+            // The process is simple: on ::Other(), compaction will print the enclosed
+            // anyhow::Error in debug mode, i.e., with backtrace. That backtrace contains the
+            // line where the write path / compaction code does undifferentiated error handling
+            // from a non-anyhow type to an anyhow type. Add the type to the list of downcasts
+            // below, following the same is_cancel() pattern.
+
+            let root_cause = other.root_cause();
+
+            let upload_queue = root_cause
+                .downcast_ref::<NotInitialized>()
+                .is_some_and(|e| e.is_stopping());
+            let timeline = root_cause
+                .downcast_ref::<PageReconstructError>()
+                .is_some_and(|e| e.is_cancel());
+            let buffered_writer_flush_task_canelled = root_cause
+                .downcast_ref::<FlushTaskError>()
+                .is_some_and(|e| e.is_cancel());
+            let write_blob_cancelled = root_cause
+                .downcast_ref::<WriteBlobError>()
+                .is_some_and(|e| e.is_cancel());
+            let gate_closed = root_cause
+                .downcast_ref::<GateError>()
+                .is_some_and(|e| e.is_cancel());
+            upload_queue
+                || timeline
+                || buffered_writer_flush_task_canelled
+                || write_blob_cancelled
+                || gate_closed
+        }
+        pub fn into_anyhow(self) -> anyhow::Error {
+            match self {
+                CompactionError::ShuttingDown(ForbidMatching) => anyhow::Error::new(self),
+                CompactionError::Other(e) => e,
+            }
+        }
+        pub fn from_collect_keyspace(err: CollectKeySpaceError) -> Self {
+            if err.is_cancel() {
+                Self::new_cancelled()
+            } else {
+                Self::Other(err.into_anyhow())
+            }
         }
     }
 }
@@ -6074,7 +6191,7 @@ impl From<super::upload_queue::NotInitialized> for CompactionError {
                 CompactionError::Other(anyhow::anyhow!(value))
             }
             super::upload_queue::NotInitialized::ShuttingDown
-            | super::upload_queue::NotInitialized::Stopped => CompactionError::ShuttingDown,
+            | super::upload_queue::NotInitialized::Stopped => CompactionError::new_cancelled(),
         }
     }
 }
@@ -6084,7 +6201,7 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
         match e {
             super::storage_layer::layer::DownloadError::TimelineShutdown
             | super::storage_layer::layer::DownloadError::DownloadCancelled => {
-                CompactionError::ShuttingDown
+                CompactionError::new_cancelled()
             }
             super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads
             | super::storage_layer::layer::DownloadError::DownloadRequired
@@ -6103,14 +6220,14 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
 
 impl From<layer_manager::Shutdown> for CompactionError {
     fn from(_: layer_manager::Shutdown) -> Self {
-        CompactionError::ShuttingDown
+        CompactionError::new_cancelled()
     }
 }
 
 impl From<super::storage_layer::errors::PutError> for CompactionError {
     fn from(e: super::storage_layer::errors::PutError) -> Self {
         if e.is_cancel() {
-            CompactionError::ShuttingDown
+            CompactionError::new_cancelled()
         } else {
             CompactionError::Other(e.into_anyhow())
         }
@@ -6209,7 +6326,7 @@ impl Timeline {
         let mut guard = tokio::select! {
             guard = self.layers.write(LayerManagerLockHolder::Compaction) => guard,
             _ = self.cancel.cancelled() => {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
         };
 
@@ -6765,7 +6882,7 @@ impl Timeline {
     }
 
     /// Reconstruct a value, using the given base image and WAL records in 'data'.
-    async fn reconstruct_value(
+    pub(crate) async fn reconstruct_value(
         &self,
         key: Key,
         request_lsn: Lsn,

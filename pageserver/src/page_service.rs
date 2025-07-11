@@ -50,6 +50,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Interceptor as _;
+use tonic::transport::server::TcpConnectInfo;
 use tracing::*;
 use utils::auth::{Claims, Scope, SwappableJwtAuth};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
@@ -69,7 +70,7 @@ use crate::context::{
 };
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, GetPageBatchBreakReason, LIVE_CONNECTIONS,
-    SmgrOpTimer, TimelineMetrics,
+    MISROUTED_PAGESTREAM_REQUESTS, PAGESTREAM_HANDLER_RESULTS_TOTAL, SmgrOpTimer, TimelineMetrics,
 };
 use crate::pgdatadir_mapping::{LsnRange, Version};
 use crate::span::{
@@ -90,7 +91,8 @@ use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 /// is not yet in state [`TenantState::Active`].
 ///
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
+/// HADRON: reduced timeout and we will retry in Cache::get().
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Threshold at which to log slow GetPage requests.
 const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
@@ -1127,6 +1129,7 @@ impl PageServerHandler {
                                 // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
                                 // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
                                 // and talk to a different pageserver.
+                                MISROUTED_PAGESTREAM_REQUESTS.inc();
                                 return respond_error!(
                                     span,
                                     PageStreamError::Reconnect(
@@ -1438,20 +1441,57 @@ impl PageServerHandler {
             let (response_msg, ctx) = match handler_result {
                 Err(e) => match &e.err {
                     PageStreamError::Shutdown => {
+                        // BEGIN HADRON
+                        PAGESTREAM_HANDLER_RESULTS_TOTAL
+                            .with_label_values(&[metrics::PAGESTREAM_HANDLER_OUTCOME_OTHER_ERROR])
+                            .inc();
+                        // END HADRON
+
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
                         // shutdown, then do not send the error to the client.  Instead just drop the
                         // connection.
                         span.in_scope(|| info!("dropping connection due to shutdown"));
                         return Err(QueryError::Shutdown);
                     }
-                    PageStreamError::Reconnect(reason) => {
-                        span.in_scope(|| info!("handler requested reconnect: {reason}"));
+                    PageStreamError::Reconnect(_reason) => {
+                        span.in_scope(|| {
+                            // BEGIN HADRON
+                            // We can get here because the compute node is pointing at the wrong PS. We
+                            // already have a metric to keep track of this so suppressing this log to
+                            // reduce log spam. The information in this log message is not going to be that
+                            // helpful given the volume of logs that can be generated.
+                            // info!("handler requested reconnect: {reason}")
+                            // END HADRON
+                        });
+                        // BEGIN HADRON
+                        PAGESTREAM_HANDLER_RESULTS_TOTAL
+                            .with_label_values(&[
+                                metrics::PAGESTREAM_HANDLER_OUTCOME_INTERNAL_ERROR,
+                            ])
+                            .inc();
+                        // END HADRON
                         return Err(QueryError::Reconnect);
                     }
                     PageStreamError::Read(_)
                     | PageStreamError::LsnTimeout(_)
                     | PageStreamError::NotFound(_)
                     | PageStreamError::BadRequest(_) => {
+                        // BEGIN HADRON
+                        if let PageStreamError::Read(_) | PageStreamError::LsnTimeout(_) = &e.err {
+                            PAGESTREAM_HANDLER_RESULTS_TOTAL
+                                .with_label_values(&[
+                                    metrics::PAGESTREAM_HANDLER_OUTCOME_INTERNAL_ERROR,
+                                ])
+                                .inc();
+                        } else {
+                            PAGESTREAM_HANDLER_RESULTS_TOTAL
+                                .with_label_values(&[
+                                    metrics::PAGESTREAM_HANDLER_OUTCOME_OTHER_ERROR,
+                                ])
+                                .inc();
+                        }
+                        // END HADRON
+
                         // print the all details to the log with {:#}, but for the client the
                         // error message is enough.  Do not log if shutting down, as the anyhow::Error
                         // here includes cancellation which is not an error.
@@ -1469,7 +1509,15 @@ impl PageServerHandler {
                         )
                     }
                 },
-                Ok((response_msg, _op_timer_already_observed, ctx)) => (response_msg, Some(ctx)),
+                Ok((response_msg, _op_timer_already_observed, ctx)) => {
+                    // BEGIN HADRON
+                    PAGESTREAM_HANDLER_RESULTS_TOTAL
+                        .with_label_values(&[metrics::PAGESTREAM_HANDLER_OUTCOME_SUCCESS])
+                        .inc();
+                    // END HADRON
+
+                    (response_msg, Some(ctx))
+                }
             };
 
             let ctx = ctx.map(|req_ctx| {
@@ -3292,9 +3340,12 @@ impl GrpcPageServiceHandler {
     }
 
     /// Generates a PagestreamRequest header from a ReadLsn and request ID.
-    fn make_hdr(read_lsn: page_api::ReadLsn, req_id: u64) -> PagestreamRequest {
+    fn make_hdr(
+        read_lsn: page_api::ReadLsn,
+        req_id: Option<page_api::RequestID>,
+    ) -> PagestreamRequest {
         PagestreamRequest {
-            reqid: req_id,
+            reqid: req_id.map(|r| r.id).unwrap_or_default(),
             request_lsn: read_lsn.request_lsn,
             not_modified_since: read_lsn
                 .not_modified_since_lsn
@@ -3352,6 +3403,8 @@ impl GrpcPageServiceHandler {
     /// NB: errors returned from here are intercepted in get_pages(), and may be converted to a
     /// GetPageResponse with an appropriate status code to avoid terminating the stream.
     ///
+    /// TODO: verify that the requested pages belong to this shard.
+    ///
     /// TODO: get_vectored() currently enforces a batch limit of 32. Postgres will typically send
     /// batches up to effective_io_concurrency = 100. Either we have to accept large batches, or
     /// split them up in the client or server.
@@ -3404,7 +3457,7 @@ impl GrpcPageServiceHandler {
 
             batch.push(BatchedGetPageRequest {
                 req: PagestreamGetPageRequest {
-                    hdr: Self::make_hdr(req.read_lsn, req.request_id),
+                    hdr: Self::make_hdr(req.read_lsn, Some(req.request_id)),
                     rel: req.rel,
                     blkno,
                 },
@@ -3434,12 +3487,16 @@ impl GrpcPageServiceHandler {
             request_id: req.request_id,
             status_code: page_api::GetPageStatusCode::Ok,
             reason: None,
-            page_images: Vec::with_capacity(results.len()),
+            rel: req.rel,
+            pages: Vec::with_capacity(results.len()),
         };
 
         for result in results {
             match result {
-                Ok((PagestreamBeMessage::GetPage(r), _, _)) => resp.page_images.push(r.page),
+                Ok((PagestreamBeMessage::GetPage(r), _, _)) => resp.pages.push(page_api::Page {
+                    block_number: r.req.blkno,
+                    image: r.page,
+                }),
                 Ok((resp, _, _)) => {
                     return Err(tonic::Status::internal(format!(
                         "unexpected response: {resp:?}"
@@ -3482,7 +3539,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         span_record!(rel=%req.rel, lsn=%req.read_lsn);
 
         let req = PagestreamExistsRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             rel: req.rel,
         };
 
@@ -3632,7 +3689,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         span_record!(db_oid=%req.db_oid, lsn=%req.read_lsn);
 
         let req = PagestreamDbSizeRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             dbnode: req.db_oid,
         };
 
@@ -3691,20 +3748,24 @@ impl proto::PageService for GrpcPageServiceHandler {
                         break;
                     },
                 };
-                let req = if let Some(req) = req? {
-                    req
-                } else {
-                    break;
-                };
-                let req_id = req.request_id;
+                let Some(req) = req? else { break };
+                let req_id = req.request_id.map(page_api::RequestID::from).unwrap_or_default();
+
                 let result = Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
                     .instrument(span.clone()) // propagate request span
                     .await;
                 yield match result {
                     Ok(resp) => resp,
                     // Convert per-request errors to GetPageResponses as appropriate, or terminate
-                    // the stream with a tonic::Status.
-                    Err(err) => page_api::GetPageResponse::try_from_status(err, req_id)?.into(),
+                    // the stream with a tonic::Status. Log the error regardless, since
+                    // ObservabilityLayer can't automatically log stream errors.
+                    Err(status) => {
+                        // TODO: it would be nice if we could propagate the get_page() fields here.
+                        span.in_scope(|| {
+                            warn!("request failed with {:?}: {}", status.code(), status.message());
+                        });
+                        page_api::GetPageResponse::try_from_status(status, req_id)?.into()
+                    }
                 }
             }
         };
@@ -3728,7 +3789,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         span_record!(rel=%req.rel, lsn=%req.read_lsn);
 
         let req = PagestreamNblocksRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             rel: req.rel,
         };
 
@@ -3761,7 +3822,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         span_record!(kind=%req.kind, segno=%req.segno, lsn=%req.read_lsn);
 
         let req = PagestreamGetSlruSegmentRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             kind: req.kind as u8,
             segno: req.segno,
         };
@@ -3842,40 +3903,85 @@ impl<S: tonic::server::NamedService> tonic::server::NamedService for Observabili
     const NAME: &'static str = S::NAME; // propagate inner service name
 }
 
-impl<S, B> tower::Service<http::Request<B>> for ObservabilityLayerService<S>
+impl<S, Req, Resp> tower::Service<http::Request<Req>> for ObservabilityLayerService<S>
 where
-    S: tower::Service<http::Request<B>>,
+    S: tower::Service<http::Request<Req>, Response = http::Response<Resp>> + Send,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    fn call(&mut self, mut req: http::Request<B>) -> Self::Future {
+    fn call(&mut self, mut req: http::Request<Req>) -> Self::Future {
         // Record the request start time as a request extension.
         //
         // TODO: we should start a timer here instead, but it currently requires a timeline handle
         // and SmgrQueryType, which we don't have yet. Refactor it to provide it later.
         req.extensions_mut().insert(ReceivedAt(Instant::now()));
 
-        // Create a basic tracing span. Enter the span for the current thread (to use it for inner
-        // sync code like interceptors), and instrument the future (to use it for inner async code
-        // like the page service itself).
+        // Extract the peer address and gRPC method.
+        let peer = req
+            .extensions()
+            .get::<TcpConnectInfo>()
+            .and_then(|info| info.remote_addr())
+            .map(|addr| addr.to_string())
+            .unwrap_or_default();
+
+        let method = req
+            .uri()
+            .path()
+            .split('/')
+            .nth(2)
+            .unwrap_or(req.uri().path())
+            .to_string();
+
+        // Create a basic tracing span.
         //
-        // The instrument() call below is not sufficient. It only affects the returned future, and
-        // only takes effect when the caller polls it. Any sync code executed when we call
-        // self.inner.call() below (such as interceptors) runs outside of the returned future, and
-        // is not affected by it. We therefore have to enter the span on the current thread too.
+        // Enter the span for the current thread and instrument the future. It is not sufficient to
+        // only instrument the future, since it only takes effect after the future is returned and
+        // polled, not when the inner service is called below (e.g. during interceptor execution).
         let span = info_span!(
             "grpc:pageservice",
-            // Set by TenantMetadataInterceptor.
+            // These will be populated by TenantMetadataInterceptor.
             tenant_id = field::Empty,
             timeline_id = field::Empty,
             shard_id = field::Empty,
+            // NB: empty fields must be listed first above. Otherwise, the field names will be
+            // clobbered when the empty fields are populated. They will be output last regardless.
+            %peer,
+            %method,
         );
         let _guard = span.enter();
 
-        Box::pin(self.inner.call(req).instrument(span.clone()))
+        // Construct a future for calling the inner service, but don't await it. This avoids having
+        // to clone the inner service into the future below.
+        let call = self.inner.call(req);
+
+        async move {
+            // Await the inner service call.
+            let result = call.await;
+
+            // Log gRPC error statuses. This won't include request info from handler spans, but it
+            // will catch all errors (even those emitted before handler spans are constructed). Only
+            // unary request errors are logged here, not streaming response errors.
+            if let Ok(ref resp) = result
+                && let Some(status) = tonic::Status::from_header_map(resp.headers())
+                && status.code() != tonic::Code::Ok
+            {
+                // TODO: it would be nice if we could propagate the handler span's request fields
+                // here. This could e.g. be done by attaching the request fields to
+                // tonic::Status::metadata via a proc macro.
+                warn!(
+                    "request failed with {:?}: {}",
+                    status.code(),
+                    status.message()
+                );
+            }
+
+            result
+        }
+        .instrument(span.clone())
+        .boxed()
     }
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

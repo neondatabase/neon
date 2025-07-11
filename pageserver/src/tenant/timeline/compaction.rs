@@ -4,10 +4,11 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
+use std::cmp::min;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::layer_manager::LayerManagerLockHolder;
 use super::{
@@ -16,7 +17,8 @@ use super::{
     Timeline,
 };
 
-use crate::tenant::timeline::DeltaEntry;
+use crate::pgdatadir_mapping::CollectKeySpaceError;
+use crate::tenant::timeline::{DeltaEntry, RepartitionError};
 use crate::walredo::RedoAttemptType;
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
@@ -32,6 +34,7 @@ use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use pageserver_compaction::helpers::{fully_contains, overlaps_with};
 use pageserver_compaction::interface::*;
+use postgres_ffi::to_pg_timestamp;
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -44,6 +47,7 @@ use wal_decoder::models::value::Value;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::gc_block::GcBlock;
@@ -64,7 +68,7 @@ use crate::tenant::timeline::{
     DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
     ResidentLayer, drop_layer_manager_rlock,
 };
-use crate::tenant::{DeltaLayer, MaybeOffloaded};
+use crate::tenant::{DeltaLayer, MaybeOffloaded, PageReconstructError};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
@@ -571,7 +575,7 @@ impl GcCompactionQueue {
         }
         match res {
             Ok(res) => Ok(res),
-            Err(CompactionError::ShuttingDown) => Err(CompactionError::ShuttingDown),
+            Err(e) if e.is_cancel() => Err(e),
             Err(_) => {
                 // There are some cases where traditional gc might collect some layer
                 // files causing gc-compaction cannot read the full history of the key.
@@ -591,9 +595,9 @@ impl GcCompactionQueue {
         timeline: &Arc<Timeline>,
     ) -> Result<CompactionOutcome, CompactionError> {
         let Ok(_one_op_at_a_time_guard) = self.consumer_lock.try_lock() else {
-            return Err(CompactionError::AlreadyRunning(
-                "cannot run gc-compaction because another gc-compaction is running. This should not happen because we only call this function from the gc-compaction queue.",
-            ));
+            return Err(CompactionError::Other(anyhow::anyhow!(
+                "cannot run gc-compaction because another gc-compaction is running. This should not happen because we only call this function from the gc-compaction queue."
+            )));
         };
         let has_pending_tasks;
         let mut yield_for_l0 = false;
@@ -1259,12 +1263,18 @@ impl Timeline {
         // Is the timeline being deleted?
         if self.is_stopping() {
             trace!("Dropping out of compaction on timeline shutdown");
-            return Err(CompactionError::ShuttingDown);
+            return Err(CompactionError::new_cancelled());
         }
 
         let target_file_size = self.get_checkpoint_distance();
 
         // Define partitioning schema if needed
+
+        // HADRON
+        let force_image_creation_lsn = self
+            .get_or_compute_force_image_creation_lsn(cancel, ctx)
+            .await
+            .map_err(CompactionError::Other)?;
 
         // 1. L0 Compact
         let l0_outcome = {
@@ -1273,6 +1283,7 @@ impl Timeline {
                 .compact_level0(
                     target_file_size,
                     options.flags.contains(CompactFlags::ForceL0Compaction),
+                    force_image_creation_lsn,
                     ctx,
                 )
                 .await?;
@@ -1375,6 +1386,7 @@ impl Timeline {
                     .create_image_layers(
                         &partitioning,
                         lsn,
+                        force_image_creation_lsn,
                         mode,
                         &image_ctx,
                         self.last_image_layer_creation_status
@@ -1417,22 +1429,33 @@ impl Timeline {
             }
 
             // Suppress errors when cancelled.
-            Err(_) if self.cancel.is_cancelled() => {}
+            //
+            // Log other errors but continue. Failure to repartition is normal, if the timeline was just created
+            // as an empty timeline. Also in unit tests, when we use the timeline as a simple
+            // key-value store, ignoring the datadir layout. Log the error but continue.
+            //
+            // TODO:
+            // 1. shouldn't we return early here if we observe cancellation
+            // 2. Experiment: can we stop checking self.cancel here?
+            Err(_) if self.cancel.is_cancelled() => {} // TODO: try how we fare removing this branch
             Err(err) if err.is_cancel() => {}
-
-            // Alert on critical errors that indicate data corruption.
-            Err(err) if err.is_critical() => {
+            Err(RepartitionError::CollectKeyspace(
+                e @ CollectKeySpaceError::Decode(_)
+                | e @ CollectKeySpaceError::PageRead(
+                    PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                ),
+            )) => {
+                // Alert on critical errors that indicate data corruption.
                 critical_timeline!(
                     self.tenant_shard_id,
                     self.timeline_id,
-                    "could not compact, repartitioning keyspace failed: {err:?}"
+                    "could not compact, repartitioning keyspace failed: {e:?}"
                 );
             }
-
-            // Log other errors. No partitioning? This is normal, if the timeline was just created
-            // as an empty timeline. Also in unit tests, when we use the timeline as a simple
-            // key-value store, ignoring the datadir layout. Log the error but continue.
-            Err(err) => error!("could not compact, repartitioning keyspace failed: {err:?}"),
+            Err(e) => error!(
+                "could not compact, repartitioning keyspace failed: {:?}",
+                e.into_anyhow()
+            ),
         };
 
         let partition_count = self.partitioning.read().0.0.parts.len();
@@ -1459,6 +1482,63 @@ impl Timeline {
 
         Ok(CompactionOutcome::Done)
     }
+
+    /* BEGIN_HADRON */
+    // Get the force image creation LSN. Compute it if the last computed LSN is too old.
+    async fn get_or_compute_force_image_creation_lsn(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Option<Lsn>> {
+        const FORCE_IMAGE_CREATION_LSN_COMPUTE_INTERVAL: Duration = Duration::from_secs(10 * 60); // 10 minutes
+        let image_layer_force_creation_period = self.get_image_creation_timeout();
+        if image_layer_force_creation_period.is_none() {
+            return Ok(None);
+        }
+
+        let image_layer_force_creation_period = image_layer_force_creation_period.unwrap();
+        let force_image_creation_lsn_computed_at =
+            *self.force_image_creation_lsn_computed_at.lock().unwrap();
+        if force_image_creation_lsn_computed_at.is_none()
+            || force_image_creation_lsn_computed_at.unwrap().elapsed()
+                > FORCE_IMAGE_CREATION_LSN_COMPUTE_INTERVAL
+        {
+            let now: SystemTime = SystemTime::now();
+            let timestamp = now
+                .checked_sub(image_layer_force_creation_period)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "image creation timeout is too large: {image_layer_force_creation_period:?}"
+                    )
+                })?;
+            let timestamp = to_pg_timestamp(timestamp);
+            let force_image_creation_lsn = match self
+                .find_lsn_for_timestamp(timestamp, cancel, ctx)
+                .await?
+            {
+                LsnForTimestamp::Present(lsn) | LsnForTimestamp::Future(lsn) => lsn,
+                _ => {
+                    let gc_lsn = *self.get_applied_gc_cutoff_lsn();
+                    tracing::info!(
+                        "no LSN found for timestamp {timestamp:?}, using latest GC cutoff LSN {}",
+                        gc_lsn
+                    );
+                    gc_lsn
+                }
+            };
+            self.force_image_creation_lsn
+                .store(force_image_creation_lsn);
+            *self.force_image_creation_lsn_computed_at.lock().unwrap() = Some(Instant::now());
+            tracing::info!(
+                "computed force image creation LSN: {}",
+                force_image_creation_lsn
+            );
+            Ok(Some(force_image_creation_lsn))
+        } else {
+            Ok(Some(self.force_image_creation_lsn.load()))
+        }
+    }
+    /* END_HADRON */
 
     /// Check for layers that are elegible to be rewritten:
     /// - Shard splitting: After a shard split, ancestor layers beyond pitr_interval, so that
@@ -1612,7 +1692,7 @@ impl Timeline {
 
         for (i, layer) in layers_to_rewrite.into_iter().enumerate() {
             if self.cancel.is_cancelled() {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
 
             info!(layer=%layer, "rewriting layer after shard split: {}/{}", i, total);
@@ -1710,7 +1790,7 @@ impl Timeline {
                     Ok(()) => {},
                     Err(WaitCompletionError::NotInitialized(ni)) => return Err(CompactionError::from(ni)),
                     Err(WaitCompletionError::UploadQueueShutDownOrStopped) => {
-                        return Err(CompactionError::ShuttingDown);
+                        return Err(CompactionError::new_cancelled());
                     }
                 },
                 // Don't wait if there's L0 compaction to do. We don't need to update the outcome
@@ -1789,6 +1869,7 @@ impl Timeline {
         self: &Arc<Self>,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
+        force_compaction_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<CompactionOutcome, CompactionError> {
         let CompactLevel0Phase1Result {
@@ -1809,6 +1890,7 @@ impl Timeline {
                 stats,
                 target_file_size,
                 force_compaction_ignore_threshold,
+                force_compaction_lsn,
                 &ctx,
             )
             .instrument(phase1_span)
@@ -1831,6 +1913,7 @@ impl Timeline {
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
+        force_compaction_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         let begin = tokio::time::Instant::now();
@@ -1860,11 +1943,28 @@ impl Timeline {
                     return Ok(CompactLevel0Phase1Result::default());
                 }
             } else {
-                debug!(
-                    level0_deltas = level0_deltas.len(),
-                    threshold, "too few deltas to compact"
-                );
-                return Ok(CompactLevel0Phase1Result::default());
+                // HADRON
+                let min_lsn = level0_deltas
+                    .iter()
+                    .map(|a| a.get_lsn_range().start)
+                    .reduce(min);
+                if force_compaction_lsn.is_some()
+                    && min_lsn.is_some()
+                    && min_lsn.unwrap() < force_compaction_lsn.unwrap()
+                {
+                    info!(
+                        "forcing L0 compaction of {} L0 deltas. Min lsn: {}, force compaction lsn: {}",
+                        level0_deltas.len(),
+                        min_lsn.unwrap(),
+                        force_compaction_lsn.unwrap()
+                    );
+                } else {
+                    debug!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact"
+                    );
+                    return Ok(CompactLevel0Phase1Result::default());
+                }
             }
         }
 
@@ -1973,7 +2073,7 @@ impl Timeline {
             let mut all_keys = Vec::new();
             for l in deltas_to_compact.iter() {
                 if self.cancel.is_cancelled() {
-                    return Err(CompactionError::ShuttingDown);
+                    return Err(CompactionError::new_cancelled());
                 }
                 let delta = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
                 let keys = delta
@@ -2066,7 +2166,7 @@ impl Timeline {
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
 
         if self.cancel.is_cancelled() {
-            return Err(CompactionError::ShuttingDown);
+            return Err(CompactionError::new_cancelled());
         }
 
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
@@ -2174,7 +2274,7 @@ impl Timeline {
                 // avoid hitting the cancellation token on every key. in benches, we end up
                 // shuffling an order of million keys per layer, this means we'll check it
                 // around tens of times per layer.
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
 
             let same_key = prev_key == Some(key);
@@ -2259,7 +2359,7 @@ impl Timeline {
                 if writer.is_none() {
                     if self.cancel.is_cancelled() {
                         // to be somewhat responsive to cancellation, check for each new layer
-                        return Err(CompactionError::ShuttingDown);
+                        return Err(CompactionError::new_cancelled());
                     }
                     // Create writer if not initiaized yet
                     writer = Some(
@@ -2515,10 +2615,13 @@ impl Timeline {
         // Is the timeline being deleted?
         if self.is_stopping() {
             trace!("Dropping out of compaction on timeline shutdown");
-            return Err(CompactionError::ShuttingDown);
+            return Err(CompactionError::new_cancelled());
         }
 
-        let (dense_ks, _sparse_ks) = self.collect_keyspace(end_lsn, ctx).await?;
+        let (dense_ks, _sparse_ks) = self
+            .collect_keyspace(end_lsn, ctx)
+            .await
+            .map_err(CompactionError::from_collect_keyspace)?;
         // TODO(chi): ignore sparse_keyspace for now, compact it in the future.
         let mut adaptor = TimelineAdaptor::new(self, (end_lsn, dense_ks));
 
@@ -3174,7 +3277,7 @@ impl Timeline {
         let gc_lock = async {
             tokio::select! {
                 guard = self.gc_lock.lock() => Ok(guard),
-                _ = cancel.cancelled() => Err(CompactionError::ShuttingDown),
+                _ = cancel.cancelled() => Err(CompactionError::new_cancelled()),
             }
         };
 
@@ -3447,7 +3550,7 @@ impl Timeline {
             }
             total_layer_size += layer.layer_desc().file_size;
             if cancel.is_cancelled() {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
             let should_yield = yield_for_l0
                 && self
@@ -3594,7 +3697,7 @@ impl Timeline {
             }
 
             if cancel.is_cancelled() {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
 
             let should_yield = yield_for_l0

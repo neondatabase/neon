@@ -1,7 +1,8 @@
 [package]
 name = "pageserver_client_grpc"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 
 [features]
 testing = ["pageserver_api/testing"]
@@ -10,35 +11,14 @@ testing = ["pageserver_api/testing"]
 anyhow.workspace = true
 arc-swap.workspace = true
 bytes.workspace = true
+compute_api.workspace = true
 futures.workspace = true
-http.workspace = true
-thiserror.workspace = true
+pageserver_api.workspace = true
+pageserver_page_api.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 tracing.workspace = true
-tokio = { version = "1.43.1", features = [
-    "full",
-    "macros",
-    "net",
-    "io-util",
-    "rt",
-    "rt-multi-thread",
-] }
-uuid = { version = "1", features = ["v4"] }
-tower = { version = "0.4", features = ["timeout", "util"] }
-rand = "0.8"
-tokio-util = { version = "0.7", features = ["compat"] }
-hyper-util = "0.1.9"
-hyper = "1.6.0"
-metrics.workspace = true
-priority-queue = "2.3.1"
-scopeguard.workspace = true
-async-trait = { version = "0.1" }
-tokio-stream = "0.1"
-dashmap = "5"
-chrono = { version = "0.4", features = ["serde"] }
-compute_api.workspace = true
-
-
-pageserver_page_api.workspace = true
-pageserver_api.workspace = true
 utils.workspace = true
+workspace_hack.workspace = true

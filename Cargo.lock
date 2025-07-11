@@ -1427,6 +1427,7 @@ dependencies = [
  "p256 0.13.2",
  "pageserver_page_api",
  "postgres",
+ "postgres-types",
  "postgres_initdb",
  "postgres_versioninfo",
  "regex",
@@ -3598,6 +3599,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "json"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "itoa",
+ "ryu",
+]
+
+[[package]]
 name = "json-structural-diff"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4454,6 +4464,7 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "remote_storage",
+ "serde",
  "serde_json",
  "svg_fmt",
  "thiserror 1.0.69",
@@ -4471,6 +4482,7 @@ dependencies = [
  "arc-swap",
  "async-compression",
  "async-stream",
+ "base64 0.22.1",
  "bincode",
  "bit_field",
  "byteorder",
@@ -4632,30 +4644,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
- "async-trait",
  "bytes",
- "chrono",
  "compute_api",
- "dashmap 5.5.0",
  "futures",
- "http 1.1.0",
- "hyper 1.6.0",
- "hyper-util",
- "metrics",
  "pageserver_api",
  "pageserver_page_api",
- "priority-queue",
- "rand 0.8.5",
- "scopeguard",
- "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
- "tower 0.4.13",
  "tracing",
  "utils",
- "uuid",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -5269,17 +5269,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
 dependencies = [
  "elliptic-curve 0.13.8",
-]
-
-[[package]]
-name = "priority-queue"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5676d703dda103cbb035b653a9f11448c0a7216c7926bd35fcb5865475d0c970"
-dependencies = [
- "autocfg",
- "equivalent",
- "indexmap 2.9.0",
 ]
 
 [[package]]
@@ -5915,6 +5904,8 @@ dependencies = [
  "azure_identity",
  "azure_storage",
  "azure_storage_blobs",
+ "base64 0.22.1",
+ "byteorder",
  "bytes",
  "camino",
  "camino-tempfile",
@@ -8993,8 +8984,10 @@ dependencies = [
  "fail",
  "form_urlencoded",
  "futures-channel",
+ "futures-core",
  "futures-executor",
  "futures-io",
+ "futures-sink",
  "futures-util",
  "generic-array",
  "getrandom 0.2.11",

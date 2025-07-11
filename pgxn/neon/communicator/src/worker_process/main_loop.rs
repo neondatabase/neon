@@ -109,7 +109,7 @@ pub(super) async fn init(
     let tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
     let timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
     let shard_spec = ShardSpec::new(shard_map, stripe_size).expect("invalid shard spec");
-    let client = PageserverClient::new(tenant_id, timeline_id, shard_spec, auth_token)
+    let client = PageserverClient::new(tenant_id, timeline_id, shard_spec, auth_token, None)
         .expect("could not create client");
 
     let request_counters = IntCounterVec::new(
@@ -610,7 +610,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         match self
             .client
             .get_page(page_api::GetPageRequest {
-                request_id: req.request_id,
+                request_id: req.request_id.into(),
                 request_class: page_api::GetPageClass::Normal,
                 read_lsn,
                 rel,
@@ -621,10 +621,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             Ok(resp) => {
                 // Write the received page images directly to the shared memory location
                 // that the backend requested.
-                if resp.page_images.len() != block_numbers.len() {
+                if resp.pages.len() != block_numbers.len() {
                     error!(
                         "received unexpected response with {} page images from pageserver for a request for {} pages",
-                        resp.page_images.len(),
+                        resp.pages.len(),
                         block_numbers.len(),
                     );
                     return Err(-1);
@@ -635,10 +635,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     block_numbers, rel, read_lsn
                 );
 
-                for (page_image, (blkno, _lsn, dest, _guard)) in
-                    resp.page_images.into_iter().zip(cache_misses)
+                for (page, (blkno, _lsn, dest, _guard)) in resp.pages.into_iter().zip(cache_misses)
                 {
-                    let src: &[u8] = page_image.as_ref();
+                    let src: &[u8] = page.image.as_ref();
                     let len = std::cmp::min(src.len(), dest.bytes_total());
                     unsafe {
                         std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
@@ -649,7 +648,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         .remember_page(
                             &rel,
                             blkno,
-                            page_image,
+                            page.image,
                             read_lsn.not_modified_since_lsn.unwrap(),
                             false,
                         )
@@ -712,7 +711,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         match self
             .client
             .get_page(page_api::GetPageRequest {
-                request_id: req.request_id,
+                request_id: req.request_id.into(),
                 request_class: page_api::GetPageClass::Prefetch,
                 read_lsn: self.request_lsns(not_modified_since),
                 rel,
@@ -725,20 +724,18 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     "prefetch completed, remembering blocks {:?} in rel {:?} in LFC",
                     block_numbers, rel
                 );
-                if resp.page_images.len() != block_numbers.len() {
+                if resp.pages.len() != block_numbers.len() {
                     error!(
                         "received unexpected response with {} page images from pageserver for a request for {} pages",
-                        resp.page_images.len(),
+                        resp.pages.len(),
                         block_numbers.len(),
                     );
                     return Err(-1);
                 }
 
-                for (page_image, (blkno, _lsn, _guard)) in
-                    resp.page_images.into_iter().zip(cache_misses)
-                {
+                for (page, (blkno, _lsn, _guard)) in resp.pages.into_iter().zip(cache_misses) {
                     self.cache
-                        .remember_page(&rel, blkno, page_image, not_modified_since, false)
+                        .remember_page(&rel, blkno, page.image, not_modified_since, false)
                         .await;
                 }
             }

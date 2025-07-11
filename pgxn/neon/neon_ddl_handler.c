@@ -953,7 +953,9 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 
 	/*
 	 * Fire Event Trigger if both function owner and current user are
-	 * superuser, or none of them are.
+	 * superuser. Allow executing Event Trigger function that belongs to a
+	 * superuser when connected as a non-superuser, even when the function is
+	 * SECURITY DEFINER.
 	 */
     else if (event == FHET_START
 		/* still enable it to pass pg_regress tests */
@@ -976,32 +978,7 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		function_is_owned_by_super = superuser_arg(function_owner);
 
 		/*
-		 * 1. Refuse to run SECURITY DEFINER function that belongs to a
-		 * superuser when the current user is not a superuser itself.
-		 */
-		if (!role_is_super
-			&& function_is_owned_by_super
-			&& function_is_secdef)
-		{
-			char *func_name = get_func_name(flinfo->fn_oid);
-
-			ereport(WARNING,
-					(errmsg("Skipping Event Trigger"),
-					 errdetail("Event Trigger function \"%s\" is owned by \"%s\" "
-							   "and is SECURITY DEFINER",
-							   func_name,
-							   GetUserNameFromId(function_owner, false))));
-
-			/*
-			 * we can't skip execution directly inside the fmgr_hook so
-			 * instead we change the event trigger function to a noop
-			 * function.
-			 */
-			force_noop(flinfo);
-		}
-
-		/*
-		 * 2. Refuse to run functions that belongs to a non-superuser when the
+		 * Refuse to run functions that belongs to a non-superuser when the
 		 * current user is a superuser.
 		 *
 		 * We could run a SECURITY DEFINER user-function here and be safe with
@@ -1009,7 +986,7 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		 * infrastructure maintenance operations, where we prefer to skip
 		 * running user-defined code.
 		 */
-		else if (role_is_super && !function_is_owned_by_super)
+		if (role_is_super && !function_is_owned_by_super)
 		{
 			char *func_name = get_func_name(flinfo->fn_oid);
 

@@ -46,7 +46,7 @@ pub struct ExtensionInstallResponse {
     pub version: ExtVersion,
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+#[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcPrewarmState {
     #[default]
@@ -56,6 +56,17 @@ pub enum LfcPrewarmState {
     Failed {
         error: String,
     },
+}
+
+impl Display for LfcPrewarmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LfcPrewarmState::NotPrewarmed => f.write_str("NotPrewarmed"),
+            LfcPrewarmState::Prewarming => f.write_str("Prewarming"),
+            LfcPrewarmState::Completed => f.write_str("Completed"),
+            LfcPrewarmState::Failed { error } => write!(f, "Error({error})"),
+        }
+    }
 }
 
 #[derive(Serialize, Default, Debug, Clone, PartialEq)]
@@ -68,6 +79,23 @@ pub enum LfcOffloadState {
     Failed {
         error: String,
     },
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+/// Response of /promote
+pub enum PromoteState {
+    NotPromoted,
+    Completed,
+    Failed { error: String },
+}
+
+#[derive(Deserialize, Serialize, Default, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+/// Result of /safekeepers_lsn
+pub struct SafekeepersLsn {
+    pub safekeepers: String,
+    pub wal_flush_lsn: utils::lsn::Lsn,
 }
 
 /// Response of the /status API
@@ -93,6 +121,15 @@ pub enum TerminateMode {
     Immediate,
 }
 
+impl From<TerminateMode> for ComputeStatus {
+    fn from(mode: TerminateMode) -> Self {
+        match mode {
+            TerminateMode::Fast => ComputeStatus::TerminationPendingFast,
+            TerminateMode::Immediate => ComputeStatus::TerminationPendingImmediate,
+        }
+    }
+}
+
 #[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeStatus {
@@ -113,7 +150,9 @@ pub enum ComputeStatus {
     // control-plane to terminate it.
     Failed,
     // Termination requested
-    TerminationPending { mode: TerminateMode },
+    TerminationPendingFast,
+    // Termination requested, without waiting 30s before returning from /terminate
+    TerminationPendingImmediate,
     // Terminated Postgres
     Terminated,
 }
@@ -132,7 +171,10 @@ impl Display for ComputeStatus {
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),
             ComputeStatus::Failed => f.write_str("failed"),
-            ComputeStatus::TerminationPending { .. } => f.write_str("termination-pending"),
+            ComputeStatus::TerminationPendingFast => f.write_str("termination-pending-fast"),
+            ComputeStatus::TerminationPendingImmediate => {
+                f.write_str("termination-pending-immediate")
+            }
             ComputeStatus::Terminated => f.write_str("terminated"),
         }
     }

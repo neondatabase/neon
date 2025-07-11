@@ -17,23 +17,35 @@ use tracing::*;
 use utils::backoff::exponential_backoff_duration;
 use utils::completion::Barrier;
 use utils::pausable_failpoint;
-use utils::sync::gate::GateError;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::{self, BackgroundLoopSemaphoreMetricsRecorder, TENANT_TASK_EVENTS};
 use crate::task_mgr::{self, BACKGROUND_RUNTIME, TOKIO_WORKER_THREADS, TaskKind};
-use crate::tenant::blob_io::WriteBlobError;
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::compaction::CompactionOutcome;
 use crate::tenant::{TenantShard, TenantState};
-use crate::virtual_file::owned_buffers_io::write::FlushTaskError;
 
 /// Semaphore limiting concurrent background tasks (across all tenants).
 ///
 /// We use 3/4 Tokio threads, to avoid blocking all threads in case we do any CPU-heavy work.
 static CONCURRENT_BACKGROUND_TASKS: Lazy<Semaphore> = Lazy::new(|| {
     let total_threads = TOKIO_WORKER_THREADS.get();
+
+    /*BEGIN_HADRON*/
+    // ideally we should run at least one compaction task per tenant in order to (1) maximize
+    // compaction throughput (2) avoid head-of-line blocking of large compactions. However doing
+    // that may create too many compaction tasks with lots of memory overheads. So we limit the
+    // number of compaction tasks based on the available CPU core count.
+    // Need to revisit.
+    // let tasks_per_thread = std::env::var("BG_TASKS_PER_THREAD")
+    //     .ok()
+    //     .and_then(|s| s.parse().ok())
+    //     .unwrap_or(4);
+    // let permits = usize::max(1, total_threads * tasks_per_thread);
+    // // assert!(permits < total_threads, "need threads for other work");
+    /*END_HADRON*/
+
     let permits = max(1, (total_threads * 3).checked_div(4).unwrap_or(0));
     assert_ne!(permits, 0, "we will not be adding in permits later");
     assert!(permits < total_threads, "need threads for other work");
@@ -295,48 +307,12 @@ pub(crate) fn log_compaction_error(
     task_cancelled: bool,
     degrade_to_warning: bool,
 ) {
-    use CompactionError::*;
+    let is_cancel = err.is_cancel();
 
-    use crate::tenant::PageReconstructError;
-    use crate::tenant::upload_queue::NotInitialized;
-
-    let level = match err {
-        e if e.is_cancel() => return,
-        ShuttingDown => return,
-        Offload(_) => Level::ERROR,
-        AlreadyRunning(_) => Level::ERROR,
-        CollectKeySpaceError(_) => Level::ERROR,
-        _ if task_cancelled => Level::INFO,
-        Other(err) => {
-            let root_cause = err.root_cause();
-
-            let upload_queue = root_cause
-                .downcast_ref::<NotInitialized>()
-                .is_some_and(|e| e.is_stopping());
-            let timeline = root_cause
-                .downcast_ref::<PageReconstructError>()
-                .is_some_and(|e| e.is_stopping());
-            let buffered_writer_flush_task_canelled = root_cause
-                .downcast_ref::<FlushTaskError>()
-                .is_some_and(|e| e.is_cancel());
-            let write_blob_cancelled = root_cause
-                .downcast_ref::<WriteBlobError>()
-                .is_some_and(|e| e.is_cancel());
-            let gate_closed = root_cause
-                .downcast_ref::<GateError>()
-                .is_some_and(|e| e.is_cancel());
-            let is_stopping = upload_queue
-                || timeline
-                || buffered_writer_flush_task_canelled
-                || write_blob_cancelled
-                || gate_closed;
-
-            if is_stopping {
-                Level::INFO
-            } else {
-                Level::ERROR
-            }
-        }
+    let level = if is_cancel || task_cancelled {
+        Level::INFO
+    } else {
+        Level::ERROR
     };
 
     if let Some((error_count, sleep_duration)) = retry_info {

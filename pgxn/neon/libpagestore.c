@@ -1441,7 +1441,7 @@ pg_init_libpagestore(void)
 							"sharding stripe size",
 							NULL,
 							&neon_stripe_size,
-							32768, 1, INT_MAX,
+							2048 1, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_BLOCKS,
 							NULL, NULL, NULL);

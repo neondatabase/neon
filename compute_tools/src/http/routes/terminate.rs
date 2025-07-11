@@ -3,7 +3,7 @@ use crate::http::JsonResponse;
 use axum::extract::State;
 use axum::response::Response;
 use axum_extra::extract::OptionalQuery;
-use compute_api::responses::{ComputeStatus, TerminateResponse};
+use compute_api::responses::{ComputeStatus, TerminateMode, TerminateResponse};
 use http::StatusCode;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use tracing::info;
 
 #[derive(Deserialize, Default)]
 pub struct TerminateQuery {
-    mode: compute_api::responses::TerminateMode,
+    mode: TerminateMode,
 }
 
 /// Terminate the compute.
@@ -24,16 +24,16 @@ pub(in crate::http) async fn terminate(
     {
         let mut state = compute.state.lock().unwrap();
         if state.status == ComputeStatus::Terminated {
-            return JsonResponse::success(StatusCode::CREATED, state.terminate_flush_lsn);
+            let response = TerminateResponse {
+                lsn: state.terminate_flush_lsn,
+            };
+            return JsonResponse::success(StatusCode::CREATED, response);
         }
 
         if !matches!(state.status, ComputeStatus::Empty | ComputeStatus::Running) {
             return JsonResponse::invalid_status(state.status);
         }
-        state.set_status(
-            ComputeStatus::TerminationPending { mode },
-            &compute.state_changed,
-        );
+        state.set_status(mode.into(), &compute.state_changed);
     }
 
     forward_termination_signal(false);

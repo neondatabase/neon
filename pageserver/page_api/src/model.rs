@@ -358,7 +358,10 @@ impl TryFrom<proto::GetPageRequest> for GetPageRequest {
             return Err(ProtocolError::Missing("block_number"));
         }
         Ok(Self {
-            request_id: pb.request_id,
+            request_id: pb
+                .request_id
+                .ok_or(ProtocolError::Missing("request_id"))?
+                .into(),
             request_class: pb.request_class.into(),
             read_lsn: pb
                 .read_lsn
@@ -373,7 +376,7 @@ impl TryFrom<proto::GetPageRequest> for GetPageRequest {
 impl From<GetPageRequest> for proto::GetPageRequest {
     fn from(request: GetPageRequest) -> Self {
         Self {
-            request_id: request.request_id,
+            request_id: Some(request.request_id.into()),
             request_class: request.request_class.into(),
             read_lsn: Some(request.read_lsn.into()),
             rel: Some(request.rel.into()),
@@ -382,8 +385,51 @@ impl From<GetPageRequest> for proto::GetPageRequest {
     }
 }
 
-/// A GetPage request ID.
-pub type RequestID = u64;
+/// A GetPage request ID and retry attempt. Should be unique for in-flight requests on a stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RequestID {
+    /// The base request ID.
+    pub id: u64,
+    // The request attempt. Starts at 0, incremented on each retry.
+    pub attempt: u32,
+}
+
+impl RequestID {
+    /// Creates a new RequestID with the given ID and an initial attempt of 0.
+    pub fn new(id: u64) -> Self {
+        Self { id, attempt: 0 }
+    }
+}
+
+impl Display for RequestID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.id, self.attempt)
+    }
+}
+
+impl From<proto::RequestId> for RequestID {
+    fn from(pb: proto::RequestId) -> Self {
+        Self {
+            id: pb.id,
+            attempt: pb.attempt,
+        }
+    }
+}
+
+impl From<u64> for RequestID {
+    fn from(id: u64) -> Self {
+        Self::new(id)
+    }
+}
+
+impl From<RequestID> for proto::RequestId {
+    fn from(request_id: RequestID) -> Self {
+        Self {
+            id: request_id.id,
+            attempt: request_id.attempt,
+        }
+    }
+}
 
 /// A GetPage request class.
 #[derive(Clone, Copy, Debug, strum_macros::Display)]
@@ -458,32 +504,41 @@ impl From<GetPageClass> for i32 {
 pub struct GetPageResponse {
     /// The original request's ID.
     pub request_id: RequestID,
-    /// The response status code.
+    /// The response status code. If not OK, the `rel` and `pages` fields will be empty.
     pub status_code: GetPageStatusCode,
     /// A string describing the status, if any.
     pub reason: Option<String>,
-    /// The 8KB page images, in the same order as the request. Empty if status != OK.
-    pub page_images: Vec<Bytes>,
+    /// The relation that the pages belong to.
+    pub rel: RelTag,
+    // The page(s), in the same order as the request.
+    pub pages: Vec<Page>,
 }
 
-impl From<proto::GetPageResponse> for GetPageResponse {
-    fn from(pb: proto::GetPageResponse) -> Self {
-        Self {
-            request_id: pb.request_id,
+impl TryFrom<proto::GetPageResponse> for GetPageResponse {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::GetPageResponse) -> Result<Self, ProtocolError> {
+        Ok(Self {
+            request_id: pb
+                .request_id
+                .ok_or(ProtocolError::Missing("request_id"))?
+                .into(),
             status_code: pb.status_code.into(),
             reason: Some(pb.reason).filter(|r| !r.is_empty()),
-            page_images: pb.page_image,
-        }
+            rel: pb.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
+            pages: pb.page.into_iter().map(Page::from).collect(),
+        })
     }
 }
 
 impl From<GetPageResponse> for proto::GetPageResponse {
     fn from(response: GetPageResponse) -> Self {
         Self {
-            request_id: response.request_id,
+            request_id: Some(response.request_id.into()),
             status_code: response.status_code.into(),
             reason: response.reason.unwrap_or_default(),
-            page_image: response.page_images,
+            rel: Some(response.rel.into()),
+            page: response.pages.into_iter().map(proto::Page::from).collect(),
         }
     }
 }
@@ -516,8 +571,36 @@ impl GetPageResponse {
             request_id,
             status_code,
             reason: Some(status.message().to_string()),
-            page_images: Vec::new(),
+            rel: RelTag::default(),
+            pages: Vec::new(),
         })
+    }
+}
+
+// A page.
+#[derive(Clone, Debug)]
+pub struct Page {
+    /// The page number.
+    pub block_number: u32,
+    /// The materialized page image, as an 8KB byte vector.
+    pub image: Bytes,
+}
+
+impl From<proto::Page> for Page {
+    fn from(pb: proto::Page) -> Self {
+        Self {
+            block_number: pb.block_number,
+            image: pb.image,
+        }
+    }
+}
+
+impl From<Page> for proto::Page {
+    fn from(page: Page) -> Self {
+        Self {
+            block_number: page.block_number,
+            image: page.image,
+        }
     }
 }
 

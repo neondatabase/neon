@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fixtures.common_types import Lsn, TenantId, TimelineId
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
@@ -164,3 +165,15 @@ def test_pageserver_http_index_part_force_patch(neon_env_builder: NeonEnvBuilder
             {"rel_size_migration": "legacy"},
         )
         assert client.timeline_detail(tenant_id, timeline_id)["rel_size_migration"] == "legacy"
+
+
+def test_pageserver_get_tenant_visible_size(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 1
+    env = neon_env_builder.init_start()
+    env.create_tenant(shard_count=4)
+    env.create_tenant(shard_count=2)
+
+    json = env.pageserver.http_client().list_tenant_visible_size()
+    log.info(f"{json}")
+    # initial tennat + 2 newly created tenants
+    assert len(json) == 7
