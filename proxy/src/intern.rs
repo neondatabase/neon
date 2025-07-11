@@ -10,62 +10,50 @@ custom_key!(pub struct AccountIdInt);
 
 impl From<&RoleName> for RoleNameInt {
     fn from(value: &RoleName) -> Self {
-        RoleNameInt::from_str_or_intern(value)
+        RoleNameInt::new(value)
     }
 }
 
 impl From<&EndpointId> for EndpointIdInt {
     fn from(value: &EndpointId) -> Self {
-        EndpointIdInt::from_str_or_intern(value)
+        EndpointIdInt::new(value)
     }
 }
 impl From<EndpointId> for EndpointIdInt {
     fn from(value: EndpointId) -> Self {
-        EndpointIdInt::from_str_or_intern(&value)
+        EndpointIdInt::new(&value)
     }
 }
 
 impl From<&BranchId> for BranchIdInt {
     fn from(value: &BranchId) -> Self {
-        BranchIdInt::from_str_or_intern(value)
+        BranchIdInt::new(value)
     }
 }
 impl From<BranchId> for BranchIdInt {
     fn from(value: BranchId) -> Self {
-        BranchIdInt::from_str_or_intern(&value)
-    }
-}
-impl std::ops::Deref for BranchIdInt {
-    type Target = str;
-    fn deref(&self) -> &str {
-        self.as_str()
+        BranchIdInt::new(&value)
     }
 }
 
 impl From<&ProjectId> for ProjectIdInt {
     fn from(value: &ProjectId) -> Self {
-        ProjectIdInt::from_str_or_intern(value)
+        ProjectIdInt::new(value)
     }
 }
 impl From<ProjectId> for ProjectIdInt {
     fn from(value: ProjectId) -> Self {
-        ProjectIdInt::from_str_or_intern(&value)
-    }
-}
-impl std::ops::Deref for ProjectIdInt {
-    type Target = str;
-    fn deref(&self) -> &str {
-        self.as_str()
+        ProjectIdInt::new(&value)
     }
 }
 
 impl From<&AccountId> for AccountIdInt {
     fn from(value: &AccountId) -> Self {
-        AccountIdInt::from_str_or_intern(value)
+        AccountIdInt::new(value)
     }
 }
 impl From<AccountId> for AccountIdInt {
     fn from(value: AccountId) -> Self {
-        AccountIdInt::from_str_or_intern(&value)
+        AccountIdInt::new(&value)
     }
 }

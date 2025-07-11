@@ -38,9 +38,9 @@ impl LocalBackend {
                 },
                 // TODO(conrad): make this better reflect compute info rather than endpoint info.
                 aux: MetricsAuxInfo {
-                    endpoint_id: EndpointIdInt::from_str_or_intern("local"),
-                    project_id: ProjectIdInt::from_str_or_intern("local"),
-                    branch_id: BranchIdInt::from_str_or_intern("local"),
+                    endpoint_id: EndpointIdInt::new("local"),
+                    project_id: ProjectIdInt::new("local"),
+                    branch_id: BranchIdInt::new("local"),
                     compute_id: "local".into(),
                     cold_start_info: ColdStartInfo::WarmCached,
                 },

@@ -71,6 +71,8 @@ pub struct AppMetrics {
     pub neon_metrics: NeonMetrics,
     #[metric(flatten)]
     pub proxy: &'static crate::metrics::Metrics,
+    #[metric(namespace = "tokio")]
+    pub tokio: measured_tokio::RuntimeCollector,
 }
 
 async fn prometheus_metrics_handler(

@@ -85,7 +85,7 @@ impl EndpointId {
 
     #[must_use]
     pub fn normalize_intern(&self) -> EndpointIdInt {
-        EndpointIdInt::from_str_or_intern(self.normalize_str())
+        EndpointIdInt::new(self.normalize_str())
     }
 }
 

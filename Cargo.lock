@@ -3715,9 +3715,7 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "measured"
-version = "0.0.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3051f3a030d55d680cdef6ca50e80abd1182f8da29f2344a7c9cb575721138f0"
+version = "0.0.23"
 dependencies = [
  "bytes",
  "crossbeam-utils",
@@ -3726,6 +3724,7 @@ dependencies = [
  "lasso",
  "measured-derive",
  "memchr",
+ "paracord",
  "parking_lot 0.12.1",
  "rustc-hash 1.1.0",
  "ryu",
@@ -3733,9 +3732,7 @@ dependencies = [
 
 [[package]]
 name = "measured-derive"
-version = "0.0.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9e6777fc80a575f9503d908c8b498782a6c3ee88a06cb416dc3941401e43b94"
+version = "0.0.23"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3745,13 +3742,20 @@ dependencies = [
 
 [[package]]
 name = "measured-process"
-version = "0.0.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c4b80445aeb08e832d87bf1830049a924cdc1d6b7ef40b6b9b365bff17bf8ec"
+version = "0.0.23"
 dependencies = [
  "libc",
  "measured",
  "procfs",
+]
+
+[[package]]
+name = "measured-tokio"
+version = "0.0.23"
+dependencies = [
+ "itoa",
+ "measured",
+ "tokio",
 ]
 
 [[package]]
@@ -4614,9 +4618,9 @@ dependencies = [
 
 [[package]]
 name = "paracord"
-version = "0.1.0-rc.6"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "965ee8b44c8a2556aa73279eab88d5aa63a2859336d8a61295104c8d8a4fb248"
+checksum = "5e41e924113f9a05eecd561c6e695648f243a03b3ad8d9b3eff689342b95023b"
 dependencies = [
  "boxcar",
  "clashmap",
@@ -5384,8 +5388,8 @@ dependencies = [
  "itoa",
  "jose-jwa",
  "jose-jwk",
- "lasso",
  "measured",
+ "measured-tokio",
  "metrics",
  "once_cell",
  "opentelemetry",
