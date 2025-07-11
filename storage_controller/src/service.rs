@@ -5210,6 +5210,9 @@ impl Service {
                 match res {
                     Ok(ok) => Ok(ok),
                     Err(mgmt_api::Error::ApiError(StatusCode::CONFLICT, _)) => Ok(StatusCode::CONFLICT),
+                    Err(mgmt_api::Error::ApiError(StatusCode::PRECONDITION_FAILED, msg)) if msg.contains("Requested tenant is missing") => {
+                        Err(ApiError::ResourceUnavailable("Tenant migration in progress".into()))
+                    },
                     Err(mgmt_api::Error::ApiError(StatusCode::SERVICE_UNAVAILABLE, msg)) => Err(ApiError::ResourceUnavailable(msg.into())),
                     Err(e) => {
                         Err(
