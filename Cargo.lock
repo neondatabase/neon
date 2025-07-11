@@ -8891,6 +8891,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "p256 0.13.2",
+ "paracord",
  "parquet",
  "prettyplease",
  "proc-macro2",
