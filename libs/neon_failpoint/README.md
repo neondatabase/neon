@@ -47,7 +47,7 @@ The probability system uses a counter to track how many times a probability-base
 When a failpoint is reconfigured while tasks are waiting on it:
 
 - **Paused tasks** will immediately resume and continue normal execution
-- **Sleeping tasks** will wake up early and continue normal execution  
+- **Sleeping tasks** will wake up early and continue normal execution
 - **Removed failpoints** will cause all waiting tasks to resume normally
 
 The new configuration only applies to future hits of the failpoint, not to tasks that are already waiting. This allows for flexible testing scenarios where you can pause execution, inspect state, and then resume execution dynamically.
@@ -139,26 +139,42 @@ The context matching system works as follows:
 
 ### Runtime Context Usage
 
-When code hits a failpoint, it provides context using the `failpoint_context!` macro:
+When code hits a failpoint, it provides context using a `HashMap<String, String>`:
 
 ```rust
-use neon_failpoint::{failpoint, failpoint_context, FailpointResult};
+use neon_failpoint::{failpoint, FailpointResult};
+use std::collections::HashMap;
 
-let context = failpoint_context! {
-    "tenant_id" => "test_123",
-    "operation" => "backup",
-    "user_id" => "user_456",
-};
+let mut context = HashMap::new();
+context.insert("tenant_id".to_string(), "test_123".to_string());
+context.insert("operation".to_string(), "backup".to_string());
+context.insert("user_id".to_string(), "user_456".to_string());
 
-match failpoint("backup_operation", Some(&context)).await {
-    FailpointResult::Return(value) => {
-        // This will only trigger if ALL context matchers match
-        println!("Backup failed: {}", value);
+match failpoint("backup_operation", Some(&context)) {
+    either::Either::Left(result) => {
+        match result {
+            FailpointResult::Return(value) => {
+                // This will only trigger if ALL context matchers match
+                println!("Backup failed: {}", value);
+            }
+            FailpointResult::Continue => {
+                // Continue with normal backup operation
+            }
+            FailpointResult::Cancelled => {}
+        }
     }
-    FailpointResult::Continue => {
-        // Continue with normal backup operation
+    either::Either::Right(future) => {
+        match future.await {
+            FailpointResult::Return(value) => {
+                // This will only trigger if ALL context matchers match
+                println!("Backup failed: {}", value);
+            }
+            FailpointResult::Continue => {
+                // Continue with normal backup operation
+            }
+            FailpointResult::Cancelled => {}
+        }
     }
-    FailpointResult::Cancelled => {}
 }
 ```
 
@@ -173,9 +189,11 @@ matchers.insert("tenant_id".to_string(), "test_.*".to_string());
 configure_failpoint_with_context("test_failpoint", "pause", matchers).unwrap();
 
 // This will match
-let context = failpoint_context! { "tenant_id" => "test_123" };
-// This will NOT match  
-let context = failpoint_context! { "tenant_id" => "prod_123" };
+let mut context = HashMap::new();
+context.insert("tenant_id".to_string(), "test_123".to_string());
+// This will NOT match
+let mut context = HashMap::new();
+context.insert("tenant_id".to_string(), "prod_123".to_string());
 ```
 
 #### Multiple Conditions
@@ -188,16 +206,14 @@ matchers.insert("operation".to_string(), "backup".to_string());
 configure_failpoint_with_context("backup_test", "return(failed)", matchers).unwrap();
 
 // This will match (both conditions met)
-let context = failpoint_context! {
-    "tenant_id" => "test_123",
-    "operation" => "backup",
-};
+let mut context = HashMap::new();
+context.insert("tenant_id".to_string(), "test_123".to_string());
+context.insert("operation".to_string(), "backup".to_string());
 
 // This will NOT match (missing operation)
-let context = failpoint_context! {
-    "tenant_id" => "test_123",
-    "operation" => "restore",
-};
+let mut context = HashMap::new();
+context.insert("tenant_id".to_string(), "test_123".to_string());
+context.insert("operation".to_string(), "restore".to_string());
 ```
 
 #### Exact String Matching
@@ -209,9 +225,11 @@ matchers.insert("env".to_string(), "staging".to_string());
 configure_failpoint_with_context("env_specific", "sleep(1000)", matchers).unwrap();
 
 // This will match
-let context = failpoint_context! { "env" => "staging" };
+let mut context = HashMap::new();
+context.insert("env".to_string(), "staging".to_string());
 // This will NOT match
-let context = failpoint_context! { "env" => "production" };
+let mut context = HashMap::new();
+context.insert("env".to_string(), "production".to_string());
 ```
 
 ### Benefits of Context-Based Failpoints
@@ -229,7 +247,7 @@ let context = failpoint_context! { "env" => "production" };
 ## Context-Specific Failpoints
 
 ```rust
-use neon_failpoint::{configure_failpoint_with_context, failpoint, failpoint_context};
+use neon_failpoint::{configure_failpoint_with_context, failpoint};
 use std::collections::HashMap;
 
 // Configure a failpoint that only triggers for specific tenants
@@ -238,26 +256,41 @@ context_matchers.insert("tenant_id".to_string(), "test_.*".to_string());
 context_matchers.insert("operation".to_string(), "backup".to_string());
 
 configure_failpoint_with_context(
-    "backup_operation", 
-    "return(simulated_failure)", 
+    "backup_operation",
+    "return(simulated_failure)",
     context_matchers
 ).unwrap();
 
 // Use with context
-let context = failpoint_context! {
-    "tenant_id" => "test_123",
-    "operation" => "backup",
-};
+let mut context = HashMap::new();
+context.insert("tenant_id".to_string(), "test_123".to_string());
+context.insert("operation".to_string(), "backup".to_string());
 
-match failpoint("backup_operation", Some(&context)).await {
-    FailpointResult::Return(value) => {
-        // This will trigger for tenant_id matching "test_.*"
-        println!("Backup failed: {}", value);
+match failpoint("backup_operation", Some(&context)) {
+    either::Either::Left(result) => {
+        match result {
+            FailpointResult::Return(value) => {
+                // This will trigger for tenant_id matching "test_.*"
+                println!("Backup failed: {}", value);
+            }
+            FailpointResult::Continue => {
+                // Continue with backup
+            }
+            FailpointResult::Cancelled => {}
+        }
     }
-    FailpointResult::Continue => {
-        // Continue with backup
+    either::Either::Right(future) => {
+        match future.await {
+            FailpointResult::Return(value) => {
+                // This will trigger for tenant_id matching "test_.*"
+                println!("Backup failed: {}", value);
+            }
+            FailpointResult::Continue => {
+                // Continue with backup
+            }
+            FailpointResult::Cancelled => {}
+        }
     }
-    FailpointResult::Cancelled => {}
 }
 ```
 
@@ -315,12 +348,12 @@ The `fail_point_with_context!` macro has three variants that mirror `fail_point!
 3. **Conditional with context** - `fail_point_with_context!(name, context, condition, closure)`
 
 ```rust
-use neon_failpoint::{fail_point_with_context, failpoint_context};
+use neon_failpoint::{fail_point_with_context};
+use std::collections::HashMap;
 
-let context = failpoint_context! {
-    "tenant_id" => "test_123",
-    "operation" => "backup",
-};
+let mut context = HashMap::new();
+context.insert("tenant_id".to_string(), "test_123".to_string());
+context.insert("operation".to_string(), "backup".to_string());
 
 // Simple context failpoint
 fail_point_with_context!("backup_failpoint", &context);
@@ -344,7 +377,7 @@ fail_point_with_context!("backup_failpoint", &context, is_test_tenant, |value: O
 ### Other Utility Macros
 
 ```rust
-use neon_failpoint::{pausable_failpoint, sleep_millis_async, failpoint_return, failpoint_bail};
+use neon_failpoint::{pausable_failpoint, sleep_millis_async};
 
 // Pausable failpoint with cancellation
 let cancel_token = CancellationToken::new();
@@ -355,17 +388,10 @@ if let Err(()) = pausable_failpoint!("pause_here", &cancel_token).await {
 // Sleep failpoint
 sleep_millis_async!("sleep_here", &cancel_token).await;
 
-// Simple return failpoint - automatically parses and returns the value
-failpoint_return!("return_early");
-
-// Failpoint that bails with an error
-failpoint_bail!("error_point", "Something went wrong");
-
 // Context creation helper
-let context = failpoint_context! {
-    "key1" => "value1",
-    "key2" => "value2",
-};
+let mut context = HashMap::new();
+context.insert("key1".to_string(), "value1".to_string());
+context.insert("key2".to_string(), "value2".to_string());
 ```
 
 ### Argument Reference
@@ -431,4 +457,4 @@ The library integrates with the existing HTTP failpoint configuration API. Send 
     "actions": "return(42)"
   }
 ]
-``` 
+```

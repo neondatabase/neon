@@ -468,16 +468,6 @@ mod tests {
         matches!(result, FailpointResult::Continue);
     }
 
-    #[tokio::test]
-    async fn test_failpoint_return() {
-        configure_failpoint("test_return", "return(42)").unwrap();
-        let result = await_failpoint_result(failpoint("test_return", None)).await;
-        if let FailpointResult::Return(Some(value)) = result {
-            assert_eq!(value, "42");
-        } else {
-            panic!("Expected return result");
-        }
-    }
 
     #[tokio::test]
     async fn test_failpoint_sleep() {

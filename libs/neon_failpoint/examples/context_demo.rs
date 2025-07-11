@@ -1,5 +1,5 @@
 use neon_failpoint::{
-    configure_failpoint_with_context, failpoint, failpoint_context, FailpointResult,
+    configure_failpoint_with_context, failpoint, FailpointResult,
 };
 use std::collections::HashMap;
 
@@ -21,40 +21,72 @@ async fn main() {
     .unwrap();
 
     // Test with matching context
-    let context = failpoint_context! {
-        "tenant_id" => "test_123",
-        "operation" => "backup",
-    };
+    let mut context = HashMap::new();
+    context.insert("tenant_id".to_string(), "test_123".to_string());
+    context.insert("operation".to_string(), "backup".to_string());
 
     println!("Testing with matching context...");
-    match failpoint("backup_operation", Some(&context)).await {
-        FailpointResult::Return(value) => {
-            println!("Failpoint triggered with value: {:?}", value);
+    match failpoint("backup_operation", Some(&context)) {
+        either::Either::Left(result) => {
+            match result {
+                FailpointResult::Return(value) => {
+                    println!("Failpoint triggered with value: {:?}", value);
+                }
+                FailpointResult::Continue => {
+                    println!("Failpoint not triggered");
+                }
+                FailpointResult::Cancelled => {
+                    println!("Failpoint cancelled");
+                }
+            }
         }
-        FailpointResult::Continue => {
-            println!("Failpoint not triggered");
-        }
-        FailpointResult::Cancelled => {
-            println!("Failpoint cancelled");
+        either::Either::Right(future) => {
+            match future.await {
+                FailpointResult::Return(value) => {
+                    println!("Failpoint triggered with value: {:?}", value);
+                }
+                FailpointResult::Continue => {
+                    println!("Failpoint not triggered");
+                }
+                FailpointResult::Cancelled => {
+                    println!("Failpoint cancelled");
+                }
+            }
         }
     }
 
     // Test with non-matching context
-    let context = failpoint_context! {
-        "tenant_id" => "prod_456",
-        "operation" => "backup",
-    };
+    let mut context = HashMap::new();
+    context.insert("tenant_id".to_string(), "prod_456".to_string());
+    context.insert("operation".to_string(), "backup".to_string());
 
     println!("Testing with non-matching context...");
-    match failpoint("backup_operation", Some(&context)).await {
-        FailpointResult::Return(value) => {
-            println!("Failpoint triggered with value: {:?}", value);
+    match failpoint("backup_operation", Some(&context)) {
+        either::Either::Left(result) => {
+            match result {
+                FailpointResult::Return(value) => {
+                    println!("Failpoint triggered with value: {:?}", value);
+                }
+                FailpointResult::Continue => {
+                    println!("Failpoint not triggered (expected)");
+                }
+                FailpointResult::Cancelled => {
+                    println!("Failpoint cancelled");
+                }
+            }
         }
-        FailpointResult::Continue => {
-            println!("Failpoint not triggered (expected)");
-        }
-        FailpointResult::Cancelled => {
-            println!("Failpoint cancelled");
+        either::Either::Right(future) => {
+            match future.await {
+                FailpointResult::Return(value) => {
+                    println!("Failpoint triggered with value: {:?}", value);
+                }
+                FailpointResult::Continue => {
+                    println!("Failpoint not triggered (expected)");
+                }
+                FailpointResult::Cancelled => {
+                    println!("Failpoint cancelled");
+                }
+            }
         }
     }
 }
