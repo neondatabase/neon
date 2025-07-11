@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Method;
-use http::header::AUTHORIZATION;
+use http::header::{AUTHORIZATION, CONTENT_TYPE, HOST};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use http_utils::error::ApiError;
@@ -16,34 +16,26 @@ use ouroboros::self_referencing;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value as JsonValue;
 use serde_json::value::RawValue;
-use subzero_core::{
-    api::{
-        ApiResponse,
-        ContentType::{ApplicationJSON, Other, SingularJSON, TextCSV},
-        ListVal, Payload, Preferences,
-        QueryNode::{Delete, FunctionCall, Insert, Update},
-        Representation,
-        Resolution::{IgnoreDuplicates, MergeDuplicates},
-        SingleVal,
-    },
-    config::{db_allowed_select_functions, db_schemas, role_claim_key /*to_tuple*/},
-    content_range_header, content_range_status,
-    dynamic_statement::{JoinIterator, param, sql},
-    error::Error::{
-        self as SubzeroCoreError, ContentTypeError, GucHeadersError, GucStatusError, InternalError,
-        JsonDeserialize, JwtTokenInvalid, NotFound,
-    },
-    error::pg_error_to_status_code,
-    formatter::{
-        Param,
-        Param::{LV, PL, SV, Str, StrOwned},
-        Snippet, SqlParam,
-        postgresql::{fmt_main_query, generate},
-    },
-    parser::postgrest::parse,
-    permissions::check_safe_functions,
-    schema::{DbSchema, POSTGRESQL_INTROSPECTION_SQL, get_postgresql_configuration_query},
+use subzero_core::api::ContentType::{ApplicationJSON, Other, SingularJSON, TextCSV};
+use subzero_core::api::QueryNode::{Delete, FunctionCall, Insert, Update};
+use subzero_core::api::Resolution::{IgnoreDuplicates, MergeDuplicates};
+use subzero_core::api::{ApiResponse, ListVal, Payload, Preferences, Representation, SingleVal};
+use subzero_core::config::{db_allowed_select_functions, db_schemas, role_claim_key};
+use subzero_core::dynamic_statement::{JoinIterator, param, sql};
+use subzero_core::error::Error::{
+    self as SubzeroCoreError, ContentTypeError, GucHeadersError, GucStatusError, InternalError,
+    JsonDeserialize, JwtTokenInvalid, NotFound,
 };
+use subzero_core::error::pg_error_to_status_code;
+use subzero_core::formatter::Param::{LV, PL, SV, Str, StrOwned};
+use subzero_core::formatter::postgresql::{fmt_main_query, generate};
+use subzero_core::formatter::{Param, Snippet, SqlParam};
+use subzero_core::parser::postgrest::parse;
+use subzero_core::permissions::check_safe_functions;
+use subzero_core::schema::{
+    DbSchema, POSTGRESQL_INTROSPECTION_SQL, get_postgresql_configuration_query,
+};
+use subzero_core::{content_range_header, content_range_status};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use typed_json::json;
@@ -151,7 +143,7 @@ impl DbSchemaCache {
                     .await;
                 let (api_config, schema_owned) = match remote_value {
                     Ok((api_config, schema_owned)) => (api_config, schema_owned),
-                    Err(e @ RestError::SchemaTooLarge(_, _)) => {
+                    Err(e @ RestError::SchemaTooLarge { .. }) => {
                         // for the case where the schema is too large, we cache an empty dummy value
                         // all the other requests will fail without triggering the introspection query
                         let schema_owned = DbSchemaOwned::new(EMPTY_JSON_SCHEMA.to_string(), |s| {
@@ -291,10 +283,10 @@ impl DbSchemaCache {
         let string_size = json_schema.len();
 
         if string_size > config.rest_config.max_schema_size {
-            return Err(RestError::SchemaTooLarge(
-                config.rest_config.max_schema_size,
-                string_size,
-            ));
+            return Err(RestError::SchemaTooLarge {
+                max: config.rest_config.max_schema_size,
+                current: string_size,
+            });
         }
 
         let schema_owned = DbSchemaOwned::new(json_schema, |s| {
@@ -352,20 +344,20 @@ impl std::fmt::Display for PostgresError {
 // A type to represent errors that can occur in the rest broker
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RestError {
-    #[error("{0}")]
+    #[error(transparent)]
     ReadPayload(#[from] ReadPayloadError),
-    #[error("{0}")]
+    #[error(transparent)]
     ConnectCompute(#[from] HttpConnError),
-    #[error("{0}")]
+    #[error(transparent)]
     ConnInfo(#[from] ConnInfoError),
     #[error("{0}")]
     Postgres(#[source] PostgresError),
-    #[error("{0}")]
+    #[error(transparent)]
     JsonConversion(#[from] JsonConversionError),
-    #[error("{0}")]
-    SubzeroCore(#[source] SubzeroCoreError),
-    #[error("schema is too large (max is {0} bytes, current is {1} bytes)")]
-    SchemaTooLarge(usize, usize),
+    #[error(transparent)]
+    SubzeroCore(#[from] SubzeroCoreError),
+    #[error("schema is too large (max is {max} bytes, current is {current} bytes)")]
+    SchemaTooLarge { max: usize, current: usize },
 }
 impl ReportableError for RestError {
     fn get_error_kind(&self) -> ErrorKind {
@@ -376,7 +368,7 @@ impl ReportableError for RestError {
             RestError::Postgres(_) => ErrorKind::Postgres,
             RestError::JsonConversion(_) => ErrorKind::Postgres,
             RestError::SubzeroCore(_) => ErrorKind::User,
-            RestError::SchemaTooLarge(_, _) => ErrorKind::User,
+            RestError::SchemaTooLarge { .. } => ErrorKind::User,
         }
     }
 }
@@ -386,7 +378,7 @@ impl UserFacingError for RestError {
             RestError::ReadPayload(p) => p.to_string(),
             RestError::ConnectCompute(c) => c.to_string_client(),
             RestError::ConnInfo(c) => c.to_string_client(),
-            RestError::SchemaTooLarge(_, _) => self.to_string(),
+            RestError::SchemaTooLarge { .. } => self.to_string(),
             RestError::Postgres(p) => p.to_string_client(),
             RestError::JsonConversion(_) => "could not parse postgres response".to_string(),
             RestError::SubzeroCore(s) => {
@@ -414,17 +406,12 @@ impl HttpCodeError for RestError {
             RestError::ConnInfo(_) => StatusCode::BAD_REQUEST,
             RestError::Postgres(e) => e.get_http_status_code(),
             RestError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            RestError::SchemaTooLarge(_, _) => StatusCode::INTERNAL_SERVER_ERROR,
+            RestError::SchemaTooLarge { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             RestError::SubzeroCore(e) => {
                 let status = e.status_code();
                 StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
             }
         }
-    }
-}
-impl From<SubzeroCoreError> for RestError {
-    fn from(e: SubzeroCoreError) -> Self {
-        RestError::SubzeroCore(e)
     }
 }
 
@@ -662,17 +649,18 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    // Read host from headers (X-Forwarded-Host takes precedence, then Host, then URI host as fallback)
+    // Read host from Host, then URI host as fallback
+    // TODO: will this be a problem if behind a load balancer?
+    // TODO: can we use the x-forwarded-host header?
     let host = request
         .headers()
-        .get("x-forwarded-host")
+        .get(HOST)
         .and_then(|v| v.to_str().ok())
-        .or_else(|| request.headers().get("host").and_then(|v| v.to_str().ok()))
         .unwrap_or_else(|| request.uri().host().unwrap_or(""));
 
-    let path_parts: Vec<&str> = request.uri().path().split('/').collect();
+    let path_parts: Vec<&str> = request.uri().path().splitn(3, '/').collect();
     // a valid path is /database/rest/v1/... so parts should be ["", "database", "rest", "v1", ...]
-    let database_name = if path_parts.len() >= 3 && !path_parts[1].is_empty() {
+    let database_name = if path_parts.len() == 3 && !path_parts[1].is_empty() {
         Ok(path_parts[1])
     } else {
         Err(RestError::SubzeroCore(NotFound {
@@ -681,8 +669,8 @@ async fn handle_inner(
     }?;
 
     // we always use the authenticator role to connect to the database
-    let autheticator_role = "authenticator";
-    let connection_string = format!("postgresql://{autheticator_role}@{host}/{database_name}");
+    let authenticator_role = "authenticator";
+    let connection_string = format!("postgresql://{authenticator_role}@{host}/{database_name}");
 
     let conn_info = get_conn_info(
         &config.authentication_config,
@@ -820,7 +808,7 @@ async fn handle_rest_inner(
 
     // start deconstructing the request because subzero core mostly works with &str
     let method = parts.method;
-    let method_str = method.to_string();
+    let method_str = method.as_str();
     let path = parts.uri.path_and_query().map_or("/", |pq| pq.as_str());
 
     // this is actually the table name (or rpc/function_name)
@@ -833,7 +821,7 @@ async fn handle_rest_inner(
     }?;
 
     // pick the current schema from the headers (or the first one from config)
-    let schema_name = &DbSchema::pick_current_schema(db_schemas, &method_str, &headers_map)?;
+    let schema_name = &DbSchema::pick_current_schema(db_schemas, method_str, &headers_map)?;
 
     // add the content-profile header to the response
     let mut response_headers = vec![];
@@ -876,7 +864,7 @@ async fn handle_rest_inner(
         schema_name,
         root,
         db_schema,
-        &method_str,
+        method_str,
         path,
         get,
         body_as_string.as_deref(),
@@ -886,6 +874,8 @@ async fn handle_rest_inner(
     )
     .map_err(RestError::SubzeroCore)?;
 
+    // TODO: this is nice to have but not critical (we can do this in the context of DBX)
+    // we chose to not do this to reduce the schema size returned by the introspection query
     // replace "*" with the list of columns the user has access to
     // so that he does not encounter permission errors
     // this only works if the schema intropsection includes the database permissions (which for now it does not)
@@ -896,14 +886,16 @@ async fn handle_rest_inner(
         None => "",
     };
 
-    // this is not relevant when acting as PostgREST
+    // TODO: this is not relevant when acting as PostgREST but will be useful
+    // in the context of DBX where they need internal permissions
     // if !disable_internal_permissions {
     //     check_privileges(db_schema, schema_name, role_str, &api_request)?;
     // }
 
     check_safe_functions(&api_request, &db_allowed_select_functions)?;
 
-    // this is not relevant when acting as PostgREST
+    // TODO: this is not relevant when acting as PostgREST but will be useful
+    // in the context of DBX where they need internal permissions
     // if !disable_internal_permissions {
     //     insert_policy_conditions(db_schema, schema_name, role_str, &mut api_request.query)?;
     // }
@@ -1068,25 +1060,25 @@ async fn handle_rest_inner(
         body: body_string,
     };
 
-    // rollback the transaction if the page_total is not 1 and the accept_content_type is SingularJSON
+    // TODO: rollback the transaction if the page_total is not 1 and the accept_content_type is SingularJSON
     // we can not do this in the context of proxy for now
     // if api_request.accept_content_type == SingularJSON && api_response.page_total != 1 {
-    //     transaction.rollback().await.context(PgDbSnafu { authenticated })?;
-    //     return Err(to_core_error(SingularityError {
+    //     // rollback the transaction here
+    //     return Err(RestError::SubzeroCore(SingularityError {
     //         count: api_response.page_total,
     //         content_type: "application/vnd.pgrst.object+json".to_string(),
     //     }));
     // }
 
-    // rollback the transaction if the page_total is not 1 and the method is PUT
+    // TODO: rollback the transaction if the page_total is not 1 and the method is PUT
     // we can not do this in the context of proxy for now
     // if api_request.method == Method::PUT && api_response.page_total != 1 {
     //     // Makes sure the querystring pk matches the payload pk
     //     // e.g. PUT /items?id=eq.1 { "id" : 1, .. } is accepted,
     //     // PUT /items?id=eq.14 { "id" : 2, .. } is rejected.
     //     // If this condition is not satisfied then nothing is inserted,
-    //     transaction.rollback().await.context(PgDbSnafu { authenticated })?;
-    //     return Err(to_core_error(PutMatchingPkError));
+    //     // rollback the transaction here
+    //     return Err(RestError::SubzeroCore(PutMatchingPkError));
     // }
 
     // create and return the response to the client
@@ -1183,6 +1175,8 @@ async fn handle_rest_inner(
     }
 
     // set the content type header
+    // TODO: move this to a subzero function
+    // as_header_value(&self) -> Option<&str>
     let http_content_type = match response_content_type {
         SingularJSON => Ok("application/vnd.pgrst.object+json"),
         TextCSV => Ok("text/csv"),
@@ -1200,7 +1194,7 @@ async fn handle_rest_inner(
     // build the response
     let mut response = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
-        .header("content-type", http_content_type);
+        .header(CONTENT_TYPE, http_content_type);
 
     // Add all headers from response_headers vector
     for (header_name, header_value) in response_headers {
@@ -1213,12 +1207,4 @@ async fn handle_rest_inner(
             message: "Failed to build response".to_string(),
         })
     })
-}
-
-#[cfg(test)]
-mod tests {
-    //use super::*;
-
-    #[test]
-    fn test_payload() {}
 }

@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = []
 testing = ["dep:tokio-postgres"]
-rest_broker = ["subzero-core", "jsonpath_lib", "ouroboros"]
+rest_broker = ["dep:subzero-core", "dep:jsonpath_lib", "dep:ouroboros"]
 
 [dependencies]
 ahash.workspace = true
