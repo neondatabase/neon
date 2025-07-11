@@ -303,6 +303,7 @@ macro_rules! pausable_failpoint {
     }};
     ($name:literal, $cancel:expr) => {{
         if cfg!(feature = "testing") {
+            ::tracing::info!("at failpoint {}", $name); // tests rely on this
             match $crate::failpoint_with_cancellation($name, None, $cancel) {
                 $crate::either::Either::Left(result) => match result {
                     $crate::FailpointResult::Continue => Ok(()),

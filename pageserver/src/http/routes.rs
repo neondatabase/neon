@@ -3976,7 +3976,7 @@ pub fn make_router(
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| api_handler(r, status_handler))
-        .put("/v1/failpoints", |r| {
+        .post("/v1/failpoints", |r| {
             testing_api_handler("manage failpoints", r, failpoints_handler)
         })
         .post("/v1/reload_auth_validation_keys", |r| {

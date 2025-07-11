@@ -362,7 +362,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             else:
                 raise ValueError(f"Invalid config format: {config}")
 
-        res = self.post(f"{self.base_url}/failpoints", json=body)
+        res = self.post(f"{self.base_url}/v1/failpoints", json=body)
         if res.status_code != 200:
             raise PageserverApiException(
                 f"Failed to configure failpoints: {res.text}", res.status_code

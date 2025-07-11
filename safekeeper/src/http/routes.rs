@@ -717,7 +717,7 @@ pub fn make_router(
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| request_span(r, status_handler))
-        .put("/v1/failpoints", |r| {
+        .post("/v1/failpoints", |r| {
             request_span(r, move |r| async {
                 check_permission(&r, None)?;
                 let cancel = CancellationToken::new();
