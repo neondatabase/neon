@@ -2668,7 +2668,12 @@ class NeonStorageController(MetricsGetter, LogUtils):
             else:
                 raise ValueError(f"Invalid config format: {config}")
 
-        res = self.request("PUT", f"{self.api_root()}/debug/v1/failpoints", json=body)
+        res = self.request(
+            "PUT",
+            f"{self.api_root()}/debug/v1/failpoints",
+            json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
         if res.status_code != 200:
             self.raise_api_exception(res)
 
