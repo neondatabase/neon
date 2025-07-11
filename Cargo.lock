@@ -5329,6 +5329,7 @@ dependencies = [
  "itoa",
  "jose-jwa",
  "jose-jwk",
+ "json",
  "lasso",
  "measured",
  "metrics",
