@@ -21,6 +21,10 @@ platforms = [
     # "x86_64-apple-darwin",
     # "x86_64-pc-windows-msvc",
 ]
+[traversal-excludes]
+third-party = [
+    { name = "jsonpath_lib" },
+]
 
 [final-excludes]
 workspace-members = [
