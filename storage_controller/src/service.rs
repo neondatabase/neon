@@ -484,6 +484,9 @@ pub struct Config {
 
     /// When set, actively checks and initiates heatmap downloads/uploads.
     pub kick_secondary_downloads: bool,
+
+    /// Timeout used for HTTP client of split requests. [`Duration::MAX`] if None.
+    pub shard_split_request_timeout: Duration,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -6323,9 +6326,9 @@ impl Service {
         // partially split shards correctly.
         let shard_split_timeout =
             if let Some(env::DeploymentMode::Local) = env::get_deployment_mode() {
-                Duration::MAX
+                Duration::from_secs(30)
             } else {
-                Duration::MAX
+                self.config.shard_split_request_timeout
             };
         let mut http_client_builder = reqwest::ClientBuilder::new()
             .pool_max_idle_per_host(0)

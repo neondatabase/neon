@@ -648,6 +648,13 @@ impl StorageController {
             args.push(format!("--timeline-safekeeper-count={sk_cnt}"));
         }
 
+        if let Some(duration) = self.config.shard_split_request_timeout {
+            args.push(format!(
+                "--shard-split-request-timeout={}",
+                humantime::Duration::from(duration)
+            ));
+        }
+
         let mut envs = vec![
             ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
             ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
