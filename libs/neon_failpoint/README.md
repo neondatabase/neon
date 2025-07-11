@@ -19,6 +19,28 @@ A modern, async-first failpoint library for Neon, replacing the `fail` crate wit
 - `return` - Return early (empty value)
 - `return(value)` - Return early with a specific value
 - `exit` - Exit the process immediately
+- `panic(message)` - Panic the process with a custom message
+- `N%return(value)` - Return with a specific value N% of the time (probability-based)
+- `N%M*return(value)` - Return with a specific value N% of the time, maximum M times
+- `N%action` - Execute any action N% of the time (probability-based)
+- `N%M*action` - Execute any action N% of the time, maximum M times
+
+## Probability-Based Actions
+
+The library supports probability-based failpoints that trigger only a percentage of the time:
+
+```rust
+// 50% chance to return a value
+configure_failpoint("random_failure", "50%return(error)").unwrap();
+
+// 10% chance to sleep, maximum 3 times
+configure_failpoint("occasional_delay", "10%3*sleep(1000)").unwrap();
+
+// 25% chance to panic
+configure_failpoint("rare_panic", "25%panic(critical error)").unwrap();
+```
+
+The probability system uses a counter to track how many times a probability-based action has been triggered, allowing for precise control over test scenarios.
 
 ## Dynamic Behavior
 

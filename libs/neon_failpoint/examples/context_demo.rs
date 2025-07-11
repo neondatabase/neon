@@ -26,7 +26,7 @@ async fn main() {
     println!("Testing with matching context...");
     match failpoint("backup_operation", Some(&context)).await {
         FailpointResult::Return(value) => {
-            println!("Failpoint triggered with value: {}", value);
+            println!("Failpoint triggered with value: {:?}", value);
         }
         FailpointResult::Continue => {
             println!("Failpoint not triggered");
@@ -45,7 +45,7 @@ async fn main() {
     println!("Testing with non-matching context...");
     match failpoint("backup_operation", Some(&context)).await {
         FailpointResult::Return(value) => {
-            println!("Failpoint triggered with value: {}", value);
+            println!("Failpoint triggered with value: {:?}", value);
         }
         FailpointResult::Continue => {
             println!("Failpoint not triggered (expected)");
