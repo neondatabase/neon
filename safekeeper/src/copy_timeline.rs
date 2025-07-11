@@ -161,9 +161,9 @@ pub async fn handle_request(
     FileStorage::create_new(&tli_dir_path, new_state.clone(), conf.no_sync).await?;
 
     // now we have a ready timeline in a temp directory
-    validate_temp_timeline(conf, request.destination_ttid, &tli_dir_path).await?;
+    validate_temp_timeline(conf, request.destination_ttid, &tli_dir_path, None).await?;
     global_timelines
-        .load_temp_timeline(request.destination_ttid, &tli_dir_path, true)
+        .load_temp_timeline(request.destination_ttid, &tli_dir_path, None)
         .await?;
 
     Ok(())
