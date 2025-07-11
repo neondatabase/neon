@@ -87,22 +87,27 @@ jobs:
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
-  lint-openapi-spec:
-    runs-on: ubuntu-22.04
-    needs: [ meta, check-permissions ]
+  lint-yamls:
+    needs: [ meta, check-permissions, build-build-tools-image ]
     # We do need to run this in `.*-rc-pr` because of hotfixes.
     if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
+    runs-on: [ self-hosted, small ]
+    container:
+      image: ${{ needs.build-build-tools-image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
         with:
           egress-policy: audit
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - run: make -C compute manifest-schema-validation
       - run: make lint-openapi-spec
 
   check-codestyle-python:
@@ -216,28 +221,6 @@ jobs:
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
     secrets: inherit
-
-  validate-compute-manifest:
-    runs-on: ubuntu-22.04
-    needs: [ meta, check-permissions ]
-    # We do need to run this in `.*-rc-pr` because of hotfixes.
-    if: ${{ contains(fromJSON('["pr", "push-main", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: '24'
-
-      - name: Validate manifest against schema
-        run: |
-          make -C compute manifest-schema-validation
 
   build-and-test-locally:
     needs: [ meta, build-build-tools-image ]
