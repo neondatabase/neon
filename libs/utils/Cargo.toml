@@ -9,7 +9,7 @@ default = ["rename_noreplace"]
 rename_noreplace = []
 # Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
 # which adds some runtime cost to run tests on outage conditions
-testing = ["fail/failpoints"]
+testing = ["neon_failpoint/testing"]
 
 [dependencies]
 arc-swap.workspace = true
@@ -24,7 +24,7 @@ diatomic-waker.workspace = true
 git-version.workspace = true
 hex = { workspace = true, features = ["serde"] }
 humantime.workspace = true
-fail.workspace = true
+neon_failpoint.workspace = true
 futures = { workspace = true }
 jsonwebtoken.workspace = true
 nix = { workspace = true, features = ["ioctl"] }

@@ -21,6 +21,7 @@ members = [
     "workspace_hack",
     "libs/compute_api",
     "libs/http-utils",
+    "libs/neon_failpoint",
     "libs/pageserver_api",
     "libs/postgres_ffi",
     "libs/postgres_ffi_types",
@@ -258,6 +259,7 @@ desim = { version = "0.1", path = "./libs/desim" }
 endpoint_storage = { version = "0.0.1", path = "./endpoint_storage/" }
 http-utils = { version = "0.1", path = "./libs/http-utils/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
+neon_failpoint = { version = "0.1", path = "./libs/neon_failpoint/" }
 neon-shmem = { version = "0.1", path = "./libs/neon-shmem/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }

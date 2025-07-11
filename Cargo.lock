@@ -2891,13 +2891,13 @@ dependencies = [
  "arc-swap",
  "bytes",
  "camino",
- "fail",
  "futures",
  "hyper 0.14.30",
  "itertools 0.10.5",
  "jemalloc_pprof",
  "jsonwebtoken",
  "metrics",
+ "neon_failpoint",
  "once_cell",
  "pprof",
  "regex",
@@ -3850,6 +3850,21 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "workspace_hack",
+]
+
+[[package]]
+name = "neon_failpoint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "once_cell",
+ "parking_lot 0.12.1",
+ "regex",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -8164,7 +8179,6 @@ dependencies = [
  "const_format",
  "criterion",
  "diatomic-waker",
- "fail",
  "futures",
  "git-version",
  "hex",
@@ -8172,6 +8186,7 @@ dependencies = [
  "humantime",
  "jsonwebtoken",
  "metrics",
+ "neon_failpoint",
  "nix 0.30.1",
  "once_cell",
  "pem",
