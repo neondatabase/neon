@@ -1,51 +1,43 @@
-//! Resizable hash table implementation on top of byte-level storage (either a [`ShmemHandle`] or a
-//! fixed byte array).
-//!
-
-//! This hash table has two major components: the bucket array and the dictionary. Each bucket
-//! within the bucket array contains a `Option<(K, V)>` and an index of another bucket. In this way
-//! there is both an implicit freelist within the bucket array (`None` buckets point to other `None`
-//! entries) and various hash chains within the bucket array (a Some bucket will point to other Some
-//! buckets that had the same hash).
-//!
-//! Buckets are never moved unless they are within a region that is being shrunk, and so the actual
-//! hash- dependent component is done with the dictionary. When a new key is inserted into the map,
-//! a position within the dictionary is decided based on its hash, the data is inserted into an
-//! empty bucket based off of the freelist, and then the index of said bucket is placed in the
-//! dictionary.
-//!
-//! This map is resizable (if initialized on top of a [`ShmemHandle`]). Both growing and shrinking
-//! happen in-place and are at a high level achieved by expanding/reducing the bucket array and
-//! rebuilding the dictionary by rehashing all keys.
-
 use std::hash::{BuildHasher, Hash};
 use std::mem::MaybeUninit;
+use std::ptr::NonNull;
+use std::sync::atomic::Ordering;
 
-use crate::{shmem, sync::{
-	PthreadRwLock, RwLock, RwLockReadGuard, RwLockWriteGuard, ValueReadGuard
-}};
 use crate::shmem::ShmemHandle;
 use crate::{shmem, sync::*};
 
 mod core;
+mod bucket;
 pub mod entry;
 
 #[cfg(test)]
 mod tests;
 
-use core::{Bucket, CoreHashMap, INVALID_POS};
-use entry::{Entry, OccupiedEntry, PrevPos, VacantEntry};
+use core::{
+	CoreHashMap, DictShard, EntryKey, EntryType,
+	FullError, MaybeUninitDictShard
+};
+use bucket::{Bucket, BucketIdx};
+use entry::Entry;
+
+/// Wrapper struct around multiple [`ShmemHandle`]s.
+struct HashMapHandles {
+	keys_shmem: ShmemHandle,
+	idxs_shmem: ShmemHandle,
+	vals_shmem: ShmemHandle,
+}
 
 /// This represents a hash table that (possibly) lives in shared memory.
 /// If a new process is launched with fork(), the child process inherits
 /// this struct.
 #[must_use]
 pub struct HashMapInit<'a, K, V, S = rustc_hash::FxBuildHasher> {
-    shmem_handle: Option<ShmemHandle>,
+    shmem_handles: Option<HashMapHandles>,
     shared_ptr: *mut HashMapShared<'a, K, V>,
-    shared_size: usize,
     hasher: S,
-    num_buckets: u32,
+    num_buckets: usize,
+	num_shards: usize,
+	resize_lock: Mutex<()>,
 }
 
 /// This is a per-process handle to a hash table that (possibly) lives in shared memory.
@@ -55,9 +47,10 @@ pub struct HashMapInit<'a, K, V, S = rustc_hash::FxBuildHasher> {
 /// XXX: We're not making use of it at the moment, but this struct could
 /// hold process-local information in the future.
 pub struct HashMapAccess<'a, K, V, S = rustc_hash::FxBuildHasher> {
-    shmem_handle: Option<ShmemHandle>,
+    shmem_handles: Option<HashMapHandles>,
     shared_ptr: *mut HashMapShared<'a, K, V>,
     hasher: S,
+	resize_lock: Mutex<()>,
 }
 
 unsafe impl<K: Sync, V: Sync, S> Sync for HashMapAccess<'_, K, V, S> {}
@@ -70,79 +63,104 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
     /// before inserting any entries and before calling attach_writer/reader.
     /// Otherwise different accessors could be using different hash function,
     /// with confusing results.
+	///
+	/// TODO(quantumish): consider splitting out into a separate builder type?
     pub fn with_hasher<T: BuildHasher>(self, hasher: T) -> HashMapInit<'a, K, V, T> {
         HashMapInit {
             hasher,
-            shmem_handle: self.shmem_handle,
+            shmem_handles: self.shmem_handles,
             shared_ptr: self.shared_ptr,
-            shared_size: self.shared_size,
             num_buckets: self.num_buckets,
+			num_shards: self.num_shards,
+			resize_lock: self.resize_lock,
         }
     }
 
     /// Loosely (over)estimate the size needed to store a hash table with `num_buckets` buckets.
-    pub fn estimate_size(num_buckets: u32) -> usize {
-        // add some margin to cover alignment etc.
-        CoreHashMap::<K, V>::estimate_size(num_buckets) + size_of::<HashMapShared<K, V>>() + 1000
-    }
+    pub fn estimate_sizes(num_buckets: usize, num_shards: usize) -> (usize, usize, usize) {
+		(
+			(size_of::<EntryKey<K>>() * num_buckets)
+				+ (size_of::<libc::pthread_rwlock_t>() * num_shards)
+				+ (size_of::<RwLock<DictShard<'_, K>>>() * num_shards)
+				+ size_of::<HashMapShared<K, V>>()
+				+ 1000,
+			(size_of::<BucketIdx>() * num_buckets)+ 1000,
+			(size_of::<Bucket<V>>() * num_buckets) + 1000
+		)
+	}
 
+	fn carve_space<T>(ptr: &mut *mut u8, amount: usize) -> *mut T {
+		*ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<T>())) };
+        let out = ptr.cast();
+        *ptr = unsafe { ptr.add(size_of::<T>() * amount) };
+		out
+	}
+	
     fn new(
-        num_buckets: u32,
-        shmem_handle: Option<ShmemHandle>,
-        area_ptr: *mut u8,
-        area_size: usize,
+        num_buckets: usize,
+		num_shards: usize,
+        mut keys_ptr: *mut u8,
+		mut idxs_ptr: *mut u8,
+		mut vals_ptr: *mut u8,
+        shmem_handles: Option<HashMapHandles>,
         hasher: S,
     ) -> Self {
-        let mut ptr: *mut u8 = area_ptr;
-        let end_ptr: *mut u8 = unsafe { ptr.add(area_size) };
+		// Set up the main area: hashmap info at front, keys at back
+		let mutex_ptr = Self::carve_space::<libc::pthread_mutex_t>(&mut keys_ptr, 1);
+		let shared_ptr = Self::carve_space::<HashMapShared<K, V>>(&mut keys_ptr, 1);
+		let shards_ptr = Self::carve_space::<RwLock<DictShard<'_, K>>>(&mut keys_ptr, num_shards);
+		let locks_ptr = Self::carve_space::<libc::pthread_rwlock_t>(&mut keys_ptr, num_shards);
+		let keys_ptr = Self::carve_space::<EntryKey<K>>(&mut keys_ptr, num_buckets);
+		
+		// Set up the area of bucket idxs and the area of buckets. Not much to do!
+		let idxs_ptr = Self::carve_space::<BucketIdx>(&mut idxs_ptr, num_buckets);
+		let vals_ptr = Self::carve_space::<Bucket<V>>(&mut vals_ptr, num_buckets);
 
-        // carve out area for the One Big Lock (TM) and the HashMapShared.
-        ptr = unsafe { ptr.add(ptr.align_offset(align_of::<libc::pthread_rwlock_t>())) };
-        let raw_lock_ptr = ptr;
-        ptr = unsafe { ptr.add(size_of::<libc::pthread_rwlock_t>()) };
-        ptr = unsafe { ptr.add(ptr.align_offset(align_of::<HashMapShared<K, V>>())) };
-        let shared_ptr: *mut HashMapShared<K, V> = ptr.cast();
-        ptr = unsafe { ptr.add(size_of::<HashMapShared<K, V>>()) };
-
-        // carve out the buckets
-        ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<core::Bucket<K, V>>())) };
-        let buckets_ptr = ptr;
-        ptr = unsafe { ptr.add(size_of::<core::Bucket<K, V>>() * num_buckets as usize) };
-
-        // use remaining space for the dictionary
-        ptr = unsafe { ptr.byte_add(ptr.align_offset(align_of::<u32>())) };
-        assert!(ptr.addr() < end_ptr.addr());
-        let dictionary_ptr = ptr;
-        let dictionary_size = unsafe { end_ptr.byte_offset_from(ptr) / size_of::<u32>() as isize };
-        assert!(dictionary_size > 0);
-
+		// Initialize the shards.
+		let shards_uninit: &mut [MaybeUninit<RwLock<MaybeUninitDictShard<'_, K>>>] =
+            unsafe { std::slice::from_raw_parts_mut(shards_ptr.cast(), num_shards) };
+		let shard_size = num_buckets / num_shards;
+		for i in 0..num_shards {
+			let size = ((i + 1) * shard_size).min(num_buckets) - (i * shard_size);
+			unsafe {
+				shards_uninit[i].write(RwLock::from_raw(
+					PthreadRwLock::new(NonNull::new_unchecked(locks_ptr.add(i))),
+					MaybeUninitDictShard {
+						keys: std::slice::from_raw_parts_mut(keys_ptr.add(i * shard_size).cast(), size),
+						idxs: std::slice::from_raw_parts_mut(idxs_ptr.add(i * shard_size).cast(), size)
+					}
+				));
+			};
+		}
+		let shards: &mut [RwLock<MaybeUninitDictShard<'_, K>>] =
+            unsafe { std::slice::from_raw_parts_mut(shards_ptr.cast(), num_shards) };
         let buckets =
-            unsafe { std::slice::from_raw_parts_mut(buckets_ptr.cast(), num_buckets as usize) };
-        let dictionary = unsafe {
-            std::slice::from_raw_parts_mut(dictionary_ptr.cast(), dictionary_size as usize)
-        };
+            unsafe { std::slice::from_raw_parts_mut(vals_ptr.cast(), num_buckets) };
 
-        let hashmap = CoreHashMap::new(buckets, dictionary);
-        let lock = RwLock::from_raw(PthreadRwLock::new(raw_lock_ptr.cast()), hashmap);
-        unsafe {
-            std::ptr::write(shared_ptr, lock);
-        }
+        let hashmap = CoreHashMap::new(buckets, shards);
+        unsafe { std::ptr::write(shared_ptr, hashmap); }
 
+		let resize_lock = Mutex::from_raw(
+			unsafe { PthreadMutex::new(NonNull::new_unchecked(mutex_ptr)) }, ()
+		);
+		
         Self {
+			num_shards,
             num_buckets,
-            shmem_handle,
+            shmem_handles,
             shared_ptr,
-            shared_size: area_size,
             hasher,
+			resize_lock, 
         }
     }
 
     /// Attach to a hash table for writing.
     pub fn attach_writer(self) -> HashMapAccess<'a, K, V, S> {
         HashMapAccess {
-            shmem_handle: self.shmem_handle,
+            shmem_handles: self.shmem_handles,
             shared_ptr: self.shared_ptr,
             hasher: self.hasher,
+			resize_lock: self.resize_lock,
         }
     }
 
@@ -152,31 +170,27 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
     }
 }
 
-/// Hash table data that is actually stored in the shared memory area.
-///
-/// NOTE: We carve out the parts from a contiguous chunk. Growing and shrinking the hash table
-/// relies on the memory layout! The data structures are laid out in the contiguous shared memory
-/// area as follows:
-///
-/// [`libc::pthread_rwlock_t`]
-/// [`HashMapShared`]
-/// [buckets]
-/// [dictionary]
-///
-/// In between the above parts, there can be padding bytes to align the parts correctly.
-type HashMapShared<'a, K, V> = RwLock<CoreHashMap<'a, K, V>>;
+type HashMapShared<'a, K, V> = CoreHashMap<'a, K, V>;
 
 impl<'a, K, V> HashMapInit<'a, K, V, rustc_hash::FxBuildHasher>
 where
     K: Clone + Hash + Eq,
 {
     /// Place the hash table within a user-supplied fixed memory area.
-    pub fn with_fixed(num_buckets: u32, area: &'a mut [MaybeUninit<u8>]) -> Self {
+    pub fn with_fixed(
+		num_buckets: usize,
+		num_shards: usize,
+		area: &'a mut [MaybeUninit<u8>]
+	) -> Self {
+		let (keys_size, idxs_size, _) = Self::estimate_sizes(num_buckets, num_shards);
+		let ptr = area.as_mut_ptr().cast();
         Self::new(
             num_buckets,
+			num_shards,
+            ptr,
+			unsafe { ptr.add(keys_size) },
+			unsafe { ptr.add(keys_size).add(idxs_size) },
             None,
-            area.as_mut_ptr().cast(),
-            area.len(),
             rustc_hash::FxBuildHasher,
         )
     }
@@ -185,45 +199,65 @@ where
     ///
     /// # Panics
     /// Will panic on failure to resize area to expected map size.
-    pub fn with_shmem(num_buckets: u32, shmem: ShmemHandle) -> Self {
-        let size = Self::estimate_size(num_buckets);
-        shmem
-            .set_size(size)
-            .expect("could not resize shared memory area");
-        let ptr = shmem.data_ptr.as_ptr().cast();
+    pub fn with_shmems(
+		num_buckets: usize,
+		num_shards: usize,
+		keys_shmem: ShmemHandle,
+		idxs_shmem: ShmemHandle,
+		vals_shmem: ShmemHandle,
+	) -> Self {
+		let (keys_size, idxs_size, vals_size) = Self::estimate_sizes(num_buckets, num_shards);
+        keys_shmem.set_size(keys_size).expect("could not resize shared memory area");
+        idxs_shmem.set_size(idxs_size).expect("could not resize shared memory area");
+        vals_shmem.set_size(vals_size).expect("could not resize shared memory area");
         Self::new(
             num_buckets,
-            Some(shmem),
-            ptr,
-            size,
+			num_shards,
+            keys_shmem.data_ptr.as_ptr().cast(),
+			idxs_shmem.data_ptr.as_ptr().cast(),
+			vals_shmem.data_ptr.as_ptr().cast(),
+            Some(HashMapHandles { keys_shmem, idxs_shmem, vals_shmem }),
             rustc_hash::FxBuildHasher,
         )
     }
 
     /// Make a resizable hash map within a new shared memory area with the given name.
-    pub fn new_resizeable_named(num_buckets: u32, max_buckets: u32, name: &str) -> Self {
-        let size = Self::estimate_size(num_buckets);
-        let max_size = Self::estimate_size(max_buckets);
-        let shmem =
-            ShmemHandle::new(name, size, max_size).expect("failed to make shared memory area");
-        let ptr = shmem.data_ptr.as_ptr().cast();
-
+    pub fn new_resizeable_named(
+		num_buckets: usize,
+		max_buckets: usize,
+		num_shards: usize,
+		name: &str
+	) -> Self {
+		let (keys_size, idxs_size, vals_size) = Self::estimate_sizes(num_buckets, num_shards);
+		let (keys_max, idxs_max, vals_max) = Self::estimate_sizes(max_buckets, num_shards);
+        let keys_shmem = ShmemHandle::new(&format!("{name}_keys"), keys_size, keys_max)
+			.expect("failed to make shared memory area");
+		let idxs_shmem = ShmemHandle::new(&format!("{name}_idxs"), idxs_size, idxs_max)
+			.expect("failed to make shared memory area");
+		let vals_shmem = ShmemHandle::new(&format!("{name}_vals"), vals_size, vals_max)
+			.expect("failed to make shared memory area");
         Self::new(
             num_buckets,
-            Some(shmem),
-            ptr,
-            size,
+			num_shards,
+            keys_shmem.data_ptr.as_ptr().cast(),
+			idxs_shmem.data_ptr.as_ptr().cast(),
+			vals_shmem.data_ptr.as_ptr().cast(),
+            Some(HashMapHandles { keys_shmem, idxs_shmem, vals_shmem }),
             rustc_hash::FxBuildHasher,
         )
     }
 
     /// Make a resizable hash map within a new anonymous shared memory area.
-    pub fn new_resizeable(num_buckets: u32, max_buckets: u32) -> Self {
+    pub fn new_resizeable(
+		num_buckets: usize,
+		max_buckets: usize,
+		num_shards: usize,
+	) -> Self {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let val = COUNTER.fetch_add(1, Ordering::Relaxed);
         let name = format!("neon_shmem_hmap{val}");
-        Self::new_resizeable_named(num_buckets, max_buckets, &name)
+        Self::new_resizeable_named(num_buckets, max_buckets, num_shards, &name)
     }
 }
 
@@ -237,66 +271,27 @@ where
         self.hasher.hash_one(key)
     }
 
-    fn entry_with_hash(&self, key: K, hash: u64) -> Entry<'a, '_, K, V> {
-        let mut map = unsafe { self.shared_ptr.as_ref() }.unwrap().write();
-        let dict_pos = hash as usize % map.dictionary.len();
-        let first = map.dictionary[dict_pos];
-        if first == INVALID_POS {
-            // no existing entry
-            return Entry::Vacant(VacantEntry {
-                map,
-                key,
-                dict_pos: dict_pos as u32,
-            });
-        }
-
-        let mut prev_pos = PrevPos::First(dict_pos as u32);
-        let mut next = first;
-        loop {
-            let bucket = &mut map.buckets[next as usize];
-            let (bucket_key, _bucket_value) = bucket.inner.as_mut().expect("entry is in use");
-            if *bucket_key == key {
-                // found existing entry
-                return Entry::Occupied(OccupiedEntry {
-                    map,
-                    _key: key,
-                    prev_pos,
-                    bucket_pos: next,
-                });
-            }
-
-            if bucket.next == INVALID_POS {
-                // No existing entry
-                return Entry::Vacant(VacantEntry {
-                    map,
-                    key,
-                    dict_pos: dict_pos as u32,
-                });
-            }
-            prev_pos = PrevPos::Chained(next);
-            next = bucket.next;
-        }
-    }
-
     /// Get a reference to the corresponding value for a key.
     pub fn get<'e>(&'e self, key: &K) -> Option<ValueReadGuard<'e, V>> {
         let hash = self.get_hash_value(key);
-        let map = unsafe { self.shared_ptr.as_ref() }.unwrap().read();
-        RwLockReadGuard::try_map(map, |m| m.get_with_hash(key, hash)).ok()
+        let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
+		map.get_with_hash(key, hash)
     }
 
     /// Get a reference to the entry containing a key.
-    pub fn entry(&self, key: K) -> Entry<'a, '_, K, V> {
+    pub fn entry(&self, key: K) -> Result<Entry<'a, K, V>, FullError> {
         let hash = self.get_hash_value(&key);
-        self.entry_with_hash(key, hash)
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+        map.entry_with_hash(key, hash)
     }
 
     /// Remove a key given its hash. Returns the associated value if it existed.
     pub fn remove(&self, key: &K) -> Option<V> {
 		let hash = self.get_hash_value(key);
-        match self.entry_with_hash(key.clone(), hash) {
-            Entry::Occupied(e) => Some(e.remove()),
-            Entry::Vacant(_) => None,
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+        match map.entry_with_hash(key.clone(), hash) {
+            Ok(Entry::Occupied(mut e)) => Some(e.remove()),
+            _ => None,
         }
     }
 
@@ -306,154 +301,110 @@ where
     /// Will return [`core::FullError`] if there is no more space left in the map.
     pub fn insert(&self, key: K, value: V) -> Result<Option<V>, core::FullError> {
         let hash = self.get_hash_value(&key);
-        match self.entry_with_hash(key.clone(), hash) {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+        match map.entry_with_hash(key.clone(), hash)? {
             Entry::Occupied(mut e) => Ok(Some(e.insert(value))),
             Entry::Vacant(e) => {
-                _ = e.insert(value)?;
+                _ = e.insert(value);
                 Ok(None)
             }
         }
     }
 
-    /// Optionally return the entry for a bucket at a given index if it exists.
-    ///
-    /// Has more overhead than one would intuitively expect: performs both a clone of the key
-    /// due to the [`OccupiedEntry`] type owning the key and also a hash of the key in order
-    /// to enable repairing the hash chain if the entry is removed.
-    pub fn entry_at_bucket(&self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
-        let map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
-        if pos >= map.buckets.len() {
+    /// Optionally return reference to a bucket at a given index if it exists.
+    pub fn get_at_bucket(&self, pos: usize) -> Option<&V> {
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+        if pos >= map.bucket_arr.buckets.len() {
             return None;
         }
 
-		let entry = map.buckets[pos].inner.as_ref();
-		match entry {
-			Some((key, _)) => Some(OccupiedEntry {
-				_key: key.clone(),
-				bucket_pos: pos as u32,
-				prev_pos: entry::PrevPos::Unknown(
-					self.get_hash_value(key)
-				),
-				map,
-			}),
-			_ => None,
-		}
+		todo!("safely check if a given bucket is empty? always mark?");
     }
 
     /// Returns the number of buckets in the table.
     pub fn get_num_buckets(&self) -> usize {
-        let map = unsafe { self.shared_ptr.as_ref() }.unwrap().read();
+        let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
         map.get_num_buckets()
-    }
-
-    /// Return the key and value stored in bucket with given index. This can be used to
-    /// iterate through the hash map.
-    // TODO: An Iterator might be nicer. The communicator's clock algorithm needs to
-    // _slowly_ iterate through all buckets with its clock hand,  without holding a lock.
-    // If we switch to an Iterator, it must not hold the lock.
-    pub fn get_at_bucket(&self, pos: usize) -> Option<ValueReadGuard<(K, V)>> {
-        let map = unsafe { self.shared_ptr.as_ref() }.unwrap().read();
-        if pos >= map.buckets.len() {
-            return None;
-        }
-        RwLockReadGuard::try_map(map, |m| m.buckets[pos].inner.as_ref()).ok()
     }
 
     /// Returns the index of the bucket a given value corresponds to.
     pub fn get_bucket_for_value(&self, val_ptr: *const V) -> usize {
-        let map = unsafe { self.shared_ptr.as_ref() }.unwrap().read();
+        let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
 
-        let origin = map.buckets.as_ptr();
-        let idx = (val_ptr as usize - origin as usize) / size_of::<Bucket<K, V>>();
-        assert!(idx < map.buckets.len());
+        let origin = map.bucket_arr.buckets.as_ptr();
+        let idx = (val_ptr as usize - origin as usize) / size_of::<Bucket<V>>();
+        assert!(idx < map.bucket_arr.buckets.len());
 
         idx
     }
 
     /// Returns the number of occupied buckets in the table.
     pub fn get_num_buckets_in_use(&self) -> usize {
-        let map = unsafe { self.shared_ptr.as_ref() }.unwrap().read();
-        map.buckets_in_use as usize
+        let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
+        map.bucket_arr.buckets_in_use.load(Ordering::Relaxed)
     }
 
     /// Clears all entries in a table. Does not reset any shrinking operations.
     pub fn clear(&self) {
-        let mut map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         map.clear();
 	}
 	
-	/// Perform an in-place rehash of some region (0..`rehash_buckets`) of the table and reset
-	/// the `buckets` and `dictionary` slices to be as long as `num_buckets`. Resets the freelist
-	/// in the process.
-	fn rehash_dict(
+    pub fn rehash(
 		&self,
-		inner: &mut RwLockWriteGuard<'_, CoreHashMap<'a, K, V>>,
-		buckets_ptr: *mut core::Bucket<K, V>,
-		end_ptr: *mut u8,
-		num_buckets: u32,
-		rehash_buckets: u32,
+		shards: &mut Vec<RwLockWriteGuard<'_, DictShard<'_, K>>>,
+		rehash_buckets: usize
 	) {
-		inner.free_head = INVALID_POS;
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		assert!(rehash_buckets <= map.get_num_buckets(), "rehashing subset of buckets");
+		shards.iter_mut().for_each(|x| x.keys.iter_mut().for_each(|key| {
+			if let EntryType::Occupied = key.tag {
+				key.tag = EntryType::Rehash;
+			}
+		}));
 		
-        let buckets;
-        let dictionary;
-        unsafe {
-            let buckets_end_ptr = buckets_ptr.add(num_buckets as usize);
-            let dictionary_ptr: *mut u32 = buckets_end_ptr
-                .byte_add(buckets_end_ptr.align_offset(align_of::<u32>()))
-                .cast();
-            let dictionary_size: usize =
-                end_ptr.byte_offset_from(buckets_end_ptr) as usize / size_of::<u32>();
-
-            buckets = std::slice::from_raw_parts_mut(buckets_ptr, num_buckets as usize);
-            dictionary = std::slice::from_raw_parts_mut(dictionary_ptr, dictionary_size);
-        }
-        for e in dictionary.iter_mut() {
-            *e = INVALID_POS;
-        }
-
-        for (i, bucket) in buckets.iter_mut().enumerate().take(rehash_buckets as usize) {
-            if bucket.inner.is_none() {
-                bucket.next = inner.free_head;
-                inner.free_head = i as u32;
-                continue;
-            }
-
-            let hash = self.hasher.hash_one(&bucket.inner.as_ref().unwrap().0);
-            let pos: usize = (hash % dictionary.len() as u64) as usize;
-            bucket.next = dictionary[pos];
-            dictionary[pos] = i as u32;
-        }
-
-        inner.dictionary = dictionary;
-        inner.buckets = buckets;
+		todo!("solution with no memory allocation: split out metadata?")
     }
 
-    /// Rehash the map without growing or shrinking.
-    pub fn shuffle(&self) {
-        let mut map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
-        let num_buckets = map.get_num_buckets() as u32;
-        let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
-        let end_ptr: *mut u8 = unsafe { self.shared_ptr.byte_add(size_bytes).cast() };
-        let buckets_ptr = map.buckets.as_mut_ptr();
-        self.rehash_dict(&mut map, buckets_ptr, end_ptr, num_buckets, num_buckets);
+	pub fn shuffle(&self) {
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		let mut shards: Vec<_> = map.dict_shards.iter().map(|x| x.write()).collect();
+		self.rehash(&mut shards, map.get_num_buckets());
     }
+	
+	fn reshard(&self, shards: &mut Vec<RwLockWriteGuard<'_, DictShard<'_, K>>>, num_buckets: usize) {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		let shard_size = num_buckets / map.dict_shards.len();
+		for i in 0..map.dict_shards.len() {
+			let size = ((i + 1) * shard_size).min(num_buckets) - (i * shard_size);
+			unsafe {
+				shards[i].keys = std::slice::from_raw_parts_mut(shards[i].keys.as_mut_ptr(), size);
+				shards[i].idxs = std::slice::from_raw_parts_mut(shards[i].idxs.as_mut_ptr(), size);
+			}
+		}
+	}
 
-    /// Grow the number of buckets within the table.
-    ///
-    /// 1. Grows the underlying shared memory area
-    /// 2. Initializes new buckets and overwrites the current dictionary
-    /// 3. Rehashes the dictionary
-    ///
-    /// # Panics
-    /// Panics if called on a map initialized with [`HashMapInit::with_fixed`].
-    ///
-    /// # Errors
-    /// Returns an [`shmem::Error`] if any errors occur resizing the memory region.
-    pub fn grow(&self, num_buckets: u32) -> Result<(), shmem::Error> {
-        let mut map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
-        let old_num_buckets = map.buckets.len() as u32;
+	fn resize_shmem(&self, num_buckets: usize) -> Result<(), shmem::Error> {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		let shmem_handles = self
+            .shmem_handles
+            .as_ref()
+            .expect("grow called on a fixed-size hash table");
 
+		let (keys_size, idxs_size, vals_size) =
+			HashMapInit::<K, V, S>::estimate_sizes(num_buckets, map.dict_shards.len());
+        shmem_handles.keys_shmem.set_size(keys_size)?;
+		shmem_handles.idxs_shmem.set_size(idxs_size)?;
+		shmem_handles.vals_shmem.set_size(vals_size)?;
+		Ok(())
+	}
+
+    pub fn grow(&self, num_buckets: usize) -> Result<(), shmem::Error> {
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		let _resize_guard = self.resize_lock.lock();
+		let mut shards: Vec<_> = map.dict_shards.iter().map(|x| x.write()).collect();
+
+		let old_num_buckets = map.bucket_arr.buckets.len();
         assert!(
             num_buckets >= old_num_buckets,
             "grow called with a smaller number of buckets"
@@ -461,128 +412,114 @@ where
         if num_buckets == old_num_buckets {
             return Ok(());
         }
-        let shmem_handle = self
-            .shmem_handle
-            .as_ref()
-            .expect("grow called on a fixed-size hash table");
 
-        let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
-        shmem_handle.set_size(size_bytes)?;
-        let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
-
-        // Initialize new buckets. The new buckets are linked to the free list.
-        // NB: This overwrites the dictionary!
-        let buckets_ptr = map.buckets.as_mut_ptr();
+		// Grow memory areas and initialize each of them.
+		self.resize_shmem(num_buckets)?;                
         unsafe {
+			let buckets_ptr = map.bucket_arr.buckets.as_mut_ptr();
             for i in old_num_buckets..num_buckets {
-                let bucket = buckets_ptr.add(i as usize);
-                bucket.write(core::Bucket {
-                    next: if i < num_buckets - 1 {
-                        i + 1
+                let bucket = buckets_ptr.add(i);
+                bucket.write(Bucket::empty(
+                    if i < num_buckets - 1 {
+                        BucketIdx::new(i + 1)
                     } else {
-                        map.free_head
-                    },
-                    inner: None,
-                });
+                        map.bucket_arr.free_head.load(Ordering::Relaxed)
+                    }
+                ));
+            }
+
+			// TODO(quantumish) a bit questionable to use pointers here
+			let first_shard = &mut shards[0];
+			let keys_ptr = first_shard.keys.as_mut_ptr();			
+			for i in old_num_buckets..num_buckets {
+                let key = keys_ptr.add(i);
+                key.write(EntryKey {
+					tag: EntryType::Empty,
+					val: MaybeUninit::uninit(),
+				});
+            }
+			
+			let idxs_ptr = first_shard.idxs.as_mut_ptr();
+			for i in old_num_buckets..num_buckets {
+                let idx = idxs_ptr.add(i);
+                idx.write(BucketIdx::invalid());
             }
         }
 
-        self.rehash_dict(&mut map, buckets_ptr, end_ptr, num_buckets, old_num_buckets);
-        map.free_head = old_num_buckets;
-
+		self.reshard(&mut shards, num_buckets);
+        self.rehash(&mut shards, old_num_buckets);
+        map.bucket_arr.free_head.store(
+			BucketIdx::new(old_num_buckets), Ordering::Relaxed
+		);
         Ok(())
     }
 
-    /// Begin a shrink, limiting all new allocations to be in buckets with index below `num_buckets`.
-    ///
-    /// # Panics
-    /// Panics if called on a map initialized with [`HashMapInit::with_fixed`] or if `num_buckets` is
-    /// greater than the number of buckets in the map.
-    pub fn begin_shrink(&mut self, num_buckets: u32) {
-        let mut map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
+    pub fn begin_shrink(&mut self, num_buckets: usize) {
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		let _resize_guard = self.resize_lock.lock();
         assert!(
-            num_buckets <= map.get_num_buckets() as u32,
+            num_buckets <= map.get_num_buckets(),
             "shrink called with a larger number of buckets"
         );
         _ = self
-            .shmem_handle
+            .shmem_handles
             .as_ref()
             .expect("shrink called on a fixed-size hash table");
-        map.alloc_limit = num_buckets;
+        map.bucket_arr.alloc_limit.store(
+			BucketIdx::new(num_buckets), Ordering::SeqCst
+		);
     }
 
-    /// If a shrink operation is underway, returns the target size of the map. Otherwise, returns None.
+	// TODO(quantumish): Safety? Maybe replace this with expanded version of finish_shrink?
     pub fn shrink_goal(&self) -> Option<usize> {
-        let map = unsafe { self.shared_ptr.as_mut() }.unwrap().read();
-        let goal = map.alloc_limit;
-		if goal == INVALID_POS { None } else { Some(goal as usize) }
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+        let goal = map.bucket_arr.alloc_limit.load(Ordering::Relaxed);
+		goal.pos_checked()
 	}
-	
-	/// Complete a shrink after caller has evicted entries, removing the unused buckets and rehashing.
-	///
-	/// # Panics
-	/// The following two cases result in a panic: 
-	/// - Calling this function on a map initialized with [`HashMapInit::with_fixed`].
-	/// - Calling this function on a map when no shrink operation is in progress.
-	///   there are more buckets in use than the value returned by [`HashMapAccess::shrink_goal`].
-	///
-	/// # Errors
-	/// Returns an [`shmem::Error`] if any errors occur resizing the memory region.
-	pub fn finish_shrink(&self) -> Result<(), shmem::Error> {
-		let mut map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
-		assert!(
-			map.alloc_limit != INVALID_POS,
-			"called finish_shrink when no shrink is in progress"
-		);
 
-    /// Complete a shrink after caller has evicted entries, removing the unused buckets and rehashing.
-    ///
-    /// # Panics
-    /// The following cases result in a panic:
-    /// - Calling this function on a map initialized with [`HashMapInit::with_fixed`].
-    /// - Calling this function on a map when no shrink operation is in progress.
-    /// - Calling this function on a map with `shrink_mode` set to [`HashMapShrinkMode::Remap`] and
-    ///   there are more buckets in use than the value returned by [`HashMapAccess::shrink_goal`].
-    ///
-    /// # Errors
-    /// Returns an [`shmem::Error`] if any errors occur resizing the memory region.
     pub fn finish_shrink(&self) -> Result<(), shmem::Error> {
-        let mut map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
-        assert!(
-            map.alloc_limit != INVALID_POS,
-            "called finish_shrink when no shrink is in progress"
-        );
-
-        let num_buckets = map.alloc_limit;
-
-        if map.get_num_buckets() == num_buckets as usize {
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		let _resize_guard = self.resize_lock.lock();
+		let mut shards: Vec<_> = map.dict_shards.iter().map(|x| x.write()).collect();
+		
+        let num_buckets = map.bucket_arr.alloc_limit
+			.load(Ordering::Relaxed)
+			.pos_checked()
+			.expect("called finish_shrink when no shrink is in progress");
+        
+        if map.get_num_buckets() == num_buckets {
             return Ok(());
         }
 
         assert!(
-            map.buckets_in_use <= num_buckets,
+            map.bucket_arr.buckets_in_use.load(Ordering::Relaxed) <= num_buckets,
             "called finish_shrink before enough entries were removed"
         );
 
-        for i in (num_buckets as usize)..map.buckets.len() {
-            if let Some((k, v)) = map.buckets[i].inner.take() {
-                // alloc_bucket increases count, so need to decrease since we're just moving
-                map.buckets_in_use -= 1;
-                map.alloc_bucket(k, v).unwrap();
-            }
-        }
+		// let shard_size = shards[0].len();
+        // for i in (num_buckets as usize)..map.buckets.len() {
+		// 	let shard_start = num_buckets / shard_size;
+		// 	let shard = shards[shard_start];
+		// 	let entry_start = num_buckets % shard_size;
+		// 	for entry_idx in entry_start..shard.len() {
+				
+		// 	}
+			
+		// 	if let EntryKey::Occupied(v) = map.[i].inner.take() {
+        //         // alloc_bucket increases count, so need to decrease since we're just moving
+        //         map.buckets_in_use.fetch_sub(1, Ordering::Relaxed);
+        //         map.alloc_bucket(k, v).unwrap();
+        //     }
+        // }
 
-        let shmem_handle = self
-            .shmem_handle
-            .as_ref()
-            .expect("shrink called on a fixed-size hash table");
+		todo!("dry way to handle reinsertion");
 
-        let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
-        shmem_handle.set_size(size_bytes)?;
-        let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
-        let buckets_ptr = map.buckets.as_mut_ptr();
-        self.rehash_dict(&mut map, buckets_ptr, end_ptr, num_buckets, num_buckets);
-        map.alloc_limit = INVALID_POS;
+		self.resize_shmem(num_buckets)?;
+
+		self.reshard(&mut shards, num_buckets);
+		
+        self.rehash(&mut shards, num_buckets);
+        map.bucket_arr.alloc_limit.store(BucketIdx::invalid(), Ordering::Relaxed);
 
         Ok(())
     }

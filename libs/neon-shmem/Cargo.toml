@@ -12,6 +12,8 @@ rustc-hash = { version = "2.1.1" }
 rand = "0.9.1"
 libc.workspace = true
 lock_api = "0.4.13"
+atomic = "0.6.1"
+bytemuck = { version = "1.23.1", features = ["derive"] }
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }

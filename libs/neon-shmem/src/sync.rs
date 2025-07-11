@@ -6,6 +6,7 @@ use std::ptr::NonNull;
 use nix::errno::Errno;
 
 pub type RwLock<T> = lock_api::RwLock<PthreadRwLock, T>;
+pub type Mutex<T> = lock_api::Mutex<PthreadMutex, T>;
 pub(crate) type RwLockReadGuard<'a, T> = lock_api::RwLockReadGuard<'a, PthreadRwLock, T>;
 pub type RwLockWriteGuard<'a, T> = lock_api::RwLockWriteGuard<'a, PthreadRwLock, T>;
 pub type ValueReadGuard<'a, T> = lock_api::MappedRwLockReadGuard<'a, PthreadRwLock, T>;
@@ -43,7 +44,7 @@ impl PthreadRwLock {
 	
 	fn inner(&self) -> NonNull<libc::pthread_rwlock_t> {
 		self.0.unwrap_or_else(
-			|| panic!("PthreadRwLock constructed badly - something likely used RawMutex::INIT")
+			|| panic!("PthreadRwLock constructed badly - something likely used RawRwLock::INIT")
 		)
 	}
 
@@ -103,5 +104,66 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
 
 	unsafe fn unlock_shared(&self) {
 		self.unlock();
+	}
+}
+
+pub struct PthreadMutex(Option<NonNull<libc::pthread_mutex_t>>);
+
+impl PthreadMutex {
+	pub fn new(lock: NonNull<libc::pthread_mutex_t>) -> Self {
+		unsafe {
+			let mut attrs = MaybeUninit::uninit();
+			// Ignoring return value here - only possible error is OOM.
+			libc::pthread_mutexattr_init(attrs.as_mut_ptr());
+			libc::pthread_mutexattr_setpshared(
+				attrs.as_mut_ptr(),
+				libc::PTHREAD_PROCESS_SHARED
+			);
+			libc::pthread_mutex_init(lock.as_ptr(), attrs.as_mut_ptr());
+			// Safety: POSIX specifies that "any function affecting the attributes
+			// object (including destruction) shall not affect any previously
+			// initialized read-write locks". 
+			libc::pthread_mutexattr_destroy(attrs.as_mut_ptr());
+			Self(Some(lock))
+		}
+	}
+
+	fn inner(&self) -> NonNull<libc::pthread_mutex_t> {
+		self.0.unwrap_or_else(
+			|| panic!("PthreadMutex constructed badly - something likely used RawMutex::INIT")
+		)
+	}
+
+}
+
+unsafe impl lock_api::RawMutex for PthreadMutex {
+	type GuardMarker = lock_api::GuardSend;
+
+	/// *DO NOT USE THIS.* See [`PthreadRwLock`] for the full explanation.
+	const INIT: Self = Self(None);	
+
+	fn lock(&self) {
+		unsafe {
+			let res = libc::pthread_mutex_lock(self.inner().as_ptr());
+			assert!(res == 0, "lock failed with {}", Errno::from_raw(res));
+		}
+	}
+
+	fn try_lock(&self) -> bool {
+		unsafe {
+			let res = libc::pthread_mutex_trylock(self.inner().as_ptr());
+			match res {
+				0 => true,
+				libc::EAGAIN => false,
+				o => panic!("try_rdlock failed with {}", Errno::from_raw(o)),
+			}
+		}
+	}
+
+	unsafe fn unlock(&self) {
+		unsafe {
+			let res = libc::pthread_mutex_unlock(self.inner().as_ptr());
+			assert!(res == 0, "unlock failed with {}", Errno::from_raw(res));
+		}
 	}
 }
