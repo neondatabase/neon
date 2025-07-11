@@ -4171,6 +4171,15 @@ impl TenantShard {
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
+    // HADRON
+    pub fn get_image_creation_timeout(&self) -> Option<Duration> {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf.image_layer_force_creation_period.or(self
+            .conf
+            .default_tenant_conf
+            .image_layer_force_creation_period)
+    }
+
     pub fn get_pitr_interval(&self) -> Duration {
         let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
         tenant_conf
@@ -5708,6 +5717,16 @@ impl TenantShard {
             .map(|t| t.metrics.visible_physical_size_gauge.get())
             .max()
             .unwrap_or(0)
+    }
+
+    /// HADRON
+    /// Return the visible size of all timelines in this tenant.
+    pub(crate) fn get_visible_size(&self) -> u64 {
+        let timelines = self.timelines.lock().unwrap();
+        timelines
+            .values()
+            .map(|t| t.metrics.visible_physical_size_gauge.get())
+            .sum()
     }
 
     /// Builds a new tenant manifest, and uploads it if it differs from the last-known tenant

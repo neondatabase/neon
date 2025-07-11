@@ -1984,11 +1984,14 @@ impl Service {
         });
 
         // Check that there is enough safekeepers configured that we can create new timelines
-        let test_sk_res = this.safekeepers_for_new_timeline().await;
+        let test_sk_res_str = match this.safekeepers_for_new_timeline().await {
+            Ok(v) => format!("Ok({v:?})"),
+            Err(v) => format!("Err({v:})"),
+        };
         tracing::info!(
             timeline_safekeeper_count = config.timeline_safekeeper_count,
             timelines_onto_safekeepers = config.timelines_onto_safekeepers,
-            "viability test result (test timeline creation on safekeepers): {test_sk_res:?}",
+            "viability test result (test timeline creation on safekeepers): {test_sk_res_str}",
         );
 
         Ok(this)
@@ -4758,6 +4761,7 @@ impl Service {
         )
         .await;
 
+        let mut retry_if_not_attached = false;
         let targets = {
             let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
@@ -4774,6 +4778,24 @@ impl Service {
                         .expect("Pageservers may not be deleted while referenced");
 
                     targets.push((*tenant_shard_id, node.clone()));
+
+                    if let Some(location) = shard.observed.locations.get(node_id) {
+                        if let Some(ref conf) = location.conf {
+                            if conf.mode != LocationConfigMode::AttachedSingle
+                                && conf.mode != LocationConfigMode::AttachedMulti
+                            {
+                                // If the shard is attached as secondary, we need to retry if 404.
+                                retry_if_not_attached = true;
+                            }
+                            // If the shard is attached as primary, we should succeed.
+                        } else {
+                            // Location conf is not available yet, retry if 404.
+                            retry_if_not_attached = true;
+                        }
+                    } else {
+                        // The shard is not attached to the intended pageserver yet, retry if 404.
+                        retry_if_not_attached = true;
+                    }
                 }
             }
             targets
@@ -4803,6 +4825,18 @@ impl Service {
                     } else {
                         valid_until = Some(lease.valid_until);
                     }
+                }
+                Err(mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _))
+                    if retry_if_not_attached =>
+                {
+                    // This is expected if the attach is not finished yet. Return 503 so that the client can retry.
+                    return Err(ApiError::ResourceUnavailable(
+                        format!(
+                            "Timeline is not attached to the pageserver {} yet, please retry",
+                            node.get_id()
+                        )
+                        .into(),
+                    ));
                 }
                 Err(e) => {
                     return Err(passthrough_api_error(&node, e));

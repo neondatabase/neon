@@ -2,7 +2,9 @@
 //! Management HTTP API
 //!
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BTreeMap;
+use std::collections::BinaryHeap;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -3214,6 +3216,30 @@ async fn get_utilization(
         .map_err(ApiError::InternalServerError)
 }
 
+/// HADRON
+async fn list_tenant_visible_size_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let state = get_state(&request);
+
+    let mut map = BTreeMap::new();
+    for (tenant_shard_id, slot) in state.tenant_manager.list() {
+        match slot {
+            TenantSlot::Attached(tenant) => {
+                let visible_size = tenant.get_visible_size();
+                map.insert(tenant_shard_id, visible_size);
+            }
+            TenantSlot::Secondary(_) | TenantSlot::InProgress(_) => {
+                continue;
+            }
+        }
+    }
+
+    json_response(StatusCode::OK, map)
+}
+
 async fn list_aux_files(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -3938,9 +3964,14 @@ pub fn make_router(
         .expect("construct launch timestamp header middleware"),
     );
 
+    let force_metric_collection_on_scrape = state.conf.force_metric_collection_on_scrape;
+
+    let prometheus_metrics_handler_wrapper =
+        move |req| prometheus_metrics_handler(req, force_metric_collection_on_scrape);
+
     Ok(router
         .data(state)
-        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/metrics", move |r| request_span(r, prometheus_metrics_handler_wrapper))
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| api_handler(r, status_handler))
@@ -4146,6 +4177,7 @@ pub fn make_router(
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .put("/v1/io_mode", |r| api_handler(r, put_io_mode_handler))
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
+        .get("/v1/list_tenant_visible_size", |r| api_handler(r, list_tenant_visible_size_handler))
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/ingest_aux_files",
             |r| testing_api_handler("ingest_aux_files", r, ingest_aux_files),

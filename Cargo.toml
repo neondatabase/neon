@@ -262,6 +262,7 @@ neon-shmem = { version = "0.1", path = "./libs/neon-shmem/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
+pageserver_client_grpc = { path = "./pageserver/client_grpc" }
 pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 pageserver_page_api = { path = "./pageserver/page_api" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }

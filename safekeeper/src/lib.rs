@@ -134,6 +134,7 @@ pub struct SafeKeeperConf {
     pub ssl_ca_certs: Vec<Pem>,
     pub use_https_safekeeper_api: bool,
     pub enable_tls_wal_service_api: bool,
+    pub force_metric_collection_on_scrape: bool,
 }
 
 impl SafeKeeperConf {
@@ -183,6 +184,7 @@ impl SafeKeeperConf {
             ssl_ca_certs: Vec::new(),
             use_https_safekeeper_api: false,
             enable_tls_wal_service_api: false,
+            force_metric_collection_on_scrape: true,
         }
     }
 }

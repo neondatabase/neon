@@ -922,7 +922,8 @@ impl Endpoint {
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
-                        | ComputeStatus::TerminationPending { .. }
+                        | ComputeStatus::TerminationPendingFast
+                        | ComputeStatus::TerminationPendingImmediate
                         | ComputeStatus::Terminated => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }

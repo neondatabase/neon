@@ -99,6 +99,8 @@ pub mod elapsed_accum;
 #[cfg(target_os = "linux")]
 pub mod linux_socket_ioctl;
 
+pub mod metrics_collector;
+
 // Re-export used in macro. Avoids adding git-version as dep in target crates.
 #[doc(hidden)]
 pub use git_version;
