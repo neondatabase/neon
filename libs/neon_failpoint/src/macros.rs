@@ -52,8 +52,11 @@ macro_rules! fail_point_with_context {
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, Some($context)).await {
                 $crate::FailpointResult::Continue => {},
-                $crate::FailpointResult::Return(value) => {
-                    return Ok(value.parse().unwrap_or_default());
+                $crate::FailpointResult::Return(None) => {
+                    return;
+                },
+                $crate::FailpointResult::Return(Some(value)) => {
+                    panic!("failpoint was configured with return(X) but Rust code does not pass a closure to map X to a return value");
                 },
                 $crate::FailpointResult::Cancelled => {},
             }
@@ -65,7 +68,7 @@ macro_rules! fail_point_with_context {
                 $crate::FailpointResult::Continue => {},
                 $crate::FailpointResult::Return(value) => {
                     let closure = $closure;
-                    return closure(value.as_str());
+                    return closure(value);
                 },
                 $crate::FailpointResult::Cancelled => {},
             }
@@ -78,7 +81,7 @@ macro_rules! fail_point_with_context {
                     $crate::FailpointResult::Continue => {},
                     $crate::FailpointResult::Return(value) => {
                         let closure = $closure;
-                        return closure(value.as_str());
+                        return closure(value);
                     },
                     $crate::FailpointResult::Cancelled => {},
                 }

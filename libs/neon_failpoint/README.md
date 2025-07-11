@@ -83,6 +83,127 @@ match failpoint("my_failpoint", None).await {
 }
 ```
 
+## Context-Based Failpoint Configuration
+
+Context allows you to create **conditional failpoints** that only trigger when specific runtime conditions are met. This is particularly useful for testing scenarios where you want to inject failures only for specific tenants, operations, or other contextual conditions.
+
+### Configuring Context-Based Failpoints
+
+Use `configure_failpoint_with_context()` to set up failpoints with context matching:
+
+```rust
+use neon_failpoint::configure_failpoint_with_context;
+use std::collections::HashMap;
+
+let mut context_matchers = HashMap::new();
+context_matchers.insert("tenant_id".to_string(), "test_.*".to_string());
+context_matchers.insert("operation".to_string(), "backup".to_string());
+
+configure_failpoint_with_context(
+    "backup_operation",           // failpoint name
+    "return(simulated_failure)",  // action to take
+    context_matchers             // context matching rules
+).unwrap();
+```
+
+### Context Matching Rules
+
+The context matching system works as follows:
+
+1. **Key-Value Matching**: Each entry in `context_matchers` specifies a key that must exist in the runtime context
+2. **Regex Support**: Values in `context_matchers` are treated as regular expressions first
+3. **Fallback to Exact Match**: If the regex compilation fails, it falls back to exact string matching
+4. **ALL Must Match**: All context matchers must match for the failpoint to trigger
+
+### Runtime Context Usage
+
+When code hits a failpoint, it provides context using the `failpoint_context!` macro:
+
+```rust
+use neon_failpoint::{failpoint, failpoint_context, FailpointResult};
+
+let context = failpoint_context! {
+    "tenant_id" => "test_123",
+    "operation" => "backup",
+    "user_id" => "user_456",
+};
+
+match failpoint("backup_operation", Some(&context)).await {
+    FailpointResult::Return(value) => {
+        // This will only trigger if ALL context matchers match
+        println!("Backup failed: {}", value);
+    }
+    FailpointResult::Continue => {
+        // Continue with normal backup operation
+    }
+    FailpointResult::Cancelled => {}
+}
+```
+
+### Context Matching Examples
+
+#### Regex Matching
+```rust
+// Configure to match test tenants only
+let mut matchers = HashMap::new();
+matchers.insert("tenant_id".to_string(), "test_.*".to_string());
+
+configure_failpoint_with_context("test_failpoint", "pause", matchers).unwrap();
+
+// This will match
+let context = failpoint_context! { "tenant_id" => "test_123" };
+// This will NOT match  
+let context = failpoint_context! { "tenant_id" => "prod_123" };
+```
+
+#### Multiple Conditions
+```rust
+// Must match BOTH tenant pattern AND operation
+let mut matchers = HashMap::new();
+matchers.insert("tenant_id".to_string(), "test_.*".to_string());
+matchers.insert("operation".to_string(), "backup".to_string());
+
+configure_failpoint_with_context("backup_test", "return(failed)", matchers).unwrap();
+
+// This will match (both conditions met)
+let context = failpoint_context! {
+    "tenant_id" => "test_123",
+    "operation" => "backup",
+};
+
+// This will NOT match (missing operation)
+let context = failpoint_context! {
+    "tenant_id" => "test_123",
+    "operation" => "restore",
+};
+```
+
+#### Exact String Matching
+```rust
+// If regex compilation fails, falls back to exact match
+let mut matchers = HashMap::new();
+matchers.insert("env".to_string(), "staging".to_string());
+
+configure_failpoint_with_context("env_specific", "sleep(1000)", matchers).unwrap();
+
+// This will match
+let context = failpoint_context! { "env" => "staging" };
+// This will NOT match
+let context = failpoint_context! { "env" => "production" };
+```
+
+### Benefits of Context-Based Failpoints
+
+1. **Selective Testing**: Only inject failures for specific tenants, environments, or operations
+2. **Production Safety**: Avoid accidentally triggering failpoints in production by using context filters
+3. **Complex Scenarios**: Test interactions between different components with targeted failures
+4. **Debugging**: Isolate issues to specific contexts without affecting the entire system
+
+### Context vs. Non-Context Failpoints
+
+- **Without context**: `configure_failpoint("name", "action")` - triggers for ALL hits
+- **With context**: `configure_failpoint_with_context("name", "action", matchers)` - triggers only when context matches
+
 ## Context-Specific Failpoints
 
 ```rust
@@ -122,17 +243,86 @@ match failpoint("backup_operation", Some(&context)).await {
 
 The library provides convenient macros for common patterns:
 
-```rust
-use neon_failpoint::{fail_point, pausable_failpoint, sleep_millis_async};
+### `fail_point!` - Basic Failpoint Macro
 
-// Simple failpoint (equivalent to fail::fail_point!)
+The `fail_point!` macro has three variants:
+
+1. **Simple failpoint** - `fail_point!(name)`
+   - Just checks the failpoint and continues or returns early (no value)
+   - Panics if the failpoint is configured with `return(value)` since no closure is provided
+
+2. **Failpoint with return handler** - `fail_point!(name, closure)`
+   - Provides a closure to handle return values from the failpoint
+   - The closure receives `Option<String>` and should return the appropriate value
+
+3. **Conditional failpoint** - `fail_point!(name, condition, closure)`
+   - Only checks the failpoint if the condition is true
+   - Provides a closure to handle return values (receives `&str`)
+
+```rust
+use neon_failpoint::fail_point;
+
+// Simple failpoint - just continue or return early
 fail_point!("my_failpoint");
 
 // Failpoint with return value handling
-fail_point!("my_failpoint", |value| {
-    println!("Got value: {}", value);
-    return Ok(value.parse().unwrap_or_default());
+fail_point!("my_failpoint", |value: Option<String>| {
+    match value {
+        Some(v) => {
+            println!("Got value: {}", v);
+            return Ok(v.parse().unwrap_or_default());
+        }
+        None => return Ok(42), // Default return value
+    }
 });
+
+// Conditional failpoint - only check if condition is met
+let should_fail = some_condition();
+fail_point!("conditional_failpoint", should_fail, |value: &str| {
+    println!("Conditional failpoint triggered with: {}", value);
+    return Err(anyhow::anyhow!("Simulated failure"));
+});
+```
+
+### `fail_point_with_context!` - Context-Aware Failpoint Macro
+
+The `fail_point_with_context!` macro has three variants that mirror `fail_point!` but include context:
+
+1. **Simple with context** - `fail_point_with_context!(name, context)`
+2. **With context and return handler** - `fail_point_with_context!(name, context, closure)`
+3. **Conditional with context** - `fail_point_with_context!(name, context, condition, closure)`
+
+```rust
+use neon_failpoint::{fail_point_with_context, failpoint_context};
+
+let context = failpoint_context! {
+    "tenant_id" => "test_123",
+    "operation" => "backup",
+};
+
+// Simple context failpoint
+fail_point_with_context!("backup_failpoint", &context);
+
+// Context failpoint with return handler
+fail_point_with_context!("backup_failpoint", &context, |value: Option<String>| {
+    match value {
+        Some(v) => return Err(anyhow::anyhow!("Backup failed: {}", v)),
+        None => return Err(anyhow::anyhow!("Backup failed")),
+    }
+});
+
+// Conditional context failpoint
+let is_test_tenant = tenant_id.starts_with("test_");
+fail_point_with_context!("backup_failpoint", &context, is_test_tenant, |value: Option<String>| {
+    // Only triggers for test tenants
+    return Err(anyhow::anyhow!("Test tenant backup failure"));
+});
+```
+
+### Other Utility Macros
+
+```rust
+use neon_failpoint::{pausable_failpoint, sleep_millis_async, failpoint_return, failpoint_bail};
 
 // Pausable failpoint with cancellation
 let cancel_token = CancellationToken::new();
@@ -142,7 +332,30 @@ if let Err(()) = pausable_failpoint!("pause_here", &cancel_token).await {
 
 // Sleep failpoint
 sleep_millis_async!("sleep_here", &cancel_token).await;
+
+// Simple return failpoint - automatically parses and returns the value
+failpoint_return!("return_early");
+
+// Failpoint that bails with an error
+failpoint_bail!("error_point", "Something went wrong");
+
+// Context creation helper
+let context = failpoint_context! {
+    "key1" => "value1",
+    "key2" => "value2",
+};
 ```
+
+### Argument Reference
+
+- **`name`**: String literal - the name of the failpoint
+- **`context`**: Expression that evaluates to `&HashMap<String, String>` - context for matching
+- **`condition`**: Boolean expression - only check failpoint if true
+- **`closure`**: Closure that handles return values:
+  - For `fail_point!` with closure: receives `Option<String>`
+  - For conditional variants: receives `&str`
+  - For `fail_point_with_context!` with closure: receives `Option<String>`
+- **`cancel`**: `&CancellationToken` - for cancellation support
 
 ## Migration from `fail` crate
 
