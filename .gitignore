@@ -29,3 +29,7 @@ docker-compose/docker-compose-parallel.yml
 
 # pgindent typedef lists
 *.list
+
+# Node
+**/node_modules/
+**/package-lock.json
