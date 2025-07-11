@@ -15,7 +15,6 @@ use std::time::Duration;
 use anyhow::Result;
 use either::Either;
 use once_cell::sync::Lazy;
-use parking_lot::RwLock;
 use rand::Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -26,8 +25,9 @@ pub mod macros;
 pub use either; // re-export for use in macros
 
 /// Global failpoint registry
-static FAILPOINTS: Lazy<Arc<RwLock<HashMap<String, FailpointConfig>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+// TODO: switch to simple_rcu, but it's in `utils`
+static FAILPOINTS: Lazy<Arc<std::sync::RwLock<HashMap<String, FailpointConfig>>>> =
+    Lazy::new(|| Default::default());
 
 /// Configuration for a single failpoint
 #[derive(Debug, Clone)]
@@ -106,7 +106,7 @@ pub fn configure_failpoint(name: &str, actions: &str) -> Result<()> {
         trigger_count: 0,
     };
 
-    let mut failpoints = FAILPOINTS.write();
+    let mut failpoints = FAILPOINTS.write().unwrap();
 
     // If this failpoint already exists, notify all waiting tasks
     if let Some(existing_config) = failpoints.get(name) {
@@ -136,7 +136,7 @@ pub fn configure_failpoint_with_context(
         trigger_count: 0,
     };
 
-    let mut failpoints = FAILPOINTS.write();
+    let mut failpoints = FAILPOINTS.write().unwrap();
 
     // If this failpoint already exists, notify all waiting tasks
     if let Some(existing_config) = failpoints.get(name) {
@@ -154,7 +154,7 @@ pub fn configure_failpoint_with_context(
 
 /// Remove a failpoint configuration
 pub fn remove_failpoint(name: &str) {
-    let mut failpoints = FAILPOINTS.write();
+    let mut failpoints = FAILPOINTS.write().unwrap();
 
     // Notify all waiting tasks before removing
     if let Some(existing_config) = failpoints.get(name) {
@@ -176,6 +176,7 @@ pub fn has_failpoints() -> bool {
 pub fn list() -> Vec<(impl std::fmt::Display, impl std::fmt::Display)> {
     FAILPOINTS
         .read()
+        .unwrap()
         .iter()
         .map(|(name, config)| (name.clone(), format!("{config:?}")))
         .collect::<Vec<_>>()
@@ -201,7 +202,7 @@ pub fn failpoint_with_cancellation(
     }
 
     let config = {
-        let failpoints = FAILPOINTS.read();
+        let failpoints = FAILPOINTS.read().unwrap();
         failpoints.get(name).cloned()
     };
 
@@ -234,7 +235,8 @@ pub fn failpoint_with_cancellation(
 
         // Increment trigger count
         {
-            let mut failpoints = FAILPOINTS.write();
+            let mut failpoints: std::sync::RwLockWriteGuard<'_, HashMap<String, FailpointConfig>> =
+                FAILPOINTS.write().unwrap();
             if let Some(fp_config) = failpoints.get_mut(name) {
                 fp_config.trigger_count += 1;
             }
@@ -280,7 +282,7 @@ fn execute_action(
 
                 // Add the notifier to the failpoint configuration
                 {
-                    let mut failpoints = FAILPOINTS.write();
+                    let mut failpoints = FAILPOINTS.write().unwrap();
                     if let Some(fp_config) = failpoints.get_mut(&name) {
                         fp_config.notifiers.push(notifier.clone());
                     }
@@ -321,7 +323,7 @@ fn execute_action(
 
                 // Add the notifier to the failpoint configuration
                 {
-                    let mut failpoints = FAILPOINTS.write();
+                    let mut failpoints = FAILPOINTS.write().unwrap();
                     if let Some(fp_config) = failpoints.get_mut(&name) {
                         fp_config.notifiers.push(notifier.clone());
                     }
@@ -448,7 +450,7 @@ struct NotifierCleanupGuard {
 
 impl Drop for NotifierCleanupGuard {
     fn drop(&mut self) {
-        let mut failpoints = FAILPOINTS.write();
+        let mut failpoints = FAILPOINTS.write().unwrap();
         if let Some(fp_config) = failpoints.get_mut(&self.failpoint_name) {
             // Remove this specific notifier from the list
             fp_config
