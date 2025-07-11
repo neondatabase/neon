@@ -2,6 +2,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use anyhow::Context;
+use neon_failpoint as fail;
 use pageserver_api::models::TimelineState;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;

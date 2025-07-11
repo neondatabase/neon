@@ -1,9 +1,9 @@
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
+use neon_failpoint::{configure_failpoint, configure_failpoint_with_context};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::info;
-use neon_failpoint::{configure_failpoint, configure_failpoint_with_context};
 
 pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
 
@@ -39,7 +39,10 @@ pub(in crate::http) async fn configure_failpoints(
     }
 
     for fp in &*failpoints {
-        info!("cfg failpoint: {} {} (context: {:?})", fp.name, fp.actions, fp.context_matchers);
+        info!(
+            "cfg failpoint: {} {} (context: {:?})",
+            fp.name, fp.actions, fp.context_matchers
+        );
 
         let cfg_result = if let Some(context_matchers) = fp.context_matchers.clone() {
             configure_failpoint_with_context(&fp.name, &fp.actions, context_matchers)

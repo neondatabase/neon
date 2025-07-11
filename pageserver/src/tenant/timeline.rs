@@ -39,6 +39,7 @@ use layer_manager::{
     LayerManagerLockHolder, LayerManagerReadGuard, LayerManagerWriteGuard, LockedLayerManager,
     Shutdown,
 };
+use neon_failpoint as fail;
 
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;

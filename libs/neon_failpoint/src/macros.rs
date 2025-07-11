@@ -151,7 +151,9 @@ macro_rules! failpoint_return {
     }};
     ($name:literal, $context:expr) => {{
         if cfg!(feature = "testing") {
-            if let $crate::FailpointResult::Return(value) = $crate::failpoint($name, Some($context)).await {
+            if let $crate::FailpointResult::Return(value) =
+                $crate::failpoint($name, Some($context)).await
+            {
                 return value.parse().unwrap_or_default();
             }
         }
@@ -170,7 +172,9 @@ macro_rules! failpoint_bail {
     }};
     ($name:literal, $context:expr, $error_msg:literal) => {{
         if cfg!(feature = "testing") {
-            if let $crate::FailpointResult::Return(_) = $crate::failpoint($name, Some($context)).await {
+            if let $crate::FailpointResult::Return(_) =
+                $crate::failpoint($name, Some($context)).await
+            {
                 anyhow::bail!($error_msg);
             }
         }

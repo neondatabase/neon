@@ -30,6 +30,7 @@ use enumset::EnumSet;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use itertools::Itertools as _;
+use neon_failpoint as fail;
 use once_cell::sync::Lazy;
 pub use pageserver_api::models::TenantState;
 use pageserver_api::models::{self, RelSizeMigration};

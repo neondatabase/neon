@@ -1,8 +1,8 @@
 use hyper::{Body, Request, Response, StatusCode};
+use neon_failpoint::{configure_failpoint, configure_failpoint_with_context, has_failpoints};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
-use neon_failpoint::{configure_failpoint, configure_failpoint_with_context, has_failpoints};
 
 use crate::error::ApiError;
 use crate::json::{json_request, json_response};
@@ -39,7 +39,12 @@ pub async fn failpoints_handler(
 
     let failpoints: ConfigureFailpointsRequest = json_request(&mut request).await?;
     for fp in failpoints {
-        tracing::info!("cfg failpoint: {} {} (context: {:?})", fp.name, fp.actions, fp.context_matchers);
+        tracing::info!(
+            "cfg failpoint: {} {} (context: {:?})",
+            fp.name,
+            fp.actions,
+            fp.context_matchers
+        );
 
         let cfg_result = if let Some(context_matchers) = fp.context_matchers {
             configure_failpoint_with_context(&fp.name, &fp.actions, context_matchers)
@@ -49,7 +54,9 @@ pub async fn failpoints_handler(
 
         if let Err(err) = cfg_result {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
-                "Failed to configure failpoint '{}': {}", fp.name, err
+                "Failed to configure failpoint '{}': {}",
+                fp.name,
+                err
             )));
         }
     }

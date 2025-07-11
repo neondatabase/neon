@@ -1,4 +1,6 @@
-use neon_failpoint::{configure_failpoint_with_context, failpoint, failpoint_context, FailpointResult};
+use neon_failpoint::{
+    configure_failpoint_with_context, failpoint, failpoint_context, FailpointResult,
+};
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -12,10 +14,11 @@ async fn main() {
     context_matchers.insert("operation".to_string(), "backup".to_string());
 
     configure_failpoint_with_context(
-        "backup_operation", 
-        "return(simulated_failure)", 
-        context_matchers
-    ).unwrap();
+        "backup_operation",
+        "return(simulated_failure)",
+        context_matchers,
+    )
+    .unwrap();
 
     // Test with matching context
     let context = failpoint_context! {
@@ -54,4 +57,4 @@ async fn main() {
             println!("Failpoint cancelled");
         }
     }
-} 
+}

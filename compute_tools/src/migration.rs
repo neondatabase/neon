@@ -46,7 +46,8 @@ impl<'m> MigrationRunner<'m> {
                 });
 
                 false
-            }.await;
+            }
+            .await;
 
             if fail {
                 return Err(anyhow::anyhow!(format!(

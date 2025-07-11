@@ -17,6 +17,7 @@ use anyhow::{Context, anyhow};
 use async_compression::tokio::write::GzipEncoder;
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
+use neon_failpoint as fail;
 use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants::{PG_HBA, PGDATA_SPECIAL_FILES};

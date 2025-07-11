@@ -19,6 +19,7 @@ use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use itertools::Itertools;
 use jsonwebtoken::TokenData;
+use neon_failpoint as fail;
 use once_cell::sync::OnceCell;
 use pageserver_api::config::{
     GetVectoredConcurrentIo, PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,

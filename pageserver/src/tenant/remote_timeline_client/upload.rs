@@ -8,6 +8,7 @@ use anyhow::{Context, bail};
 use bytes::Bytes;
 use camino::Utf8Path;
 use fail::fail_point;
+use neon_failpoint as fail;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeTravelError};
 use tokio::fs::{self, File};

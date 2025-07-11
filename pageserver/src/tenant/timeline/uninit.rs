@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use neon_failpoint as fail;
 use tracing::{error, info, info_span};
 use utils::fs_ext;
 use utils::id::TimelineId;

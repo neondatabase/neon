@@ -28,6 +28,7 @@ use http_utils::{RequestExt, RouterBuilder};
 use humantime::format_rfc3339;
 use hyper::{Body, Request, Response, StatusCode, Uri, header};
 use metrics::launch_timestamp::LaunchTimestamp;
+use neon_failpoint as fail;
 use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::models::{
     DetachBehavior, DownloadRemoteLayersTaskSpawnRequest, IngestAuxFilesRequest,

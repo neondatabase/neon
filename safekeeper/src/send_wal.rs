@@ -879,7 +879,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                     |_| { false }
                 );
                 self.end_pos > self.start_pos
-            }.await;
+            }
+            .await;
 
             if have_something_to_send {
                 trace!("got end_pos {:?}, streaming", self.end_pos);
@@ -938,7 +939,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 |_| { true }
             );
             false
-        }.await;
+        }
+        .await;
         if fp {
             tokio::time::sleep(POLL_STATE_TIMEOUT).await;
             return Ok(None);

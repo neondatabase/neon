@@ -14,6 +14,7 @@ use crate::{PERF_TRACE_TARGET, ensure_walingest};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
+use neon_failpoint as fail;
 use pageserver_api::key::{
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, CompactKey, DBDIR_KEY, Key, RelDirExists,
     TWOPHASEDIR_KEY, dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range,

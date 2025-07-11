@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use bytes::Bytes;
 use http_utils::error::ApiError;
+use neon_failpoint as fail;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::DetachBehavior;

@@ -26,6 +26,7 @@ use enumset::EnumSet;
 use fail::fail_point;
 use futures::FutureExt;
 use itertools::Itertools;
+use neon_failpoint as fail;
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
 use pageserver_api::key::{KEY_SIZE, Key};

@@ -1,9 +1,9 @@
 //! Failpoint support code shared between pageserver and safekeepers.
-//! 
+//!
 //! This module provides a compatibility layer over the new neon_failpoint crate.
 
+pub use neon_failpoint::{configure_failpoint as apply_failpoint, has_failpoints, init};
 use tokio_util::sync::CancellationToken;
-pub use neon_failpoint::{configure_failpoint as apply_failpoint, init, has_failpoints};
 
 /// Declare a failpoint that can use to `pause` failpoint action.
 /// This is now a compatibility wrapper around the new neon_failpoint crate.
