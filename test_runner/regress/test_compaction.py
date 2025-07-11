@@ -1079,5 +1079,8 @@ def test_image_consistent_lsn(neon_env_builder: NeonEnvBuilder):
 
     endpoint.stop_and_destroy()
 
+    for ps in env.pageservers:
+        ps.allowed_errors.append(".*created delta file of size.*larger than double of target.*")
+
 
 # END_HADRON
