@@ -1191,10 +1191,10 @@ impl Service {
             }
             // It it is the same new_sk_set, we can continue the migration (retry).
         } else {
-            let finished = timeline.cplane_notified_generation == timeline.generation
+            let prev_finished = timeline.cplane_notified_generation == timeline.generation
                 && timeline.sk_set_notified_generation == timeline.generation;
 
-            if !finished {
+            if !prev_finished {
                 // The previous migration is committed, but the finish step failed.
                 // Safekeepers/cplane might not know about the last membership configuration.
                 // Retry the finish step to ensure smooth migration.
