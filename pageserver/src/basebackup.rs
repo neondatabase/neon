@@ -773,6 +773,8 @@ where
                 .map_err(|e| BasebackupError::Server(e.into()))?;
         }
 
+        // TODO: Remove zenith.signal once all historical computes have been replaced
+        // ... and thus support the neon.signal file.
         for signalfilename in ["neon.signal", "zenith.signal"] {
             self.ar
                 .append(
