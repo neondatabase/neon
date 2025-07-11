@@ -1,8 +1,8 @@
 diff --git a/sql/anon.sql b/sql/anon.sql
-index 0cdc769..b450327 100644
+index 0cdc769..5eab1d6 100644
 --- a/sql/anon.sql
 +++ b/sql/anon.sql
-@@ -1141,3 +1141,15 @@ $$
+@@ -1141,3 +1141,19 @@ $$
  -- TODO : https://en.wikipedia.org/wiki/L-diversity
  
  -- TODO : https://en.wikipedia.org/wiki/T-closeness
