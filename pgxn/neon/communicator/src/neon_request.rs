@@ -187,12 +187,6 @@ pub struct CReadSlruSegmentRequest {
     pub segment_number: u32,
     pub request_lsn: CLsn,
 
-    // pub spc_oid: COid,
-    // pub db_oid: COid,
-    // pub rel_number: u32,
-    // pub fork_number: u8,
-    // pub block_number: u32,
-
     // These fields define where the result is written. Must point into a buffer in shared memory!
     pub dest: ShmemBuf,
 }
