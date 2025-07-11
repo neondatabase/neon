@@ -11,7 +11,6 @@ use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use indexmap::IndexMap;
-
 use ouroboros::self_referencing;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value as JsonValue;
@@ -786,15 +785,12 @@ async fn handle_rest_inner(
         }
         ComputeCredentialKeys::AuthKeys(_) => None,
     };
-    
+
     // read the role from the jwt claims (and set it to the "anon" role if not present)
     let (role, authenticated) = match &jwt_claims {
-        Some(claims) => {
-            
-            match claims.get("role") {
-                Some(JsonValue::String(r)) => (Some(r), true),
-                _ => (db_anon_role.as_ref(), true),
-            }
+        Some(claims) => match claims.get("role") {
+            Some(JsonValue::String(r)) => (Some(r), true),
+            _ => (db_anon_role.as_ref(), true),
         },
         None => (db_anon_role.as_ref(), false),
     };
