@@ -16,6 +16,7 @@ async-compression.workspace = true
 async-trait.workspace = true
 atomic-take.workspace = true
 aws-config.workspace = true
+aws-credential-types.workspace = true
 aws-sdk-iam.workspace = true
 aws-sigv4.workspace = true
 base64.workspace = true

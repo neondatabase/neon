@@ -5289,6 +5289,7 @@ dependencies = [
  "async-trait",
  "atomic-take",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-iam",
  "aws-sigv4",
  "base64 0.22.1",
