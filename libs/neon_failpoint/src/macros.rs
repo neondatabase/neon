@@ -36,7 +36,7 @@ macro_rules! fail_point {
                     $crate::FailpointResult::Continue => {},
                     $crate::FailpointResult::Return(value) => {
                         let closure = $closure;
-                        return closure(value.as_str());
+                        return closure(value);
                     },
                     $crate::FailpointResult::Cancelled => {},
                 }
@@ -184,4 +184,4 @@ pub use failpoint_bail;
 pub use failpoint_context;
 pub use failpoint_return;
 pub use pausable_failpoint;
-pub use sleep_millis_async; 
+pub use sleep_millis_async;
