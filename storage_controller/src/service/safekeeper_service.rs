@@ -1121,6 +1121,7 @@ impl Service {
         let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
         let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
         // Construct new member set in advance to validate it.
+        // E.g. validates that there is no duplicate safekeepers.
         let new_sk_member_set =
             Self::make_member_set(&new_safekeepers).map_err(ApiError::BadRequest)?;
 
@@ -1153,6 +1154,18 @@ impl Service {
             .iter()
             .map(|&id| NodeId(id as u64))
             .collect::<Vec<_>>();
+
+        // Validate that we are not migrating to a decomissioned safekeeper.
+        for sk in new_safekeepers.iter() {
+            if !cur_sk_set.contains(&sk.get_id())
+                && sk.scheduling_policy() == SkSchedulingPolicy::Decomissioned
+            {
+                return Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "safekeeper {} is decomissioned",
+                    sk.get_id()
+                )));
+            }
+        }
 
         tracing::info!(
             ?cur_sk_set,

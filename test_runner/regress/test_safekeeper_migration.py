@@ -84,7 +84,7 @@ def test_new_sk_set_validation(neon_env_builder: NeonEnvBuilder):
     """
     Test that safekeeper_migrate validates the new_sk_set before starting the migration.
     """
-    neon_env_builder.num_safekeepers = 2
+    neon_env_builder.num_safekeepers = 3
     neon_env_builder.storage_controller_config = {
         "timelines_onto_safekeepers": True,
         "timeline_safekeeper_count": 2,
@@ -102,5 +102,14 @@ def test_new_sk_set_validation(neon_env_builder: NeonEnvBuilder):
 
     expect_fail([], "must have at least 2 safekeepers")
     expect_fail([1], "must have at least 2 safekeepers")
-    expect_fail([1, 1], "duplicate")
+    expect_fail([1, 1], "duplicate safekeeper")
     expect_fail([1, 100500], "does not exist")
+
+    mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+    sk_set = mconf["sk_set"]
+    assert len(sk_set) == 2
+
+    decom_sk = [sk.id for sk in env.safekeepers if sk.id not in sk_set][0]
+    env.storage_controller.safekeeper_scheduling_policy(decom_sk, "Decomissioned")
+
+    expect_fail([sk_set[0], decom_sk], "decomissioned")
