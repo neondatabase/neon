@@ -3693,6 +3693,8 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 [[package]]
 name = "measured"
 version = "0.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d22ae866c28b9c59afaeb488ad6e3bd148570cf5a2bacf6c4845def5b9a03470"
 dependencies = [
  "bytes",
  "crossbeam-utils",
@@ -3709,6 +3711,8 @@ dependencies = [
 [[package]]
 name = "measured-derive"
 version = "0.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16d734ed9dbca22d87d56b54d220f254ce921cb5cce97d4a960075af0131d076"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3719,6 +3723,8 @@ dependencies = [
 [[package]]
 name = "measured-process"
 version = "0.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f71a318d2b9edcded1e5e0ccf3c9e1e1614217d7f07933631c771daa717743aa"
 dependencies = [
  "libc",
  "measured",
@@ -3728,6 +3734,8 @@ dependencies = [
 [[package]]
 name = "measured-tokio"
 version = "0.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e79a936051c484268e2d71a5dd01219096c62c8ff09afad95f07c14a3b0c580"
 dependencies = [
  "itoa",
  "measured",
