@@ -34,7 +34,7 @@ def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
 
     for ep in [ep_normal, ep_prewarmed]:
         connstr: str = ep.connstr()
-        pg_bin.run(["pgbench", "-i", "-I", "dtGvp", connstr, "-s10"])
+        pg_bin.run(["pgbench", "-i", "-I", "dtGvp", connstr, "-s100"])
         ep.safe_psql("CREATE EXTENSION neon")
         ep.http_client().offload_lfc()
         ep.stop()
@@ -58,7 +58,7 @@ def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
 
 
 @pytest.mark.remote_cluster
-@pytest.mark.timeout(60 * 60)
+@pytest.mark.timeout(30 * 60)
 def test_compare_prewarmed_pgbench_perf_benchmark(
     pg_bin: PgBin,
     neon_api: NeonAPI,
@@ -69,24 +69,24 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
     project = neon_api.create_project(pg_version, name)
     project_id = project["project"]["id"]
     neon_api.wait_for_operation_to_finish(project_id)
-    error_occurred = False
+    err = False
     try:
         benchmark_impl(pg_bin, neon_api, project, zenbenchmark)
     except Exception as e:
-        error_occurred = True
+        err = True
         log.error(f"Caught exception: {e}")
         log.error(traceback.format_exc())
     finally:
-        assert not error_occurred
+        assert not err
         neon_api.delete_project(project_id)
 
 
 def benchmark_impl(
     pg_bin: PgBin, neon_api: NeonAPI, project: dict[str, Any], zenbenchmark: NeonBenchmarker
 ):
-    pgbench_size = 50  # 3424
+    pgbench_size = 3424  # 50GB
     offload_secs = 20
-    test_duration_min = 2  # 5
+    test_duration_min = 5
     pgbench_duration = f"-T{test_duration_min * 60}"
 
     branch_id = project["branch"]["id"]
@@ -114,13 +114,13 @@ def benchmark_impl(
     prewarmed_id = ep_prewarmed["endpoint"]["id"]
 
     def bench(endpoint_name, endpoint_id, env):
-        pg_bin.run(["pgbench", "-i", "-I", "dtGvp", f"-s{pgbench_size}"], env=env)
+        pg_bin.run(["pgbench", "-i", "-I", "dtGvp", f"-s{pgbench_size}"], env)
         sleep(offload_secs)  # ensure LFC is offloaded after pgbench finishes
         neon_api.restart_endpoint(project_id, endpoint_id)
 
         run_start_timestamp = utc_now_timestamp()
         t0 = timeit.default_timer()
-        out = pg_bin.run_capture(["pgbench", "-c10", pgbench_duration, "-Mprepared"])
+        out = pg_bin.run_capture(["pgbench", "-c10", pgbench_duration, "-Mprepared"], env)
         run_duration = timeit.default_timer() - t0
         run_end_timestamp = utc_now_timestamp()
 
