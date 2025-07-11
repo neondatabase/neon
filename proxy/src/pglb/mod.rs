@@ -3,12 +3,15 @@ pub mod handshake;
 pub mod inprocess;
 pub mod passthrough;
 
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::FutureExt;
 use smol_str::ToSmolStr;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, warn};
 
@@ -262,34 +265,48 @@ pub(crate) async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(ctx, client, mode.handshake_tls(tls), record_handshake_error);
 
-    let (mut client, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
-        .await??
-    {
-        HandshakeData::Startup(client, params) => (client, params),
-        HandshakeData::Cancel(cancel_key_data) => {
-            // spawn a task to cancel the session, but don't wait for it
-            cancellations.spawn({
-                let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-                let ctx = ctx.clone();
-                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?ctx.session_id());
-                cancel_span.follows_from(tracing::Span::current());
-                async move {
-                    cancellation_handler_clone
-                        .cancel_session(
-                            cancel_key_data,
-                            ctx,
-                            config.authentication_config.ip_allowlist_check_enabled,
-                            config.authentication_config.is_vpc_acccess_proxy,
-                            auth_backend.get_api(),
-                        )
-                        .await
-                        .inspect_err(|e | debug!(error = ?e, "cancel_session failed")).ok();
-                }.instrument(cancel_span)
-            });
+    let (mut client, params) =
+        match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
+            HandshakeData::Startup(client, params) => (client, params),
+            HandshakeData::Cancel(server_name, cancel_key_data) => {
+                // // spawn a task to cancel the session, but don't wait for it
+                // cancellations.spawn({
+                //     let cancellation_handler_clone = Arc::clone(&cancellation_handler);
+                //     let ctx = ctx.clone();
+                //     let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?ctx.session_id());
+                //     cancel_span.follows_from(tracing::Span::current());
+                //     async move {
+                //         cancellation_handler_clone
+                //             .cancel_session(
+                //                 cancel_key_data,
+                //                 ctx,
+                //                 config.authentication_config.ip_allowlist_check_enabled,
+                //                 config.authentication_config.is_vpc_acccess_proxy,
+                //                 auth_backend.get_api(),
+                //             )
+                //             .await
+                //             .inspect_err(|e | debug!(error = ?e, "cancel_session failed")).ok();
+                //     }.instrument(cancel_span)
+                // });
 
-            return Ok(None);
-        }
-    };
+                let pod_ip = server_name
+                    .as_deref()
+                    .and_then(|server_name| {
+                        server_name.strip_suffix(".hadron-compute.pod.cluster.local")
+                    })
+                    .and_then(|pod_ip| IpAddr::from_str(pod_ip).ok());
+
+                if let Some(pod_ip) = pod_ip {
+                    cancellations.spawn(async move {
+                        let stream = TcpStream::connect((pod_ip, 5432)).await?;
+                        crate::pqproto::cancel(stream, cancel_key_data).await?;
+                        anyhow::Ok(())
+                    });
+                }
+
+                return Ok(None);
+            }
+        };
     drop(pause);
 
     ctx.set_db_options(params.clone());

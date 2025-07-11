@@ -126,7 +126,7 @@ pub(crate) struct AuthInfo {
     /// None for local-proxy, as we use trust-based localhost auth.
     /// Some for sql-over-http, ws, tcp, and in most cases for console-redirect.
     /// Might be None for console-redirect, but that's only a consequence of testing environments ATM.
-    auth: Option<Auth>,
+    pub(crate) auth: Option<Auth>,
     server_params: StartupMessageParams,
 
     channel_binding: ChannelBinding,
@@ -165,6 +165,7 @@ impl AuthInfo {
                 ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(auth_keys)) => {
                     Some(Auth::Scram(Box::new(auth_keys)))
                 }
+                ComputeCredentialKeys::Password(pw) => Some(Auth::Password(pw)),
                 ComputeCredentialKeys::JwtPayload(_) => None,
             },
             server_params: StartupMessageParams::default(),

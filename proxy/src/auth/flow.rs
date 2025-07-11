@@ -116,7 +116,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
         )
         .await?;
 
-        if let sasl::Outcome::Success(_) = &outcome {
+        if let sasl::Outcome::Success(ComputeCredentialKeys::AuthKeys(_)) = &outcome {
             self.stream.write_message(BeMessage::AuthenticationOk);
         }
 
@@ -187,5 +187,8 @@ pub(crate) async fn validate_password_and_exchange(
                 postgres_client::config::AuthKeys::ScramSha256(keys),
             )))
         }
+        AuthSecret::Cleartext => Ok(sasl::Outcome::Success(ComputeCredentialKeys::Password(
+            password.to_vec(),
+        ))),
     }
 }

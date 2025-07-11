@@ -72,7 +72,6 @@ pub(crate) struct ProxyPassthrough<S> {
     pub(crate) private_link_id: Option<SmolStr>,
 
     pub(crate) _cancel_on_shutdown: tokio::sync::oneshot::Sender<Infallible>,
-
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
     pub(crate) _db_conn: NumDbConnectionsGuard<'static>,
