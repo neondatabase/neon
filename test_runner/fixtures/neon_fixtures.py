@@ -2614,22 +2614,63 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         return res.json()
 
-    def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]):
+    def configure_failpoints(
+        self,
+        config_strings: tuple[str, str]
+        | list[tuple[str, str]]
+        | list[dict[str, str | dict[str, str]]],
+    ):
+        """
+        Configure failpoints for testing purposes.
+
+        Args:
+            config_strings: Can be one of:
+                - Single tuple of (name, actions)
+                - List of tuples [(name, actions), ...]
+                - List of dicts with keys: name, actions, and optionally context_matchers
+
+        Examples:
+            # Basic failpoint
+            client.configure_failpoints(("test_fp", "return(error)"))
+
+            # Multiple basic failpoints
+            client.configure_failpoints([("fp1", "return"), ("fp2", "sleep(1000)")])
+
+            # Probability-based failpoint
+            client.configure_failpoints(("test_fp", "50%return(error)"))
+
+            # Context-based failpoint
+            client.configure_failpoints([{
+                "name": "test_fp",
+                "actions": "return(error)",
+                "context_matchers": {"tenant_id": ".*test.*"}
+            }])
+        """
+        # Handle single tuple case
         if isinstance(config_strings, tuple):
-            pairs = [config_strings]
-        else:
-            pairs = config_strings
+            config_strings = [config_strings]
 
-        log.info(f"Requesting config failpoints: {repr(pairs)}")
+        # Convert to server format
+        body: list[dict[str, str | dict[str, str]]] = []
+        for config in config_strings:
+            if isinstance(config, tuple):
+                # Simple (name, actions) tuple
+                body.append({"name": config[0], "actions": config[1]})
+            elif isinstance(config, dict):
+                # Dict with name, actions, and optional context_matchers
+                server_config: dict[str, str | dict[str, str]] = {
+                    "name": config["name"],
+                    "actions": config["actions"],
+                }
+                if "context_matchers" in config:
+                    server_config["context_matchers"] = config["context_matchers"]
+                body.append(server_config)
+            else:
+                raise ValueError(f"Invalid config format: {config}")
 
-        res = self.request(
-            "PUT",
-            f"{self.api}/debug/v1/failpoints",
-            json=[{"name": name, "actions": actions} for name, actions in pairs],
-            headers=self.headers(TokenScope.ADMIN),
-        )
-        log.info(f"Got failpoints request response code {res.status_code}")
-        res.raise_for_status()
+        res = self.request("PUT", f"{self.api_root()}/debug/v1/failpoints", json=body)
+        if res.status_code != 200:
+            self.raise_api_exception(res)
 
     def get_tenants_placement(self) -> defaultdict[str, dict[str, Any]]:
         """

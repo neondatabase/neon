@@ -1,8 +1,9 @@
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::info;
-use utils::failpoint_support::apply_failpoint;
+use neon_failpoint::{configure_failpoint, configure_failpoint_with_context};
 
 pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
 
@@ -11,10 +12,16 @@ pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
 pub struct FailpointConfig {
     /// Name of the fail point
     pub name: String,
-    /// List of actions to take, using the format described in `fail::cfg`
+    /// List of actions to take, using the format described in neon_failpoint
     ///
-    /// We also support `actions = "exit"` to cause the fail point to immediately exit.
+    /// We support actions: "pause", "sleep(N)", "return", "return(value)", "exit", "off", "panic(message)"
+    /// Plus probability-based actions: "N%return(value)", "N%M*return(value)", "N%action", "N%M*action"
     pub actions: String,
+    /// Optional context matching rules for conditional failpoints
+    /// Each key-value pair specifies a context key and a regex pattern to match against
+    /// All context matchers must match for the failpoint to trigger
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_matchers: Option<HashMap<String, String>>,
 }
 
 use crate::http::JsonResponse;
@@ -32,16 +39,18 @@ pub(in crate::http) async fn configure_failpoints(
     }
 
     for fp in &*failpoints {
-        info!("cfg failpoint: {} {}", fp.name, fp.actions);
+        info!("cfg failpoint: {} {} (context: {:?})", fp.name, fp.actions, fp.context_matchers);
 
-        // We recognize one extra "action" that's not natively recognized
-        // by the failpoints crate: exit, to immediately kill the process
-        let cfg_result = apply_failpoint(&fp.name, &fp.actions);
+        let cfg_result = if let Some(context_matchers) = fp.context_matchers.clone() {
+            configure_failpoint_with_context(&fp.name, &fp.actions, context_matchers)
+        } else {
+            configure_failpoint(&fp.name, &fp.actions)
+        };
 
         if let Err(e) = cfg_result {
             return JsonResponse::error(
                 StatusCode::BAD_REQUEST,
-                format!("failed to configure failpoints: {e}"),
+                format!("failed to configure failpoint '{}': {e}", fp.name),
             );
         }
     }

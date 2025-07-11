@@ -1,7 +1,8 @@
 use hyper::{Body, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
-use neon_failpoint::{configure_failpoint, has_failpoints};
+use neon_failpoint::{configure_failpoint, configure_failpoint_with_context, has_failpoints};
 
 use crate::error::ApiError;
 use crate::json::{json_request, json_response};
@@ -15,8 +16,14 @@ pub struct FailpointConfig {
     pub name: String,
     /// List of actions to take, using the format described in neon_failpoint
     ///
-    /// We support actions: "pause", "sleep(N)", "return", "return(value)", "exit", "off"
+    /// We support actions: "pause", "sleep(N)", "return", "return(value)", "exit", "off", "panic(message)"
+    /// Plus probability-based actions: "N%return(value)", "N%M*return(value)", "N%action", "N%M*action"
     pub actions: String,
+    /// Optional context matching rules for conditional failpoints
+    /// Each key-value pair specifies a context key and a regex pattern to match against
+    /// All context matchers must match for the failpoint to trigger
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_matchers: Option<HashMap<String, String>>,
 }
 
 /// Configure failpoints through http.
@@ -32,13 +39,17 @@ pub async fn failpoints_handler(
 
     let failpoints: ConfigureFailpointsRequest = json_request(&mut request).await?;
     for fp in failpoints {
-        tracing::info!("cfg failpoint: {} {}", fp.name, fp.actions);
+        tracing::info!("cfg failpoint: {} {} (context: {:?})", fp.name, fp.actions, fp.context_matchers);
 
-        let cfg_result = configure_failpoint(&fp.name, &fp.actions);
+        let cfg_result = if let Some(context_matchers) = fp.context_matchers {
+            configure_failpoint_with_context(&fp.name, &fp.actions, context_matchers)
+        } else {
+            configure_failpoint(&fp.name, &fp.actions)
+        };
 
         if let Err(err) = cfg_result {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
-                "Failed to configure failpoints: {err}"
+                "Failed to configure failpoint '{}': {}", fp.name, err
             )));
         }
     }
