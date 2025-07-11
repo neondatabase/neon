@@ -28,6 +28,20 @@ macro_rules! fail_point {
             }
         }
     }};
+    ($name:literal, $condition:expr, $closure:expr) => {{
+        if cfg!(feature = "testing") {
+            if $condition {
+                match $crate::failpoint($name, None).await {
+                    $crate::FailpointResult::Continue => {},
+                    $crate::FailpointResult::Return(value) => {
+                        let closure = $closure;
+                        return closure(value.as_str());
+                    },
+                    $crate::FailpointResult::Cancelled => {},
+                }
+            }
+        }
+    }};
 }
 
 /// Failpoint macro with context support
@@ -53,6 +67,20 @@ macro_rules! fail_point_with_context {
                     return closure(value.as_str());
                 },
                 $crate::FailpointResult::Cancelled => {},
+            }
+        }
+    }};
+    ($name:literal, $context:expr, $condition:expr, $closure:expr) => {{
+        if cfg!(feature = "testing") {
+            if $condition {
+                match $crate::failpoint($name, Some($context)).await {
+                    $crate::FailpointResult::Continue => {},
+                    $crate::FailpointResult::Return(value) => {
+                        let closure = $closure;
+                        return closure(value.as_str());
+                    },
+                    $crate::FailpointResult::Cancelled => {},
+                }
             }
         }
     }};

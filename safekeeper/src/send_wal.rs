@@ -872,14 +872,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     async fn wait_wal(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
             self.end_pos = self.end_watch.get();
-            let have_something_to_send = (|| {
-                fail::fail_point!(
+            let have_something_to_send = async {
+                neon_failpoint::fail_point!(
                     "sk-pause-send",
                     self.appname.as_deref() != Some("pageserver"),
                     |_| { false }
                 );
                 self.end_pos > self.start_pos
-            })();
+            }.await;
 
             if have_something_to_send {
                 trace!("got end_pos {:?}, streaming", self.end_pos);
@@ -931,14 +931,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     /// - Err in case of error -- only if 1) term changed while fetching in recovery
     ///   mode 2) watch channel closed, which must never happen.
     async fn wait_for_lsn(&mut self) -> anyhow::Result<Option<Lsn>> {
-        let fp = (|| {
-            fail::fail_point!(
+        let fp = async {
+            neon_failpoint::fail_point!(
                 "sk-pause-send",
                 self.appname.as_deref() != Some("pageserver"),
                 |_| { true }
             );
             false
-        })();
+        }.await;
         if fp {
             tokio::time::sleep(POLL_STATE_TIMEOUT).await;
             return Ok(None);
