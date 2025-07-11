@@ -42,7 +42,7 @@ impl<K, V> OccupiedEntry<'_, K, V> {
 
     /// Removes the entry from the hash map, returning the value originally stored within it.
     pub fn remove(&mut self) -> V {
-		self.shard.idxs[self.shard_pos] = BucketIdx::invalid();
+		self.shard.idxs[self.shard_pos] = BucketIdx::INVALID;
 		self.shard.keys[self.shard_pos].tag = EntryType::Tombstone;
         self.bucket_arr.dealloc_bucket(self.bucket_pos)
     }

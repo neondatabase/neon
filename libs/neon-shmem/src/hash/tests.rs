@@ -332,7 +332,8 @@ fn test_clear() {
 
 #[test]
 fn test_bucket_ops() {
-    let writer = HashMapInit::<TestKey, usize>::new_resizeable_named(1000, 1200, 10, "test_bucket_ops")
+
+	let writer = HashMapInit::<TestKey, usize>::new_resizeable_named(1000, 1200, 10, "test_bucket_ops")
         .attach_writer();
     match writer.entry(1.into()).unwrap() {
         Entry::Occupied(mut e) => {
@@ -355,7 +356,7 @@ fn test_bucket_ops() {
             panic!("Insert didn't affect entry");
         }
     };
-    assert_eq!(writer.get_at_bucket(pos).unwrap(), &2);
+    assert_eq!(unsafe { writer.get_at_bucket(pos).unwrap() }, &2);
     {
         let ptr: *const usize = &*writer.get(&1.into()).unwrap();
         assert_eq!(writer.get_bucket_for_value(ptr), pos);

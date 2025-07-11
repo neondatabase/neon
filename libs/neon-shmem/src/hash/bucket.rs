@@ -8,35 +8,29 @@ use atomic::Atomic;
 pub(crate) struct BucketIdx(pub(super) u32);
 
 impl BucketIdx {
-	pub const INVALID: u32 = 0x7FFFFFFF;
-	pub const MARK_TAG: u32 = 0x80000000;
+	const MARK_TAG: u32 = 0x80000000;
+	pub const INVALID: Self = Self(0x7FFFFFFF);
+	pub const RESERVED: Self = Self(0x7FFFFFFE);
+	pub const MAX: usize = Self::RESERVED.0 as usize - 1;
 
 	pub(super) fn is_marked(&self) -> bool {
 		self.0 & Self::MARK_TAG != 0
 	}
 
-	pub(super) fn is_invalid(self) -> bool {
-		self.0 & Self::INVALID == Self::INVALID
-	}
-	
 	pub(super) fn as_marked(self) -> Self {
 		Self(self.0 | Self::MARK_TAG)
 	}
 
 	pub(super) fn get_unmarked(self) -> Self {
-		Self(self.0 & Self::INVALID)
+		Self(self.0 & !Self::MARK_TAG)
 	}
 	
 	pub fn new(val: usize) -> Self {
 		Self(val as u32)
 	}
-
-	pub fn invalid() -> Self {
-		Self(Self::INVALID)
-	}
-
+	
 	pub fn pos_checked(&self) -> Option<usize> {
-		if self.0 == Self::INVALID || self.is_marked() {
+		if *self == Self::INVALID || self.is_marked() {
 			None
 		} else {
 			Some(self.0 as usize)
@@ -44,7 +38,22 @@ impl BucketIdx {
 	}
 }
 
-/// Fundamental storage unit within the hash table. Either empty or contains a key-value pair.
+impl std::fmt::Debug for BucketIdx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+		let idx = self.get_unmarked().0;
+		write!(
+			f, "BucketIdx(marked={}, idx={})",
+			self.is_marked(),
+			match *self {
+				Self::INVALID => "INVALID".to_string(),
+				Self::RESERVED => "RESERVED".to_string(),
+				_ => format!("{idx}")
+			}
+		)
+	}
+}
+
+/// format storage unit within the hash table. Either empty or contains a key-value pair.
 /// Always part of a chain of some kind (either a freelist if empty or a hash chain if full).
 pub(crate) struct Bucket<V> {
     pub val: MaybeUninit<V>,
@@ -62,7 +71,7 @@ impl<V> Bucket<V> {
 	pub fn full(val: V) -> Self {
 		Self {
 			val: MaybeUninit::new(val),
-			next: Atomic::new(BucketIdx::invalid())
+			next: Atomic::new(BucketIdx::INVALID)
 		}
 	}
 
@@ -101,7 +110,7 @@ impl<'a, V> BucketArray<'a, V> {
 			buckets,
 			free_head: Atomic::new(BucketIdx(0)),
 			_user_list_head: Atomic::new(BucketIdx(0)),
-			alloc_limit: Atomic::new(BucketIdx::invalid()),
+			alloc_limit: Atomic::new(BucketIdx::INVALID),
 			buckets_in_use: 0.into(),
 		}
 	}
@@ -111,7 +120,7 @@ impl<'a, V> BucketArray<'a, V> {
 		let pos = BucketIdx::new(pos);
 		loop {
 			let free = self.free_head.load(Ordering::Relaxed);
-			bucket.next = Atomic::new(free);
+			bucket.next.store(free, Ordering::Relaxed);
 			if self.free_head.compare_exchange_weak(
 				free, pos, Ordering::Relaxed, Ordering::Relaxed
 			).is_ok() {
@@ -123,64 +132,65 @@ impl<'a, V> BucketArray<'a, V> {
 
 	#[allow(unused_assignments)]
 	fn find_bucket(&self) -> (BucketIdx, BucketIdx) {
-		let mut left_node = BucketIdx::invalid();
-		let mut right_node = BucketIdx::invalid();
-		let mut left_node_next = BucketIdx::invalid();
+		let mut left_node = BucketIdx::INVALID;
+		let mut right_node = BucketIdx::INVALID;
+		let mut left_node_next = BucketIdx::INVALID;
 		
 		loop { 
-			let mut t = BucketIdx::invalid();
+			let mut t = BucketIdx::INVALID;
 			let mut t_next = self.free_head.load(Ordering::Relaxed);
 			let alloc_limit = self.alloc_limit.load(Ordering::Relaxed).pos_checked();
 			while t_next.is_marked() || t.pos_checked()
 				.map_or(true, |v| alloc_limit.map_or(false, |l| v > l))
 			{
-				if t_next.is_marked() {
+				if !t_next.is_marked() {
 					left_node = t;
 					left_node_next = t_next;
 				}
 				t = t_next.get_unmarked();
-				if t.is_invalid() { break }
+				if t == BucketIdx::INVALID { break }
 				t_next = self.buckets[t.0 as usize].next.load(Ordering::Relaxed);
 			}
 			right_node = t;
 
 			if left_node_next == right_node {
-				if !right_node.is_invalid() && self.buckets[right_node.0 as usize]
+				if right_node != BucketIdx::INVALID && self.buckets[right_node.0 as usize]
 					.next.load(Ordering::Relaxed).is_marked()
-				{
+				{					
 					continue;
 				} else {
 					return (left_node, right_node);
 				}
 			}
 
-			let left_ref = if !left_node.is_invalid() {
+			let left_ref = if left_node != BucketIdx::INVALID {
 				&self.buckets[left_node.0 as usize].next					
 			} else { &self.free_head };
 			
 			if left_ref.compare_exchange_weak(
 				left_node_next, right_node, Ordering::Relaxed, Ordering::Relaxed
 			).is_ok() {
-				if !right_node.is_invalid() && self.buckets[right_node.0 as usize]
+				if right_node != BucketIdx::INVALID && self.buckets[right_node.0 as usize]
 					.next.load(Ordering::Relaxed).is_marked()
 				{
 					continue;
 				} else {
 					return (left_node, right_node);
 				}
-			}
+			}			
 		}
 	}
 
 	#[allow(unused_assignments)]
     pub(crate) fn alloc_bucket(&mut self, value: V) -> Option<BucketIdx> {
-		let mut right_node_next = BucketIdx::invalid();
-		let mut left_idx = BucketIdx::invalid();
-		let mut right_idx = BucketIdx::invalid();
+		// println!("alloc()");
+		let mut right_node_next = BucketIdx::INVALID;
+		let mut left_idx = BucketIdx::INVALID;
+		let mut right_idx = BucketIdx::INVALID;
 		
 		loop {
 			(left_idx, right_idx) = self.find_bucket();
-			if right_idx.is_invalid() {
+			if right_idx == BucketIdx::INVALID {
 				return None;
 			}
 			
@@ -196,7 +206,7 @@ impl<'a, V> BucketArray<'a, V> {
 			}
 		}
 
-		let left_ref = if !left_idx.is_invalid() {
+		let left_ref = if left_idx != BucketIdx::INVALID {
 			&self.buckets[left_idx.0 as usize].next
 		} else {
 			&self.free_head
@@ -211,6 +221,9 @@ impl<'a, V> BucketArray<'a, V> {
 
         self.buckets_in_use.fetch_add(1, Ordering::Relaxed);
 		self.buckets[right_idx.0 as usize].val.write(value);
+		self.buckets[right_idx.0 as usize].next.store(
+			BucketIdx::RESERVED, Ordering::Relaxed
+		);
 		Some(right_idx)
     }
 
@@ -220,7 +233,7 @@ impl<'a, V> BucketArray<'a, V> {
 				if i < self.buckets.len() - 1 {
 					BucketIdx::new(i + 1)
 				} else {
-					BucketIdx::invalid()
+					BucketIdx::INVALID
 				}				
 			);
         }

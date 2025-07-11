@@ -311,17 +311,21 @@ where
         }
     }
 
-    /// Optionally return reference to a bucket at a given index if it exists.
-    pub fn get_at_bucket(&self, pos: usize) -> Option<&V> {
+    pub unsafe fn get_at_bucket(&self, pos: usize) -> Option<&V> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         if pos >= map.bucket_arr.buckets.len() {
             return None;
         }
 
-		todo!("safely check if a given bucket is empty? always mark?");
+		let bucket = &map.bucket_arr.buckets[pos];
+		if bucket.next.load(Ordering::Relaxed) == BucketIdx::RESERVED {
+			Some(unsafe { bucket.val.assume_init_ref() })
+		} else {
+			None
+		}
     }
 
-    /// Returns the number of buckets in the table.
+    /// bucket the number of buckets in the table.
     pub fn get_num_buckets(&self) -> usize {
         let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
         map.get_num_buckets()
@@ -442,7 +446,7 @@ where
 			let idxs_ptr = first_shard.idxs.as_mut_ptr();
 			for i in old_num_buckets..num_buckets {
                 let idx = idxs_ptr.add(i);
-                idx.write(BucketIdx::invalid());
+                idx.write(BucketIdx::INVALID);
             }
         }
 
@@ -519,7 +523,7 @@ where
 		self.reshard(&mut shards, num_buckets);
 		
         self.rehash(&mut shards, num_buckets);
-        map.bucket_arr.alloc_limit.store(BucketIdx::invalid(), Ordering::Relaxed);
+        map.bucket_arr.alloc_limit.store(BucketIdx::INVALID, Ordering::Relaxed);
 
         Ok(())
     }

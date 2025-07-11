@@ -61,7 +61,7 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 				if i < buckets.len() - 1 {
 					BucketIdx::new(i + 1)
 				} else {
-					BucketIdx::invalid()
+					BucketIdx::INVALID
 				})
 			);
         }
@@ -76,7 +76,7 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 				});
 			}
 			for e in dicts.idxs.iter_mut() {
-				e.write(BucketIdx::invalid());
+				e.write(BucketIdx::INVALID);
 			}
 		}
 
@@ -211,7 +211,7 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 				e.tag = EntryType::Empty;
 			}
 			for e in shard.idxs.iter_mut() {
-				*e = BucketIdx::invalid();
+				*e = BucketIdx::INVALID;
 			}
 		}
 
