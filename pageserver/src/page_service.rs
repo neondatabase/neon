@@ -1195,6 +1195,8 @@ impl PageServerHandler {
                 })
                 .await?;
 
+                failpoint_support::pausable_failpoint!("pagestream_read_message:before_gc_cutoff_check", cancel).unwrap();
+
                 // We're holding the Handle
                 let effective_lsn = match Self::effective_request_lsn(
                     &shard,
