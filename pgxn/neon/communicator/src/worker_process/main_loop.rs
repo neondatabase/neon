@@ -427,7 +427,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             }
             NeonIORequest::ReadSlruSegment(req) => {
                 self.request_read_slru_segment_counter.inc();
-                let lsn = self.cache.get_lsn();
+                let lsn = Lsn(req.request_lsn);
 
                 match self
                     .client
@@ -447,7 +447,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                             std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
                         };
 
-                        let blocks_count = len / (crate::BLCKSZ * crate::SLRU_PAGES_PER_SEGMENT);
+                        let blocks_count = len / crate::BLCKSZ;
 
                         NeonIOResult::ReadSlruSegment(blocks_count as _)
                     }

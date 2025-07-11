@@ -38,8 +38,6 @@ extern void communicator_new_prefetch_register_bufferv(NRelFileInfo rinfo, ForkN
 													   BlockNumber nblocks);
 extern bool communicator_new_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
 											BlockNumber blockno);
-// extern int	communicator_new_read_slru_segment(SlruKind kind, uint32_t segno,
-// 											   void *buffer);
 extern int communicator_new_read_slru_segment(
 	SlruKind kind,
 	uint32_t segno,

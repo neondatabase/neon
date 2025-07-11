@@ -997,7 +997,6 @@ communicator_new_dbsize(Oid dbNode)
 }
 
 int
-// communicator_new_read_slru_segment(SlruKind kind, uint32_t segno, void *buffer)
 communicator_new_read_slru_segment(
 	SlruKind kind,
 	uint32_t segno,
@@ -1011,7 +1010,8 @@ communicator_new_read_slru_segment(
 			.request_id = assign_request_id(),
 			.slru_kind = kind,
 			.segment_number = segno,
-			.dest.ptr = buffer,
+			.request_lsn = request_lsns->request_lsn,
+			.dest.ptr = bounce_buf(),
 		}
 	};
 
@@ -1021,9 +1021,11 @@ communicator_new_read_slru_segment(
 	XLogSetAsyncXactLSN(request_lsns->request_lsn);
 
 	perform_request(&request, &result);
+
 	switch (result.tag)
 	{
 		case NeonIOResult_ReadSlruSegment:
+			memcpy(buffer, request.read_slru_segment.dest.ptr, 8192);
 			return result.read_slru_segment;
 		case NeonIOResult_Error:
 			ereport(ERROR,
@@ -1035,6 +1037,8 @@ communicator_new_read_slru_segment(
 			elog(ERROR, "unexpected result for read SLRU operation: %d", result.tag);
 			break;
 	}
+
+	return 0;
 }
 
 /* Write requests */

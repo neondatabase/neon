@@ -185,6 +185,7 @@ pub struct CReadSlruSegmentRequest {
     pub request_id: u64,
     pub slru_kind: SlruKind,
     pub segment_number: u32,
+    pub request_lsn: CLsn,
 
     // pub spc_oid: COid,
     // pub db_oid: COid,
