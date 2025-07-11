@@ -169,7 +169,6 @@ RUN case $DEBIAN_VERSION in \
 #########################################################################################
 FROM build-deps AS pg-build
 ARG PG_VERSION
-WORKDIR /pg-src
 COPY vendor/postgres-${PG_VERSION:?} postgres
 COPY compute/patches/postgres_fdw.patch .
 COPY compute/patches/pg_stat_statements_pg14-16.patch .
@@ -184,16 +183,16 @@ RUN cd postgres && \
     # so we do it here.
     case "${PG_VERSION}" in \
     "v14" | "v15" | "v16") \
-    patch -p1 < /pg-src/pg_stat_statements_pg14-16.patch; \
+    patch -p1 < /pg_stat_statements_pg14-16.patch; \
     ;; \
     "v17") \
-    patch -p1 < /pg-src/pg_stat_statements_pg17.patch; \
+    patch -p1 < /pg_stat_statements_pg17.patch; \
     ;; \
     *) \
     # To do not forget to migrate patches to the next major version
     echo "No contrib patches for this PostgreSQL version" && exit 1;; \
     esac && \
-    patch -p1 < /pg-src/postgres_fdw.patch && \
+    patch -p1 < /postgres_fdw.patch && \
     export CONFIGURE_CMD="./configure CFLAGS='-O2 -g3 -fsigned-char' --enable-debug --with-openssl --with-uuid=ossp \
     --with-icu --with-libxml --with-libxslt --with-lz4" && \
     if [ "${PG_VERSION:?}" != "v14" ]; then \
