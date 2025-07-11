@@ -606,28 +606,7 @@ impl Timeline {
             return Ok(false);
         }
 
-        // Read path: first read the new reldir keyspace. Early return if the relation exists.
-        // Otherwise, read the old reldir keyspace.
-        // TODO: if IndexPart::rel_size_migration is `Migrated`, we only need to read from v2.
-
-        if let RelSizeMigration::Migrated | RelSizeMigration::Migrating =
-            self.get_rel_size_v2_status()
-        {
-            // fetch directory listing (new)
-            let key = rel_tag_sparse_key(tag.spcnode, tag.dbnode, tag.relnode, tag.forknum);
-            let buf = RelDirExists::decode_option(version.sparse_get(self, key, ctx).await?)
-                .map_err(|_| PageReconstructError::Other(anyhow::anyhow!("invalid reldir key")))?;
-            let exists_v2 = buf == RelDirExists::Exists;
-            // Fast path: if the relation exists in the new format, return true.
-            // TODO: we should have a verification mode that checks both keyspaces
-            // to ensure the relation only exists in one of them.
-            if exists_v2 {
-                return Ok(true);
-            }
-        }
-
-        // fetch directory listing (old)
-
+        // fetch directory listing (v1)
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
 
         if let Some((cached_key, dir)) = deserialized_reldir_v1 {
@@ -644,6 +623,27 @@ impl Timeline {
 
         let dir = RelDirectory::des(&buf)?;
         let exists_v1 = dir.rels.contains(&(tag.relnode, tag.forknum));
+
+        // fetch directory listing (v2)
+        // TODO: if IndexPart::rel_size_migration is `Migrated`, we only need to read from v2.
+        if let RelSizeMigration::Migrated | RelSizeMigration::Migrating =
+            self.get_rel_size_v2_status()
+        {
+            // fetch directory listing (new)
+            let key = rel_tag_sparse_key(tag.spcnode, tag.dbnode, tag.relnode, tag.forknum);
+            let buf = RelDirExists::decode_option(version.sparse_get(self, key, ctx).await?)
+                .map_err(|_| PageReconstructError::Other(anyhow::anyhow!("invalid reldir key")))?;
+            let exists_v2 = buf == RelDirExists::Exists;
+            if exists_v1 != exists_v2 {
+                tracing::warn!(
+                    "inconsistent v1/v2 reldir keyspace for rel {}: exists_v1={}, exists_v2={}",
+                    tag,
+                    exists_v1,
+                    exists_v2
+                );
+            }
+        }
+
         Ok(exists_v1)
     }
 
@@ -695,7 +695,7 @@ impl Timeline {
                 io_concurrency,
             )
             .await?;
-        let mut rels = rels_v1;
+        let mut rels = HashSet::new();
         for (key, val) in results {
             let val = RelDirExists::decode(&val?)
                 .map_err(|_| PageReconstructError::Other(anyhow::anyhow!("invalid reldir key")))?;
@@ -714,6 +714,16 @@ impl Timeline {
             }
             let did_not_contain = rels.insert(tag);
             debug_assert!(did_not_contain, "duplicate reltag in v2");
+        }
+
+        if rels_v1 != rels {
+            tracing::warn!(
+                "inconsistent v1/v2 reldir keyspace for db {} {}: v1_rels.len()={}, v2_rels.len()={}",
+                spcnode,
+                dbnode,
+                rels_v1.len(),
+                rels.len()
+            );
         }
         Ok(rels)
     }
@@ -1551,8 +1561,6 @@ pub enum MetricsUpdate {
 pub struct RelDirMode {
     // Whether we can read the v2 keyspace or not.
     v2_ready: bool,
-    // Whether we should validate the v2 keyspace or not.
-    v2_validate: bool,
     // Whether we should initialize the v2 keyspace or not.
     initialize: bool,
 }
@@ -1923,7 +1931,6 @@ impl DatadirModification<'_> {
                 // tenant config didn't enable it and we didn't write any reldir_v2 key yet
                 Ok(RelDirMode {
                     v2_ready: false,
-                    v2_validate: false,
                     initialize: false,
                 })
             }
@@ -1931,7 +1938,6 @@ impl DatadirModification<'_> {
                 // index_part already persisted that the timeline has enabled rel_size_v2
                 Ok(RelDirMode {
                     v2_ready: true,
-                    v2_validate: true,
                     initialize: false,
                 })
             }
@@ -1941,14 +1947,12 @@ impl DatadirModification<'_> {
                 if is_create {
                     Ok(RelDirMode {
                         v2_ready: true,
-                        v2_validate: true,
                         initialize: true,
                     })
                 } else {
                     // Only initialize the v2 keyspace on new relation creation.
                     Ok(RelDirMode {
                         v2_ready: false,
-                        v2_validate: false,
                         initialize: false,
                     })
                 }
@@ -1958,7 +1962,6 @@ impl DatadirModification<'_> {
                 // and we don't need to do anything
                 Ok(RelDirMode {
                     v2_ready: true,
-                    v2_validate: true,
                     initialize: false,
                 })
             }
@@ -2347,7 +2350,7 @@ impl DatadirModification<'_> {
 
                     match get_v2.await {
                         Ok(v2_found) => {
-                            if v2_mode.v2_validate && v1_found != v2_found {
+                            if v1_found != v2_found {
                                 tracing::warn!(
                                     "inconsistent v1/v2 reldir keyspace for rel {}: v1_found={}, v2_found={}",
                                     rel_tag,
