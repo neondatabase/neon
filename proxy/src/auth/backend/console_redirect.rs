@@ -6,18 +6,17 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span};
 
-use super::ComputeCredentialKeys;
-use crate::auth::IpPattern;
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
+use crate::compute::AuthInfo;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::cplane_proxy_v1;
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::{ReportableError, UserFacingError};
-use crate::pglb::connect_compute::ComputeConnectBackend;
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
+use crate::proxy::wake_compute::WakeComputeBackend;
 use crate::stream::PqStream;
 use crate::types::RoleName;
 use crate::{auth, compute, waiters};
@@ -98,15 +97,11 @@ impl ConsoleRedirectBackend {
         ctx: &RequestContext,
         auth_config: &'static AuthenticationConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    ) -> auth::Result<(
-        ConsoleRedirectNodeInfo,
-        ComputeUserInfo,
-        Option<Vec<IpPattern>>,
-    )> {
+    ) -> auth::Result<(ConsoleRedirectNodeInfo, AuthInfo, ComputeUserInfo)> {
         authenticate(ctx, auth_config, &self.console_uri, client)
             .await
-            .map(|(node_info, user_info, ip_allowlist)| {
-                (ConsoleRedirectNodeInfo(node_info), user_info, ip_allowlist)
+            .map(|(node_info, auth_info, user_info)| {
+                (ConsoleRedirectNodeInfo(node_info), auth_info, user_info)
             })
     }
 }
@@ -114,16 +109,12 @@ impl ConsoleRedirectBackend {
 pub struct ConsoleRedirectNodeInfo(pub(super) NodeInfo);
 
 #[async_trait]
-impl ComputeConnectBackend for ConsoleRedirectNodeInfo {
+impl WakeComputeBackend for ConsoleRedirectNodeInfo {
     async fn wake_compute(
         &self,
         _ctx: &RequestContext,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         Ok(Cached::new_uncached(self.0.clone()))
-    }
-
-    fn get_keys(&self) -> &ComputeCredentialKeys {
-        &ComputeCredentialKeys::None
     }
 }
 
@@ -132,7 +123,7 @@ async fn authenticate(
     auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<(NodeInfo, ComputeUserInfo, Option<Vec<IpPattern>>)> {
+) -> auth::Result<(NodeInfo, AuthInfo, ComputeUserInfo)> {
     ctx.set_auth_method(crate::context::AuthMethod::ConsoleRedirect);
 
     // registering waiter can fail if we get unlucky with rng.
@@ -173,29 +164,42 @@ async fn authenticate(
         })?
         .map_err(ConsoleRedirectError::from)?;
 
-    if auth_config.ip_allowlist_check_enabled {
-        if let Some(allowed_ips) = &db_info.allowed_ips {
-            if !auth::check_peer_addr_is_in_list(&ctx.peer_addr(), allowed_ips) {
-                return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
-            }
-        }
+    if auth_config.ip_allowlist_check_enabled
+        && let Some(allowed_ips) = &db_info.allowed_ips
+        && !auth::check_peer_addr_is_in_list(&ctx.peer_addr(), allowed_ips)
+    {
+        return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
     }
 
     // Check if the access over the public internet is allowed, otherwise block. Note that
     // the console redirect is not behind the VPC service endpoint, so we don't need to check
     // the VPC endpoint ID.
-    if let Some(public_access_allowed) = db_info.public_access_allowed {
-        if !public_access_allowed {
-            return Err(auth::AuthError::NetworkNotAllowed);
-        }
+    if let Some(public_access_allowed) = db_info.public_access_allowed
+        && !public_access_allowed
+    {
+        return Err(auth::AuthError::NetworkNotAllowed);
     }
 
     client.write_message(BeMessage::NoticeResponse("Connecting to database."));
 
-    // This config should be self-contained, because we won't
-    // take username or dbname from client's startup message.
-    let mut config = compute::ConnCfg::new(db_info.host.to_string(), db_info.port);
-    config.dbname(&db_info.dbname).user(&db_info.user);
+    // Backwards compatibility. pg_sni_proxy uses "--" in domain names
+    // while direct connections do not. Once we migrate to pg_sni_proxy
+    // everywhere, we can remove this.
+    let ssl_mode = if db_info.host.contains("--") {
+        // we need TLS connection with SNI info to properly route it
+        SslMode::Require
+    } else {
+        SslMode::Disable
+    };
+
+    let conn_info = compute::ConnectInfo {
+        host: db_info.host.into(),
+        port: db_info.port,
+        ssl_mode,
+        host_addr: None,
+    };
+    let auth_info =
+        AuthInfo::for_console_redirect(&db_info.dbname, &db_info.user, db_info.password.as_deref());
 
     let user: RoleName = db_info.user.into();
     let user_info = ComputeUserInfo {
@@ -209,26 +213,12 @@ async fn authenticate(
     ctx.set_project(db_info.aux.clone());
     info!("woken up a compute node");
 
-    // Backwards compatibility. pg_sni_proxy uses "--" in domain names
-    // while direct connections do not. Once we migrate to pg_sni_proxy
-    // everywhere, we can remove this.
-    if db_info.host.contains("--") {
-        // we need TLS connection with SNI info to properly route it
-        config.ssl_mode(SslMode::Require);
-    } else {
-        config.ssl_mode(SslMode::Disable);
-    }
-
-    if let Some(password) = db_info.password {
-        config.password(password.as_ref());
-    }
-
     Ok((
         NodeInfo {
-            config,
+            conn_info,
             aux: db_info.aux,
         },
+        auth_info,
         user_info,
-        db_info.allowed_ips,
     ))
 }

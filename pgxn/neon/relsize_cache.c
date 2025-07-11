@@ -10,6 +10,7 @@
  */
 #include "postgres.h"
 
+#include "neon.h"
 #include "neon_pgversioncompat.h"
 
 #include "pagestore_client.h"
@@ -99,6 +100,8 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 {
 	bool		found = false;
 
+	Assert(!neon_enable_new_communicator);
+
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
@@ -130,6 +133,8 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 void
 set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
+	Assert(!neon_enable_new_communicator);
+
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
@@ -178,6 +183,8 @@ set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 void
 update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
+	Assert(!neon_enable_new_communicator);
+
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
@@ -212,6 +219,8 @@ update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 void
 forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
 {
+	Assert(!neon_enable_new_communicator);
+
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;

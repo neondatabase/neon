@@ -22,7 +22,7 @@ use pageserver_api::controller_api::{
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
     NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, SafekeeperSchedulingPolicyRequest,
     ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
-    TimelineImportRequest,
+    TimelineImportRequest, TimelineSafekeeperMigrateRequest,
 };
 use pageserver_api::models::{
     DetachBehavior, LsnLeaseRequest, TenantConfigPatchRequest, TenantConfigRequest,
@@ -34,6 +34,7 @@ use pageserver_api::upcall_api::{
     PutTimelineImportStatusRequest, ReAttachRequest, TimelineImportStatusRequest, ValidateRequest,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
+
 use routerify::Middleware;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -635,6 +636,32 @@ async fn handle_tenant_timeline_download_heatmap_layers(
     json_response(StatusCode::OK, ())
 }
 
+async fn handle_tenant_timeline_safekeeper_migrate(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let migrate_req = json_request::<TimelineSafekeeperMigrateRequest>(&mut req).await?;
+
+    service
+        .tenant_timeline_safekeeper_migrate(tenant_id, timeline_id, migrate_req)
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn handle_tenant_timeline_lsn_lease(
     service: Arc<Service>,
     req: Request<Body>,
@@ -721,9 +748,9 @@ async fn handle_tenant_timeline_passthrough(
 
     // Callers will always pass an unsharded tenant ID.  Before proxying, we must
     // rewrite this to a shard-aware shard zero ID.
-    let path = format!("{}", path);
+    let path = format!("{path}");
     let tenant_str = tenant_or_shard_id.tenant_id.to_string();
-    let tenant_shard_str = format!("{}", tenant_shard_id);
+    let tenant_shard_str = format!("{tenant_shard_id}");
     let path = path.replace(&tenant_str, &tenant_shard_str);
 
     let latency = &METRICS_REGISTRY
@@ -892,7 +919,7 @@ async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError
     json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
 }
 
-async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_node_delete_old(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
     let req = match maybe_forward(req).await {
@@ -904,7 +931,46 @@ async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiErr
 
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
-    json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
+    json_response(
+        StatusCode::OK,
+        state.service.node_delete_old(node_id).await?,
+    )
+}
+
+async fn handle_tombstone_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let mut nodes = state.service.tombstone_list().await?;
+    nodes.sort_by_key(|n| n.get_id());
+    let api_nodes = nodes.into_iter().map(|n| n.describe()).collect::<Vec<_>>();
+
+    json_response(StatusCode::OK, api_nodes)
+}
+
+async fn handle_tombstone_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::OK,
+        state.service.tombstone_delete(node_id).await?,
+    )
 }
 
 async fn handle_node_configure(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -986,6 +1052,42 @@ async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiErro
     })?;
 
     json_response(StatusCode::OK, leader)
+}
+
+async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::OK,
+        state.service.start_node_delete(node_id).await?,
+    )
+}
+
+async fn handle_cancel_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Infra)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::ACCEPTED,
+        state.service.cancel_node_delete(node_id).await?,
+    )
 }
 
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -1362,6 +1464,31 @@ async fn handle_timeline_import(req: Request<Body>) -> Result<Response<Body>, Ap
     )
 }
 
+async fn handle_tenant_timeline_locate(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    check_permissions(&req, Scope::Admin)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_timeline_locate(tenant_id, timeline_id)
+            .await?,
+    )
+}
+
 async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -1478,7 +1605,7 @@ async fn handle_ready(req: Request<Body>) -> Result<Response<Body>, ApiError> {
 
 impl From<ReconcileError> for ApiError {
     fn from(value: ReconcileError) -> Self {
-        ApiError::Conflict(format!("Reconciliation error: {}", value))
+        ApiError::Conflict(format!("Reconciliation error: {value}"))
     }
 }
 
@@ -2009,10 +2136,10 @@ pub fn make_router(
 
     router
         .data(Arc::new(HttpState::new(service, auth, build_info)))
+        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/metrics", |r| {
             named_request_span(r, measured_metrics_handler, RequestName("metrics"))
         })
-        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/status", |r| {
             named_request_span(r, handle_status, RequestName("status"))
         })
@@ -2062,6 +2189,20 @@ pub fn make_router(
         .post("/debug/v1/node/:node_id/drop", |r| {
             named_request_span(r, handle_node_drop, RequestName("debug_v1_node_drop"))
         })
+        .delete("/debug/v1/tombstone/:node_id", |r| {
+            named_request_span(
+                r,
+                handle_tombstone_delete,
+                RequestName("debug_v1_tombstone_delete"),
+            )
+        })
+        .get("/debug/v1/tombstone", |r| {
+            named_request_span(
+                r,
+                handle_tombstone_list,
+                RequestName("debug_v1_tombstone_list"),
+            )
+        })
         .post("/debug/v1/tenant/:tenant_id/import", |r| {
             named_request_span(
                 r,
@@ -2089,6 +2230,16 @@ pub fn make_router(
                 )
             },
         )
+        .get(
+            "/debug/v1/tenant/:tenant_id/timeline/:timeline_id/locate",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_locate,
+                    RequestName("v1_tenant_timeline_locate"),
+                )
+            },
+        )
         .get("/debug/v1/scheduler", |r| {
             named_request_span(r, handle_scheduler_dump, RequestName("debug_v1_scheduler"))
         })
@@ -2109,8 +2260,14 @@ pub fn make_router(
         .post("/control/v1/node", |r| {
             named_request_span(r, handle_node_register, RequestName("control_v1_node"))
         })
+        // This endpoint is deprecated and will be removed in a future version.
+        // Use PUT /control/v1/node/:node_id/delete instead.
         .delete("/control/v1/node/:node_id", |r| {
-            named_request_span(r, handle_node_delete, RequestName("control_v1_node_delete"))
+            named_request_span(
+                r,
+                handle_node_delete_old,
+                RequestName("control_v1_node_delete"),
+            )
         })
         .get("/control/v1/node", |r| {
             named_request_span(r, handle_node_list, RequestName("control_v1_node"))
@@ -2134,6 +2291,20 @@ pub fn make_router(
         })
         .get("/control/v1/leader", |r| {
             named_request_span(r, handle_get_leader, RequestName("control_v1_get_leader"))
+        })
+        .put("/control/v1/node/:node_id/delete", |r| {
+            named_request_span(
+                r,
+                handle_node_delete,
+                RequestName("control_v1_start_node_delete"),
+            )
+        })
+        .delete("/control/v1/node/:node_id/delete", |r| {
+            named_request_span(
+                r,
+                handle_cancel_node_delete,
+                RequestName("control_v1_cancel_node_delete"),
+            )
         })
         .put("/control/v1/node/:node_id/drain", |r| {
             named_request_span(r, handle_node_drain, RequestName("control_v1_node_drain"))
@@ -2370,6 +2541,16 @@ pub fn make_router(
                     r,
                     handle_tenant_timeline_download_heatmap_layers,
                     RequestName("v1_tenant_timeline_download_heatmap_layers"),
+                )
+            },
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/safekeeper_migrate",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_safekeeper_migrate,
+                    RequestName("v1_tenant_timeline_safekeeper_migrate"),
                 )
             },
         )

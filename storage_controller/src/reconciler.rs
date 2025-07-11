@@ -65,7 +65,7 @@ pub(super) struct Reconciler {
     pub(crate) compute_hook: Arc<ComputeHook>,
 
     /// To avoid stalling if the cloud control plane is unavailable, we may proceed
-    /// past failures in [`ComputeHook::notify`], but we _must_ remember that we failed
+    /// past failures in [`ComputeHook::notify_attach`], but we _must_ remember that we failed
     /// so that we can set [`crate::tenant_shard::TenantShard::pending_compute_notification`] to ensure a later retry.
     pub(crate) compute_notify_failure: bool,
 
@@ -856,6 +856,7 @@ impl Reconciler {
                 &self.shard,
                 &self.config,
                 &self.placement_policy,
+                self.intent.secondary.len(),
             );
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
@@ -1022,7 +1023,7 @@ impl Reconciler {
         if let Some(node) = &self.intent.attached {
             let result = self
                 .compute_hook
-                .notify(
+                .notify_attach(
                     compute_hook::ShardUpdate {
                         tenant_shard_id: self.tenant_shard_id,
                         node_id: node.get_id(),
@@ -1235,11 +1236,11 @@ pub(crate) fn attached_location_conf(
     shard: &ShardIdentity,
     config: &TenantConfig,
     policy: &PlacementPolicy,
+    secondary_count: usize,
 ) -> LocationConfig {
     let has_secondaries = match policy {
-        PlacementPolicy::Attached(0) | PlacementPolicy::Detached | PlacementPolicy::Secondary => {
-            false
-        }
+        PlacementPolicy::Detached | PlacementPolicy::Secondary => false,
+        PlacementPolicy::Attached(0) => secondary_count > 0,
         PlacementPolicy::Attached(_) => true,
     };
 

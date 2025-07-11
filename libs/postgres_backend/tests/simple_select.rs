@@ -61,7 +61,7 @@ async fn simple_select() {
     // so spawn it off to run on its own.
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            eprintln!("connection error: {e}");
         }
     });
 
@@ -137,7 +137,7 @@ async fn simple_select_ssl() {
     // so spawn it off to run on its own.
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            eprintln!("connection error: {e}");
         }
     });
 

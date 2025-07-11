@@ -12,6 +12,9 @@ testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing", "
 
 fuzz-read-path = ["testing"]
 
+# Enables benchmarking only APIs
+benchmarking = []
+
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
@@ -51,17 +54,20 @@ pageserver_api.workspace = true
 pageserver_client.workspace = true # for ResponseErrorMessageExt TOOD refactor that
 pageserver_compaction.workspace = true
 pageserver_page_api.workspace = true
+peekable.workspace = true
 pem.workspace = true
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 postgres_connection.workspace = true
 postgres_ffi.workspace = true
+postgres_ffi_types.workspace = true
 postgres_initdb.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
 posthog_client_lite.workspace = true
 pprof.workspace = true
 pq_proto.workspace = true
+prost.workspace = true
 rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
@@ -126,6 +132,7 @@ harness = false
 [[bench]]
 name = "bench_ingest"
 harness = false
+required-features = ["benchmarking"]
 
 [[bench]]
 name = "upload_queue"

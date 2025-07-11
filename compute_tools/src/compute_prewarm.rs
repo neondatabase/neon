@@ -5,6 +5,7 @@ use compute_api::responses::LfcOffloadState;
 use compute_api::responses::LfcPrewarmState;
 use http::StatusCode;
 use reqwest::Client;
+use std::mem::replace;
 use std::sync::Arc;
 use tokio::{io::AsyncReadExt, spawn};
 use tracing::{error, info};
@@ -25,11 +26,16 @@ struct EndpointStoragePair {
 }
 
 const KEY: &str = "lfc_state";
-impl TryFrom<&crate::compute::ParsedSpec> for EndpointStoragePair {
-    type Error = anyhow::Error;
-    fn try_from(pspec: &crate::compute::ParsedSpec) -> Result<Self, Self::Error> {
-        let Some(ref endpoint_id) = pspec.spec.endpoint_id else {
-            bail!("pspec.endpoint_id missing")
+impl EndpointStoragePair {
+    /// endpoint_id is set to None while prewarming from other endpoint, see replica promotion
+    /// If not None, takes precedence over pspec.spec.endpoint_id
+    fn from_spec_and_endpoint(
+        pspec: &crate::compute::ParsedSpec,
+        endpoint_id: Option<String>,
+    ) -> Result<Self> {
+        let endpoint_id = endpoint_id.as_ref().or(pspec.spec.endpoint_id.as_ref());
+        let Some(ref endpoint_id) = endpoint_id else {
+            bail!("pspec.endpoint_id missing, other endpoint_id not provided")
         };
         let Some(ref base_uri) = pspec.endpoint_storage_addr else {
             bail!("pspec.endpoint_storage_addr missing")
@@ -83,21 +89,19 @@ impl ComputeNode {
         self.state.lock().unwrap().lfc_offload_state.clone()
     }
 
-    /// Returns false if there is a prewarm request ongoing, true otherwise
-    pub fn prewarm_lfc(self: &Arc<Self>) -> bool {
-        crate::metrics::LFC_PREWARM_REQUESTS.inc();
+    /// If there is a prewarm request ongoing, return false, true otherwise
+    pub fn prewarm_lfc(self: &Arc<Self>, from_endpoint: Option<String>) -> bool {
         {
             let state = &mut self.state.lock().unwrap().lfc_prewarm_state;
-            if let LfcPrewarmState::Prewarming =
-                std::mem::replace(state, LfcPrewarmState::Prewarming)
-            {
+            if let LfcPrewarmState::Prewarming = replace(state, LfcPrewarmState::Prewarming) {
                 return false;
             }
         }
+        crate::metrics::LFC_PREWARMS.inc();
 
         let cloned = self.clone();
         spawn(async move {
-            let Err(err) = cloned.prewarm_impl().await else {
+            let Err(err) = cloned.prewarm_impl(from_endpoint).await else {
                 cloned.state.lock().unwrap().lfc_prewarm_state = LfcPrewarmState::Completed;
                 return;
             };
@@ -109,13 +113,14 @@ impl ComputeNode {
         true
     }
 
-    fn endpoint_storage_pair(&self) -> Result<EndpointStoragePair> {
+    /// from_endpoint: None for endpoint managed by this compute_ctl
+    fn endpoint_storage_pair(&self, from_endpoint: Option<String>) -> Result<EndpointStoragePair> {
         let state = self.state.lock().unwrap();
-        state.pspec.as_ref().unwrap().try_into()
+        EndpointStoragePair::from_spec_and_endpoint(state.pspec.as_ref().unwrap(), from_endpoint)
     }
 
-    async fn prewarm_impl(&self) -> Result<()> {
-        let EndpointStoragePair { url, token } = self.endpoint_storage_pair()?;
+    async fn prewarm_impl(&self, from_endpoint: Option<String>) -> Result<()> {
+        let EndpointStoragePair { url, token } = self.endpoint_storage_pair(from_endpoint)?;
         info!(%url, "requesting LFC state from endpoint storage");
 
         let request = Client::new().get(&url).bearer_auth(token);
@@ -146,34 +151,43 @@ impl ComputeNode {
             .map(|_| ())
     }
 
-    /// Returns false if there is an offload request ongoing, true otherwise
+    /// If offload request is ongoing, return false, true otherwise
     pub fn offload_lfc(self: &Arc<Self>) -> bool {
-        crate::metrics::LFC_OFFLOAD_REQUESTS.inc();
         {
             let state = &mut self.state.lock().unwrap().lfc_offload_state;
-            if let LfcOffloadState::Offloading =
-                std::mem::replace(state, LfcOffloadState::Offloading)
-            {
+            if replace(state, LfcOffloadState::Offloading) == LfcOffloadState::Offloading {
                 return false;
             }
         }
-
         let cloned = self.clone();
-        spawn(async move {
-            let Err(err) = cloned.offload_lfc_impl().await else {
-                cloned.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Completed;
-                return;
-            };
-            error!(%err);
-            cloned.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
-                error: err.to_string(),
-            };
-        });
+        spawn(async move { cloned.offload_lfc_with_state_update().await });
         true
     }
 
+    pub async fn offload_lfc_async(self: &Arc<Self>) {
+        {
+            let state = &mut self.state.lock().unwrap().lfc_offload_state;
+            if replace(state, LfcOffloadState::Offloading) == LfcOffloadState::Offloading {
+                return;
+            }
+        }
+        self.offload_lfc_with_state_update().await
+    }
+
+    async fn offload_lfc_with_state_update(&self) {
+        crate::metrics::LFC_OFFLOADS.inc();
+        let Err(err) = self.offload_lfc_impl().await else {
+            self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Completed;
+            return;
+        };
+        error!(%err);
+        self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
+            error: err.to_string(),
+        };
+    }
+
     async fn offload_lfc_impl(&self) -> Result<()> {
-        let EndpointStoragePair { url, token } = self.endpoint_storage_pair()?;
+        let EndpointStoragePair { url, token } = self.endpoint_storage_pair(None)?;
         info!(%url, "requesting LFC state from postgres");
 
         let mut compressed = Vec::new();

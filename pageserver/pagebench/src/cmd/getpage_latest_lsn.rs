@@ -10,33 +10,35 @@ use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;
 use camino::Utf8PathBuf;
+use futures::{Stream, StreamExt as _};
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
-use pageserver_api::models::{PagestreamGetPageRequest, PagestreamRequest};
+use pageserver_api::pagestream_api::{PagestreamGetPageRequest, PagestreamRequest};
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::TenantShardId;
-use pageserver_page_api::proto;
+use pageserver_page_api as page_api;
 use rand::prelude::*;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use url::Url;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
+use utils::shard::ShardIndex;
 
 use crate::util::tokio_thread_local_stats::AllThreadLocalStats;
 use crate::util::{request_stats, tokio_thread_local_stats};
 
-#[derive(clap::ValueEnum, Clone, Debug)]
-enum Protocol {
-    Libpq,
-    Grpc,
-}
-
 /// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
 #[derive(clap::Parser)]
 pub(crate) struct Args {
+    #[clap(long, default_value = "false")]
+    grpc: bool,
+    #[clap(long, default_value = "false")]
+    grpc_stream: bool,
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
+    /// Pageserver connection string. Supports postgresql:// and grpc:// protocols.
     #[clap(long, default_value = "postgres://postgres@localhost:64000")]
     page_service_connstring: String,
     #[clap(long)]
@@ -45,8 +47,9 @@ pub(crate) struct Args {
     num_clients: NonZeroUsize,
     #[clap(long)]
     runtime: Option<humantime::Duration>,
-    #[clap(long, value_enum, default_value = "libpq")]
-    protocol: Protocol,
+    /// If true, enable compression (only for gRPC).
+    #[clap(long)]
+    compression: bool,
     /// Each client sends requests at the given rate.
     ///
     /// If a request takes too long and we should be issuing a new request already,
@@ -73,6 +76,9 @@ pub(crate) struct Args {
     #[clap(long)]
     set_io_mode: Option<pageserver_api::models::virtual_file::IoMode>,
 
+    #[clap(long)]
+    only_relnode: Option<u32>,
+
     /// Queue depth generated in each client.
     #[clap(long, default_value = "1")]
     queue_depth: NonZeroUsize,
@@ -87,10 +93,31 @@ pub(crate) struct Args {
     #[clap(long, default_value = "1")]
     batch_size: NonZeroUsize,
 
-    #[clap(long)]
-    only_relnode: Option<u32>,
-
     targets: Option<Vec<TenantTimelineId>>,
+
+    #[clap(long, default_value = "100")]
+    pool_max_consumers: NonZeroUsize,
+
+    #[clap(long, default_value = "5")]
+    pool_error_threshold: NonZeroUsize,
+
+    #[clap(long, default_value = "5000")]
+    pool_connect_timeout: NonZeroUsize,
+
+    #[clap(long, default_value = "1000")]
+    pool_connect_backoff: NonZeroUsize,
+
+    #[clap(long, default_value = "60000")]
+    pool_max_idle_duration: NonZeroUsize,
+
+    #[clap(long, default_value = "0")]
+    max_delay_ms: usize,
+
+    #[clap(long, default_value = "0")]
+    percent_drops: usize,
+
+    #[clap(long, default_value = "0")]
+    percent_hangs: usize,
 }
 
 /// State shared by all clients
@@ -147,7 +174,6 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
         main_impl(args, thread_local_stats)
     })
 }
-
 async fn main_impl(
     args: Args,
     all_thread_local_stats: AllThreadLocalStats<request_stats::Stats>,
@@ -312,6 +338,7 @@ async fn main_impl(
     let rps_period = args
         .per_client_rate
         .map(|rps_limit| Duration::from_secs_f64(1.0 / (rps_limit as f64)));
+
     let make_worker: &dyn Fn(WorkerId) -> Pin<Box<dyn Send + Future<Output = ()>>> = &|worker_id| {
         let ss = shared_state.clone();
         let cancel = cancel.clone();
@@ -325,18 +352,32 @@ async fn main_impl(
                 .unwrap();
 
         Box::pin(async move {
-            let client: Box<dyn Client> = match args.protocol {
-                Protocol::Libpq => Box::new(
-                    LibpqClient::new(args.page_service_connstring.clone(), worker_id.timeline)
-                        .await
-                        .unwrap(),
+            let scheme = match Url::parse(&args.page_service_connstring) {
+                Ok(url) => url.scheme().to_lowercase().to_string(),
+                Err(url::ParseError::RelativeUrlWithoutBase) => "postgresql".to_string(),
+                Err(err) => panic!("invalid connstring: {err}"),
+            };
+            let client: Box<dyn Client> = match scheme.as_str() {
+                "postgresql" | "postgres" => {
+                    assert!(!args.compression, "libpq does not support compression");
+                    Box::new(
+                        LibpqClient::new(&args.page_service_connstring, worker_id.timeline)
+                            .await
+                            .unwrap(),
+                    )
+                }
+
+                "grpc" => Box::new(
+                    GrpcClient::new(
+                        &args.page_service_connstring,
+                        worker_id.timeline,
+                        args.compression,
+                    )
+                    .await
+                    .unwrap(),
                 ),
 
-                Protocol::Grpc => Box::new(
-                    GrpcClient::new(args.page_service_connstring.clone(), worker_id.timeline)
-                        .await
-                        .unwrap(),
-                ),
+                scheme => panic!("unsupported scheme {scheme}"),
             };
             run_worker(args, client, ss, cancel, rps_period, ranges, weights).await
         })
@@ -543,8 +584,8 @@ struct LibpqClient {
 }
 
 impl LibpqClient {
-    async fn new(connstring: String, ttid: TenantTimelineId) -> anyhow::Result<Self> {
-        let inner = pageserver_client::page_service::Client::new(connstring)
+    async fn new(connstring: &str, ttid: TenantTimelineId) -> anyhow::Result<Self> {
+        let inner = pageserver_client::page_service::Client::new(connstring.to_string())
             .await?
             .pagestream(ttid.tenant_id, ttid.timeline_id)
             .await?;
@@ -600,34 +641,36 @@ impl Client for LibpqClient {
     }
 }
 
-/// A gRPC client using the raw, no-frills gRPC client.
+/// A gRPC Pageserver client.
 struct GrpcClient {
-    req_tx: tokio::sync::mpsc::Sender<proto::GetPageRequest>,
-    resp_rx: tonic::Streaming<proto::GetPageResponse>,
+    req_tx: tokio::sync::mpsc::Sender<page_api::GetPageRequest>,
+    resp_rx: Pin<Box<dyn Stream<Item = Result<page_api::GetPageResponse, tonic::Status>> + Send>>,
 }
 
 impl GrpcClient {
-    async fn new(connstring: String, ttid: TenantTimelineId) -> anyhow::Result<Self> {
-        let mut client = pageserver_page_api::proto::PageServiceClient::connect(connstring).await?;
+    async fn new(
+        connstring: &str,
+        ttid: TenantTimelineId,
+        compression: bool,
+    ) -> anyhow::Result<Self> {
+        let mut client = page_api::Client::connect(
+            connstring.to_string(),
+            ttid.tenant_id,
+            ttid.timeline_id,
+            ShardIndex::unsharded(),
+            None,
+            compression.then_some(tonic::codec::CompressionEncoding::Zstd),
+        )
+        .await?;
 
         // The channel has a buffer size of 1, since 0 is not allowed. It does not matter, since the
         // benchmark will control the queue depth (i.e. in-flight requests) anyway, and requests are
         // buffered by Tonic and the OS too.
         let (req_tx, req_rx) = tokio::sync::mpsc::channel(1);
         let req_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
-        let mut req = tonic::Request::new(req_stream);
-        let metadata = req.metadata_mut();
-        metadata.insert("neon-tenant-id", ttid.tenant_id.to_string().try_into()?);
-        metadata.insert("neon-timeline-id", ttid.timeline_id.to_string().try_into()?);
-        metadata.insert("neon-shard-id", "0000".try_into()?);
+        let resp_rx = Box::pin(client.get_pages(req_stream).await?);
 
-        let resp = client.get_pages(req).await?;
-        let resp_stream = resp.into_inner();
-
-        Ok(Self {
-            req_tx,
-            resp_rx: resp_stream,
-        })
+        Ok(Self { req_tx, resp_rx })
     }
 }
 
@@ -641,27 +684,27 @@ impl Client for GrpcClient {
         rel: RelTag,
         blks: Vec<u32>,
     ) -> anyhow::Result<()> {
-        let req = proto::GetPageRequest {
+        let req = page_api::GetPageRequest {
             request_id: req_id,
-            request_class: proto::GetPageClass::Normal as i32,
-            read_lsn: Some(proto::ReadLsn {
-                request_lsn: req_lsn.0,
-                not_modified_since_lsn: mod_lsn.0,
-            }),
-            rel: Some(rel.into()),
-            block_number: blks,
+            request_class: page_api::GetPageClass::Normal,
+            read_lsn: page_api::ReadLsn {
+                request_lsn: req_lsn,
+                not_modified_since_lsn: Some(mod_lsn),
+            },
+            rel,
+            block_numbers: blks,
         };
         self.req_tx.send(req).await?;
         Ok(())
     }
 
     async fn recv_get_page(&mut self) -> anyhow::Result<(u64, Vec<Bytes>)> {
-        let resp = self.resp_rx.message().await?.unwrap();
+        let resp = self.resp_rx.next().await.unwrap().unwrap();
         anyhow::ensure!(
-            resp.status_code == proto::GetPageStatusCode::Ok as i32,
+            resp.status_code == page_api::GetPageStatusCode::Ok,
             "unexpected status code: {}",
-            resp.status_code
+            resp.status_code,
         );
-        Ok((resp.request_id, resp.page_image))
+        Ok((resp.request_id, resp.page_images))
     }
 }

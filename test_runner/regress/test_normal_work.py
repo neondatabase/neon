@@ -17,7 +17,7 @@ def check_tenant(
     config_lines = [
         f"neon.safekeeper_proto_version = {safekeeper_proto_version}",
     ]
-    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id, config_lines=config_lines)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id, config_lines=config_lines, grpc=True)
     # we rely upon autocommit after each statement
     res_1 = endpoint.safe_psql_many(
         queries=[
@@ -64,6 +64,11 @@ def test_normal_work(
     """
 
     neon_env_builder.num_safekeepers = num_safekeepers
+
+    if safekeeper_proto_version == 2:
+        neon_env_builder.storage_controller_config = {
+            "timelines_onto_safekeepers": False,
+        }
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 

@@ -58,7 +58,7 @@ pub enum LfcPrewarmState {
     },
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+#[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcOffloadState {
     #[default]
@@ -83,6 +83,16 @@ pub struct ComputeStatusResponse {
     pub error: Option<String>,
 }
 
+#[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminateMode {
+    #[default]
+    /// wait 30s till returning from /terminate to allow control plane to get the error
+    Fast,
+    /// return from /terminate immediately as soon as all components are terminated
+    Immediate,
+}
+
 #[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeStatus {
@@ -103,9 +113,14 @@ pub enum ComputeStatus {
     // control-plane to terminate it.
     Failed,
     // Termination requested
-    TerminationPending,
+    TerminationPending { mode: TerminateMode },
     // Terminated Postgres
     Terminated,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct TerminateResponse {
+    pub lsn: Option<utils::lsn::Lsn>,
 }
 
 impl Display for ComputeStatus {
@@ -117,7 +132,7 @@ impl Display for ComputeStatus {
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),
             ComputeStatus::Failed => f.write_str("failed"),
-            ComputeStatus::TerminationPending => f.write_str("termination-pending"),
+            ComputeStatus::TerminationPending { .. } => f.write_str("termination-pending"),
             ComputeStatus::Terminated => f.write_str("terminated"),
         }
     }

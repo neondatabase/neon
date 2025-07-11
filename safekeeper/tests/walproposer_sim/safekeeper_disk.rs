@@ -7,8 +7,8 @@ use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
-use postgres_ffi::XLogSegNo;
 use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::{PgMajorVersion, XLogSegNo};
 use safekeeper::metrics::WalStorageMetrics;
 use safekeeper::state::TimelinePersistentState;
 use safekeeper::{control_file, wal_storage};
@@ -142,7 +142,7 @@ impl DiskWALStorage {
             write_lsn,
             write_record_lsn: flush_lsn,
             flush_record_lsn: flush_lsn,
-            decoder: WalStreamDecoder::new(flush_lsn, 16),
+            decoder: WalStreamDecoder::new(flush_lsn, PgMajorVersion::PG16),
             unflushed_bytes: BytesMut::new(),
             disk,
         })
@@ -151,7 +151,7 @@ impl DiskWALStorage {
     fn find_end_of_wal(disk: Arc<TimelineDisk>, start_lsn: Lsn) -> Result<Lsn> {
         let mut buf = [0; 8192];
         let mut pos = start_lsn.0;
-        let mut decoder = WalStreamDecoder::new(start_lsn, 16);
+        let mut decoder = WalStreamDecoder::new(start_lsn, PgMajorVersion::PG16);
         let mut result = start_lsn;
         loop {
             disk.wal.lock().read(pos, &mut buf);
@@ -204,7 +204,7 @@ impl wal_storage::Storage for DiskWALStorage {
                 self.decoder.available(),
                 startpos,
             );
-            self.decoder = WalStreamDecoder::new(startpos, 16);
+            self.decoder = WalStreamDecoder::new(startpos, PgMajorVersion::PG16);
         }
         self.decoder.feed_bytes(buf);
         loop {
@@ -242,7 +242,7 @@ impl wal_storage::Storage for DiskWALStorage {
         self.write_record_lsn = end_pos;
         self.flush_record_lsn = end_pos;
         self.unflushed_bytes.clear();
-        self.decoder = WalStreamDecoder::new(end_pos, 16);
+        self.decoder = WalStreamDecoder::new(end_pos, PgMajorVersion::PG16);
 
         Ok(())
     }

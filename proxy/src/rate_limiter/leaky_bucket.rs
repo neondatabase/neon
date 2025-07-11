@@ -39,7 +39,11 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
 
         let config = config.map_or(self.default_config, Into::into);
 
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
+        if self
+            .access_count
+            .fetch_add(1, Ordering::AcqRel)
+            .is_multiple_of(2048)
+        {
             self.do_gc(now);
         }
 
@@ -69,9 +73,8 @@ pub struct LeakyBucketConfig {
     pub max: f64,
 }
 
-#[cfg(test)]
 impl LeakyBucketConfig {
-    pub(crate) fn new(rps: f64, max: f64) -> Self {
+    pub fn new(rps: f64, max: f64) -> Self {
         assert!(rps > 0.0, "rps must be positive");
         assert!(max > 0.0, "max must be positive");
         Self { rps, max }

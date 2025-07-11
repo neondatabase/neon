@@ -18,11 +18,6 @@ pub(super) async fn authenticate(
     secret: AuthSecret,
 ) -> auth::Result<ComputeCredentials> {
     let scram_keys = match secret {
-        #[cfg(any(test, feature = "testing"))]
-        AuthSecret::Md5(_) => {
-            debug!("auth endpoint chooses MD5");
-            return Err(auth::AuthError::MalformedPassword("MD5 not supported"));
-        }
         AuthSecret::Scram(secret) => {
             debug!("auth endpoint chooses SCRAM");
 

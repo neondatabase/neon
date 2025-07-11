@@ -1,9 +1,11 @@
 # pgxs/neon/Makefile
 
+
 MODULE_big = neon
 OBJS = \
 	$(WIN32RES) \
 	communicator.o \
+	communicator_new.o \
 	extension_server.o \
 	file_cache.o \
 	hll.o \
@@ -20,13 +22,18 @@ OBJS = \
 	unstable_extensions.o \
 	walproposer.o \
 	walproposer_pg.o \
-	control_plane_connector.o \
+	neon_ddl_handler.o \
 	walsender_hooks.o \
-	$(LIBCOMMUNICATOR_PATH)/libcommunicator.a
+	$(NEON_CARGO_ARTIFACT_TARGET_DIR)/libcommunicator.a
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
 SHLIB_LINK = -lcurl
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S), Darwin)
+    SHLIB_LINK += -framework Security -framework CoreFoundation -framework SystemConfiguration
+endif
 
 EXTENSION = neon
 DATA = \
@@ -53,6 +60,17 @@ WALPROP_OBJS = \
 	walproposer.o \
 	neon_utils.o \
 	walproposer_compat.o
+
+# libcommunicator.a is built by cargo from the Rust sources under communicator/
+# subdirectory. `cargo build` also generates communicator_bindings.h.
+communicator_new.o: communicator/communicator_bindings.h
+
+$(NEON_CARGO_ARTIFACT_TARGET_DIR)/libcommunicator.a communicator/communicator_bindings.h &:
+	(cd $(srcdir)/communicator && cargo build $(CARGO_BUILD_FLAGS) $(CARGO_PROFILE))
+
+# Force `cargo build` every time. Some of the Rust sources might have
+# changed.
+.PHONY: $(NEON_CARGO_ARTIFACT_TARGET_DIR)/libcommunicator.a communicator/communicator_bindings.h
 
 .PHONY: walproposer-lib
 walproposer-lib: CPPFLAGS += -DWALPROPOSER_LIB

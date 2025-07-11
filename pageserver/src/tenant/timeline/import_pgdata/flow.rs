@@ -36,8 +36,8 @@ use pageserver_api::keyspace::{ShardedRange, singleton_range};
 use pageserver_api::models::{ShardImportProgress, ShardImportProgressV1, ShardImportStatus};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::BLCKSZ;
 use postgres_ffi::relfile_utils::parse_relfilename;
-use postgres_ffi::{BLCKSZ, pg_constants};
 use remote_storage::RemotePath;
 use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
@@ -56,6 +56,7 @@ use crate::pgdatadir_mapping::{
 };
 use crate::task_mgr::TaskKind;
 use crate::tenant::storage_layer::{AsLayerDesc, ImageLayerWriter, Layer};
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 
 pub async fn run(
     timeline: Arc<Timeline>,
@@ -557,7 +558,7 @@ impl PgDataDir {
                 PgDataDirDb::new(
                     storage,
                     &basedir.join(dboid.to_string()),
-                    pg_constants::DEFAULTTABLESPACE_OID,
+                    postgres_ffi_types::constants::DEFAULTTABLESPACE_OID,
                     dboid,
                     &datadir_path,
                 )
@@ -570,7 +571,7 @@ impl PgDataDir {
             PgDataDirDb::new(
                 storage,
                 &datadir_path.join("global"),
-                postgres_ffi::pg_constants::GLOBALTABLESPACE_OID,
+                postgres_ffi_types::constants::GLOBALTABLESPACE_OID,
                 0,
                 &datadir_path,
             )
@@ -984,7 +985,10 @@ impl ChunkProcessingJob {
             let (desc, path) = writer.finish(ctx).await?;
 
             {
-                let guard = timeline.layers.read().await;
+                let guard = timeline
+                    .layers
+                    .read(LayerManagerLockHolder::ImportPgData)
+                    .await;
                 let existing_layer = guard.try_get_from_key(&desc.key());
                 if let Some(layer) = existing_layer {
                     if layer.metadata().generation == timeline.generation {
@@ -1007,7 +1011,10 @@ impl ChunkProcessingJob {
         // certain that the existing layer is identical to the new one, so in that case
         // we replace the old layer with the one we just generated.
 
-        let mut guard = timeline.layers.write().await;
+        let mut guard = timeline
+            .layers
+            .write(LayerManagerLockHolder::ImportPgData)
+            .await;
 
         let existing_layer = guard
             .try_get_from_key(&resident_layer.layer_desc().key())
@@ -1036,7 +1043,7 @@ impl ChunkProcessingJob {
             }
         }
 
-        crate::tenant::timeline::drop_wlock(guard);
+        crate::tenant::timeline::drop_layer_manager_wlock(guard);
 
         timeline
             .remote_client

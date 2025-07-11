@@ -43,7 +43,7 @@ pub async fn get_installed_extensions(mut conf: Config) -> Result<InstalledExten
         let (mut client, connection) = conf.connect(NoTls).await?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                eprintln!("connection error: {e}");
             }
         });
 
@@ -57,7 +57,7 @@ pub async fn get_installed_extensions(mut conf: Config) -> Result<InstalledExten
         let (client, connection) = conf.connect(NoTls).await?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                eprintln!("connection error: {e}");
             }
         });
 

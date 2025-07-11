@@ -23,6 +23,7 @@ use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::feature_resolver::FeatureResolver;
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
+use pageserver::page_service::GrpcPageServiceHandler;
 use pageserver::task_mgr::{
     BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
 };
@@ -568,11 +569,14 @@ fn start_pageserver(
         pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    let (basebackup_prepare_sender, basebackup_prepare_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (basebackup_cache, basebackup_prepare_receiver) = BasebackupCache::new(
+        conf.basebackup_cache_dir(),
+        conf.basebackup_cache_config.clone(),
+    );
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
-    let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
+
+    let tenant_manager = mgr::init(
         conf,
         background_purges.clone(),
         TenantSharedResources {
@@ -580,18 +584,16 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
-            feature_resolver,
+            basebackup_cache: Arc::clone(&basebackup_cache),
+            feature_resolver: feature_resolver.clone(),
         },
-        order,
         shutdown_pageserver.clone(),
-    ))?;
+    );
     let tenant_manager = Arc::new(tenant_manager);
+    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(tenant_manager.clone(), order))?;
 
-    let basebackup_cache = BasebackupCache::spawn(
+    basebackup_cache.spawn_background_task(
         BACKGROUND_RUNTIME.handle(),
-        conf.basebackup_cache_dir(),
-        conf.basebackup_cache_config.clone(),
         basebackup_prepare_receiver,
         Arc::clone(&tenant_manager),
         shutdown_pageserver.child_token(),
@@ -713,6 +715,7 @@ fn start_pageserver(
                 disk_usage_eviction_state,
                 deletion_queue.new_client(),
                 secondary_controller,
+                feature_resolver,
             )
             .context("Failed to initialize router state")?,
         );
@@ -803,7 +806,6 @@ fn start_pageserver(
         } else {
             None
         },
-        basebackup_cache,
     );
 
     // Spawn a Pageserver gRPC server task. It will spawn separate tasks for
@@ -814,7 +816,7 @@ fn start_pageserver(
     // necessary?
     let mut page_service_grpc = None;
     if let Some(grpc_listener) = grpc_listener {
-        page_service_grpc = Some(page_service::spawn_grpc(
+        page_service_grpc = Some(GrpcPageServiceHandler::spawn(
             tenant_manager.clone(),
             grpc_auth,
             otel_guard.as_ref().map(|g| g.dispatch.clone()),

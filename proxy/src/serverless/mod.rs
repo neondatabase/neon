@@ -29,13 +29,13 @@ use futures::future::{Either, select};
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
+use http_util::{NEON_REQUEST_ID, uuid_to_header_value};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use sql_over_http::{NEON_REQUEST_ID, uuid_to_header_value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -50,10 +50,10 @@ use crate::context::RequestContext;
 use crate::ext::TaskExt;
 use crate::metrics::Metrics;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
-use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
+use crate::util::run_until_cancelled;
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 pub(crate) const AUTH_BROKER_SNI: &str = "apiauth";
@@ -417,12 +417,7 @@ async fn request_handler(
     if config.http_config.accept_websockets
         && framed_websockets::upgrade::is_upgrade_request(&request)
     {
-        let ctx = RequestContext::new(
-            session_id,
-            conn_info,
-            crate::metrics::Protocol::Ws,
-            &config.region,
-        );
+        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Ws);
 
         ctx.set_user_agent(
             request
@@ -462,12 +457,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response.map(|b| b.map_err(|x| match x {}).boxed()))
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
-        let ctx = RequestContext::new(
-            session_id,
-            conn_info,
-            crate::metrics::Protocol::Http,
-            &config.region,
-        );
+        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
         let span = ctx.span();
 
         let testodrome_id = request

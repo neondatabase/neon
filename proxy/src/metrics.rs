@@ -238,13 +238,6 @@ pub enum Bool {
 
 #[derive(FixedCardinalityLabel, Copy, Clone)]
 #[label(singleton = "outcome")]
-pub enum Outcome {
-    Success,
-    Failed,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "outcome")]
 pub enum CacheOutcome {
     Hit,
     Miss,
@@ -610,11 +603,11 @@ pub enum RedisEventsCount {
     BranchCreated,
     ProjectCreated,
     CancelSession,
-    PasswordUpdate,
-    AllowedIpsUpdate,
-    AllowedVpcEndpointIdsUpdateForProjects,
-    AllowedVpcEndpointIdsUpdateForAllProjectsInOrg,
-    BlockPublicOrVpcAccessUpdate,
+    InvalidateRole,
+    InvalidateEndpoint,
+    InvalidateProject,
+    InvalidateProjects,
+    InvalidateOrg,
 }
 
 pub struct ThreadPoolWorkers(usize);

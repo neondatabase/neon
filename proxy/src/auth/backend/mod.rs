@@ -14,20 +14,21 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info};
 
-use crate::auth::{self, AuthError, ComputeUserInfoMaybeEndpoint, validate_password_and_exchange};
+use crate::auth::{self, ComputeUserInfoMaybeEndpoint, validate_password_and_exchange};
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::errors::GetAuthInfoError;
+use crate::control_plane::messages::EndpointRateLimitConfig;
 use crate::control_plane::{
     self, AccessBlockerFlags, AuthSecret, CachedNodeInfo, ControlPlaneApi, EndpointAccessControl,
     RoleAccessControl,
 };
 use crate::intern::EndpointIdInt;
-use crate::pglb::connect_compute::ComputeConnectBackend;
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
+use crate::proxy::wake_compute::WakeComputeBackend;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::Stream;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
@@ -168,11 +169,8 @@ impl ComputeUserInfo {
 
 #[cfg_attr(test, derive(Debug))]
 pub(crate) enum ComputeCredentialKeys {
-    #[cfg(any(test, feature = "testing"))]
-    Password(Vec<u8>),
     AuthKeys(AuthKeys),
     JwtPayload(Vec<u8>),
-    None,
 }
 
 impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
@@ -232,11 +230,8 @@ async fn auth_quirks(
         config.is_vpc_acccess_proxy,
     )?;
 
-    let endpoint = EndpointIdInt::from(&info.endpoint);
-    let rate_limit_config = None;
-    if !endpoint_rate_limiter.check(endpoint, rate_limit_config, 1) {
-        return Err(AuthError::too_many_connections());
-    }
+    access_controls.connection_attempt_rate_limit(ctx, &info.endpoint, &endpoint_rate_limiter)?;
+
     let role_access = api
         .get_role_access_control(ctx, &info.endpoint, &info.user)
         .await?;
@@ -350,15 +345,13 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
                     Err(e) => {
                         // The password could have been changed, so we invalidate the cache.
                         // We should only invalidate the cache if the TTL might have expired.
-                        if e.is_password_failed() {
-                            #[allow(irrefutable_let_patterns)]
-                            if let ControlPlaneClient::ProxyV1(api) = &*api {
-                                if let Some(ep) = &user_info.endpoint_id {
-                                    api.caches
-                                        .project_info
-                                        .maybe_invalidate_role_secret(ep, &user_info.user);
-                                }
-                            }
+                        if e.is_password_failed()
+                            && let ControlPlaneClient::ProxyV1(api) = &*api
+                            && let Some(ep) = &user_info.endpoint_id
+                        {
+                            api.caches
+                                .project_info
+                                .maybe_invalidate_role_secret(ep, &user_info.user);
                         }
 
                         Err(e)
@@ -403,27 +396,21 @@ impl Backend<'_, ComputeUserInfo> {
                 allowed_ips: Arc::new(vec![]),
                 allowed_vpce: Arc::new(vec![]),
                 flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
             }),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
+impl WakeComputeBackend for Backend<'_, ComputeUserInfo> {
     async fn wake_compute(
         &self,
         ctx: &RequestContext,
     ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         match self {
-            Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
+            Self::ControlPlane(api, info) => api.wake_compute(ctx, info).await,
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
-        }
-    }
-
-    fn get_keys(&self) -> &ComputeCredentialKeys {
-        match self {
-            Self::ControlPlane(_, creds) => &creds.keys,
-            Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
 }
@@ -448,6 +435,7 @@ mod tests {
     use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
     use crate::config::AuthenticationConfig;
     use crate::context::RequestContext;
+    use crate::control_plane::messages::EndpointRateLimitConfig;
     use crate::control_plane::{
         self, AccessBlockerFlags, CachedNodeInfo, EndpointAccessControl, RoleAccessControl,
     };
@@ -486,6 +474,7 @@ mod tests {
                 allowed_ips: Arc::new(self.ips.clone()),
                 allowed_vpce: Arc::new(self.vpc_endpoint_ids.clone()),
                 flags: self.access_blocker_flags,
+                rate_limits: EndpointRateLimitConfig::default(),
             })
         }
 

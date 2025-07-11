@@ -4,11 +4,14 @@
 //! provide it by calling the compute_ctl's `/compute_ctl` endpoint, or
 //! compute_ctl can fetch it by calling the control plane's API.
 use std::collections::HashMap;
+use std::fmt::Display;
 
+use anyhow::anyhow;
 use indexmap::IndexMap;
 use regex::Regex;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
+use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -102,7 +105,11 @@ pub struct ComputeSpec {
     // updated to fill these fields, we can make these non optional.
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
-    pub pageserver_connstring: Option<String>,
+
+    // Pageserver information can be passed in two different ways:
+    // 1. Here
+    // 2. in cluster.settings. This is legacy, we are switching to method 1.
+    pub pageserver_connection_info: Option<PageserverConnectionInfo>,
 
     // More neon ids that we expose to the compute_ctl
     // and to postgres as neon extension GUCs.
@@ -178,9 +185,18 @@ pub struct ComputeSpec {
     /// JWT for authorizing requests to endpoint storage service
     pub endpoint_storage_token: Option<String>,
 
-    /// Download LFC state from endpoint_storage and pass it to Postgres on startup
     #[serde(default)]
+    /// Download LFC state from endpoint storage and pass it to Postgres on compute startup
     pub autoprewarm: bool,
+
+    #[serde(default)]
+    /// Upload LFC state to endpoint storage periodically. Default value (None) means "don't upload"
+    pub offload_lfc_interval_seconds: Option<std::num::NonZeroU64>,
+
+    /// Suspend timeout in seconds.
+    ///
+    /// We use this value to derive other values, such as the installed extensions metric.
+    pub suspend_timeout_seconds: i64,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -200,6 +216,20 @@ pub enum ComputeFeature {
     /// `parse_unknown_features()` for more details.
     #[serde(other)]
     UnknownFeature,
+}
+
+/// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverConnectionInfo {
+    pub shards: HashMap<u32, PageserverShardConnectionInfo>,
+
+    pub prefer_grpc: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverShardConnectionInfo {
+    pub libpq_url: Option<String>,
+    pub grpc_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -319,6 +349,12 @@ impl ComputeMode {
     }
 }
 
+impl Display for ComputeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_type_str())
+    }
+}
+
 /// Log level for audit logging
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ComputeAudit {
@@ -427,6 +463,47 @@ pub struct JwksSettings {
     pub jwks_url: String,
     pub provider_name: String,
     pub jwt_audience: Option<String>,
+}
+
+/// Protocol used to connect to a Pageserver. Parsed from the connstring scheme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PageserverProtocol {
+    /// The original protocol based on libpq and COPY. Uses postgresql:// or postgres:// scheme.
+    #[default]
+    Libpq,
+    /// A newer, gRPC-based protocol. Uses grpc:// scheme.
+    Grpc,
+}
+
+impl PageserverProtocol {
+    /// Parses the protocol from a connstring scheme. Defaults to Libpq if no scheme is given.
+    /// Errors if the connstring is an invalid URL.
+    pub fn from_connstring(connstring: &str) -> anyhow::Result<Self> {
+        let scheme = match Url::parse(connstring) {
+            Ok(url) => url.scheme().to_lowercase(),
+            Err(url::ParseError::RelativeUrlWithoutBase) => return Ok(Self::default()),
+            Err(err) => return Err(anyhow!("invalid connstring URL: {err}")),
+        };
+        match scheme.as_str() {
+            "postgresql" | "postgres" => Ok(Self::Libpq),
+            "grpc" => Ok(Self::Grpc),
+            scheme => Err(anyhow!("invalid protocol scheme: {scheme}")),
+        }
+    }
+
+    /// Returns the URL scheme for the protocol, for use in connstrings.
+    pub fn scheme(&self) -> &'static str {
+        match self {
+            Self::Libpq => "postgresql",
+            Self::Grpc => "grpc",
+        }
+    }
+}
+
+impl Display for PageserverProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.scheme())
+    }
 }
 
 #[cfg(test)]

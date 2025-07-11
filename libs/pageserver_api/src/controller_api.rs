@@ -52,6 +52,8 @@ pub struct NodeRegisterRequest {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
@@ -101,6 +103,8 @@ pub struct TenantLocateResponseShard {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
@@ -152,6 +156,8 @@ pub struct NodeDescribeResponse {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -345,12 +351,42 @@ impl Default for ShardSchedulingPolicy {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum NodeLifecycle {
+    Active,
+    Deleted,
+}
+
+impl FromStr for NodeLifecycle {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "deleted" => Ok(Self::Deleted),
+            _ => Err(anyhow::anyhow!("Unknown node lifecycle '{s}'")),
+        }
+    }
+}
+
+impl From<NodeLifecycle> for String {
+    fn from(value: NodeLifecycle) -> String {
+        use NodeLifecycle::*;
+        match value {
+            Active => "active",
+            Deleted => "deleted",
+        }
+        .to_string()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum NodeSchedulingPolicy {
     Active,
     Filling,
     Pause,
     PauseForRestart,
     Draining,
+    Deleting,
 }
 
 impl FromStr for NodeSchedulingPolicy {
@@ -363,6 +399,7 @@ impl FromStr for NodeSchedulingPolicy {
             "pause" => Ok(Self::Pause),
             "pause_for_restart" => Ok(Self::PauseForRestart),
             "draining" => Ok(Self::Draining),
+            "deleting" => Ok(Self::Deleting),
             _ => Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
         }
     }
@@ -377,6 +414,7 @@ impl From<NodeSchedulingPolicy> for String {
             Pause => "pause",
             PauseForRestart => "pause_for_restart",
             Draining => "draining",
+            Deleting => "deleting",
         }
         .to_string()
     }
@@ -385,6 +423,7 @@ impl From<NodeSchedulingPolicy> for String {
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum SkSchedulingPolicy {
     Active,
+    Activating,
     Pause,
     Decomissioned,
 }
@@ -395,6 +434,7 @@ impl FromStr for SkSchedulingPolicy {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "active" => Self::Active,
+            "activating" => Self::Activating,
             "pause" => Self::Pause,
             "decomissioned" => Self::Decomissioned,
             _ => {
@@ -411,6 +451,7 @@ impl From<SkSchedulingPolicy> for String {
         use SkSchedulingPolicy::*;
         match value {
             Active => "active",
+            Activating => "activating",
             Pause => "pause",
             Decomissioned => "decomissioned",
         }
@@ -511,6 +552,11 @@ pub struct TimelineImportRequest {
     pub sk_set: Vec<NodeId>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TimelineSafekeeperMigrateRequest {
+    pub new_sk_set: Vec<NodeId>,
+}
+
 #[cfg(test)]
 mod test {
     use serde_json;
@@ -542,8 +588,7 @@ mod test {
         let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
+            "expect unknown field `unknown_field` error, got: {err}"
         );
     }
 

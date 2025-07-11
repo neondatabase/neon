@@ -22,7 +22,7 @@ pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<Cat
 
     spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            eprintln!("connection error: {e}");
         }
     });
 
@@ -119,7 +119,7 @@ pub async fn get_database_schema(
         _ => {
             let mut lines = stderr_reader.lines();
             if let Some(line) = lines.next_line().await? {
-                if line.contains(&format!("FATAL:  database \"{}\" does not exist", dbname)) {
+                if line.contains(&format!("FATAL:  database \"{dbname}\" does not exist")) {
                     return Err(SchemaDumpError::DatabaseDoesNotExist);
                 }
                 warn!("pg_dump stderr: {}", line)

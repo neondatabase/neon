@@ -12,6 +12,7 @@ use postgres_protocol2::message::frontend;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::cancel_token::RawCancelToken;
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{Host, SslMode};
 use crate::query::RowStream;
@@ -89,7 +90,7 @@ pub struct InnerClient {
 }
 
 impl InnerClient {
-    pub fn start(&mut self) -> Result<PartialQuery, Error> {
+    pub fn start(&mut self) -> Result<PartialQuery<'_>, Error> {
         self.responses.waiting += 1;
         Ok(PartialQuery(Some(self)))
     }
@@ -226,7 +227,7 @@ impl Client {
         &mut self,
         statement: &str,
         params: I,
-    ) -> Result<RowStream, Error>
+    ) -> Result<RowStream<'_>, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,
@@ -261,7 +262,7 @@ impl Client {
     pub(crate) async fn simple_query_raw(
         &mut self,
         query: &str,
-    ) -> Result<SimpleQueryStream, Error> {
+    ) -> Result<SimpleQueryStream<'_>, Error> {
         simple_query::simple_query(self.inner_mut(), query).await
     }
 
@@ -331,10 +332,12 @@ impl Client {
     /// connection associated with this client.
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken {
-            socket_config: Some(self.socket_config.clone()),
-            ssl_mode: self.ssl_mode,
-            process_id: self.process_id,
-            secret_key: self.secret_key,
+            socket_config: self.socket_config.clone(),
+            raw: RawCancelToken {
+                ssl_mode: self.ssl_mode,
+                process_id: self.process_id,
+                secret_key: self.secret_key,
+            },
         }
     }
 

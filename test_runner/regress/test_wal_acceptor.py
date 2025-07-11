@@ -229,7 +229,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
 
     # Test timeline_list endpoint.
     http_cli = env.safekeepers[0].http_client()
-    assert len(http_cli.timeline_list()) == 3
+    assert len(http_cli.timeline_list()) == 4
 
 
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
@@ -433,6 +433,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.extend(
         [
             ".*Timeline .* was not found in global map.*",
+            ".*Timeline .* has been deleted.*",
             ".*Timeline .* was cancelled and cannot be used anymore.*",
         ]
     )
@@ -739,8 +740,8 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.create_branch("test_timeline_status")
-    endpoint = env.endpoints.create_start("test_timeline_status")
+    timeline_id = env.initial_timeline
+    endpoint = env.endpoints.create_start("main")
 
     wa = env.safekeepers[0]
 
@@ -1291,6 +1292,12 @@ def test_lagging_sk(neon_env_builder: NeonEnvBuilder):
 # it works without compute at all.
 def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
+
+    # timelines should be created the old way
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": False,
+    }
+
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
@@ -1531,6 +1538,11 @@ def test_safekeeper_without_pageserver(
 
 
 def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
+    # timelines should be created the old way manually until we have migration support
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": False,
+    }
+
     def execute_payload(endpoint: Endpoint):
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
@@ -1660,6 +1672,15 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder, live_sk_change: bool):
     res = env.safekeepers[3].pull_timeline(
         [env.safekeepers[0], env.safekeepers[2]], tenant_id, timeline_id
     )
+    sk_id_1 = env.safekeepers[0].safekeeper_id()
+    sk_id_3 = env.safekeepers[2].safekeeper_id()
+    sk_id_4 = env.safekeepers[3].safekeeper_id()
+    new_conf = MembershipConfiguration(
+        generation=2, members=[sk_id_1, sk_id_3, sk_id_4], new_members=None
+    )
+    for i in [0, 2, 3]:
+        env.safekeepers[i].http_client().membership_switch(tenant_id, timeline_id, new_conf)
+
     log.info("Finished pulling timeline")
     log.info(res)
 
@@ -1704,13 +1725,15 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     env = neon_env_builder.init_start()
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     (src_sk, dst_sk) = (env.safekeepers[0], env.safekeepers[2])
 
+    dst_sk.stop()
+
+    [tenant_id, timeline_id] = env.create_tenant()
+
     log.info("use only first 2 safekeepers, 3rd will be seeded")
-    endpoint = env.endpoints.create("main")
+    endpoint = env.endpoints.create("main", tenant_id=tenant_id)
     endpoint.active_safekeepers = [1, 2]
     endpoint.start()
     endpoint.safe_psql("create table t(key int, value text)")
@@ -1722,6 +1745,7 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     src_http = src_sk.http_client()
     # run pull_timeline which will halt before downloading files
     src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "pause"))
+    dst_sk.start()
     pt_handle = PropagatingThread(
         target=dst_sk.pull_timeline, args=([src_sk], tenant_id, timeline_id)
     )
@@ -1781,23 +1805,27 @@ def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
 
     (src_sk, dst_sk) = (env.safekeepers[0], env.safekeepers[2])
+    dst_sk.stop()
 
+    src_http = src_sk.http_client()
+    src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "pause"))
+
+    timeline_id = env.create_branch("pull_timeline_term_changes")
+
+    # run pull_timeline which will halt before downloading files
     log.info("use only first 2 safekeepers, 3rd will be seeded")
-    ep = env.endpoints.create("main")
+    ep = env.endpoints.create("pull_timeline_term_changes")
     ep.active_safekeepers = [1, 2]
     ep.start()
     ep.safe_psql("create table t(key int, value text)")
     ep.safe_psql("insert into t select generate_series(1, 1000), 'pear'")
 
-    src_http = src_sk.http_client()
-    # run pull_timeline which will halt before downloading files
-    src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "pause"))
     pt_handle = PropagatingThread(
         target=dst_sk.pull_timeline, args=([src_sk], tenant_id, timeline_id)
     )
+    dst_sk.start()
     pt_handle.start()
     src_sk.wait_until_paused("sk-snapshot-after-list-pausable")
 
@@ -1806,7 +1834,7 @@ def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
 
     # restart compute to bump term
     ep.stop()
-    ep = env.endpoints.create("main")
+    ep = env.endpoints.create("pull_timeline_term_changes")
     ep.active_safekeepers = [1, 2]
     ep.start()
     ep.safe_psql("insert into t select generate_series(1, 100), 'pear'")
@@ -1928,12 +1956,18 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
 @run_only_on_default_postgres("tests only safekeeper API")
 def test_membership_api(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 1
+    # timelines should be created the old way
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": False,
+    }
+
     env = neon_env_builder.init_start()
 
     # These are expected after timeline deletion on safekeepers.
     env.pageserver.allowed_errors.extend(
         [
             ".*Timeline .* was not found in global map.*",
+            ".*Timeline .* has been deleted.*",
             ".*Timeline .* was cancelled and cannot be used anymore.*",
         ]
     )
@@ -2007,6 +2041,12 @@ def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
     created manually, later storcon will do that.
     """
     neon_env_builder.num_safekeepers = 3
+
+    # timelines should be created the old way manually
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": False,
+    }
+
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
@@ -2062,7 +2102,7 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.create_branch("test_idle_reconnections")
+    timeline_id = env.initial_timeline
 
     def collect_stats() -> dict[str, float]:
         # we need to collect safekeeper_pg_queries_received_total metric from all safekeepers
@@ -2093,7 +2133,7 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
 
     collect_stats()
 
-    endpoint = env.endpoints.create_start("test_idle_reconnections")
+    endpoint = env.endpoints.create_start("main")
     # just write something to the timeline
     endpoint.safe_psql("create table t(i int)")
     collect_stats()
@@ -2700,3 +2740,85 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
             raise Exception("Uneviction did not happen on source safekeeper yet")
 
     wait_until(unevicted)
+
+
+def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that the timeline disk usage circuit breaker works as expected. We test that:
+    1. The circuit breaker kicks in when the timeline's disk usage exceeds the configured limit,
+       and it causes writes to hang.
+    2. The hanging writes unblock when the issue resolves (by restarting the safekeeper in the
+       test to simulate a more realistic production troubleshooting scenario).
+    3. We can continue to write as normal after the issue resolves.
+    4. There is no data corruption throughout the test.
+    """
+    # Set up environment with a very small disk usage limit (1KB)
+    neon_env_builder.num_safekeepers = 1
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
+
+    # Set a very small disk usage limit (1KB)
+    neon_env_builder.safekeeper_extra_opts = ["--max-timeline-disk-usage-bytes=1024"]
+
+    env = neon_env_builder.init_start()
+
+    # Create a timeline and endpoint
+    env.create_branch("test_timeline_disk_usage_limit")
+    endpoint = env.endpoints.create_start("test_timeline_disk_usage_limit")
+
+    # Get the safekeeper
+    sk = env.safekeepers[0]
+
+    # Inject a failpoint to stop WAL backup
+    with sk.http_client() as http_cli:
+        http_cli.configure_failpoints([("backup-lsn-range-pausable", "pause")])
+
+    # Write some data that will exceed the 1KB limit. While the failpoint is active, this operation
+    # will hang as Postgres encounters safekeeper-returned errors and retries.
+    def run_hanging_insert():
+        with closing(endpoint.connect()) as bg_conn:
+            with bg_conn.cursor() as bg_cur:
+                # This should generate more than 1KB of WAL
+                bg_cur.execute("create table t(key int, value text)")
+                bg_cur.execute("insert into t select generate_series(1,2000), 'payload'")
+
+    # Start the inserts in a background thread
+    bg_thread = threading.Thread(target=run_hanging_insert)
+    bg_thread.start()
+
+    # Wait for the error message to appear in the compute log
+    def error_logged():
+        return endpoint.log_contains("WAL storage utilization exceeds configured limit") is not None
+
+    wait_until(error_logged)
+    log.info("Found expected error message in compute log, resuming.")
+
+    # Sanity check that the hanging insert is indeed still hanging. Otherwise means the circuit breaker we
+    # implemented didn't work as expected.
+    time.sleep(2)
+    assert bg_thread.is_alive(), (
+        "The hanging insert somehow unblocked without resolving the disk usage issue!"
+    )
+
+    log.info("Restarting the safekeeper to resume WAL backup.")
+    # Restart the safekeeper with defaults to both clear the failpoint and resume the larger disk usage limit.
+    for sk in env.safekeepers:
+        sk.stop().start(extra_opts=[])
+
+    # The hanging insert will now complete. Join the background thread so that we can
+    # verify that the insert completed successfully.
+    bg_thread.join(timeout=120)
+    assert not bg_thread.is_alive(), "Hanging insert did not complete after safekeeper restart"
+    log.info("Hanging insert unblocked.")
+
+    # Verify we can continue to write as normal
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("insert into t select generate_series(2001,3000), 'payload'")
+
+    # Sanity check data correctness
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("select count(*) from t")
+            # 2000 rows from first insert + 1000 from last insert
+            assert cur.fetchone() == (3000,)

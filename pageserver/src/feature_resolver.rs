@@ -1,20 +1,26 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
+use pageserver_api::config::NodeMetadata;
 use posthog_client_lite::{
-    CaptureEvent, FeatureResolverBackgroundLoop, PostHogClientConfig, PostHogEvaluationError,
+    CaptureEvent, FeatureResolverBackgroundLoop, PostHogEvaluationError,
     PostHogFlagFilterPropertyValue,
 };
+use rand::Rng;
 use remote_storage::RemoteStorageKind;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
 
-use crate::{config::PageServerConf, metrics::FEATURE_FLAG_EVALUATION};
+use crate::{config::PageServerConf, metrics::FEATURE_FLAG_EVALUATION, tenant::TenantShard};
+
+const DEFAULT_POSTHOG_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
 pub struct FeatureResolver {
     inner: Option<Arc<FeatureResolverBackgroundLoop>>,
     internal_properties: Option<Arc<HashMap<String, PostHogFlagFilterPropertyValue>>>,
+    force_overrides_for_testing: Arc<ArcSwap<HashMap<String, String>>>,
 }
 
 impl FeatureResolver {
@@ -22,7 +28,15 @@ impl FeatureResolver {
         Self {
             inner: None,
             internal_properties: None,
+            force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
         }
+    }
+
+    pub fn update(&self, spec: String) -> anyhow::Result<()> {
+        if let Some(inner) = &self.inner {
+            inner.update(spec)?;
+        }
+        Ok(())
     }
 
     pub fn spawn(
@@ -32,16 +46,24 @@ impl FeatureResolver {
     ) -> anyhow::Result<Self> {
         // DO NOT block in this function: make it return as fast as possible to avoid startup delays.
         if let Some(posthog_config) = &conf.posthog_config {
-            let inner = FeatureResolverBackgroundLoop::new(
-                PostHogClientConfig {
-                    server_api_key: posthog_config.server_api_key.clone(),
-                    client_api_key: posthog_config.client_api_key.clone(),
-                    project_id: posthog_config.project_id.clone(),
-                    private_api_url: posthog_config.private_api_url.clone(),
-                    public_api_url: posthog_config.public_api_url.clone(),
-                },
-                shutdown_pageserver,
-            );
+            let posthog_client_config = match posthog_config.clone().try_into_posthog_config() {
+                Ok(config) => config,
+                Err(e) => {
+                    tracing::warn!(
+                        "invalid posthog config, skipping posthog integration: {}",
+                        e
+                    );
+                    return Ok(FeatureResolver {
+                        inner: None,
+                        internal_properties: None,
+                        force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(
+                            HashMap::new(),
+                        ))),
+                    });
+                }
+            };
+            let inner =
+                FeatureResolverBackgroundLoop::new(posthog_client_config, shutdown_pageserver);
             let inner = Arc::new(inner);
 
             // The properties shared by all tenants on this pageserver.
@@ -86,9 +108,38 @@ impl FeatureResolver {
                         }
                     }
                 }
-                // TODO: add pageserver URL.
+                // TODO: move this to a background task so that we don't block startup in case of slow disk
+                let metadata_path = conf.metadata_path();
+                match std::fs::read_to_string(&metadata_path) {
+                    Ok(metadata_str) => match serde_json::from_str::<NodeMetadata>(&metadata_str) {
+                        Ok(metadata) => {
+                            properties.insert(
+                                "hostname".to_string(),
+                                PostHogFlagFilterPropertyValue::String(metadata.http_host),
+                            );
+                            if let Some(cplane_region) = metadata.other.get("region_id") {
+                                if let Some(cplane_region) = cplane_region.as_str() {
+                                    // This region contains the cell number
+                                    properties.insert(
+                                        "neon_region".to_string(),
+                                        PostHogFlagFilterPropertyValue::String(
+                                            cplane_region.to_string(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse metadata.json: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to read metadata.json: {}", e);
+                    }
+                }
                 Arc::new(properties)
             };
+
             let fake_tenants = {
                 let mut tenants = Vec::new();
                 for i in 0..10 {
@@ -98,9 +149,16 @@ impl FeatureResolver {
                         conf.id,
                         i
                     );
+
+                    let tenant_properties = PerTenantProperties {
+                        remote_size_mb: Some(rand::thread_rng().gen_range(100.0..1000000.00)),
+                    }
+                    .into_posthog_properties();
+
                     let properties = Self::collect_properties_inner(
                         distinct_id.clone(),
                         Some(&internal_properties),
+                        &tenant_properties,
                     );
                     tenants.push(CaptureEvent {
                         event: "initial_tenant_report".to_string(),
@@ -110,18 +168,23 @@ impl FeatureResolver {
                 }
                 tenants
             };
-            // TODO: make refresh period configurable
-            inner
-                .clone()
-                .spawn(handle, Duration::from_secs(60), fake_tenants);
+            inner.clone().spawn(
+                handle,
+                posthog_config
+                    .refresh_interval
+                    .unwrap_or(DEFAULT_POSTHOG_REFRESH_INTERVAL),
+                fake_tenants,
+            );
             Ok(FeatureResolver {
                 inner: Some(inner),
                 internal_properties: Some(internal_properties),
+                force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
             })
         } else {
             Ok(FeatureResolver {
                 inner: None,
                 internal_properties: None,
+                force_overrides_for_testing: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
             })
         }
     }
@@ -129,6 +192,7 @@ impl FeatureResolver {
     fn collect_properties_inner(
         tenant_id: String,
         internal_properties: Option<&HashMap<String, PostHogFlagFilterPropertyValue>>,
+        tenant_properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> HashMap<String, PostHogFlagFilterPropertyValue> {
         let mut properties = HashMap::new();
         if let Some(internal_properties) = internal_properties {
@@ -140,6 +204,9 @@ impl FeatureResolver {
             "tenant_id".to_string(),
             PostHogFlagFilterPropertyValue::String(tenant_id),
         );
+        for (key, value) in tenant_properties.iter() {
+            properties.insert(key.clone(), value.clone());
+        }
         properties
     }
 
@@ -147,8 +214,13 @@ impl FeatureResolver {
     pub(crate) fn collect_properties(
         &self,
         tenant_id: TenantId,
+        tenant_properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> HashMap<String, PostHogFlagFilterPropertyValue> {
-        Self::collect_properties_inner(tenant_id.to_string(), self.internal_properties.as_deref())
+        Self::collect_properties_inner(
+            tenant_id.to_string(),
+            self.internal_properties.as_deref(),
+            tenant_properties,
+        )
     }
 
     /// Evaluate a multivariate feature flag. Currently, we do not support any properties.
@@ -160,12 +232,18 @@ impl FeatureResolver {
         &self,
         flag_key: &str,
         tenant_id: TenantId,
+        tenant_properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> Result<String, PostHogEvaluationError> {
+        let force_overrides = self.force_overrides_for_testing.load();
+        if let Some(value) = force_overrides.get(flag_key) {
+            return Ok(value.clone());
+        }
+
         if let Some(inner) = &self.inner {
             let res = inner.feature_store().evaluate_multivariate(
                 flag_key,
                 &tenant_id.to_string(),
-                &self.collect_properties(tenant_id),
+                &self.collect_properties(tenant_id, tenant_properties),
             );
             match &res {
                 Ok(value) => {
@@ -198,12 +276,22 @@ impl FeatureResolver {
         &self,
         flag_key: &str,
         tenant_id: TenantId,
+        tenant_properties: &HashMap<String, PostHogFlagFilterPropertyValue>,
     ) -> Result<(), PostHogEvaluationError> {
+        let force_overrides = self.force_overrides_for_testing.load();
+        if let Some(value) = force_overrides.get(flag_key) {
+            return if value == "true" {
+                Ok(())
+            } else {
+                Err(PostHogEvaluationError::NoConditionGroupMatched)
+            };
+        }
+
         if let Some(inner) = &self.inner {
             let res = inner.feature_store().evaluate_boolean(
                 flag_key,
                 &tenant_id.to_string(),
-                &self.collect_properties(tenant_id),
+                &self.collect_properties(tenant_id, tenant_properties),
             );
             match &res {
                 Ok(()) => {
@@ -230,8 +318,97 @@ impl FeatureResolver {
             inner.feature_store().is_feature_flag_boolean(flag_key)
         } else {
             Err(PostHogEvaluationError::NotAvailable(
-                "PostHog integration is not enabled".to_string(),
+                "PostHog integration is not enabled, cannot auto-determine the flag type"
+                    .to_string(),
             ))
         }
+    }
+
+    /// Force override a feature flag for testing. This is only for testing purposes. Assume the caller only call it
+    /// from a single thread so it won't race.
+    pub fn force_override_for_testing(&self, flag_key: &str, value: Option<&str>) {
+        let mut force_overrides = self.force_overrides_for_testing.load().as_ref().clone();
+        if let Some(value) = value {
+            force_overrides.insert(flag_key.to_string(), value.to_string());
+        } else {
+            force_overrides.remove(flag_key);
+        }
+        self.force_overrides_for_testing
+            .store(Arc::new(force_overrides));
+    }
+}
+
+struct PerTenantProperties {
+    pub remote_size_mb: Option<f64>,
+}
+
+impl PerTenantProperties {
+    pub fn into_posthog_properties(self) -> HashMap<String, PostHogFlagFilterPropertyValue> {
+        let mut properties = HashMap::new();
+        if let Some(remote_size_mb) = self.remote_size_mb {
+            properties.insert(
+                "tenant_remote_size_mb".to_string(),
+                PostHogFlagFilterPropertyValue::Number(remote_size_mb),
+            );
+        }
+        properties
+    }
+}
+
+#[derive(Clone)]
+pub struct TenantFeatureResolver {
+    inner: FeatureResolver,
+    tenant_id: TenantId,
+    cached_tenant_properties: Arc<ArcSwap<HashMap<String, PostHogFlagFilterPropertyValue>>>,
+}
+
+impl TenantFeatureResolver {
+    pub fn new(inner: FeatureResolver, tenant_id: TenantId) -> Self {
+        Self {
+            inner,
+            tenant_id,
+            cached_tenant_properties: Arc::new(ArcSwap::new(Arc::new(HashMap::new()))),
+        }
+    }
+
+    pub fn evaluate_multivariate(&self, flag_key: &str) -> Result<String, PostHogEvaluationError> {
+        self.inner.evaluate_multivariate(
+            flag_key,
+            self.tenant_id,
+            &self.cached_tenant_properties.load(),
+        )
+    }
+
+    pub fn evaluate_boolean(&self, flag_key: &str) -> Result<(), PostHogEvaluationError> {
+        self.inner.evaluate_boolean(
+            flag_key,
+            self.tenant_id,
+            &self.cached_tenant_properties.load(),
+        )
+    }
+
+    pub fn collect_properties(&self) -> HashMap<String, PostHogFlagFilterPropertyValue> {
+        self.inner
+            .collect_properties(self.tenant_id, &self.cached_tenant_properties.load())
+    }
+
+    pub fn is_feature_flag_boolean(&self, flag_key: &str) -> Result<bool, PostHogEvaluationError> {
+        self.inner.is_feature_flag_boolean(flag_key)
+    }
+
+    pub fn update_cached_tenant_properties(&self, tenant_shard: &TenantShard) {
+        let mut remote_size_mb = None;
+        for timeline in tenant_shard.list_timelines() {
+            let size = timeline.metrics.resident_physical_size_get();
+            if size == 0 {
+                remote_size_mb = None;
+            }
+            if let Some(ref mut remote_size_mb) = remote_size_mb {
+                *remote_size_mb += size as f64 / 1024.0 / 1024.0;
+            }
+        }
+        self.cached_tenant_properties.store(Arc::new(
+            PerTenantProperties { remote_size_mb }.into_posthog_properties(),
+        ));
     }
 }

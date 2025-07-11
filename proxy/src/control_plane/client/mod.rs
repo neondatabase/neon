@@ -10,6 +10,7 @@ use clashmap::ClashMap;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
+use super::{EndpointAccessControl, RoleAccessControl};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
 use crate::cache::endpoints::EndpointsCache;
@@ -21,8 +22,6 @@ use crate::error::ReportableError;
 use crate::metrics::ApiLockMetrics;
 use crate::rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token};
 use crate::types::EndpointId;
-
-use super::{EndpointAccessControl, RoleAccessControl};
 
 #[non_exhaustive]
 #[derive(Clone)]
@@ -214,7 +213,12 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         self.metrics
             .semaphore_acquire_seconds
             .observe(now.elapsed().as_secs_f64());
-        debug!("acquired permit {:?}", now.elapsed().as_secs_f64());
+
+        if permit.is_ok() {
+            debug!(elapsed = ?now.elapsed(), "acquired permit");
+        } else {
+            debug!(elapsed = ?now.elapsed(), "timed out acquiring permit");
+        }
         Ok(WakeComputePermit { permit: permit? })
     }
 

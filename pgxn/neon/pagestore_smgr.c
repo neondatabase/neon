@@ -62,6 +62,7 @@
 
 #include "bitmap.h"
 #include "communicator.h"
+#include "communicator_new.h"
 #include "file_cache.h"
 #include "neon.h"
 #include "neon_lwlsncache.h"
@@ -76,28 +77,18 @@
 typedef PGAlignedBlock PGIOAlignedBlock;
 #endif
 
-/*
- * If DEBUG_COMPARE_LOCAL is defined, we pass through all the SMGR API
- * calls to md.c, and *also* do the calls to the Page Server. On every
- * read, compare the versions we read from local disk and Page Server,
- * and Assert that they are identical.
- */
-/* #define DEBUG_COMPARE_LOCAL */
-
-#ifdef DEBUG_COMPARE_LOCAL
 #include "access/nbtree.h"
 #include "storage/bufpage.h"
 #include "access/xlog_internal.h"
 
 static char *hexdump_page(char *page);
-#endif
 
 #define IS_LOCAL_REL(reln) (\
 	NInfoGetDbOid(InfoFromSMgrRel(reln)) != 0 && \
 		NInfoGetRelNumber(InfoFromSMgrRel(reln)) >= FirstNormalObjectId \
 )
 
-const int	SmgrTrace = DEBUG5;
+const int	SmgrTrace = DEBUG1;
 
 /* unlogged relation build states */
 typedef enum
@@ -107,6 +98,8 @@ typedef enum
 	UNLOGGED_BUILD_PHASE_2,
 	UNLOGGED_BUILD_NOT_PERMANENT
 } UnloggedBuildPhase;
+
+int debug_compare_local;
 
 static NRelFileInfo unlogged_build_rel_info;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
@@ -478,9 +471,10 @@ neon_init(void)
 	old_redo_read_buffer_filter = redo_read_buffer_filter;
 	redo_read_buffer_filter = neon_redo_read_buffer_filter;
 
-#ifdef DEBUG_COMPARE_LOCAL
-	mdinit();
-#endif
+	if (debug_compare_local)
+	{
+		mdinit();
+	}
 }
 
 /*
@@ -751,11 +745,6 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (get_cached_relsize(InfoFromSMgrRel(reln), forkNum, &n_blocks))
-	{
-		return true;
-	}
-
 	/*
 	 * \d+ on a view calls smgrexists with 0/0/0 relfilenode. The page server
 	 * will error out if you check that, because the whole dbdir for
@@ -779,10 +768,20 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		return false;
 	}
 
-	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum,
-						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
+	if (neon_enable_new_communicator)
+		return communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum);
+	else
+	{
+		if (get_cached_relsize(InfoFromSMgrRel(reln), forkNum, &n_blocks))
+		{
+			return true;
+		}
 
-	return communicator_exists(InfoFromSMgrRel(reln), forkNum, &request_lsns);
+		neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum,
+							  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
+
+		return communicator_exists(InfoFromSMgrRel(reln), forkNum, &request_lsns);
+	}
 }
 
 /*
@@ -803,13 +802,16 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
-#ifdef DEBUG_COMPARE_LOCAL
-			mdcreate(reln, forkNum, forkNum == INIT_FORKNUM || isRedo);
-			if (forkNum == MAIN_FORKNUM)
-				mdcreate(reln, INIT_FORKNUM, true);
-#else
-			mdcreate(reln, forkNum, isRedo);
-#endif
+			if (debug_compare_local)
+			{
+				mdcreate(reln, forkNum, forkNum == INIT_FORKNUM || isRedo);
+				if (forkNum == MAIN_FORKNUM)
+					mdcreate(reln, INIT_FORKNUM, true);
+			}
+			else
+			{
+				mdcreate(reln, forkNum, isRedo);
+			}
 			return;
 
 		default:
@@ -820,38 +822,52 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 		 forkNum);
 
-	/*
-	 * Newly created relation is empty, remember that in the relsize cache.
-	 *
-	 * Note that in REDO, this is called to make sure the relation fork
-	 * exists, but it does not truncate the relation. So, we can only update
-	 * the relsize if it didn't exist before.
-	 *
-	 * Also, in redo, we must make sure to update the cached size of the
-	 * relation, as that is the primary source of truth for REDO's file length
-	 * considerations, and as file extension isn't (perfectly) logged, we need
-	 * to take care of that before we hit file size checks.
-	 *
-	 * FIXME: This is currently not just an optimization, but required for
-	 * correctness. Postgres can call smgrnblocks() on the newly-created
-	 * relation. Currently, we don't call SetLastWrittenLSN() when a new
-	 * relation created, so if we didn't remember the size in the relsize
-	 * cache, we might call smgrnblocks() on the newly-created relation before
-	 * the creation WAL record hass been received by the page server.
-	 */
-	if (isRedo)
+	if (neon_enable_new_communicator)
 	{
-		update_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0);
-		get_cached_relsize(InfoFromSMgrRel(reln), forkNum,
-						   &reln->smgr_cached_nblocks[forkNum]);
+		if (isRedo)
+		{
+			if (!communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum))
+				communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
+		}
+		else
+			communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
 	}
 	else
-		set_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0);
+	{
+		/*
+		 * Newly created relation is empty, remember that in the relsize cache.
+		 *
+		 * Note that in REDO, this is called to make sure the relation fork
+		 * exists, but it does not truncate the relation. So, we can only update
+		 * the relsize if it didn't exist before.
+		 *
+		 * Also, in redo, we must make sure to update the cached size of the
+		 * relation, as that is the primary source of truth for REDO's file length
+		 * considerations, and as file extension isn't (perfectly) logged, we need
+		 * to take care of that before we hit file size checks.
+		 *
+		 * FIXME: This is currently not just an optimization, but required for
+		 * correctness. Postgres can call smgrnblocks() on the newly-created
+		 * relation. Currently, we don't call SetLastWrittenLSN() when a new
+		 * relation created, so if we didn't remember the size in the relsize
+		 * cache, we might call smgrnblocks() on the newly-created relation before
+		 * the creation WAL record hass been received by the page server.
+		 */
+		if (isRedo)
+		{
+			update_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0);
+			get_cached_relsize(InfoFromSMgrRel(reln), forkNum,
+							   &reln->smgr_cached_nblocks[forkNum]);
+		}
+		else
+			set_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0);
+	}
 
-#ifdef DEBUG_COMPARE_LOCAL
-	if (IS_LOCAL_REL(reln))
-		mdcreate(reln, forkNum, isRedo);
-#endif
+	if (debug_compare_local)
+	{
+		if (IS_LOCAL_REL(reln))
+			mdcreate(reln, forkNum, isRedo);
+	}
 }
 
 /*
@@ -877,13 +893,19 @@ neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
 {
 	/*
 	 * Might or might not exist locally, depending on whether it's an unlogged
-	 * or permanent relation (or if DEBUG_COMPARE_LOCAL is set). Try to
+	 * or permanent relation (or if debug_compare_local is set). Try to
 	 * unlink, it won't do any harm if the file doesn't exist.
 	 */
 	mdunlink(rinfo, forkNum, isRedo);
+
 	if (!NRelFileInfoBackendIsTemp(rinfo))
 	{
-		forget_cached_relsize(InfoFromNInfoB(rinfo), forkNum);
+		if (neon_enable_new_communicator)
+		{
+			communicator_new_rel_unlink(InfoFromNInfoB(rinfo), forkNum);
+		}
+		else
+			forget_cached_relsize(InfoFromNInfoB(rinfo), forkNum);
 	}
 }
 
@@ -963,7 +985,6 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		neon_wallog_page(reln, forkNum, n_blocks++, buffer, true);
 
 	neon_wallog_page(reln, forkNum, blkno, buffer, false);
-	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1);
 
 	lsn = PageGetLSN((Page) buffer);
 	neon_log(SmgrTrace, "smgrextend called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
@@ -971,34 +992,51 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
-
-#ifdef DEBUG_COMPARE_LOCAL
-	if (IS_LOCAL_REL(reln))
-		mdextend(reln, forkNum, blkno, buffer, skipFsync);
-#endif
-
-	/*
-	 * smgr_extend is often called with an all-zeroes page, so
-	 * lsn==InvalidXLogRecPtr. An smgr_write() call will come for the buffer
-	 * later, after it has been initialized with the real page contents, and
-	 * it is eventually evicted from the buffer cache. But we need a valid LSN
-	 * to the relation metadata update now.
-	 */
-	if (lsn == InvalidXLogRecPtr)
+	if (neon_enable_new_communicator)
 	{
-		lsn = GetXLogInsertRecPtr();
-		neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum, blkno);
+		// FIXME: this can pass lsn == invalid. Is that ok?
+		communicator_new_rel_extend(InfoFromSMgrRel(reln), forkNum, blkno, (const void *) buffer, lsn);
+
+		if (debug_compare_local)
+		{
+			if (IS_LOCAL_REL(reln))
+				mdextend(reln, forkNum, blkno, buffer, skipFsync);
+		}
 	}
-	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
+	else
+	{
+		set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1);
+		lfc_write(InfoFromSMgrRel(reln), forkNum, blkno, buffer);
+
+		if (debug_compare_local)
+		{
+			if (IS_LOCAL_REL(reln))
+				mdextend(reln, forkNum, blkno, buffer, skipFsync);
+		}
+
+		/*
+		 * smgr_extend is often called with an all-zeroes page, so
+		 * lsn==InvalidXLogRecPtr. An smgr_write() call will come for the buffer
+		 * later, after it has been initialized with the real page contents, and
+		 * it is eventually evicted from the buffer cache. But we need a valid LSN
+		 * to the relation metadata update now.
+		 */
+		if (lsn == InvalidXLogRecPtr)
+		{
+			lsn = GetXLogInsertRecPtr();
+			neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum, blkno);
+		}
+		neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
+	}
 }
 
 #if PG_MAJORVERSION_NUM >= 16
 static void
-neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
+neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber start_block,
 				int nblocks, bool skipFsync)
 {
 	const PGIOAlignedBlock buffer = {0};
+	BlockNumber blocknum = start_block;
 	int			remblocks = nblocks;
 	XLogRecPtr	lsn = 0;
 
@@ -1051,10 +1089,11 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 						relpath(reln->smgr_rlocator, forkNum),
 						InvalidBlockNumber)));
 
-#ifdef DEBUG_COMPARE_LOCAL
-	if (IS_LOCAL_REL(reln))
-		mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
-#endif
+	if (debug_compare_local)
+	{
+		if (IS_LOCAL_REL(reln))
+			mdzeroextend(reln, forkNum, blocknum, nblocks, skipFsync);
+	}
 
 	/* Don't log any pages if we're not allowed to do so. */
 	if (!XLogInsertAllowed())
@@ -1080,11 +1119,14 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 
 		lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
 
-		for (int i = 0; i < count; i++)
+		if (!neon_enable_new_communicator)
 		{
-			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
-			neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum,
-									  blocknum + i);
+			for (int i = 0; i < count; i++)
+			{
+				lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+				neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum,
+									 blocknum + i);
+			}
 		}
 
 		blocknum += count;
@@ -1093,8 +1135,15 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 
 	Assert(lsn != 0);
 
-	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
-	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum);
+	if (neon_enable_new_communicator)
+	{
+		communicator_new_rel_zeroextend(InfoFromSMgrRel(reln), forkNum, start_block, nblocks, lsn);
+	}
+	else
+	{
+		neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
+		set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum);
+	}
 }
 #endif
 
@@ -1154,11 +1203,17 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
+	if (neon_enable_new_communicator)
+	{
+		communicator_new_prefetch_register_bufferv(InfoFromSMgrRel(reln), forknum, blocknum, nblocks);
+		return false;
+	}
+
 	tag.spcOid = reln->smgr_rlocator.locator.spcOid;
 	tag.dbOid = reln->smgr_rlocator.locator.dbOid;
 	tag.relNumber = reln->smgr_rlocator.locator.relNumber;
 	tag.forkNum = forknum;
-
+	
 	while (nblocks > 0)
 	{
 		int		iterblocks = Min(nblocks, PG_IOV_MAX);
@@ -1180,7 +1235,8 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		blocknum += iterblocks;
 	}
 
-	communicator_prefetch_pump_state();
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state();
 
 	return false;
 }
@@ -1193,8 +1249,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 static bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
-	BufferTag	tag;
-
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:					/* probably shouldn't happen, but ignore it */
@@ -1209,17 +1263,25 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
-		return false;
+	if (neon_enable_new_communicator)
+	{
+		communicator_new_prefetch_register_bufferv(InfoFromSMgrRel(reln), forknum, blocknum, 1);
+	}
+	else
+	{
+		BufferTag	tag;
 
-	tag.forkNum = forknum;
-	tag.blockNum = blocknum;
+		if (lfc_cache_contains(InfoFromSMgrRel(reln), forknum, blocknum))
+			return false;
 
-	CopyNRelFileInfoToBufTag(tag, InfoFromSMgrRel(reln));
+		tag.forkNum = forknum;
+		tag.blockNum = blocknum;
 
-	communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
+		CopyNRelFileInfoToBufTag(tag, InfoFromSMgrRel(reln));
+		communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
 
-	communicator_prefetch_pump_state();
+		communicator_prefetch_pump_state();
+	}
 
 	return false;
 }
@@ -1263,12 +1325,14 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 	 */
 	neon_log(SmgrTrace, "writeback noop");
 
-	communicator_prefetch_pump_state();
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state();
 
-#ifdef DEBUG_COMPARE_LOCAL
-	if (IS_LOCAL_REL(reln))
-		mdwriteback(reln, forknum, blocknum, nblocks);
-#endif
+	if (debug_compare_local)
+	{
+		if (IS_LOCAL_REL(reln))
+			mdwriteback(reln, forknum, blocknum, nblocks);
+	}
 }
 
 /*
@@ -1279,10 +1343,16 @@ void
 neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				 neon_request_lsns request_lsns, void *buffer)
 {
-	communicator_read_at_lsnv(rinfo, forkNum, blkno, &request_lsns, &buffer, 1, NULL);
+	if (neon_enable_new_communicator)
+	{
+		// FIXME: request_lsns is ignored. That affects the neon_test_utils callers.
+		// Add the capability to specify the LSNs explicitly, for the sake of neon_test_utils ?
+		communicator_new_read_at_lsnv(rinfo, forkNum, blkno, &buffer, 1);
+	}
+	else
+		communicator_read_at_lsnv(rinfo, forkNum, blkno, &request_lsns, &buffer, 1, NULL);
 }
 
-#ifdef DEBUG_COMPARE_LOCAL
 static void
 compare_with_local(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void* buffer, XLogRecPtr request_lsn)
 {
@@ -1364,7 +1434,6 @@ compare_with_local(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, voi
 		}
 	}
 }
-#endif
 
 
 #if PG_MAJORVERSION_NUM < 17
@@ -1407,50 +1476,64 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	/* Try to read PS results if they are available */
-	communicator_prefetch_pump_state();
-
-	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1);
-
-	present = 0;
-	bufferp = buffer;
-	if (communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, &bufferp, &present))
+	if (neon_enable_new_communicator)
 	{
-		/* Prefetch hit */
-#ifdef DEBUG_COMPARE_LOCAL
-		compare_with_local(reln, forkNum, blkno, buffer, request_lsns.request_lsn);
-#else
-		return;
-#endif
+		communicator_new_read_at_lsnv(InfoFromSMgrRel(reln), forkNum, blkno,
+									  (void *) &buffer, 1);
+	}
+	else
+	{
+		/* Try to read PS results if they are available */
+		communicator_prefetch_pump_state();
+
+		neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1);
+
+		present = 0;
+		bufferp = buffer;
+		if (communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, &bufferp, &present))
+		{
+			/* Prefetch hit */
+			if (debug_compare_local >= DEBUG_COMPARE_LOCAL_PREFETCH)
+			{
+				compare_with_local(reln, forkNum, blkno, buffer, request_lsns.request_lsn);
+			}
+			if (debug_compare_local <= DEBUG_COMPARE_LOCAL_PREFETCH)
+			{
+				return;
+			}
+		}
+
+		/* Try to read from local file cache */
+		if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
+		{
+			MyNeonCounters->file_cache_hits_total++;
+			if (debug_compare_local >= DEBUG_COMPARE_LOCAL_LFC)
+			{
+				compare_with_local(reln, forkNum, blkno, buffer, request_lsns.request_lsn);
+			}
+			if (debug_compare_local <= DEBUG_COMPARE_LOCAL_LFC)
+			{
+				return;
+			}
+		}
+
+		neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
+
+		/*
+		 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
+		 */
+		communicator_prefetch_pump_state();
 	}
 
-	/* Try to read from local file cache */
-	if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
+	if (debug_compare_local)
 	{
-		MyNeonCounters->file_cache_hits_total++;
-#ifdef DEBUG_COMPARE_LOCAL
 		compare_with_local(reln, forkNum, blkno, buffer, request_lsns.request_lsn);
-#else
-		return;
-#endif
 	}
-
-	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
-
-	/*
-	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
-	 */
-	communicator_prefetch_pump_state();
-
-#ifdef DEBUG_COMPARE_LOCAL
-	compare_with_local(reln, forkNum, blkno, buffer, request_lsns.request_lsn);
-#endif
 }
 #endif /* PG_MAJORVERSION_NUM <= 16 */
 
 #if PG_MAJORVERSION_NUM >= 17
 
-#ifdef DEBUG_COMPARE_LOCAL
 static void
 compare_with_localv(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void** buffers, BlockNumber nblocks, neon_request_lsns* request_lsns, bits8* read_pages)
 {
@@ -1465,7 +1548,6 @@ compare_with_localv(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, vo
 		}
 	}
 }
-#endif
 
 
 static void
@@ -1505,57 +1587,76 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				 nblocks, PG_IOV_MAX);
 
 	/* Try to read PS results if they are available */
-	communicator_prefetch_pump_state();
-
-	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
-						  request_lsns, nblocks);
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state();
 
 	memset(read_pages, 0, sizeof(read_pages));
 
-	prefetch_result = communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forknum,
-													blocknum, request_lsns, nblocks,
-													buffers, read_pages);
+	if (neon_enable_new_communicator)
+	{
+		communicator_new_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum,
+									  buffers, nblocks);
+	}
+	else
+	{
+		neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
+							  request_lsns, nblocks);
+		
+		prefetch_result = communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forknum,
+														blocknum, request_lsns, nblocks,
+														buffers, read_pages);
 
-#ifdef DEBUG_COMPARE_LOCAL
-	compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
-	memset(read_pages, 0, sizeof(read_pages));
-#else
-	if (prefetch_result == nblocks)
-		return;
-#endif
+		if (debug_compare_local >= DEBUG_COMPARE_LOCAL_PREFETCH)
+		{
+			compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
+		}
+		if (debug_compare_local <= DEBUG_COMPARE_LOCAL_PREFETCH && prefetch_result == nblocks)
+		{
+			return;
+		}
+		if (debug_compare_local > DEBUG_COMPARE_LOCAL_PREFETCH)
+		{
+			memset(read_pages, 0, sizeof(read_pages));
+		}
 
-	/* Try to read from local file cache */
-	lfc_result = lfc_readv_select(InfoFromSMgrRel(reln), forknum, blocknum, buffers,
-								  nblocks, read_pages);
+		/* Try to read from local file cache */
+		lfc_result = lfc_readv_select(InfoFromSMgrRel(reln), forknum, blocknum, buffers,
+									  nblocks, read_pages);
 
-	if (lfc_result > 0)
-		MyNeonCounters->file_cache_hits_total += lfc_result;
+		if (lfc_result > 0)
+			MyNeonCounters->file_cache_hits_total += lfc_result;
 
-#ifdef DEBUG_COMPARE_LOCAL
-	compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
-	memset(read_pages, 0, sizeof(read_pages));
-#else
-	/* Read all blocks from LFC, so we're done */
-	if (prefetch_result + lfc_result == nblocks)
-		return;
-#endif
+		if (debug_compare_local >= DEBUG_COMPARE_LOCAL_LFC)
+		{
+			compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
+		}
+		if (debug_compare_local <= DEBUG_COMPARE_LOCAL_LFC && prefetch_result + lfc_result == nblocks)
+		{
+			/* Read all blocks from LFC, so we're done */
+			return;
+		}
+		if (debug_compare_local > DEBUG_COMPARE_LOCAL_LFC)
+		{
+			memset(read_pages, 0, sizeof(read_pages));
+		}
 
-	communicator_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
-							  buffers, nblocks, read_pages);
+		communicator_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum, request_lsns,
+								  buffers, nblocks, read_pages);
 
-	/*
-	 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
-	 */
-	communicator_prefetch_pump_state();
+		/*
+		 * Try to receive prefetch results once again just to make sure we don't leave the smgr code while the OS might still have buffered bytes.
+		 */
+		communicator_prefetch_pump_state();
+	}
 
-#ifdef DEBUG_COMPARE_LOCAL
-	memset(read_pages, 0xFF, sizeof(read_pages));
-	compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
-#endif
+	if (debug_compare_local)
+	{
+		memset(read_pages, 0xFF, sizeof(read_pages));
+		compare_with_localv(reln, forknum, blocknum, buffers, nblocks, request_lsns, read_pages);
+	}
 }
 #endif
 
-#ifdef DEBUG_COMPARE_LOCAL
 static char *
 hexdump_page(char *page)
 {
@@ -1574,7 +1675,6 @@ hexdump_page(char *page)
 
 	return result.data;
 }
-#endif
 
 #if PG_MAJORVERSION_NUM < 17
 /*
@@ -1596,12 +1696,8 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-#ifndef DEBUG_COMPARE_LOCAL
 			/* This is a bit tricky. Check if the relation exists locally */
-			if (mdexists(reln, forknum))
-#else
-			if (mdexists(reln, INIT_FORKNUM))
-#endif
+			if (mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum))
 			{
 				/* It exists locally. Guess it's unlogged then. */
 #if PG_MAJORVERSION_NUM >= 17
@@ -1652,18 +1748,28 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 		 forknum, blocknum,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
+	if (neon_enable_new_communicator)
+	{
+		communicator_new_write_page(InfoFromSMgrRel(reln), forknum, blocknum, buffer, lsn);
+	}
+	else
+	{
+		lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
 
-	communicator_prefetch_pump_state();
+		communicator_prefetch_pump_state();
+	}
 
-#ifdef DEBUG_COMPARE_LOCAL
-	if (IS_LOCAL_REL(reln))
+	if (debug_compare_local)
+	{
+		if (IS_LOCAL_REL(reln))
+		{
 		#if PG_MAJORVERSION_NUM >= 17
-		mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
+			mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
 		#else
-		mdwrite(reln, forknum, blocknum, buffer, skipFsync);
+			mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 		#endif
-#endif
+		}
+	}
 }
 #endif
 
@@ -1677,12 +1783,8 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-#ifndef DEBUG_COMPARE_LOCAL
 			/* This is a bit tricky. Check if the relation exists locally */
-			if (mdexists(reln, forknum))
-#else
-			if (mdexists(reln, INIT_FORKNUM))
-#endif
+			if (mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum))
 			{
 				/* It exists locally. Guess it's unlogged then. */
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
@@ -1716,14 +1818,27 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 	neon_wallog_pagev(reln, forknum, blkno, nblocks, (const char **) buffers, false);
 
-	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
+	if (neon_enable_new_communicator)
+	{
+		for (int i = 0; i < nblocks; i++)
+		{
+			XLogRecPtr lsn = PageGetLSN((Page) buffers[i]);
 
-	communicator_prefetch_pump_state();
+			communicator_new_write_page(InfoFromSMgrRel(reln), forknum, blkno + i, buffers[i], lsn);
+		}
+	}
+	else
+	{
+		lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
 
-#ifdef DEBUG_COMPARE_LOCAL
-	if (IS_LOCAL_REL(reln))
-		mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
-#endif
+		communicator_prefetch_pump_state();
+	}
+
+	if (debug_compare_local)
+	{
+		if (IS_LOCAL_REL(reln))
+			mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+	}
 }
 
 #endif
@@ -1758,19 +1873,26 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (get_cached_relsize(InfoFromSMgrRel(reln), forknum, &n_blocks))
+	if (neon_enable_new_communicator)
 	{
-		neon_log(SmgrTrace, "cached nblocks for %u/%u/%u.%u: %u blocks",
-			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
-			 forknum, n_blocks);
-		return n_blocks;
+		n_blocks = communicator_new_rel_nblocks(InfoFromSMgrRel(reln), forknum);
 	}
+	else
+	{
+		if (get_cached_relsize(InfoFromSMgrRel(reln), forknum, &n_blocks))
+		{
+			neon_log(SmgrTrace, "cached nblocks for %u/%u/%u.%u: %u blocks",
+					 RelFileInfoFmt(InfoFromSMgrRel(reln)),
+					 forknum, n_blocks);
+			return n_blocks;
+		}
 
-	neon_get_request_lsns(InfoFromSMgrRel(reln), forknum,
-						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
+		neon_get_request_lsns(InfoFromSMgrRel(reln), forknum,
+							  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 
-	n_blocks = communicator_nblocks(InfoFromSMgrRel(reln), forknum, &request_lsns);
-	update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
+		n_blocks = communicator_nblocks(InfoFromSMgrRel(reln), forknum, &request_lsns);
+		update_cached_relsize(InfoFromSMgrRel(reln), forknum, n_blocks);
+	}
 
 	neon_log(SmgrTrace, "neon_nblocks: rel %u/%u/%u fork %u (request LSN %X/%08X): %u blocks",
 			 RelFileInfoFmt(InfoFromSMgrRel(reln)),
@@ -1791,10 +1913,17 @@ neon_dbsize(Oid dbNode)
 	neon_request_lsns request_lsns;
 	NRelFileInfo dummy_node = {0};
 
-	neon_get_request_lsns(dummy_node, MAIN_FORKNUM,
-						  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
+	if (neon_enable_new_communicator)
+	{
+		db_size = communicator_new_dbsize(dbNode);
+	}
+	else
+	{
+		neon_get_request_lsns(dummy_node, MAIN_FORKNUM,
+							  REL_METADATA_PSEUDO_BLOCKNO, &request_lsns, 1);
 
-	db_size = communicator_dbsize(dbNode, &request_lsns);
+		db_size = communicator_dbsize(dbNode, &request_lsns);
+	}
 
 	neon_log(SmgrTrace, "neon_dbsize: db %u (request LSN %X/%08X): %ld bytes",
 			 dbNode, LSN_FORMAT_ARGS(request_lsns.effective_request_lsn), db_size);
@@ -1808,8 +1937,6 @@ neon_dbsize(Oid dbNode)
 static void
 neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, BlockNumber nblocks)
 {
-	XLogRecPtr	lsn;
-
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
@@ -1833,39 +1960,49 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, Blo
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	set_cached_relsize(InfoFromSMgrRel(reln), forknum, nblocks);
+	if (neon_enable_new_communicator)
+	{
+		communicator_new_rel_truncate(InfoFromSMgrRel(reln), forknum, nblocks);
+	}
+	else
+	{
+		XLogRecPtr	lsn;
 
-	/*
-	 * Truncating a relation drops all its buffers from the buffer cache
-	 * without calling smgrwrite() on them. But we must account for that in
-	 * our tracking of last-written-LSN all the same: any future smgrnblocks()
-	 * request must return the new size after the truncation. We don't know
-	 * what the LSN of the truncation record was, so be conservative and use
-	 * the most recently inserted WAL record's LSN.
-	 */
-	lsn = GetXLogInsertRecPtr();
-	lsn = nm_adjust_lsn(lsn);
+		set_cached_relsize(InfoFromSMgrRel(reln), forknum, nblocks);
 
-	/*
-	 * Flush it, too. We don't actually care about it here, but let's uphold
-	 * the invariant that last-written LSN <= flush LSN.
-	 */
-	XLogFlush(lsn);
+		/*
+		 * Truncating a relation drops all its buffers from the buffer cache
+		 * without calling smgrwrite() on them. But we must account for that in
+		 * our tracking of last-written-LSN all the same: any future smgrnblocks()
+		 * request must return the new size after the truncation. We don't know
+		 * what the LSN of the truncation record was, so be conservative and use
+		 * the most recently inserted WAL record's LSN.
+		 */
+		lsn = GetXLogInsertRecPtr();
+		lsn = nm_adjust_lsn(lsn);
 
-	/*
-	 * Truncate may affect several chunks of relations. So we should either
-	 * update last written LSN for all of them, or update LSN for "dummy"
-	 * metadata block. Second approach seems more efficient. If the relation
-	 * is extended again later, the extension will update the last-written LSN
-	 * for the extended pages, so there's no harm in leaving behind obsolete
-	 * entries for the truncated chunks.
-	 */
-	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forknum);
+		/*
+		 * Flush it, too. We don't actually care about it here, but let's uphold
+		 * the invariant that last-written LSN <= flush LSN.
+		 */
+		XLogFlush(lsn);
 
-#ifdef DEBUG_COMPARE_LOCAL
-	if (IS_LOCAL_REL(reln))
-		mdtruncate(reln, forknum, old_blocks, nblocks);
-#endif
+		/*
+		 * Truncate may affect several chunks of relations. So we should either
+		 * update last written LSN for all of them, or update LSN for "dummy"
+		 * metadata block. Second approach seems more efficient. If the relation
+		 * is extended again later, the extension will update the last-written LSN
+		 * for the extended pages, so there's no harm in leaving behind obsolete
+		 * entries for the truncated chunks.
+		 */
+		neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forknum);
+	}
+
+	if (debug_compare_local)
+	{
+		if (IS_LOCAL_REL(reln))
+			mdtruncate(reln, forknum, old_blocks, nblocks);
+	}
 }
 
 /*
@@ -1902,12 +2039,14 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 
 	neon_log(SmgrTrace, "[NEON_SMGR] immedsync noop");
 
-	communicator_prefetch_pump_state();
+	if (!neon_enable_new_communicator)
+		communicator_prefetch_pump_state();
 
-#ifdef DEBUG_COMPARE_LOCAL
-	if (IS_LOCAL_REL(reln))
-		mdimmedsync(reln, forknum);
-#endif
+	if (debug_compare_local)
+	{
+		if (IS_LOCAL_REL(reln))
+			mdimmedsync(reln, forknum);
+	}
 }
 
 #if PG_MAJORVERSION_NUM >= 17
@@ -1934,10 +2073,11 @@ neon_registersync(SMgrRelation reln, ForkNumber forknum)
 
 	neon_log(SmgrTrace, "[NEON_SMGR] registersync noop");
 
-#ifdef DEBUG_COMPARE_LOCAL
-	if (IS_LOCAL_REL(reln))
-		mdimmedsync(reln, forknum);
-#endif
+	if (debug_compare_local)
+	{
+		if (IS_LOCAL_REL(reln))
+			mdimmedsync(reln, forknum);
+	}
 }
 #endif
 
@@ -1978,10 +2118,11 @@ neon_start_unlogged_build(SMgrRelation reln)
 		case RELPERSISTENCE_UNLOGGED:
 			unlogged_build_rel_info = InfoFromSMgrRel(reln);
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
-#ifdef DEBUG_COMPARE_LOCAL
-			if (!IsParallelWorker())
-				mdcreate(reln, INIT_FORKNUM, true);
-#endif
+			if (debug_compare_local)
+			{
+				if (!IsParallelWorker())
+					mdcreate(reln, INIT_FORKNUM, true);
+			}
 			return;
 
 		default:
@@ -2009,11 +2150,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 	 */
  	if (!IsParallelWorker())
 	{
-#ifndef DEBUG_COMPARE_LOCAL
-		mdcreate(reln, MAIN_FORKNUM, false);
-#else
-		mdcreate(reln, INIT_FORKNUM, true);
-#endif
+		mdcreate(reln, debug_compare_local ? INIT_FORKNUM : MAIN_FORKNUM, false);
 	}
 }
 
@@ -2103,18 +2240,22 @@ neon_end_unlogged_build(SMgrRelation reln)
 				 RelFileInfoFmt(InfoFromNInfoB(rinfob)),
 				 forknum);
 
-			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
-			lfc_invalidate(InfoFromNInfoB(rinfob), forknum, nblocks);
+			// FIXME: also do this with the new communicator
+			if (!neon_enable_new_communicator)
+			{
+				forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
+				lfc_invalidate(InfoFromNInfoB(rinfob), forknum, nblocks);
+			}
 
 			mdclose(reln, forknum);
-#ifndef DEBUG_COMPARE_LOCAL
-			/* use isRedo == true, so that we drop it immediately */
-			mdunlink(rinfob, forknum, true);
-#endif
+			if (!debug_compare_local)
+			{
+				/* use isRedo == true, so that we drop it immediately */
+				mdunlink(rinfob, forknum, true);
+			}
 		}
-#ifdef DEBUG_COMPARE_LOCAL
-		mdunlink(rinfob, INIT_FORKNUM, true);
-#endif
+		if (debug_compare_local)
+			mdunlink(rinfob, INIT_FORKNUM, true);
 	}
 	NRelFileInfoInvalidate(unlogged_build_rel_info);
 	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
@@ -2172,7 +2313,10 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	request_lsns.not_modified_since = not_modified_since;
 	request_lsns.effective_request_lsn = request_lsn;
 
-	n_blocks = communicator_read_slru_segment(kind, segno, &request_lsns, buffer);
+	if (neon_enable_new_communicator)
+		n_blocks = communicator_new_read_slru_segment(kind, segno, buffer);
+	else
+		n_blocks = communicator_read_slru_segment(kind, segno, &request_lsns, buffer);
 
 	return n_blocks;
 }
@@ -2209,7 +2353,8 @@ AtEOXact_neon(XactEvent event, void *arg)
 			}
 			break;
 	}
-	communicator_reconfigure_timeout_if_needed();
+	if (!neon_enable_new_communicator)
+		communicator_reconfigure_timeout_if_needed();
 }
 
 static const struct f_smgr neon_smgr =
@@ -2267,7 +2412,10 @@ smgr_init_neon(void)
 
 	smgr_init_standard();
 	neon_init();
-	communicator_init();
+	if (neon_enable_new_communicator)
+		communicator_new_init();
+	else
+		communicator_init();
 }
 
 
@@ -2278,6 +2426,20 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 
 	/* This is only used in WAL replay */
 	Assert(RecoveryInProgress());
+
+	if (neon_enable_new_communicator)
+	{
+		relsize = communicator_new_rel_nblocks(rinfo, forknum);
+
+		if (blkno >= relsize)
+			communicator_new_rel_zeroextend(rinfo, forknum, relsize, (blkno - relsize) + 1, end_recptr);
+
+		/*
+		 * FIXME: does this need to update the last-written LSN too, like the
+		 * old implementation?
+		 */
+		return;
+	}
 
 	/* Extend the relation if we know its size */
 	if (get_cached_relsize(rinfo, forknum, &relsize))
@@ -2444,7 +2606,10 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 		 * We should perform this check after assigning LwLSN to prevent
 		 * prefetching of some older version of the page by some other backend.
 		 */
-		no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);
+		if (neon_enable_new_communicator)
+			no_redo_needed = communicator_new_cache_contains(rinfo, forknum, blkno);
+		else
+			no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);
 	}
 
 	LWLockRelease(partitionLock);

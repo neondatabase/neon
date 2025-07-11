@@ -88,6 +88,12 @@ def test_storage_controller_smoke(
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     env = neon_env_builder.init_configs()
 
+    # These bubble up from safekeepers
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
+
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.start()
     env.storage_controller.start()
@@ -981,6 +987,102 @@ def test_storage_controller_compute_hook_retry(
         ]
         is False
     )
+
+
+@run_only_on_default_postgres("postgres behavior is not relevant")
+def test_storage_controller_compute_hook_keep_failing(
+    httpserver: HTTPServer,
+    neon_env_builder: NeonEnvBuilder,
+    httpserver_listen_address: ListenAddress,
+):
+    neon_env_builder.num_pageservers = 4
+    neon_env_builder.storage_controller_config = {"use_local_compute_notifications": False}
+    (host, port) = httpserver_listen_address
+    neon_env_builder.control_plane_hooks_api = f"http://{host}:{port}"
+
+    # Set up CP handler for compute notifications
+    status_by_tenant: dict[TenantId, int] = {}
+
+    def handler(request: Request):
+        notify_request = request.json
+        assert notify_request is not None
+        status = status_by_tenant[TenantId(notify_request["tenant_id"])]
+        log.info(f"Notify request[{status}]: {notify_request}")
+        return Response(status=status)
+
+    httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(handler)
+
+    # Run neon environment
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    # Create two tenants:
+    # - The first tenant is banned by CP and contains only one shard
+    # - The second tenant is allowed by CP and contains four shards
+    banned_tenant = TenantId.generate()
+    status_by_tenant[banned_tenant] = 200  # we will ban this tenant later
+    env.create_tenant(banned_tenant, placement_policy='{"Attached": 1}')
+
+    shard_count = 4
+    allowed_tenant = TenantId.generate()
+    status_by_tenant[allowed_tenant] = 200
+    env.create_tenant(allowed_tenant, shard_count=shard_count, placement_policy='{"Attached": 1}')
+
+    # Find the pageserver of the banned tenant
+    banned_tenant_ps = env.get_tenant_pageserver(banned_tenant)
+    assert banned_tenant_ps is not None
+    alive_pageservers = [p for p in env.pageservers if p.id != banned_tenant_ps.id]
+
+    # Stop pageserver and ban tenant to trigger failed reconciliation
+    status_by_tenant[banned_tenant] = 423
+    banned_tenant_ps.stop()
+    env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
+    env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
+    env.storage_controller.allowed_errors.append(".*Shard reconciliation is keep-failing.*")
+    env.storage_controller.node_configure(banned_tenant_ps.id, {"availability": "Offline"})
+
+    # Migrate all allowed tenant shards to the first alive pageserver
+    # to trigger storage controller optimizations due to affinity rules
+    for shard_number in range(shard_count):
+        env.storage_controller.tenant_shard_migrate(
+            TenantShardId(allowed_tenant, shard_number, shard_count),
+            alive_pageservers[0].id,
+            config=StorageControllerMigrationConfig(prewarm=False, override_scheduler=True),
+        )
+
+    # Make some reconcile_all calls to trigger optimizations
+    # RECONCILE_COUNT must be greater than storcon's MAX_CONSECUTIVE_RECONCILIATION_ERRORS
+    RECONCILE_COUNT = 12
+    for i in range(RECONCILE_COUNT):
+        try:
+            n = env.storage_controller.reconcile_all()
+            log.info(f"Reconciliation attempt {i} finished with success: {n}")
+        except StorageControllerApiException as e:
+            assert "Control plane tenant busy" in str(e)
+            log.info(f"Reconciliation attempt {i} finished with failure")
+
+        banned_descr = env.storage_controller.tenant_describe(banned_tenant)
+        assert banned_descr["shards"][0]["is_pending_compute_notification"] is True
+        time.sleep(2)
+
+    # Check that the allowed tenant shards are optimized due to affinity rules
+    locations = alive_pageservers[0].http_client().tenant_list_locations()["tenant_shards"]
+    not_optimized_shard_count = 0
+    for loc in locations:
+        tsi = TenantShardId.parse(loc[0])
+        if tsi.tenant_id != allowed_tenant:
+            continue
+        if loc[1]["mode"] == "AttachedSingle":
+            not_optimized_shard_count += 1
+        log.info(f"Shard {tsi} seen in mode {loc[1]['mode']}")
+
+    assert not_optimized_shard_count < shard_count, "At least one shard should be optimized"
+
+    # Unban the tenant and run reconciliations
+    status_by_tenant[banned_tenant] = 200
+    env.storage_controller.reconcile_all()
+    banned_descr = env.storage_controller.tenant_describe(banned_tenant)
+    assert banned_descr["shards"][0]["is_pending_compute_notification"] is False
 
 
 @run_only_on_default_postgres("this test doesn't start an endpoint")
@@ -2516,7 +2618,7 @@ def test_storage_controller_node_deletion(
         wait_until(assert_shards_migrated)
 
     log.info(f"Deleting pageserver {victim.id}")
-    env.storage_controller.node_delete(victim.id)
+    env.storage_controller.node_delete_old(victim.id)
 
     if not while_offline:
 
@@ -2549,6 +2651,60 @@ def test_storage_controller_node_deletion(
     env.storage_controller.start()
     assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
     env.storage_controller.consistency_check()
+
+
+def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 3
+    neon_env_builder.num_azs = 3
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_count = 12
+    shard_count_per_tenant = 16
+    tenant_ids = []
+
+    for _ in range(0, tenant_count):
+        tid = TenantId.generate()
+        tenant_ids.append(tid)
+        env.create_tenant(
+            tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
+        )
+
+    # Sanity check: initial creations should not leave the system in an unstable scheduling state
+    assert env.storage_controller.reconcile_all() == 0
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 3
+
+    env.storage_controller.configure_failpoints(("sleepy-delete-loop", "return(10000)"))
+
+    ps_id_to_delete = env.pageservers[0].id
+
+    env.storage_controller.warm_up_all_secondaries()
+    env.storage_controller.retryable_node_operation(
+        lambda ps_id: env.storage_controller.node_delete(ps_id),
+        ps_id_to_delete,
+        max_attempts=3,
+        backoff=2,
+    )
+
+    env.storage_controller.poll_node_status(
+        ps_id_to_delete,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.DELETING,
+        max_attempts=6,
+        backoff=2,
+    )
+
+    env.storage_controller.cancel_node_delete(ps_id_to_delete)
+
+    env.storage_controller.poll_node_status(
+        ps_id_to_delete,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.ACTIVE,
+        max_attempts=6,
+        backoff=2,
+    )
 
 
 @pytest.mark.parametrize("shard_count", [None, 2])
@@ -2956,7 +3112,7 @@ def test_storage_controller_leadership_transfer_during_split(
         env.storage_controller.allowed_errors.extend(
             [".*Unexpected child shard count.*", ".*Enqueuing background abort.*"]
         )
-        pause_failpoint = "shard-split-pre-complete"
+        pause_failpoint = "shard-split-pre-complete-pause"
         env.storage_controller.configure_failpoints((pause_failpoint, "pause"))
 
         split_fut = executor.submit(
@@ -3003,7 +3159,7 @@ def test_storage_controller_leadership_transfer_during_split(
         env.storage_controller.request(
             "PUT",
             f"http://127.0.0.1:{storage_controller_1_port}/debug/v1/failpoints",
-            json=[{"name": "shard-split-pre-complete", "actions": "off"}],
+            json=[{"name": pause_failpoint, "actions": "off"}],
             headers=env.storage_controller.headers(TokenScope.ADMIN),
         )
 
@@ -3091,6 +3247,58 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
 
     # allow for small delay between actually having cancelled and being able reconfigure again
     wait_until(reconfigure_node_again)
+
+
+def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 3
+
+    env = neon_env_builder.init_start()
+
+    def assert_nodes_count(n: int):
+        nodes = env.storage_controller.node_list()
+        assert len(nodes) == n
+
+    # Nodes count must remain the same before deletion
+    assert_nodes_count(3)
+
+    ps = env.pageservers[0]
+    env.storage_controller.node_delete_old(ps.id)
+
+    # After deletion, the node count must be reduced
+    assert_nodes_count(2)
+
+    # Running pageserver CLI init in a separate thread
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        log.info("Restarting tombstoned pageserver...")
+        ps.stop()
+        ps_start_fut = executor.submit(lambda: ps.start(await_active=False))
+
+        # After deleted pageserver restart, the node count must remain the same
+        assert_nodes_count(2)
+
+        tombstones = env.storage_controller.tombstone_list()
+        assert len(tombstones) == 1 and tombstones[0]["id"] == ps.id
+
+        env.storage_controller.tombstone_delete(ps.id)
+
+        tombstones = env.storage_controller.tombstone_list()
+        assert len(tombstones) == 0
+
+        # Wait for the pageserver start operation to complete.
+        # If it fails with an exception, we try restarting the pageserver since the failure
+        # may be due to the storage controller refusing to register the node.
+        # However, if we get a TimeoutError that means the pageserver is completely hung,
+        # which is an unexpected failure mode that we'll let propagate up.
+        try:
+            ps_start_fut.result(timeout=20)
+        except TimeoutError:
+            raise
+        except Exception:
+            log.info("Restarting deleted pageserver...")
+            ps.restart()
+
+        # Finally, the node can be registered again after tombstone is deleted
+        wait_until(lambda: assert_nodes_count(3))
 
 
 def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder):
@@ -3403,7 +3611,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     assert target.get_safekeeper(fake_id) is None
 
-    assert len(target.get_safekeepers()) == 0
+    start_sks = target.get_safekeepers()
 
     sk_0 = env.safekeepers[0]
 
@@ -3425,7 +3633,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     inserted = target.get_safekeeper(fake_id)
     assert inserted is not None
-    assert target.get_safekeepers() == [inserted]
+    assert target.get_safekeepers() == start_sks + [inserted]
     assert eq_safekeeper_records(body, inserted)
 
     # error out if pk is changed (unexpected)
@@ -3437,7 +3645,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert exc.value.status_code == 400
 
     inserted_again = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_again]
+    assert target.get_safekeepers() == start_sks + [inserted_again]
     assert inserted_again is not None
     assert eq_safekeeper_records(inserted, inserted_again)
 
@@ -3446,7 +3654,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["version"] += 1
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_now]
+    assert target.get_safekeepers() == start_sks + [inserted_now]
     assert inserted_now is not None
 
     assert eq_safekeeper_records(body, inserted_now)
@@ -3455,7 +3663,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["https_port"] = 123
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_now]
+    assert target.get_safekeepers() == start_sks + [inserted_now]
     assert inserted_now is not None
     assert eq_safekeeper_records(body, inserted_now)
     env.storage_controller.consistency_check()
@@ -3464,7 +3672,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     body["https_port"] = None
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)
-    assert target.get_safekeepers() == [inserted_now]
+    assert target.get_safekeepers() == start_sks + [inserted_now]
     assert inserted_now is not None
     assert eq_safekeeper_records(body, inserted_now)
     env.storage_controller.consistency_check()
@@ -3472,18 +3680,21 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     # some small tests for the scheduling policy querying and returning APIs
     newest_info = target.get_safekeeper(inserted["id"])
     assert newest_info
-    assert newest_info["scheduling_policy"] == "Pause"
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
-    newest_info = target.get_safekeeper(inserted["id"])
-    assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
-    # Ensure idempotency
-    target.safekeeper_scheduling_policy(inserted["id"], "Active")
-    newest_info = target.get_safekeeper(inserted["id"])
-    assert newest_info
-    assert newest_info["scheduling_policy"] == "Active"
-    # change back to paused again
+    assert (
+        newest_info["scheduling_policy"] == "Activating"
+        or newest_info["scheduling_policy"] == "Active"
+    )
     target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Pause"
+    # Ensure idempotency
+    target.safekeeper_scheduling_policy(inserted["id"], "Pause")
+    newest_info = target.get_safekeeper(inserted["id"])
+    assert newest_info
+    assert newest_info["scheduling_policy"] == "Pause"
+    # change back to active again
+    target.safekeeper_scheduling_policy(inserted["id"], "Active")
 
     def storcon_heartbeat():
         assert env.storage_controller.log_contains(
@@ -3491,6 +3702,57 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
         )
 
     wait_until(storcon_heartbeat)
+
+    # Now decomission it
+    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+
+
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
+def test_safekeeper_activating_to_active(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    fake_id = 5
+
+    target = env.storage_controller
+
+    assert target.get_safekeeper(fake_id) is None
+
+    start_sks = target.get_safekeepers()
+
+    sk_0 = env.safekeepers[0]
+
+    body = {
+        "active": True,
+        "id": fake_id,
+        "created_at": "2023-10-25T09:11:25Z",
+        "updated_at": "2024-08-28T11:32:43Z",
+        "region_id": "aws-eu-central-1",
+        "host": "localhost",
+        "port": sk_0.port.pg,
+        "http_port": sk_0.port.http,
+        "https_port": None,
+        "version": 5957,
+        "availability_zone_id": "eu-central-1a",
+    }
+
+    target.on_safekeeper_deploy(fake_id, body)
+
+    inserted = target.get_safekeeper(fake_id)
+    assert inserted is not None
+    assert target.get_safekeepers() == start_sks + [inserted]
+    assert eq_safekeeper_records(body, inserted)
+
+    def safekeeper_is_active():
+        newest_info = target.get_safekeeper(inserted["id"])
+        assert newest_info
+        assert newest_info["scheduling_policy"] == "Active"
+
+    wait_until(safekeeper_is_active)
+
+    target.safekeeper_scheduling_policy(inserted["id"], "Activating")
+
+    wait_until(safekeeper_is_active)
 
     # Now decomission it
     target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
@@ -3582,6 +3844,11 @@ def test_timeline_delete_mid_live_migration(neon_env_builder: NeonEnvBuilder, mi
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
     env.start()
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
@@ -4105,13 +4372,20 @@ class DeletionSubject(Enum):
     TENANT = "tenant"
 
 
+class EmptyTimeline(Enum):
+    EMPTY = "empty"
+    NONEMPTY = "nonempty"
+
+
 @run_only_on_default_postgres("PG version is not interesting here")
 @pytest.mark.parametrize("restart_storcon", [RestartStorcon.RESTART, RestartStorcon.ONLINE])
 @pytest.mark.parametrize("deletetion_subject", [DeletionSubject.TENANT, DeletionSubject.TIMELINE])
+@pytest.mark.parametrize("empty_timeline", [EmptyTimeline.EMPTY, EmptyTimeline.NONEMPTY])
 def test_storcon_create_delete_sk_down(
     neon_env_builder: NeonEnvBuilder,
     restart_storcon: RestartStorcon,
     deletetion_subject: DeletionSubject,
+    empty_timeline: EmptyTimeline,
 ):
     """
     Test that the storcon can create and delete tenants and timelines with a safekeeper being down.
@@ -4163,10 +4437,11 @@ def test_storcon_create_delete_sk_down(
         ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
         ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
-    with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
-        # endpoint should start.
-        ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
-        ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+    if empty_timeline == EmptyTimeline.NONEMPTY:
+        with env.endpoints.create("child_of_main", tenant_id=tenant_id) as ep:
+            # endpoint should start.
+            ep.start(safekeeper_generation=1, safekeepers=[1, 2, 3])
+            ep.safe_psql("CREATE TABLE IF NOT EXISTS t(key int, value text)")
 
     env.storage_controller.assert_log_contains("writing pending op for sk id 1")
     env.safekeepers[0].start()
@@ -4371,6 +4646,53 @@ def test_storage_controller_graceful_migration(neon_env_builder: NeonEnvBuilder,
         )
     else:
         assert initial_ps.http_client().tenant_list_locations()["tenant_shards"] == []
+
+
+def test_attached_0_graceful_migration(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 4
+    neon_env_builder.num_azs = 2
+
+    neon_env_builder.storcon_kick_secondary_downloads = False
+
+    env = neon_env_builder.init_start()
+
+    # It is default, but we want to ensure that there are no secondary locations requested
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 0}})
+    env.storage_controller.reconcile_until_idle()
+
+    desc = env.storage_controller.tenant_describe(env.initial_tenant)["shards"][0]
+    src_ps_id = desc["node_attached"]
+    src_ps = env.get_pageserver(src_ps_id)
+    src_az = desc["preferred_az_id"]
+
+    # There must be no secondary locations with Attached(0) placement policy
+    assert len(desc["node_secondary"]) == 0
+
+    # Migrate tenant shard to the same AZ node
+    dst_ps = [ps for ps in env.pageservers if ps.id != src_ps_id and ps.az_id == src_az][0]
+
+    env.storage_controller.tenant_shard_migrate(
+        TenantShardId(env.initial_tenant, 0, 0),
+        dst_ps.id,
+        config=StorageControllerMigrationConfig(prewarm=True),
+    )
+
+    def tenant_shard_migrated():
+        src_locations = src_ps.http_client().tenant_list_locations()["tenant_shards"]
+        assert len(src_locations) == 0
+        log.info(f"Tenant shard migrated from {src_ps.id}")
+        dst_locations = dst_ps.http_client().tenant_list_locations()["tenant_shards"]
+        assert len(dst_locations) == 1
+        assert dst_locations[0][1]["mode"] == "AttachedSingle"
+        log.info(f"Tenant shard migrated to {dst_ps.id}")
+
+    # After all we expect that tenant shard exists only on dst node.
+    # We wait so long because [`DEFAULT_HEATMAP_PERIOD`] and [`DEFAULT_DOWNLOAD_INTERVAL`]
+    # are set to 60 seconds by default.
+    #
+    # TODO: we should consider making these configurable, so the test can run faster.
+    wait_until(tenant_shard_migrated, timeout=180, interval=5, status_interval=10)
+    log.info("Tenant shard migrated successfully")
 
 
 @run_only_on_default_postgres("this is like a 'unit test' against storcon db")

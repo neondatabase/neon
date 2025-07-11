@@ -34,11 +34,11 @@ pub use layer_name::{DeltaLayerName, ImageLayerName, LayerName};
 use pageserver_api::config::GetVectoredConcurrentIo;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
-use pageserver_api::record::NeonWalRecord;
-use pageserver_api::value::Value;
 use tracing::{Instrument, info_span, trace};
 use utils::lsn::Lsn;
 use utils::sync::gate::GateGuard;
+use wal_decoder::models::record::NeonWalRecord;
+use wal_decoder::models::value::Value;
 
 use self::inmemory_layer::InMemoryLayerFileId;
 use super::PageReconstructError;
@@ -109,7 +109,7 @@ pub(crate) enum OnDiskValue {
 
 /// Reconstruct data accumulated for a single key during a vectored get
 #[derive(Debug, Default)]
-pub(crate) struct VectoredValueReconstructState {
+pub struct VectoredValueReconstructState {
     pub(crate) on_disk_values: Vec<(Lsn, OnDiskValueIoWaiter)>,
 
     pub(crate) situation: ValueReconstructSituation,
@@ -244,13 +244,60 @@ impl VectoredValueReconstructState {
 
         res
     }
+
+    /// Benchmarking utility to await for the completion of all pending ios
+    ///
+    /// # Cancel-Safety
+    ///
+    /// Technically fine to stop polling this future, but, the IOs will still
+    /// be executed to completion by the sidecar task and hold on to / consume resources.
+    /// Better not do it to make reasonsing about the system easier.
+    #[cfg(feature = "benchmarking")]
+    pub async fn sink_pending_ios(self) -> Result<(), std::io::Error> {
+        let mut res = Ok(());
+
+        // We should try hard not to bail early, so that by the time we return from this
+        // function, all IO for this value is done. It's not required -- we could totally
+        // stop polling the IO futures in the sidecar task, they need to support that,
+        // but just stopping to poll doesn't reduce the IO load on the disk. It's easier
+        // to reason about the system if we just wait for all IO to complete, even if
+        // we're no longer interested in the result.
+        //
+        // Revisit this when IO futures are replaced with a more sophisticated IO system
+        // and an IO scheduler, where we know which IOs were submitted and which ones
+        // just queued. Cf the comment on IoConcurrency::spawn_io.
+        for (_lsn, waiter) in self.on_disk_values {
+            let value_recv_res = waiter
+                .wait_completion()
+                // we rely on the caller to poll us to completion, so this is not a bail point
+                .await;
+
+            match (&mut res, value_recv_res) {
+                (Err(_), _) => {
+                    // We've already failed, no need to process more.
+                }
+                (Ok(_), Err(_wait_err)) => {
+                    // This shouldn't happen - likely the sidecar task panicked.
+                    unreachable!();
+                }
+                (Ok(_), Ok(Err(err))) => {
+                    let err: std::io::Error = err;
+                    res = Err(err);
+                }
+                (Ok(_ok), Ok(Ok(OnDiskValue::RawImage(_img)))) => {}
+                (Ok(_ok), Ok(Ok(OnDiskValue::WalRecordOrImage(_buf)))) => {}
+            }
+        }
+
+        res
+    }
 }
 
 /// Bag of data accumulated during a vectored get..
-pub(crate) struct ValuesReconstructState {
+pub struct ValuesReconstructState {
     /// The keys will be removed after `get_vectored` completes. The caller outside `Timeline`
     /// should not expect to get anything from this hashmap.
-    pub(crate) keys: HashMap<Key, VectoredValueReconstructState>,
+    pub keys: HashMap<Key, VectoredValueReconstructState>,
     /// The keys which are already retrieved
     keys_done: KeySpaceRandomAccum,
 
@@ -272,7 +319,7 @@ pub(crate) struct ValuesReconstructState {
 /// The desired end state is that we always do parallel IO.
 /// This struct and the dispatching in the impl will be removed once
 /// we've built enough confidence.
-pub(crate) enum IoConcurrency {
+pub enum IoConcurrency {
     Sequential,
     SidecarTask {
         task_id: usize,
@@ -317,10 +364,7 @@ impl IoConcurrency {
         Self::spawn(SelectedIoConcurrency::Sequential)
     }
 
-    pub(crate) fn spawn_from_conf(
-        conf: GetVectoredConcurrentIo,
-        gate_guard: GateGuard,
-    ) -> IoConcurrency {
+    pub fn spawn_from_conf(conf: GetVectoredConcurrentIo, gate_guard: GateGuard) -> IoConcurrency {
         let selected = match conf {
             GetVectoredConcurrentIo::Sequential => SelectedIoConcurrency::Sequential,
             GetVectoredConcurrentIo::SidecarTask => SelectedIoConcurrency::SidecarTask(gate_guard),
@@ -422,16 +466,6 @@ impl IoConcurrency {
                 }.instrument(span));
                 IoConcurrency::SidecarTask { task_id, ios_tx }
             }
-        }
-    }
-
-    pub(crate) fn clone(&self) -> Self {
-        match self {
-            IoConcurrency::Sequential => IoConcurrency::Sequential,
-            IoConcurrency::SidecarTask { task_id, ios_tx } => IoConcurrency::SidecarTask {
-                task_id: *task_id,
-                ios_tx: ios_tx.clone(),
-            },
         }
     }
 
@@ -573,6 +607,18 @@ impl IoConcurrency {
     }
 }
 
+impl Clone for IoConcurrency {
+    fn clone(&self) -> Self {
+        match self {
+            IoConcurrency::Sequential => IoConcurrency::Sequential,
+            IoConcurrency::SidecarTask { task_id, ios_tx } => IoConcurrency::SidecarTask {
+                task_id: *task_id,
+                ios_tx: ios_tx.clone(),
+            },
+        }
+    }
+}
+
 /// Make noise in case the [`ValuesReconstructState`] gets dropped while
 /// there are still IOs in flight.
 /// Refer to `collect_pending_ios` for why we prefer not to do that.
@@ -603,7 +649,7 @@ impl Drop for ValuesReconstructState {
 }
 
 impl ValuesReconstructState {
-    pub(crate) fn new(io_concurrency: IoConcurrency) -> Self {
+    pub fn new(io_concurrency: IoConcurrency) -> Self {
         Self {
             keys: HashMap::new(),
             keys_done: KeySpaceRandomAccum::new(),

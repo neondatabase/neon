@@ -13,43 +13,6 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 
 
-# Checks that pageserver's walreceiver state is printed in the logs during WAL wait timeout.
-# Ensures that walreceiver does not run without any data inserted and only starts after the insertion.
-def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
-    # Trigger WAL wait timeout faster
-    neon_env_builder.pageserver_config_override = "wait_lsn_timeout = '1s'"
-    env = neon_env_builder.init_start()
-    env.pageserver.http_client()
-
-    # In this test we force 'Timed out while waiting for WAL record error' while
-    # fetching basebackup and don't want any retries.
-    os.environ["NEON_COMPUTE_TESTING_BASEBACKUP_RETRIES"] = "1"
-
-    tenant_id, timeline_id = env.create_tenant()
-    expected_timeout_error = f"Timed out while waiting for WAL record at LSN {future_lsn} to arrive"
-    env.pageserver.allowed_errors.append(f".*{expected_timeout_error}.*")
-
-    try:
-        trigger_wait_lsn_timeout(env, tenant_id)
-    except Exception as e:
-        exception_string = str(e)
-        assert expected_timeout_error in exception_string, "Should time out during waiting for WAL"
-        assert "WalReceiver status: Not active" in exception_string, (
-            "Walreceiver should not be active before any data writes"
-        )
-
-    insert_test_elements(env, tenant_id, start=0, count=1_000)
-    try:
-        trigger_wait_lsn_timeout(env, tenant_id)
-    except Exception as e:
-        exception_string = str(e)
-        assert expected_timeout_error in exception_string, "Should time out during waiting for WAL"
-        assert "WalReceiver status: Not active" not in exception_string, (
-            "Should not be inactive anymore after INSERTs are made"
-        )
-        assert "WalReceiver status" in exception_string, "But still should have some other status"
-
-
 # Checks that all active safekeepers are shown in pageserver's walreceiver state printed on WAL wait timeout.
 # Kills one of the safekeepers and ensures that only the active ones are printed in the state.
 def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuilder):

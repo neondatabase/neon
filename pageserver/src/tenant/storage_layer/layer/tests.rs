@@ -1,6 +1,7 @@
 use std::time::UNIX_EPOCH;
 
 use pageserver_api::key::{CONTROLFILE_KEY, Key};
+use postgres_ffi::PgMajorVersion;
 use tokio::task::JoinSet;
 use utils::completion::{self, Completion};
 use utils::id::TimelineId;
@@ -10,6 +11,7 @@ use super::*;
 use crate::context::DownloadBehavior;
 use crate::tenant::harness::{TenantHarness, test_img};
 use crate::tenant::storage_layer::{IoConcurrency, LayerVisibilityHint};
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 
 /// Used in tests to advance a future to wanted await point, and not futher.
 const ADVANCE: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -44,7 +46,7 @@ async fn smoke_test() {
         .create_test_timeline_with_layers(
             TimelineId::generate(),
             Lsn(0x10),
-            14,
+            PgMajorVersion::PG14,
             &ctx,
             Default::default(), // in-memory layers
             Default::default(),
@@ -59,7 +61,7 @@ async fn smoke_test() {
     // there to avoid the timeline being illegally empty
     let (layer, dummy_layer) = {
         let mut layers = {
-            let layers = timeline.layers.read().await;
+            let layers = timeline.layers.read(LayerManagerLockHolder::Testing).await;
             layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
@@ -215,7 +217,7 @@ async fn smoke_test() {
 
     // Simulate GC removing our test layer.
     {
-        let mut g = timeline.layers.write().await;
+        let mut g = timeline.layers.write(LayerManagerLockHolder::Testing).await;
 
         let layers = &[layer];
         g.open_mut().unwrap().finish_gc_timeline(layers);
@@ -255,13 +257,18 @@ async fn evict_and_wait_on_wanted_deleted() {
     let (tenant, ctx) = h.load().await;
 
     let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .create_test_timeline(
+            TimelineId::generate(),
+            Lsn(0x10),
+            PgMajorVersion::PG14,
+            &ctx,
+        )
         .await
         .unwrap();
 
     let layer = {
         let mut layers = {
-            let layers = timeline.layers.read().await;
+            let layers = timeline.layers.read(LayerManagerLockHolder::Testing).await;
             layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
@@ -305,7 +312,7 @@ async fn evict_and_wait_on_wanted_deleted() {
     // assert that once we remove the `layer` from the layer map and drop our reference,
     // the deletion of the layer in remote_storage happens.
     {
-        let mut layers = timeline.layers.write().await;
+        let mut layers = timeline.layers.write(LayerManagerLockHolder::Testing).await;
         layers.open_mut().unwrap().finish_gc_timeline(&[layer]);
     }
 
@@ -340,14 +347,19 @@ fn read_wins_pending_eviction() {
         let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
 
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .create_test_timeline(
+                TimelineId::generate(),
+                Lsn(0x10),
+                PgMajorVersion::PG14,
+                &ctx,
+            )
             .await
             .unwrap();
         let ctx = ctx.with_scope_timeline(&timeline);
 
         let layer = {
             let mut layers = {
-                let layers = timeline.layers.read().await;
+                let layers = timeline.layers.read(LayerManagerLockHolder::Testing).await;
                 layers.likely_resident_layers().cloned().collect::<Vec<_>>()
             };
 
@@ -473,14 +485,19 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
 
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .create_test_timeline(
+                TimelineId::generate(),
+                Lsn(0x10),
+                PgMajorVersion::PG14,
+                &ctx,
+            )
             .await
             .unwrap();
         let ctx = ctx.with_scope_timeline(&timeline);
 
         let layer = {
             let mut layers = {
-                let layers = timeline.layers.read().await;
+                let layers = timeline.layers.read(LayerManagerLockHolder::Testing).await;
                 layers.likely_resident_layers().cloned().collect::<Vec<_>>()
             };
 
@@ -643,7 +660,12 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     let (tenant, ctx) = h.load().await;
 
     let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .create_test_timeline(
+            TimelineId::generate(),
+            Lsn(0x10),
+            PgMajorVersion::PG14,
+            &ctx,
+        )
         .await
         .unwrap();
     let ctx = ctx.with_scope_timeline(&timeline);
@@ -655,7 +677,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
 
     let layer = {
         let mut layers = {
-            let layers = timeline.layers.read().await;
+            let layers = timeline.layers.read(LayerManagerLockHolder::Testing).await;
             layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
@@ -729,7 +751,12 @@ async fn evict_and_wait_does_not_wait_for_download() {
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
 
     let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .create_test_timeline(
+            TimelineId::generate(),
+            Lsn(0x10),
+            PgMajorVersion::PG14,
+            &ctx,
+        )
         .await
         .unwrap();
     let ctx = ctx.with_scope_timeline(&timeline);
@@ -741,7 +768,7 @@ async fn evict_and_wait_does_not_wait_for_download() {
 
     let layer = {
         let mut layers = {
-            let layers = timeline.layers.read().await;
+            let layers = timeline.layers.read(LayerManagerLockHolder::Testing).await;
             layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
@@ -823,7 +850,7 @@ async fn evict_and_wait_does_not_wait_for_download() {
 #[tokio::test(start_paused = true)]
 async fn eviction_cancellation_on_drop() {
     use bytes::Bytes;
-    use pageserver_api::value::Value;
+    use wal_decoder::models::value::Value;
 
     // this is the runtime on which Layer spawns the blocking tasks on
     let handle = tokio::runtime::Handle::current();
@@ -835,7 +862,12 @@ async fn eviction_cancellation_on_drop() {
     let (tenant, ctx) = h.load().await;
 
     let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .create_test_timeline(
+            TimelineId::generate(),
+            Lsn(0x10),
+            PgMajorVersion::PG14,
+            &ctx,
+        )
         .await
         .unwrap();
 
@@ -862,7 +894,7 @@ async fn eviction_cancellation_on_drop() {
 
     let (evicted_layer, not_evicted) = {
         let mut layers = {
-            let mut guard = timeline.layers.write().await;
+            let mut guard = timeline.layers.write(LayerManagerLockHolder::Testing).await;
             let layers = guard.likely_resident_layers().cloned().collect::<Vec<_>>();
             // remove the layers from layermap
             guard.open_mut().unwrap().finish_gc_timeline(&layers);

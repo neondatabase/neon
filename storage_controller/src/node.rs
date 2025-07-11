@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use pageserver_api::controller_api::{
-    AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeRegisterRequest,
+    AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeLifecycle, NodeRegisterRequest,
     NodeSchedulingPolicy, TenantLocateResponseShard,
 };
 use pageserver_api::shard::TenantShardId;
@@ -29,6 +29,7 @@ pub(crate) struct Node {
 
     availability: NodeAvailability,
     scheduling: NodeSchedulingPolicy,
+    lifecycle: NodeLifecycle,
 
     listen_http_addr: String,
     listen_http_port: u16,
@@ -36,6 +37,8 @@ pub(crate) struct Node {
 
     listen_pg_addr: String,
     listen_pg_port: u16,
+    listen_grpc_addr: Option<String>,
+    listen_grpc_port: Option<u16>,
 
     availability_zone_id: AvailabilityZone,
 
@@ -99,8 +102,8 @@ impl Node {
         self.id == register_req.node_id
             && self.listen_http_addr == register_req.listen_http_addr
             && self.listen_http_port == register_req.listen_http_port
-            // Note: listen_https_port may change. See [`Self::need_update`] for mode details.
-            // && self.listen_https_port == register_req.listen_https_port
+            // Note: HTTPS and gRPC addresses may change, to allow for migrations. See
+            // [`Self::need_update`] for more details.
             && self.listen_pg_addr == register_req.listen_pg_addr
             && self.listen_pg_port == register_req.listen_pg_port
             && self.availability_zone_id == register_req.availability_zone_id
@@ -108,9 +111,10 @@ impl Node {
 
     // Do we need to update an existing record in DB on this registration request?
     pub(crate) fn need_update(&self, register_req: &NodeRegisterRequest) -> bool {
-        // listen_https_port is checked here because it may change during migration to https.
-        // After migration, this check may be moved to registration_match.
+        // These are checked here, since they may change before we're fully migrated.
         self.listen_https_port != register_req.listen_https_port
+            || self.listen_grpc_addr != register_req.listen_grpc_addr
+            || self.listen_grpc_port != register_req.listen_grpc_port
     }
 
     /// For a shard located on this node, populate a response object
@@ -124,6 +128,8 @@ impl Node {
             listen_https_port: self.listen_https_port,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port,
+            listen_grpc_addr: self.listen_grpc_addr.clone(),
+            listen_grpc_port: self.listen_grpc_port,
         }
     }
 
@@ -195,6 +201,7 @@ impl Node {
 
         match self.scheduling {
             NodeSchedulingPolicy::Active => MaySchedule::Yes(utilization),
+            NodeSchedulingPolicy::Deleting => MaySchedule::No,
             NodeSchedulingPolicy::Draining => MaySchedule::No,
             NodeSchedulingPolicy::Filling => MaySchedule::Yes(utilization),
             NodeSchedulingPolicy::Pause => MaySchedule::No,
@@ -210,6 +217,8 @@ impl Node {
         listen_https_port: Option<u16>,
         listen_pg_addr: String,
         listen_pg_port: u16,
+        listen_grpc_addr: Option<String>,
+        listen_grpc_port: Option<u16>,
         availability_zone_id: AvailabilityZone,
         use_https: bool,
     ) -> anyhow::Result<Self> {
@@ -220,6 +229,10 @@ impl Node {
             );
         }
 
+        if listen_grpc_addr.is_some() != listen_grpc_port.is_some() {
+            anyhow::bail!("cannot create node {id}: must specify both gRPC address and port");
+        }
+
         Ok(Self {
             id,
             listen_http_addr,
@@ -227,7 +240,10 @@ impl Node {
             listen_https_port,
             listen_pg_addr,
             listen_pg_port,
+            listen_grpc_addr,
+            listen_grpc_port,
             scheduling: NodeSchedulingPolicy::Active,
+            lifecycle: NodeLifecycle::Active,
             availability: NodeAvailability::Offline,
             availability_zone_id,
             use_https,
@@ -239,11 +255,14 @@ impl Node {
         NodePersistence {
             node_id: self.id.0 as i64,
             scheduling_policy: self.scheduling.into(),
+            lifecycle: self.lifecycle.into(),
             listen_http_addr: self.listen_http_addr.clone(),
             listen_http_port: self.listen_http_port as i32,
             listen_https_port: self.listen_https_port.map(|x| x as i32),
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port as i32,
+            listen_grpc_addr: self.listen_grpc_addr.clone(),
+            listen_grpc_port: self.listen_grpc_port.map(|port| port as i32),
             availability_zone_id: self.availability_zone_id.0.clone(),
         }
     }
@@ -257,17 +276,27 @@ impl Node {
             );
         }
 
+        if np.listen_grpc_addr.is_some() != np.listen_grpc_port.is_some() {
+            anyhow::bail!(
+                "can't load node {}: must specify both gRPC address and port",
+                np.node_id
+            );
+        }
+
         Ok(Self {
             id: NodeId(np.node_id as u64),
             // At startup we consider a node offline until proven otherwise.
             availability: NodeAvailability::Offline,
             scheduling: NodeSchedulingPolicy::from_str(&np.scheduling_policy)
                 .expect("Bad scheduling policy in DB"),
+            lifecycle: NodeLifecycle::from_str(&np.lifecycle).expect("Bad lifecycle in DB"),
             listen_http_addr: np.listen_http_addr,
             listen_http_port: np.listen_http_port as u16,
             listen_https_port: np.listen_https_port.map(|x| x as u16),
             listen_pg_addr: np.listen_pg_addr,
             listen_pg_port: np.listen_pg_port as u16,
+            listen_grpc_addr: np.listen_grpc_addr,
+            listen_grpc_port: np.listen_grpc_port.map(|port| port as u16),
             availability_zone_id: AvailabilityZone(np.availability_zone_id),
             use_https,
             cancel: CancellationToken::new(),
@@ -357,6 +386,8 @@ impl Node {
             listen_https_port: self.listen_https_port,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port,
+            listen_grpc_addr: self.listen_grpc_addr.clone(),
+            listen_grpc_port: self.listen_grpc_port,
         }
     }
 }

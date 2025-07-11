@@ -1219,3 +1219,31 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
         return res.json()
+
+    def force_override_feature_flag(self, flag: str, value: str | None = None):
+        if value is None:
+            res = self.delete(
+                f"http://localhost:{self.port}/v1/feature_flag/{flag}",
+            )
+        else:
+            res = self.put(
+                f"http://localhost:{self.port}/v1/feature_flag/{flag}",
+                params={"value": value},
+            )
+        self.verbose_error(res)
+
+    def evaluate_feature_flag_boolean(self, tenant_id: TenantId, flag: str) -> Any:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/feature_flag/{flag}",
+            params={"as": "boolean"},
+        )
+        self.verbose_error(res)
+        return res.json()
+
+    def evaluate_feature_flag_multivariate(self, tenant_id: TenantId, flag: str) -> Any:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/feature_flag/{flag}",
+            params={"as": "multivariate"},
+        )
+        self.verbose_error(res)
+        return res.json()

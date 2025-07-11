@@ -23,12 +23,12 @@ use super::conn_pool_lib::{
     Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, EndpointConnPool,
     GlobalConnPool,
 };
+use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::Metrics;
-use crate::tls::postgres_rustls::MakeRustlsConnect;
 
-type TlsStream = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::Stream;
+type TlsStream = <ComputeConfig as MakeTlsConnect<TcpStream>>::Stream;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
@@ -148,11 +148,10 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
             }
 
             // remove from connection pool
-            if let Some(pool) = pool.clone().upgrade() {
-                if pool.write().remove_client(db_user.clone(), conn_id) {
+            if let Some(pool) = pool.clone().upgrade()
+                && pool.write().remove_client(db_user.clone(), conn_id) {
                     info!("closed connection removed");
                 }
-            }
 
             Poll::Ready(())
         }).await;

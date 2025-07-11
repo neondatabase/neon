@@ -11,7 +11,7 @@ use http_body_util::{BodyExt, Full};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
-use hyper::{HeaderMap, Request, Response, StatusCode, header};
+use hyper::{Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{
@@ -22,29 +22,27 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{Level, debug, error, info};
 use typed_json::json;
-use url::Url;
-use uuid::Uuid;
 
 use super::backend::{LocalProxyConnError, PoolingBackend};
-use super::conn_pool::{AuthData, ConnInfoWithAuth};
+use super::conn_pool::AuthData;
 use super::conn_pool_lib::{self, ConnInfo};
-use super::error::HttpCodeError;
-use super::http_util::json_response;
+use super::error::{ConnInfoError, HttpCodeError, ReadPayloadError};
+use super::http_util::{
+    ALLOW_POOL, ARRAY_MODE, CONN_STRING, NEON_REQUEST_ID, RAW_TEXT_OUTPUT, TXN_DEFERRABLE,
+    TXN_ISOLATION_LEVEL, TXN_READ_ONLY, get_conn_info, json_response, uuid_to_header_value,
+};
 use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
-use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::{ComputeUserInfoParseError, endpoint_sni};
-use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
+use crate::auth::backend::ComputeCredentialKeys;
+use crate::config::{HttpConfig, ProxyConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::http::{ReadBodyError, read_body_with_limit};
-use crate::metrics::{HttpDirection, Metrics, SniGroup, SniKind};
-use crate::pqproto::StartupMessageParams;
-use crate::proxy::{NeonOptions, run_until_cancelled};
+use crate::http::read_body_with_limit;
+use crate::metrics::{HttpDirection, Metrics};
 use crate::serverless::backend::HttpConnError;
-use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
+use crate::util::run_until_cancelled;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,16 +67,6 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
-
-static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
-static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
-static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
-static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
-static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
-static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
-static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
-
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
@@ -88,188 +76,6 @@ where
     // TODO: consider avoiding the allocation here.
     let json: Vec<Value> = serde::de::Deserialize::deserialize(deserializer)?;
     Ok(json_to_pg_text(json))
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ConnInfoError {
-    #[error("invalid header: {0}")]
-    InvalidHeader(&'static HeaderName),
-    #[error("invalid connection string: {0}")]
-    UrlParseError(#[from] url::ParseError),
-    #[error("incorrect scheme")]
-    IncorrectScheme,
-    #[error("missing database name")]
-    MissingDbName,
-    #[error("invalid database name")]
-    InvalidDbName,
-    #[error("missing username")]
-    MissingUsername,
-    #[error("invalid username: {0}")]
-    InvalidUsername(#[from] std::string::FromUtf8Error),
-    #[error("missing authentication credentials: {0}")]
-    MissingCredentials(Credentials),
-    #[error("missing hostname")]
-    MissingHostname,
-    #[error("invalid hostname: {0}")]
-    InvalidEndpoint(#[from] ComputeUserInfoParseError),
-    #[error("malformed endpoint")]
-    MalformedEndpoint,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum Credentials {
-    #[error("required password")]
-    Password,
-    #[error("required authorization bearer token in JWT format")]
-    BearerJwt,
-}
-
-impl ReportableError for ConnInfoError {
-    fn get_error_kind(&self) -> ErrorKind {
-        ErrorKind::User
-    }
-}
-
-impl UserFacingError for ConnInfoError {
-    fn to_string_client(&self) -> String {
-        self.to_string()
-    }
-}
-
-fn get_conn_info(
-    config: &'static AuthenticationConfig,
-    ctx: &RequestContext,
-    headers: &HeaderMap,
-    tls: Option<&TlsConfig>,
-) -> Result<ConnInfoWithAuth, ConnInfoError> {
-    let connection_string = headers
-        .get(&CONN_STRING)
-        .ok_or(ConnInfoError::InvalidHeader(&CONN_STRING))?
-        .to_str()
-        .map_err(|_| ConnInfoError::InvalidHeader(&CONN_STRING))?;
-
-    let connection_url = Url::parse(connection_string)?;
-
-    let protocol = connection_url.scheme();
-    if protocol != "postgres" && protocol != "postgresql" {
-        return Err(ConnInfoError::IncorrectScheme);
-    }
-
-    let mut url_path = connection_url
-        .path_segments()
-        .ok_or(ConnInfoError::MissingDbName)?;
-
-    let dbname: DbName =
-        urlencoding::decode(url_path.next().ok_or(ConnInfoError::InvalidDbName)?)?.into();
-    ctx.set_dbname(dbname.clone());
-
-    let username = RoleName::from(urlencoding::decode(connection_url.username())?);
-    if username.is_empty() {
-        return Err(ConnInfoError::MissingUsername);
-    }
-    ctx.set_user(username.clone());
-
-    let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
-        if !config.accept_jwts {
-            return Err(ConnInfoError::MissingCredentials(Credentials::Password));
-        }
-
-        let auth = auth
-            .to_str()
-            .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
-        AuthData::Jwt(
-            auth.strip_prefix("Bearer ")
-                .ok_or(ConnInfoError::MissingCredentials(Credentials::BearerJwt))?
-                .into(),
-        )
-    } else if let Some(pass) = connection_url.password() {
-        // wrong credentials provided
-        if config.accept_jwts {
-            return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
-        }
-
-        AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
-            std::borrow::Cow::Borrowed(b) => b.into(),
-            std::borrow::Cow::Owned(b) => b.into(),
-        })
-    } else if config.accept_jwts {
-        return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
-    } else {
-        return Err(ConnInfoError::MissingCredentials(Credentials::Password));
-    };
-
-    let endpoint = match connection_url.host() {
-        Some(url::Host::Domain(hostname)) => {
-            if let Some(tls) = tls {
-                endpoint_sni(hostname, &tls.common_names).ok_or(ConnInfoError::MalformedEndpoint)?
-            } else {
-                hostname
-                    .split_once('.')
-                    .map_or(hostname, |(prefix, _)| prefix)
-                    .into()
-            }
-        }
-        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
-            return Err(ConnInfoError::MissingHostname);
-        }
-    };
-    ctx.set_endpoint_id(endpoint.clone());
-
-    let pairs = connection_url.query_pairs();
-
-    let mut options = Option::None;
-
-    let mut params = StartupMessageParams::default();
-    params.insert("user", &username);
-    params.insert("database", &dbname);
-    for (key, value) in pairs {
-        params.insert(&key, &value);
-        if key == "options" {
-            options = Some(NeonOptions::parse_options_raw(&value));
-        }
-    }
-
-    // check the URL that was used, for metrics
-    {
-        let host_endpoint = headers
-            // get the host header
-            .get("host")
-            // extract the domain
-            .and_then(|h| {
-                let (host, _port) = h.to_str().ok()?.split_once(':')?;
-                Some(host)
-            })
-            // get the endpoint prefix
-            .map(|h| h.split_once('.').map_or(h, |(prefix, _)| prefix));
-
-        let kind = if host_endpoint == Some(&*endpoint) {
-            SniKind::Sni
-        } else {
-            SniKind::NoSni
-        };
-
-        let protocol = ctx.protocol();
-        Metrics::get()
-            .proxy
-            .accepted_connections_by_sni
-            .inc(SniGroup { protocol, kind });
-    }
-
-    ctx.set_user_agent(
-        headers
-            .get(hyper::header::USER_AGENT)
-            .and_then(|h| h.to_str().ok())
-            .map(Into::into),
-    );
-
-    let user_info = ComputeUserInfo {
-        endpoint,
-        user: username,
-        options: options.unwrap_or_default(),
-    };
-
-    let conn_info = ConnInfo { user_info, dbname };
-    Ok(ConnInfoWithAuth { conn_info, auth })
 }
 
 pub(crate) async fn handle(
@@ -389,12 +195,35 @@ pub(crate) async fn handle(
             let line = get(db_error, |db| db.line().map(|l| l.to_string()));
             let routine = get(db_error, |db| db.routine());
 
-            tracing::info!(
-                kind=error_kind.to_metric_label(),
-                error=%e,
-                msg=message,
-                "forwarding error to user"
-            );
+            match &e {
+                SqlOverHttpError::Postgres(e)
+                    if e.as_db_error().is_some() && error_kind == ErrorKind::User =>
+                {
+                    // this error contains too much info, and it's not an error we care about.
+                    if tracing::enabled!(Level::DEBUG) {
+                        tracing::debug!(
+                            kind=error_kind.to_metric_label(),
+                            error=%e,
+                            msg=message,
+                            "forwarding error to user"
+                        );
+                    } else {
+                        tracing::info!(
+                            kind = error_kind.to_metric_label(),
+                            error = "bad query",
+                            "forwarding error to user"
+                        );
+                    }
+                }
+                _ => {
+                    tracing::info!(
+                        kind=error_kind.to_metric_label(),
+                        error=%e,
+                        msg=message,
+                        "forwarding error to user"
+                    );
+                }
+            }
 
             json_response(
                 e.get_http_status_code(),
@@ -459,7 +288,15 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
             SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
-            SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            // customer initiated SQL errors.
+            SqlOverHttpError::Postgres(p) => {
+                if p.as_db_error().is_some() {
+                    ErrorKind::User
+                } else {
+                    ErrorKind::Compute
+                }
+            }
+            // proxy initiated SQL errors.
             SqlOverHttpError::InternalPostgres(p) => {
                 if p.as_db_error().is_some() {
                     ErrorKind::Service
@@ -467,6 +304,7 @@ impl ReportableError for SqlOverHttpError {
                     ErrorKind::Compute
                 }
             }
+            // postgres returned a bad row format that we couldn't parse.
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
             SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
         }
@@ -504,45 +342,6 @@ impl HttpCodeError for SqlOverHttpError {
             SqlOverHttpError::InternalPostgres(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::Cancelled(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ReadPayloadError {
-    #[error("could not read the HTTP request body: {0}")]
-    Read(#[from] hyper::Error),
-    #[error("request is too large (max is {limit} bytes)")]
-    BodyTooLarge { limit: usize },
-    #[error("could not parse the HTTP request body: {0}")]
-    Parse(#[from] serde_json::Error),
-}
-
-impl From<ReadBodyError<hyper::Error>> for ReadPayloadError {
-    fn from(value: ReadBodyError<hyper::Error>) -> Self {
-        match value {
-            ReadBodyError::BodyTooLarge { limit } => Self::BodyTooLarge { limit },
-            ReadBodyError::Read(e) => Self::Read(e),
-        }
-    }
-}
-
-impl ReportableError for ReadPayloadError {
-    fn get_error_kind(&self) -> ErrorKind {
-        match self {
-            ReadPayloadError::Read(_) => ErrorKind::ClientDisconnect,
-            ReadPayloadError::BodyTooLarge { .. } => ErrorKind::User,
-            ReadPayloadError::Parse(_) => ErrorKind::User,
-        }
-    }
-}
-
-impl HttpCodeError for ReadPayloadError {
-    fn get_http_status_code(&self) -> StatusCode {
-        match self {
-            ReadPayloadError::Read(_) => StatusCode::BAD_REQUEST,
-            ReadPayloadError::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            ReadPayloadError::Parse(_) => StatusCode::BAD_REQUEST,
         }
     }
 }
@@ -637,14 +436,7 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    let conn_info = get_conn_info(
-        &config.authentication_config,
-        ctx,
-        request.headers(),
-        // todo: race condition?
-        // we're unlikely to change the common names.
-        config.tls_config.load().as_deref(),
-    )?;
+    let conn_info = get_conn_info(&config.authentication_config, ctx, None, request.headers())?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
         "credentials"
@@ -730,9 +522,17 @@ async fn handle_db_inner(
                 ComputeCredentialKeys::JwtPayload(payload)
                     if backend.auth_backend.is_local_proxy() =>
                 {
-                    let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
-                    let (cli_inner, _dsc) = client.client_inner();
-                    cli_inner.set_jwt_session(&payload).await?;
+                    #[cfg(feature = "testing")]
+                    let disable_pg_session_jwt = config.disable_pg_session_jwt;
+                    #[cfg(not(feature = "testing"))]
+                    let disable_pg_session_jwt = false;
+                    let mut client = backend
+                        .connect_to_local_postgres(ctx, conn_info, disable_pg_session_jwt)
+                        .await?;
+                    if !disable_pg_session_jwt {
+                        let (cli_inner, _dsc) = client.client_inner();
+                        cli_inner.set_jwt_session(&payload).await?;
+                    }
                     Client::Local(client)
                 }
                 _ => {
@@ -831,12 +631,6 @@ static HEADERS_TO_FORWARD: &[&HeaderName] = &[
     &TXN_DEFERRABLE,
 ];
 
-pub(crate) fn uuid_to_header_value(id: Uuid) -> HeaderValue {
-    let mut uuid = [0; uuid::fmt::Hyphenated::LENGTH];
-    HeaderValue::from_str(id.as_hyphenated().encode_lower(&mut uuid[..]))
-        .expect("uuid hyphenated format should be all valid header characters")
-}
-
 async fn handle_auth_broker_inner(
     ctx: &RequestContext,
     request: Request<Incoming>,
@@ -866,7 +660,7 @@ async fn handle_auth_broker_inner(
     req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
 
     let req = req
-        .body(body)
+        .body(body.map_err(|e| e).boxed()) //TODO: is there a potential for a regression here?
         .expect("all headers and params received via hyper should be valid for request");
 
     // todo: map body to count egress
@@ -1102,7 +896,6 @@ async fn query_to_json<T: GenericClient>(
 
     let columns_len = row_stream.statement.columns().len();
     let mut fields = Vec::with_capacity(columns_len);
-    let mut types = Vec::with_capacity(columns_len);
 
     for c in row_stream.statement.columns() {
         fields.push(json!({
@@ -1114,8 +907,6 @@ async fn query_to_json<T: GenericClient>(
             "dataTypeModifier": c.type_modifier(),
             "format": "text",
         }));
-
-        types.push(c.type_().clone());
     }
 
     let raw_output = parsed_headers.raw_output;
@@ -1137,7 +928,7 @@ async fn query_to_json<T: GenericClient>(
             ));
         }
 
-        let row = pg_text_row_to_json(&row, &types, raw_output, array_mode)?;
+        let row = pg_text_row_to_json(&row, raw_output, array_mode)?;
         rows.push(row);
 
         // assumption: parsing pg text and converting to json takes CPU time.

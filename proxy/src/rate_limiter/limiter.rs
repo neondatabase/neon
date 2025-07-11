@@ -12,10 +12,9 @@ use rand::{Rng, SeedableRng};
 use tokio::time::{Duration, Instant};
 use tracing::info;
 
+use super::LeakyBucketConfig;
 use crate::ext::LockExt;
 use crate::intern::EndpointIdInt;
-
-use super::LeakyBucketConfig;
 
 pub struct GlobalRateLimiter {
     data: Vec<RateBucket>,
@@ -140,12 +139,6 @@ impl RateBucketInfo {
         Self::new(200, Duration::from_secs(600)),
     ];
 
-    // For all the sessions will be cancel key. So this limit is essentially global proxy limit.
-    pub const DEFAULT_REDIS_SET: [Self; 2] = [
-        Self::new(100_000, Duration::from_secs(1)),
-        Self::new(50_000, Duration::from_secs(10)),
-    ];
-
     pub fn rps(&self) -> f64 {
         (self.max_rpi as f64) / self.interval.as_secs_f64()
     }
@@ -218,7 +211,11 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
         //    = 30MB
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
+        if self
+            .access_count
+            .fetch_add(1, Ordering::AcqRel)
+            .is_multiple_of(2048)
+        {
             self.do_gc();
         }
 

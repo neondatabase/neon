@@ -24,9 +24,14 @@ tracing.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+axum.workspace = true
+http.workspace = true
+metrics.workspace = true
 tonic.workspace = true
+url.workspace = true
 
 pageserver_client.workspace = true
+pageserver_client_grpc.workspace = true
 pageserver_api.workspace = true
 pageserver_page_api.workspace = true
 utils = { path = "../../libs/utils/" }

@@ -9,6 +9,10 @@
 #include "fmgr.h"
 #include "storage/buf_internals.h"
 
+#if PG_MAJORVERSION_NUM < 16
+typedef PGAlignedBlock PGIOAlignedBlock;
+#endif
+
 #if PG_MAJORVERSION_NUM < 17
 #define NRelFileInfoBackendIsTemp(rinfo) (rinfo.backend != InvalidBackendId)
 #else
@@ -158,6 +162,10 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 #define ProcNumber BackendId
 #define INVALID_PROC_NUMBER InvalidBackendId
 #define AmAutoVacuumWorkerProcess() (IsAutoVacuumWorkerProcess())
+#endif
+
+#if PG_MAJORVERSION_NUM < 17
+#define	MyProcNumber (MyProc - &ProcGlobal->allProcs[0])
 #endif
 
 #if PG_MAJORVERSION_NUM < 15

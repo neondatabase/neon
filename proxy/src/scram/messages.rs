@@ -3,6 +3,9 @@
 use std::fmt;
 use std::ops::Range;
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
+
 use super::base64_decode_array;
 use super::key::{SCRAM_KEY_LEN, ScramKey};
 use super::signature::SignatureBuilder;
@@ -84,13 +87,20 @@ impl<'a> ClientFirstMessage<'a> {
         salt_base64: &str,
         iterations: u32,
     ) -> OwnedServerFirstMessage {
-        use std::fmt::Write;
+        let mut message = String::with_capacity(128);
+        message.push_str("r=");
 
-        let mut message = String::new();
-        write!(&mut message, "r={}", self.nonce).unwrap();
-        base64::encode_config_buf(nonce, base64::STANDARD, &mut message);
-        let combined_nonce = 2..message.len();
-        write!(&mut message, ",s={salt_base64},i={iterations}").unwrap();
+        // write combined nonce
+        let combined_nonce_start = message.len();
+        message.push_str(self.nonce);
+        BASE64_STANDARD.encode_string(nonce, &mut message);
+        let combined_nonce = combined_nonce_start..message.len();
+
+        // write salt and iterations
+        message.push_str(",s=");
+        message.push_str(salt_base64);
+        message.push_str(",i=");
+        message.push_str(itoa::Buffer::new().format(iterations));
 
         // This design guarantees that it's impossible to create a
         // server-first-message without receiving a client-first-message
@@ -142,11 +152,7 @@ impl<'a> ClientFinalMessage<'a> {
         server_key: &ScramKey,
     ) -> String {
         let mut buf = String::from("v=");
-        base64::encode_config_buf(
-            signature_builder.build(server_key),
-            base64::STANDARD,
-            &mut buf,
-        );
+        BASE64_STANDARD.encode_string(signature_builder.build(server_key), &mut buf);
 
         buf
     }
@@ -251,7 +257,7 @@ mod tests {
             "iiYEfS3rOgn8S3rtpSdrOsHtPLWvIkdgmHxA0hf3JNOAG4dU"
         );
         assert_eq!(
-            base64::encode(msg.proof),
+            BASE64_STANDARD.encode(msg.proof),
             "SRpfsIVS4Gk11w1LqQ4QvCUBZYQmqXNSDEcHqbQ3CHI="
         );
     }
