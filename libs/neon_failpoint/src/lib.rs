@@ -105,14 +105,11 @@ impl FailpointNotifiers {
     ///
     /// Returns a `FailpointNotifier` that automatically removes itself
     /// from the collection when dropped.
-    pub fn create_notifier<F>(&mut self, cleanup_callback: F) -> FailpointNotifier
-    where
-        F: FnOnce(&Arc<Notify>) + Send + 'static,
-    {
+    pub fn create_notifier(&mut self, config_arc: Arc<std::sync::Mutex<FailpointConfig>>) -> FailpointNotifier {
         let notifier = Arc::new(Notify::new());
         self.notifiers.push(notifier.clone());
 
-        FailpointNotifier::new(notifier, cleanup_callback)
+        FailpointNotifier::new(notifier, config_arc)
     }
 
     /// Notify all waiting tasks
@@ -132,21 +129,18 @@ impl FailpointNotifiers {
 ///
 /// This handles the lifecycle of a notifier for a failpoint:
 /// - Provides a future that can be awaited to receive notifications
-/// - Automatically cleans up when dropped using a provided callback
+/// - Automatically cleans up when dropped
 pub struct FailpointNotifier {
     notifier: Arc<Notify>,
-    cleanup: Option<Box<dyn FnOnce(&Arc<Notify>) + Send>>,
+    config_arc: Arc<std::sync::Mutex<FailpointConfig>>,
 }
 
 impl FailpointNotifier {
-    /// Create a new notifier with a cleanup callback
-    pub fn new<F>(notifier: Arc<Notify>, cleanup_callback: F) -> Self
-    where
-        F: FnOnce(&Arc<Notify>) + Send + 'static,
-    {
+    /// Create a new notifier
+    pub fn new(notifier: Arc<Notify>, config_arc: Arc<std::sync::Mutex<FailpointConfig>>) -> Self {
         Self {
             notifier,
-            cleanup: Some(Box::new(cleanup_callback)),
+            config_arc,
         }
     }
 
@@ -158,9 +152,8 @@ impl FailpointNotifier {
 
 impl Drop for FailpointNotifier {
     fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup.take() {
-            cleanup(&self.notifier);
-        }
+        let mut config = self.config_arc.lock().unwrap();
+        config.notifiers.remove_notifier(&self.notifier);
     }
 }
 
@@ -334,13 +327,8 @@ pub fn failpoint_with_cancellation(
 
 /// Create a notifier for a failpoint
 fn create_failpoint_notifier(config_arc: Arc<std::sync::Mutex<FailpointConfig>>) -> FailpointNotifier {
-    let cleanup_config_arc = config_arc.clone();
-    
     let mut config = config_arc.lock().unwrap();
-    config.notifiers.create_notifier(move |notifier| {
-        let mut config = cleanup_config_arc.lock().unwrap();
-        config.notifiers.remove_notifier(notifier);
-    })
+    config.notifiers.create_notifier(config_arc.clone())
 }
 
 /// Execute a specific action (used for recursive execution in probability-based actions)
