@@ -350,8 +350,8 @@ pub(crate) enum RestError {
     ConnectCompute(#[from] HttpConnError),
     #[error(transparent)]
     ConnInfo(#[from] ConnInfoError),
-    #[error("{0}")]
-    Postgres(#[source] PostgresError),
+    #[error(transparent)]
+    Postgres(#[from] PostgresError),
     #[error(transparent)]
     JsonConversion(#[from] JsonConversionError),
     #[error(transparent)]
