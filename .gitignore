@@ -29,3 +29,5 @@ docker-compose/docker-compose-parallel.yml
 
 # pgindent typedef lists
 *.list
+
+venv/
