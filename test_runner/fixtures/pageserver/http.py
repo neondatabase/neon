@@ -333,6 +333,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(f"http://localhost:{self.port}/v1/reload_auth_validation_keys")
         self.verbose_error(res)
 
+    def list_tenant_visible_size(self) -> dict[TenantShardId, int]:
+        res = self.get(f"http://localhost:{self.port}/v1/list_tenant_visible_size")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def tenant_list(self) -> list[dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         self.verbose_error(res)
@@ -1002,7 +1009,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def get_metrics_str(self) -> str:
         """You probably want to use get_metrics() instead."""
-        res = self.get(f"http://localhost:{self.port}/metrics")
+        res = self.get(f"http://localhost:{self.port}/metrics?use_latest=true")
         self.verbose_error(res)
         return res.text
 

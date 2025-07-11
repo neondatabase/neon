@@ -46,11 +46,14 @@ stateDiagram-v2
   Configuration --> Failed : Failed to configure the compute
   Configuration --> Running : Compute has been configured
   Empty --> Init : Compute spec is immediately available
-  Empty --> TerminationPending : Requested termination
+  Empty --> TerminationPendingFast : Requested termination
+  Empty --> TerminationPendingImmediate : Requested termination
   Init --> Failed : Failed to start Postgres
   Init --> Running : Started Postgres
-  Running --> TerminationPending : Requested termination
-  TerminationPending --> Terminated : Terminated compute
+  Running --> TerminationPendingFast : Requested termination
+  Running --> TerminationPendingImmediate : Requested termination
+  TerminationPendingFast --> Terminated compute with 30s delay for cplane to inspect status
+  TerminationPendingImmediate --> Terminated : Terminated compute immediately
   Failed --> [*] : Compute exited
   Terminated --> [*] : Compute exited
 ```

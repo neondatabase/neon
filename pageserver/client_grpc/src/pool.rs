@@ -34,16 +34,38 @@ use std::num::NonZero;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{error, warn};
 
 use pageserver_page_api as page_api;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::ShardIndex;
+
+/// Reap channels/clients/streams that have been idle for this long.
+///
+/// TODO: this is per-pool. For nested pools, it can take up to 3x as long for a TCP connection to
+/// be reaped. First, we must wait for an idle stream to be reaped, which marks its client as idle.
+/// Then, we must wait for the idle client to be reaped, which marks its channel as idle. Then, we
+/// must wait for the idle channel to be reaped. Is that a problem? Maybe not, we just have to
+/// account for it when setting the reap threshold. Alternatively, we can immediately reap empty
+/// channels, and/or stream pool clients.
+const REAP_IDLE_THRESHOLD: Duration = match cfg!(any(test, feature = "testing")) {
+    false => Duration::from_secs(180),
+    true => Duration::from_secs(1), // exercise reaping in tests
+};
+
+/// Reap idle resources with this interval.
+const REAP_IDLE_INTERVAL: Duration = match cfg!(any(test, feature = "testing")) {
+    false => Duration::from_secs(10),
+    true => Duration::from_secs(1), // exercise reaping in tests
+};
 
 /// A gRPC channel pool, for a single Pageserver. A channel is shared by many clients (via HTTP/2
 /// stream multiplexing), up to `clients_per_channel` -- a new channel will be spun up beyond this.
@@ -52,7 +74,6 @@ use utils::shard::ShardIndex;
 ///
 /// The pool is always wrapped in an outer `Arc`, to allow long-lived guards across tasks/threads.
 ///
-/// TODO: reap idle channels.
 /// TODO: consider prewarming a set of channels, to avoid initial connection latency.
 /// TODO: consider adding a circuit breaker for errors and fail fast.
 pub struct ChannelPool {
@@ -62,6 +83,8 @@ pub struct ChannelPool {
     max_clients_per_channel: NonZero<usize>,
     /// Open channels.
     channels: Mutex<BTreeMap<ChannelID, ChannelEntry>>,
+    /// Reaps idle channels.
+    idle_reaper: Reaper,
     /// Channel ID generator.
     next_channel_id: AtomicUsize,
 }
@@ -73,6 +96,9 @@ struct ChannelEntry {
     channel: Channel,
     /// Number of clients using this channel.
     clients: usize,
+    /// The channel has been idle (no clients) since this time. None if channel is in use.
+    /// INVARIANT: Some if clients == 0, otherwise None.
+    idle_since: Option<Instant>,
 }
 
 impl ChannelPool {
@@ -82,12 +108,15 @@ impl ChannelPool {
         E: TryInto<Endpoint> + Send + Sync + 'static,
         <E as TryInto<Endpoint>>::Error: std::error::Error + Send + Sync,
     {
-        Ok(Arc::new(Self {
+        let pool = Arc::new(Self {
             endpoint: endpoint.try_into()?,
             max_clients_per_channel,
             channels: Mutex::default(),
+            idle_reaper: Reaper::new(REAP_IDLE_THRESHOLD, REAP_IDLE_INTERVAL),
             next_channel_id: AtomicUsize::default(),
-        }))
+        });
+        pool.idle_reaper.spawn(&pool);
+        Ok(pool)
     }
 
     /// Acquires a gRPC channel for a client. Multiple clients may acquire the same channel.
@@ -116,8 +145,14 @@ impl ChannelPool {
                 entry.clients <= self.max_clients_per_channel.get(),
                 "channel overflow"
             );
+            assert_eq!(
+                entry.idle_since.is_some(),
+                entry.clients == 0,
+                "incorrect channel idle state"
+            );
             if entry.clients < self.max_clients_per_channel.get() {
                 entry.clients += 1;
+                entry.idle_since = None;
                 return ChannelGuard {
                     pool: Arc::downgrade(self),
                     id,
@@ -134,6 +169,7 @@ impl ChannelPool {
         let entry = ChannelEntry {
             channel: channel.clone(),
             clients: 1, // account for the guard below
+            idle_since: None,
         };
         channels.insert(id, entry);
 
@@ -142,6 +178,20 @@ impl ChannelPool {
             id,
             channel: Some(channel),
         }
+    }
+}
+
+impl Reapable for ChannelPool {
+    /// Reaps channels that have been idle since before the cutoff.
+    fn reap_idle(&self, cutoff: Instant) {
+        self.channels.lock().unwrap().retain(|_, entry| {
+            let Some(idle_since) = entry.idle_since else {
+                assert_ne!(entry.clients, 0, "empty channel not marked idle");
+                return true;
+            };
+            assert_eq!(entry.clients, 0, "idle channel has clients");
+            idle_since >= cutoff
+        })
     }
 }
 
@@ -167,10 +217,15 @@ impl Drop for ChannelGuard {
         let Some(pool) = self.pool.upgrade() else {
             return; // pool was dropped
         };
+
         let mut channels = pool.channels.lock().unwrap();
         let entry = channels.get_mut(&self.id).expect("unknown channel");
+        assert!(entry.idle_since.is_none(), "active channel marked idle");
         assert!(entry.clients > 0, "channel underflow");
         entry.clients -= 1;
+        if entry.clients == 0 {
+            entry.idle_since = Some(Instant::now()); // mark channel as idle
+        }
     }
 }
 
@@ -179,8 +234,6 @@ impl Drop for ChannelGuard {
 /// number of concurrent clients to `max_clients` via semaphore.
 ///
 /// The pool is always wrapped in an outer `Arc`, to allow long-lived guards across tasks/threads.
-///
-/// TODO: reap idle clients.
 pub struct ClientPool {
     /// Tenant ID.
     tenant_id: TenantId,
@@ -190,6 +243,8 @@ pub struct ClientPool {
     shard_id: ShardIndex,
     /// Authentication token, if any.
     auth_token: Option<String>,
+    /// Compression to use.
+    compression: Option<CompressionEncoding>,
     /// Channel pool to acquire channels from.
     channel_pool: Arc<ChannelPool>,
     /// Limits the max number of concurrent clients for this pool. None if the pool is unbounded.
@@ -201,6 +256,8 @@ pub struct ClientPool {
     /// lower-ordered channels. This allows us to free up and reap higher-numbered channels as idle
     /// clients are reaped.
     idle: Mutex<BTreeMap<ClientID, ClientEntry>>,
+    /// Reaps idle clients.
+    idle_reaper: Reaper,
     /// Unique client ID generator.
     next_client_id: AtomicUsize,
 }
@@ -212,6 +269,9 @@ struct ClientEntry {
     client: page_api::Client,
     /// The channel guard for the channel used by the client.
     channel_guard: ChannelGuard,
+    /// The client has been idle since this time. All clients in `ClientPool::idle` are idle by
+    /// definition, so this is the time when it was added back to the pool.
+    idle_since: Instant,
 }
 
 impl ClientPool {
@@ -224,18 +284,23 @@ impl ClientPool {
         timeline_id: TimelineId,
         shard_id: ShardIndex,
         auth_token: Option<String>,
+        compression: Option<CompressionEncoding>,
         max_clients: Option<NonZero<usize>>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let pool = Arc::new(Self {
             tenant_id,
             timeline_id,
             shard_id,
             auth_token,
+            compression,
             channel_pool,
             idle: Mutex::default(),
+            idle_reaper: Reaper::new(REAP_IDLE_THRESHOLD, REAP_IDLE_INTERVAL),
             limiter: max_clients.map(|max| Arc::new(Semaphore::new(max.get()))),
             next_client_id: AtomicUsize::default(),
-        })
+        });
+        pool.idle_reaper.spawn(&pool);
+        pool
     }
 
     /// Gets a client from the pool, or creates a new one if necessary. Connections are established
@@ -271,7 +336,7 @@ impl ClientPool {
             self.timeline_id,
             self.shard_id,
             self.auth_token.clone(),
-            None,
+            self.compression,
         )?;
 
         Ok(ClientGuard {
@@ -284,6 +349,16 @@ impl ClientPool {
             channel_guard: Some(channel_guard),
             permit,
         })
+    }
+}
+
+impl Reapable for ClientPool {
+    /// Reaps clients that have been idle since before the cutoff.
+    fn reap_idle(&self, cutoff: Instant) {
+        self.idle
+            .lock()
+            .unwrap()
+            .retain(|_, entry| entry.idle_since >= cutoff)
     }
 }
 
@@ -317,9 +392,11 @@ impl Drop for ClientGuard {
         let Some(pool) = self.pool.upgrade() else {
             return; // pool was dropped
         };
+
         let entry = ClientEntry {
             client: self.client.take().expect("dropped once"),
             channel_guard: self.channel_guard.take().expect("dropped once"),
+            idle_since: Instant::now(),
         };
         pool.idle.lock().unwrap().insert(self.id, entry);
 
@@ -334,7 +411,6 @@ impl Drop for ClientGuard {
 /// a single request and await the response. Internally, requests are multiplexed across streams and
 /// channels. This allows proper queue depth enforcement and response routing.
 ///
-/// TODO: reap idle streams.
 /// TODO: consider making this generic over request and response types; not currently needed.
 pub struct StreamPool {
     /// The client pool to acquire clients from. Must be unbounded.
@@ -344,7 +420,7 @@ pub struct StreamPool {
     /// Incoming requests will be sent over an existing stream with available capacity. If all
     /// streams are full, a new one is spun up and added to the pool (up to `max_streams`). Each
     /// stream has an associated Tokio task that processes requests and responses.
-    streams: Arc<Mutex<HashMap<StreamID, StreamEntry>>>,
+    streams: Mutex<HashMap<StreamID, StreamEntry>>,
     /// The max number of concurrent streams, or None if unbounded.
     max_streams: Option<NonZero<usize>>,
     /// The max number of concurrent requests per stream.
@@ -352,6 +428,8 @@ pub struct StreamPool {
     /// Limits the max number of concurrent requests, given by `max_streams * max_queue_depth`.
     /// None if the pool is unbounded.
     limiter: Option<Arc<Semaphore>>,
+    /// Reaps idle streams.
+    idle_reaper: Reaper,
     /// Stream ID generator.
     next_stream_id: AtomicUsize,
 }
@@ -364,9 +442,11 @@ type ResponseSender = oneshot::Sender<tonic::Result<page_api::GetPageResponse>>;
 struct StreamEntry {
     /// Sends caller requests to the stream task. The stream task exits when this is dropped.
     sender: RequestSender,
-    /// Number of in-flight requests on this stream. This is an atomic to allow decrementing it on
-    /// completion without acquiring the `StreamPool::streams` lock.
-    queue_depth: Arc<AtomicUsize>,
+    /// Number of in-flight requests on this stream.
+    queue_depth: usize,
+    /// The time when this stream went idle (queue_depth == 0).
+    /// INVARIANT: Some if queue_depth == 0, otherwise None.
+    idle_since: Option<Instant>,
 }
 
 impl StreamPool {
@@ -383,16 +463,19 @@ impl StreamPool {
         max_queue_depth: NonZero<usize>,
     ) -> Arc<Self> {
         assert!(client_pool.limiter.is_none(), "bounded client pool");
-        Arc::new(Self {
+        let pool = Arc::new(Self {
             client_pool,
-            streams: Arc::default(),
+            streams: Mutex::default(),
             limiter: max_streams.map(|max_streams| {
                 Arc::new(Semaphore::new(max_streams.get() * max_queue_depth.get()))
             }),
             max_streams,
             max_queue_depth,
+            idle_reaper: Reaper::new(REAP_IDLE_THRESHOLD, REAP_IDLE_INTERVAL),
             next_stream_id: AtomicUsize::default(),
-        })
+        });
+        pool.idle_reaper.spawn(&pool);
+        pool
     }
 
     /// Acquires an available stream from the pool, or spins up a new stream async if all streams
@@ -412,8 +495,8 @@ impl StreamPool {
     /// * Allow concurrent clients to join onto streams while they're spun up.
     /// * Allow spinning up multiple streams concurrently, but don't overshoot limits.
     ///
-    /// For now, we just do something simple and functional, but very inefficient (linear scan).
-    pub async fn get(&self) -> StreamGuard {
+    /// For now, we just do something simple but inefficient (linear scan under mutex).
+    pub async fn get(self: &Arc<Self>) -> StreamGuard {
         // Acquire a permit if the pool is bounded.
         let mut permit = None;
         if let Some(limiter) = self.limiter.clone() {
@@ -422,23 +505,23 @@ impl StreamPool {
         let mut streams = self.streams.lock().unwrap();
 
         // Look for a pooled stream with available capacity.
-        for entry in streams.values() {
+        for (&id, entry) in streams.iter_mut() {
             assert!(
-                entry.queue_depth.load(Ordering::Relaxed) <= self.max_queue_depth.get(),
+                entry.queue_depth <= self.max_queue_depth.get(),
                 "stream queue overflow"
             );
-            if entry
-                .queue_depth
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |queue_depth| {
-                    // Increment the queue depth via compare-and-swap.
-                    // TODO: review ordering.
-                    (queue_depth < self.max_queue_depth.get()).then_some(queue_depth + 1)
-                })
-                .is_ok()
-            {
+            assert_eq!(
+                entry.idle_since.is_some(),
+                entry.queue_depth == 0,
+                "incorrect stream idle state"
+            );
+            if entry.queue_depth < self.max_queue_depth.get() {
+                entry.queue_depth += 1;
+                entry.idle_since = None;
                 return StreamGuard {
+                    pool: Arc::downgrade(self),
+                    id,
                     sender: entry.sender.clone(),
-                    queue_depth: entry.queue_depth.clone(),
                     permit,
                 };
             }
@@ -448,11 +531,11 @@ impl StreamPool {
         // return the guard, while spinning up the stream task async. This allows other callers to
         // join onto this stream and also create additional streams concurrently if this fills up.
         let id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
-        let queue_depth = Arc::new(AtomicUsize::new(1)); // reserve quota for this caller
         let (req_tx, req_rx) = mpsc::channel(self.max_queue_depth.get());
         let entry = StreamEntry {
             sender: req_tx.clone(),
-            queue_depth: queue_depth.clone(),
+            queue_depth: 1, // reserve quota for this caller
+            idle_since: None,
         };
         streams.insert(id, entry);
 
@@ -461,20 +544,23 @@ impl StreamPool {
         };
 
         let client_pool = self.client_pool.clone();
-        let streams = self.streams.clone();
+        let pool = Arc::downgrade(self);
 
         tokio::spawn(async move {
             if let Err(err) = Self::run_stream(client_pool, req_rx).await {
                 error!("stream failed: {err}");
             }
-            // Remove stream from pool on exit.
-            let entry = streams.lock().unwrap().remove(&id);
-            assert!(entry.is_some(), "unknown stream ID: {id}");
+            // Remove stream from pool on exit. Weak reference to avoid holding the pool alive.
+            if let Some(pool) = pool.upgrade() {
+                let entry = pool.streams.lock().unwrap().remove(&id);
+                assert!(entry.is_some(), "unknown stream ID: {id}");
+            }
         });
 
         StreamGuard {
+            pool: Arc::downgrade(self),
+            id,
             sender: req_tx,
-            queue_depth,
             permit,
         }
     }
@@ -505,6 +591,10 @@ impl StreamPool {
 
         // Track caller response channels by request ID. If the task returns early, these response
         // channels will be dropped and the waiting callers will receive an error.
+        //
+        // NB: this will leak entries if the server doesn't respond to a request (by request ID).
+        // It shouldn't happen, and if it does it will often hold onto queue depth quota anyway and
+        // block further use. But we could consider reaping closed channels after some time.
         let mut callers = HashMap::new();
 
         // Process requests and responses.
@@ -552,11 +642,26 @@ impl StreamPool {
     }
 }
 
+impl Reapable for StreamPool {
+    /// Reaps streams that have been idle since before the cutoff.
+    fn reap_idle(&self, cutoff: Instant) {
+        self.streams.lock().unwrap().retain(|_, entry| {
+            let Some(idle_since) = entry.idle_since else {
+                assert_ne!(entry.queue_depth, 0, "empty stream not marked idle");
+                return true;
+            };
+            assert_eq!(entry.queue_depth, 0, "idle stream has requests");
+            idle_since >= cutoff
+        });
+    }
+}
+
 /// A pooled stream reference. Can be used to send a single request, to properly enforce queue
 /// depth. Queue depth is already reserved and will be returned on drop.
 pub struct StreamGuard {
+    pool: Weak<StreamPool>,
+    id: StreamID,
     sender: RequestSender,
-    queue_depth: Arc<AtomicUsize>,
     permit: Option<OwnedSemaphorePermit>, // None if pool is unbounded
 }
 
@@ -588,11 +693,87 @@ impl StreamGuard {
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
+        let Some(pool) = self.pool.upgrade() else {
+            return; // pool was dropped
+        };
+
         // Release the queue depth reservation on drop. This can prematurely decrement it if dropped
         // before the response is received, but that's okay.
-        let prev_queue_depth = self.queue_depth.fetch_sub(1, Ordering::SeqCst);
-        assert!(prev_queue_depth > 0, "stream queue underflow");
+        //
+        // TODO: actually, it's probably not okay. Queue depth release should be moved into the
+        // stream task, such that it continues to account for the queue depth slot until the server
+        // responds. Otherwise, if a slow request times out and keeps blocking the stream, the
+        // server will keep waiting on it and we can pile on subsequent requests (including the
+        // timeout retry) in the same stream and get blocked. But we may also want to avoid blocking
+        // requests on e.g. LSN waits and layer downloads, instead returning early to free up the
+        // stream. Or just scale out streams with a queue depth of 1 to sidestep all head-of-line
+        // blocking. TBD.
+        let mut streams = pool.streams.lock().unwrap();
+        let entry = streams.get_mut(&self.id).expect("unknown stream");
+        assert!(entry.idle_since.is_none(), "active stream marked idle");
+        assert!(entry.queue_depth > 0, "stream queue underflow");
+        entry.queue_depth -= 1;
+        if entry.queue_depth == 0 {
+            entry.idle_since = Some(Instant::now()); // mark stream as idle
+        }
 
         _ = self.permit; // returned on drop, referenced for visibility
     }
+}
+
+/// Periodically reaps idle resources from a pool.
+struct Reaper {
+    /// The task check interval.
+    interval: Duration,
+    /// The threshold for reaping idle resources.
+    threshold: Duration,
+    /// Cancels the reaper task. Cancelled when the reaper is dropped.
+    cancel: CancellationToken,
+}
+
+impl Reaper {
+    /// Creates a new reaper.
+    pub fn new(threshold: Duration, interval: Duration) -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+            threshold,
+            interval,
+        }
+    }
+
+    /// Spawns a task to periodically reap idle resources from the given task pool. The task is
+    /// cancelled when the reaper is dropped.
+    pub fn spawn(&self, pool: &Arc<impl Reapable>) {
+        // NB: hold a weak pool reference, otherwise the task will prevent dropping the pool.
+        let pool = Arc::downgrade(pool);
+        let cancel = self.cancel.clone();
+        let (interval, threshold) = (self.interval, self.threshold);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {
+                        let Some(pool) = pool.upgrade() else {
+                            return; // pool was dropped
+                        };
+                        pool.reap_idle(Instant::now() - threshold);
+                    }
+
+                    _ = cancel.cancelled() => return,
+                }
+            }
+        });
+    }
+}
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        self.cancel.cancel(); // cancel reaper task
+    }
+}
+
+/// A reapable resource pool.
+trait Reapable: Send + Sync + 'static {
+    /// Reaps resources that have been idle since before the given cutoff.
+    fn reap_idle(&self, cutoff: Instant);
 }

@@ -4,6 +4,7 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
+use std::cmp::min;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
@@ -1267,6 +1268,9 @@ impl Timeline {
 
         // Define partitioning schema if needed
 
+        // HADRON
+        let force_image_creation_lsn = self.get_force_image_creation_lsn();
+
         // 1. L0 Compact
         let l0_outcome = {
             let timer = self.metrics.compact_time_histo.start_timer();
@@ -1274,6 +1278,7 @@ impl Timeline {
                 .compact_level0(
                     target_file_size,
                     options.flags.contains(CompactFlags::ForceL0Compaction),
+                    force_image_creation_lsn,
                     ctx,
                 )
                 .await?;
@@ -1376,6 +1381,7 @@ impl Timeline {
                     .create_image_layers(
                         &partitioning,
                         lsn,
+                        force_image_creation_lsn,
                         mode,
                         &image_ctx,
                         self.last_image_layer_creation_status
@@ -1471,6 +1477,41 @@ impl Timeline {
 
         Ok(CompactionOutcome::Done)
     }
+
+    /* BEGIN_HADRON */
+    // Get the force image creation LSN based on gc_cutoff_lsn.
+    // Note that this is an estimation and the workload rate may suddenly change. When that happens,
+    // the force image creation may be too early or too late, but eventually it should be able to catch up.
+    pub(crate) fn get_force_image_creation_lsn(self: &Arc<Self>) -> Option<Lsn> {
+        let image_creation_period = self.get_image_layer_force_creation_period()?;
+        let current_lsn = self.get_last_record_lsn();
+        let pitr_lsn = self.gc_info.read().unwrap().cutoffs.time?;
+        let pitr_interval = self.get_pitr_interval();
+        if pitr_lsn == Lsn::INVALID || pitr_interval.is_zero() {
+            tracing::warn!(
+                "pitr LSN/interval not found, skipping force image creation LSN calculation"
+            );
+            return None;
+        }
+
+        let delta_lsn = current_lsn.checked_sub(pitr_lsn).unwrap().0
+            * image_creation_period.as_secs()
+            / pitr_interval.as_secs();
+        let force_image_creation_lsn = current_lsn.checked_sub(delta_lsn).unwrap_or(Lsn(0));
+
+        tracing::info!(
+            "Tenant shard {} computed force_image_creation_lsn: {}. Current lsn: {}, image_layer_force_creation_period: {:?}, GC cutoff: {}, PITR interval: {:?}",
+            self.tenant_shard_id,
+            force_image_creation_lsn,
+            current_lsn,
+            image_creation_period,
+            pitr_lsn,
+            pitr_interval
+        );
+
+        Some(force_image_creation_lsn)
+    }
+    /* END_HADRON */
 
     /// Check for layers that are elegible to be rewritten:
     /// - Shard splitting: After a shard split, ancestor layers beyond pitr_interval, so that
@@ -1801,6 +1842,7 @@ impl Timeline {
         self: &Arc<Self>,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
+        force_compaction_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<CompactionOutcome, CompactionError> {
         let CompactLevel0Phase1Result {
@@ -1821,6 +1863,7 @@ impl Timeline {
                 stats,
                 target_file_size,
                 force_compaction_ignore_threshold,
+                force_compaction_lsn,
                 &ctx,
             )
             .instrument(phase1_span)
@@ -1843,6 +1886,7 @@ impl Timeline {
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
+        force_compaction_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         let begin = tokio::time::Instant::now();
@@ -1872,11 +1916,28 @@ impl Timeline {
                     return Ok(CompactLevel0Phase1Result::default());
                 }
             } else {
-                debug!(
-                    level0_deltas = level0_deltas.len(),
-                    threshold, "too few deltas to compact"
-                );
-                return Ok(CompactLevel0Phase1Result::default());
+                // HADRON
+                let min_lsn = level0_deltas
+                    .iter()
+                    .map(|a| a.get_lsn_range().start)
+                    .reduce(min);
+                if force_compaction_lsn.is_some()
+                    && min_lsn.is_some()
+                    && min_lsn.unwrap() < force_compaction_lsn.unwrap()
+                {
+                    info!(
+                        "forcing L0 compaction of {} L0 deltas. Min lsn: {}, force compaction lsn: {}",
+                        level0_deltas.len(),
+                        min_lsn.unwrap(),
+                        force_compaction_lsn.unwrap()
+                    );
+                } else {
+                    debug!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact"
+                    );
+                    return Ok(CompactLevel0Phase1Result::default());
+                }
             }
         }
 

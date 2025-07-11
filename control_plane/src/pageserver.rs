@@ -303,7 +303,7 @@ impl PageServerNode {
     async fn start_node(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
-        print!(
+        println!(
             "Starting pageserver node {} at '{}' in {:?}, retrying for {:?}",
             self.conf.id,
             self.pg_connection_config.raw_address(),
@@ -452,6 +452,12 @@ impl PageServerNode {
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
+            // HADRON
+            image_layer_force_creation_period: settings
+                .remove("image_layer_force_creation_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'image_layer_force_creation_period' as duration")?,
             image_layer_creation_check_threshold: settings
                 .remove("image_layer_creation_check_threshold")
                 .map(|x| x.parse::<u8>())

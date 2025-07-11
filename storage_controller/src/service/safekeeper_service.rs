@@ -25,7 +25,8 @@ use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::PgVersionId;
 use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration};
 use safekeeper_api::models::{
-    PullTimelineRequest, TimelineMembershipSwitchRequest, TimelineMembershipSwitchResponse,
+    PullTimelineRequest, TimelineLocateResponse, TimelineMembershipSwitchRequest,
+    TimelineMembershipSwitchResponse,
 };
 use safekeeper_api::{INITIAL_TERM, Term};
 use safekeeper_client::mgmt_api;
@@ -36,13 +37,6 @@ use utils::logging::SecretString;
 use utils::lsn::Lsn;
 
 use super::Service;
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct TimelineLocateResponse {
-    pub generation: SafekeeperGeneration,
-    pub sk_set: Vec<NodeId>,
-    pub new_sk_set: Option<Vec<NodeId>>,
-}
 
 impl Service {
     fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, anyhow::Error> {

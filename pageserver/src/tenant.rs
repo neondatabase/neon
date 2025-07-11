@@ -4171,6 +4171,15 @@ impl TenantShard {
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
+    // HADRON
+    pub fn get_image_creation_timeout(&self) -> Option<Duration> {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf.image_layer_force_creation_period.or(self
+            .conf
+            .default_tenant_conf
+            .image_layer_force_creation_period)
+    }
+
     pub fn get_pitr_interval(&self) -> Duration {
         let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
         tenant_conf
@@ -5708,6 +5717,16 @@ impl TenantShard {
             .map(|t| t.metrics.visible_physical_size_gauge.get())
             .max()
             .unwrap_or(0)
+    }
+
+    /// HADRON
+    /// Return the visible size of all timelines in this tenant.
+    pub(crate) fn get_visible_size(&self) -> u64 {
+        let timelines = self.timelines.lock().unwrap();
+        timelines
+            .values()
+            .map(|t| t.metrics.visible_physical_size_gauge.get())
+            .sum()
     }
 
     /// Builds a new tenant manifest, and uploads it if it differs from the last-known tenant
@@ -12797,6 +12816,40 @@ mod tests {
                 },
             ]
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_force_image_creation_lsn() -> anyhow::Result<()> {
+        let tenant_conf = pageserver_api::models::TenantConfig {
+            pitr_interval: Some(Duration::from_secs(7 * 3600)),
+            image_layer_force_creation_period: Some(Duration::from_secs(3600)),
+            ..Default::default()
+        };
+
+        let tenant_id = TenantId::generate();
+
+        let harness = TenantHarness::create_custom(
+            "test_get_force_image_creation_lsn",
+            tenant_conf,
+            tenant_id,
+            ShardIdentity::unsharded(),
+            Generation::new(1),
+        )
+        .await?;
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        timeline.gc_info.write().unwrap().cutoffs.time = Some(Lsn(100));
+        {
+            let writer = timeline.writer().await;
+            writer.finish_write(Lsn(5000));
+        }
+
+        let image_creation_lsn = timeline.get_force_image_creation_lsn().unwrap();
+        assert_eq!(image_creation_lsn, Lsn(4300));
         Ok(())
     }
 }

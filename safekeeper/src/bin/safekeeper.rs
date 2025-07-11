@@ -37,6 +37,7 @@ use tracing::*;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
 use utils::id::NodeId;
 use utils::logging::{self, LogFormat, SecretString};
+use utils::metrics_collector::{METRICS_COLLECTION_INTERVAL, METRICS_COLLECTOR};
 use utils::sentry_init::init_sentry;
 use utils::{pid_file, project_build_tag, project_git_version, tcp_listener};
 
@@ -243,6 +244,11 @@ struct Args {
     #[arg(long)]
     enable_tls_wal_service_api: bool,
 
+    /// Controls whether to collect all metrics on each scrape or to return potentially stale
+    /// results.
+    #[arg(long, default_value_t = true)]
+    force_metric_collection_on_scrape: bool,
+
     /// Run in development mode (disables security checks)
     #[arg(long, help = "Run in development mode (disables security checks)")]
     dev: bool,
@@ -428,6 +434,7 @@ async fn main() -> anyhow::Result<()> {
         ssl_ca_certs,
         use_https_safekeeper_api: args.use_https_safekeeper_api,
         enable_tls_wal_service_api: args.enable_tls_wal_service_api,
+        force_metric_collection_on_scrape: args.force_metric_collection_on_scrape,
     });
 
     // initialize sentry if SENTRY_DSN is provided
@@ -639,6 +646,26 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         )
         .map(|res| ("broker main".to_owned(), res));
     tasks_handles.push(Box::pin(broker_task_handle));
+
+    /* BEGIN_HADRON */
+    if conf.force_metric_collection_on_scrape {
+        let metrics_handle = current_thread_rt
+            .as_ref()
+            .unwrap_or_else(|| BACKGROUND_RUNTIME.handle())
+            .spawn(async move {
+                let mut interval: tokio::time::Interval =
+                    tokio::time::interval(METRICS_COLLECTION_INTERVAL);
+                loop {
+                    interval.tick().await;
+                    tokio::task::spawn_blocking(|| {
+                        METRICS_COLLECTOR.run_once(true);
+                    });
+                }
+            })
+            .map(|res| ("broker main".to_owned(), res));
+        tasks_handles.push(Box::pin(metrics_handle));
+    }
+    /* END_HADRON */
 
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
 

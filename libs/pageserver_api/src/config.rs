@@ -272,6 +272,9 @@ pub struct ConfigToml {
     pub timeline_import_config: TimelineImportConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub basebackup_cache_config: Option<BasebackupCacheConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_layer_generation_large_timeline_threshold: Option<u64>,
+    pub force_metric_collection_on_scrape: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -561,6 +564,11 @@ pub struct TenantConfigToml {
     pub gc_period: Duration,
     // Delta layer churn threshold to create L1 image layers.
     pub image_creation_threshold: usize,
+    // HADRON
+    // When the timeout is reached, PageServer will (1) force compact any remaining L0 deltas and
+    // (2) create image layers if there are any L1 deltas.
+    #[serde(with = "humantime_serde")]
+    pub image_layer_force_creation_period: Option<Duration>,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is time.
@@ -823,6 +831,8 @@ impl Default for ConfigToml {
             },
             basebackup_cache_config: None,
             posthog_config: None,
+            image_layer_generation_large_timeline_threshold: Some(2 * 1024 * 1024 * 1024),
+            force_metric_collection_on_scrape: true,
         }
     }
 }
@@ -916,6 +926,7 @@ impl Default for TenantConfigToml {
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),
             image_creation_threshold: DEFAULT_IMAGE_CREATION_THRESHOLD,
+            image_layer_force_creation_period: None,
             pitr_interval: humantime::parse_duration(DEFAULT_PITR_INTERVAL)
                 .expect("cannot parse default PITR interval"),
             walreceiver_connect_timeout: humantime::parse_duration(
