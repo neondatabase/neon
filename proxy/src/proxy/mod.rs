@@ -195,15 +195,18 @@ impl NeonOptions {
     // proxy options:
 
     /// `PARAMS_COMPAT` allows opting in to forwarding all startup parameters from client to compute.
-    pub const PARAMS_COMPAT: &str = "proxy_params_compat";
+    pub const PARAMS_COMPAT: &'static str = "proxy_params_compat";
 
     // cplane options:
 
     /// `LSN` allows provisioning an ephemeral compute with time-travel to the provided LSN.
-    const LSN: &str = "lsn";
+    const LSN: &'static str = "lsn";
+
+    /// `TIMESTAMP` allows provisioning an ephemeral compute with time-travel to the provided timestamp.
+    const TIMESTAMP: &'static str = "timestamp";
 
     /// `ENDPOINT_TYPE` allows configuring an ephemeral compute to be read_only or read_write.
-    const ENDPOINT_TYPE: &str = "endpoint_type";
+    const ENDPOINT_TYPE: &'static str = "endpoint_type";
 
     pub(crate) fn parse_params(params: &StartupMessageParams) -> Self {
         params
@@ -228,6 +231,7 @@ impl NeonOptions {
             // This is not a cplane option, we know it does not create ephemeral computes.
             Self::PARAMS_COMPAT => false,
             Self::LSN => true,
+            Self::TIMESTAMP => true,
             Self::ENDPOINT_TYPE => true,
             // err on the side of caution. any cplane options we don't know about
             // might lead to ephemeral computes.
