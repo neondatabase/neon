@@ -1587,6 +1587,20 @@ hexdump_page(char *page)
 	return result.data;
 }
 
+static bool safe_mdexists(SMgrRelation reln, ForkNumber forknum)
+{
+	PG_TRY();
+	{
+		return mdexists(reln, forknum);
+	}
+	PG_CATCH();
+	{
+		unlock_cached_relkind();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+}
+
 #if PG_MAJORVERSION_NUM < 17
 /*
  *	neon_write() -- Write the supplied block at the appropriate location.
@@ -1613,7 +1627,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			if (entry)
 			{
 				/* We do not know relation persistence: let's determine it */
-				relkind = mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
+				relkind = safe_mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
 				store_cached_relkind(entry, relkind);
 			}
 			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
@@ -1697,7 +1711,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			if (entry)
 			{
 				/* We do not know relation persistence: let's determine it */
-				relkind = mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
+				relkind = safe_mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
 				store_cached_relkind(entry, relkind);
 			}
 			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
