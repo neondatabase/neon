@@ -100,6 +100,7 @@ diesel::table! {
         new_sk_set -> Nullable<Array<Nullable<Int8>>>,
         cplane_notified_generation -> Int4,
         deleted_at -> Nullable<Timestamptz>,
+        sk_set_notified_generation -> Int4,
     }
 }
 
