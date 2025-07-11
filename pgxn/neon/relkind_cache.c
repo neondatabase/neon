@@ -228,6 +228,7 @@ void
 store_cached_relkind(RelKindEntry* entry, RelKind relkind)
 {
 	SpinLockAcquire(&relkind_ctl->mutex);
+	Assert(entry->relkind == RELKIND_UNKNOWN || entry->relkind == relkind);
 	entry->relkind = relkind;
 	Assert(entry->access_count != 0);
 	if (--entry->access_count == 0)
