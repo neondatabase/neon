@@ -125,7 +125,7 @@ docker exec -it proxy-postgres psql -U postgres -c "CREATE ROLE proxy WITH SUPER
 
 If you want to test query cancellation, redis is also required:
 ```sh
-docker run --detach --name proxy-redis --publish 6379:6379 redis:7
+docker run --detach --name proxy-redis --publish 6379:6379 redis:7.0
 ```
 
 Let's create self-signed certificate by running:
