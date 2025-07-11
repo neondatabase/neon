@@ -99,9 +99,11 @@ class NeonBranch:
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
         # XXX for debug only, remove before merge
         log.info("%s", branch["branch"])
-        self.parent_timestamp: datetime = datetime.fromisoformat(
-            branch["branch"]["parent_timestamp"]
-        ) if "parent_timestamp" in branch["branch"] else datetime.fromtimestamp(0, tz=UTC)
+        self.parent_timestamp: datetime = (
+            datetime.fromisoformat(branch["branch"]["parent_timestamp"])
+            if "parent_timestamp" in branch["branch"]
+            else datetime.fromtimestamp(0, tz=UTC)
+        )
         self.connect_env: dict[str, str] | None = None
         if self.connection_parameters:
             self.connect_env = {
@@ -157,7 +159,9 @@ class NeonBranch:
             if ep.type == "read_only":
                 ep.terminate_benchmark()
         self.terminate_benchmark()
-        self.neon_api.reset_to_parent(self.project_id, self.id)
+        res = self.neon_api.reset_to_parent(self.project_id, self.id)
+        self.updated_at = datetime.fromisoformat(res["branch"]["updated_at"])
+        self.parent_timestamp = datetime.fromisoformat(res["branch"]["parent_timestamp"])
         self.project.wait()
         self.start_benchmark()
         for ep in self.project.endpoints.values():
@@ -176,6 +180,7 @@ class NeonBranch:
         if res is None:
             return
         self.updated_at = datetime.fromisoformat(res["branch"]["updated_at"])
+        self.parent_timestamp = datetime.fromisoformat(res["branch"]["parent_timestamp"])
         parent_id: str = res["branch"]["parent_id"]
         # XXX Retry get parent details to work around the issue
         # https://databricks.atlassian.net/browse/LKB-279
