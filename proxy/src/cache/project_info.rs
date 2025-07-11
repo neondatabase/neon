@@ -12,6 +12,7 @@ use tokio::time::Instant;
 use tracing::{debug, info};
 
 use crate::config::ProjectInfoCacheOptions;
+use crate::control_plane::messages::ControlPlaneErrorMessage;
 use crate::control_plane::{EndpointAccessControl, RoleAccessControl};
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::types::{EndpointId, RoleName};
@@ -87,7 +88,7 @@ impl EndpointInfo {
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
 pub struct ProjectInfoCacheImpl {
-    cache: ClashMap<EndpointIdInt, EndpointInfo>,
+    cache: ClashMap<EndpointIdInt, Result<EndpointInfo, Box<ControlPlaneErrorMessage>>>,
 
     project2ep: ClashMap<ProjectIdInt, HashSet<EndpointIdInt>>,
     // FIXME(stefan): we need a way to GC the account2ep map.
@@ -193,7 +194,7 @@ impl ProjectInfoCacheImpl {
     fn get_endpoint_cache(
         &self,
         endpoint_id: &EndpointId,
-    ) -> Option<Ref<'_, EndpointIdInt, EndpointInfo>> {
+    ) -> Option<Ref<'_, EndpointIdInt, Result<EndpointInfo, Box<ControlPlaneErrorMessage>>>> {
         let endpoint_id = EndpointIdInt::get(endpoint_id)?;
         self.cache.get(&endpoint_id)
     }
@@ -202,20 +203,48 @@ impl ProjectInfoCacheImpl {
         &self,
         endpoint_id: &EndpointId,
         role_name: &RoleName,
-    ) -> Option<RoleAccessControl> {
+    ) -> Option<Result<RoleAccessControl, Box<ControlPlaneErrorMessage>>> {
         let valid_since = self.get_cache_times();
         let role_name = RoleNameInt::get(role_name)?;
         let endpoint_info = self.get_endpoint_cache(endpoint_id)?;
-        endpoint_info.get_role_secret(role_name, valid_since)
+        match endpoint_info.as_ref() {
+            Ok(endpoint_info) => endpoint_info
+                .get_role_secret(role_name, valid_since)
+                .map(Ok),
+            Err(msg) => Some(Err(msg.clone())),
+        }
     }
 
     pub(crate) fn get_endpoint_access(
         &self,
         endpoint_id: &EndpointId,
-    ) -> Option<EndpointAccessControl> {
+    ) -> Option<Result<EndpointAccessControl, Box<ControlPlaneErrorMessage>>> {
         let valid_since = self.get_cache_times();
         let endpoint_info = self.get_endpoint_cache(endpoint_id)?;
-        endpoint_info.get_controls(valid_since)
+        match endpoint_info.as_ref() {
+            Ok(endpoint_info) => endpoint_info.get_controls(valid_since).map(Ok),
+            Err(msg) => Some(Err(msg.clone())),
+        }
+    }
+
+    pub(crate) fn insert_endpoint_access_err(
+        &self,
+        endpoint_id: EndpointIdInt,
+        msg: Box<ControlPlaneErrorMessage>,
+    ) {
+        if self.cache.len() >= self.config.size {
+            // If there are too many entries, wait until the next gc cycle.
+            return;
+        }
+
+        match self.cache.entry(endpoint_id) {
+            clashmap::Entry::Vacant(e) => {
+                e.insert(Err(msg));
+            }
+            clashmap::Entry::Occupied(mut e) => {
+                // TODO should we clear the entry and replace with error or ignore the error?
+            }
+        }
     }
 
     pub(crate) fn insert_endpoint_access(
@@ -242,16 +271,26 @@ impl ProjectInfoCacheImpl {
 
         match self.cache.entry(endpoint_id) {
             clashmap::Entry::Vacant(e) => {
-                e.insert(EndpointInfo {
+                e.insert(Ok(EndpointInfo {
                     role_controls: HashMap::from_iter([(role_name, role_controls)]),
                     controls: Some(controls),
-                });
+                }));
             }
             clashmap::Entry::Occupied(mut e) => {
-                let ep = e.get_mut();
-                ep.controls = Some(controls);
-                if ep.role_controls.len() < self.config.max_roles {
-                    ep.role_controls.insert(role_name, role_controls);
+                let res = e.get_mut();
+                match res {
+                    Ok(ep) => {
+                        ep.controls = Some(controls);
+                        if ep.role_controls.len() < self.config.max_roles {
+                            ep.role_controls.insert(role_name, role_controls);
+                        }
+                    }
+                    Err(_) => {
+                        *res = Ok(EndpointInfo {
+                            role_controls: HashMap::from_iter([(role_name, role_controls)]),
+                            controls: Some(controls),
+                        })
+                    }
                 }
             }
         }

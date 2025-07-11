@@ -68,6 +68,53 @@ impl NeonControlPlaneClient {
         self.endpoint.url().as_str()
     }
 
+    async fn get_auth_info<T>(
+        &self,
+        ctx: &RequestContext,
+        endpoint: &EndpointId,
+        role: &RoleName,
+        extract: impl FnOnce(&EndpointAccessControl, &RoleAccessControl) -> T,
+    ) -> Result<T, GetAuthInfoError> {
+        match self.do_get_auth_req(ctx, endpoint, role).await {
+            Ok(auth_info) => {
+                let control = EndpointAccessControl {
+                    allowed_ips: Arc::new(auth_info.allowed_ips),
+                    allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
+                    flags: auth_info.access_blocker_flags,
+                    rate_limits: auth_info.rate_limits,
+                };
+                let role_control = RoleAccessControl {
+                    secret: auth_info.secret,
+                };
+                let res = extract(&control, &role_control);
+
+                if let Some(project_id) = auth_info.project_id {
+                    self.caches.project_info.insert_endpoint_access(
+                        auth_info.account_id,
+                        project_id,
+                        endpoint.normalize().into(),
+                        role.into(),
+                        control,
+                        role_control,
+                    );
+                    ctx.set_project_id(project_id);
+                }
+
+                Ok(res)
+            }
+            Err(err) => match err {
+                GetAuthInfoError::ApiError(ControlPlaneError::Message(ref msg)) => {
+                    self.caches
+                        .project_info
+                        .insert_endpoint_access_err(endpoint.normalize().into(), msg.clone());
+
+                    Err(err)
+                }
+                err => Err(err),
+            },
+        }
+    }
+
     async fn do_get_auth_req(
         &self,
         ctx: &RequestContext,
@@ -284,43 +331,18 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         ctx: &RequestContext,
         endpoint: &EndpointId,
         role: &RoleName,
-    ) -> Result<RoleAccessControl, crate::control_plane::errors::GetAuthInfoError> {
-        let normalized_ep = &endpoint.normalize();
-        if let Some(secret) = self
+    ) -> Result<RoleAccessControl, GetAuthInfoError> {
+        if let Some(role_control) = self
             .caches
             .project_info
-            .get_role_secret(normalized_ep, role)
+            .get_role_secret(&endpoint.normalize(), role)
         {
-            return Ok(secret);
+            return role_control
+                .map_err(|msg| GetAuthInfoError::ApiError(ControlPlaneError::Message(msg)));
         }
 
-        let auth_info = self.do_get_auth_req(ctx, endpoint, role).await?;
-
-        let control = EndpointAccessControl {
-            allowed_ips: Arc::new(auth_info.allowed_ips),
-            allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
-            flags: auth_info.access_blocker_flags,
-            rate_limits: auth_info.rate_limits,
-        };
-        let role_control = RoleAccessControl {
-            secret: auth_info.secret,
-        };
-
-        if let Some(project_id) = auth_info.project_id {
-            let normalized_ep_int = normalized_ep.into();
-
-            self.caches.project_info.insert_endpoint_access(
-                auth_info.account_id,
-                project_id,
-                normalized_ep_int,
-                role.into(),
-                control,
-                role_control.clone(),
-            );
-            ctx.set_project_id(project_id);
-        }
-
-        Ok(role_control)
+        self.get_auth_info(ctx, endpoint, role, |_, role_control| role_control.clone())
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -330,38 +352,17 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         endpoint: &EndpointId,
         role: &RoleName,
     ) -> Result<EndpointAccessControl, GetAuthInfoError> {
-        let normalized_ep = &endpoint.normalize();
-        if let Some(control) = self.caches.project_info.get_endpoint_access(normalized_ep) {
-            return Ok(control);
+        if let Some(control) = self
+            .caches
+            .project_info
+            .get_endpoint_access(&endpoint.normalize())
+        {
+            return control
+                .map_err(|msg| GetAuthInfoError::ApiError(ControlPlaneError::Message(msg)));
         }
 
-        let auth_info = self.do_get_auth_req(ctx, endpoint, role).await?;
-
-        let control = EndpointAccessControl {
-            allowed_ips: Arc::new(auth_info.allowed_ips),
-            allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
-            flags: auth_info.access_blocker_flags,
-            rate_limits: auth_info.rate_limits,
-        };
-        let role_control = RoleAccessControl {
-            secret: auth_info.secret,
-        };
-
-        if let Some(project_id) = auth_info.project_id {
-            let normalized_ep_int = normalized_ep.into();
-
-            self.caches.project_info.insert_endpoint_access(
-                auth_info.account_id,
-                project_id,
-                normalized_ep_int,
-                role.into(),
-                control.clone(),
-                role_control,
-            );
-            ctx.set_project_id(project_id);
-        }
-
-        Ok(control)
+        self.get_auth_info(ctx, endpoint, role, |control, _| control.clone())
+            .await
     }
 
     #[tracing::instrument(skip_all)]
