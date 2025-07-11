@@ -9572,7 +9572,7 @@ mod tests {
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
-        fail::cfg(
+        neon_failpoint::configure_failpoint(
             "flush-layer-before-update-remote-consistent-lsn",
             "return()",
         )
