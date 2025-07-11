@@ -6,7 +6,7 @@ macro_rules! fail_point {
     ($name:literal) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, None) {
-                either::Either::Left(result) => {
+                $crate::either::Either::Left(result) => {
                     match result {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(_) => {
@@ -15,7 +15,7 @@ macro_rules! fail_point {
                         $crate::FailpointResult::Cancelled => {},
                     }
                 },
-                either::Either::Right(future) => {
+                $crate::either::Either::Right(future) => {
                     match future.await {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(_) => {
@@ -30,7 +30,7 @@ macro_rules! fail_point {
     ($name:literal, $closure:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, None) {
-                either::Either::Left(result) => {
+                $crate::either::Either::Left(result) => {
                     match result {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(value) => {
@@ -40,7 +40,7 @@ macro_rules! fail_point {
                         $crate::FailpointResult::Cancelled => {},
                     }
                 },
-                either::Either::Right(future) => {
+                $crate::either::Either::Right(future) => {
                     match future.await {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(value) => {
@@ -57,7 +57,7 @@ macro_rules! fail_point {
         if cfg!(feature = "testing") {
             if $condition {
                 match $crate::failpoint($name, None) {
-                    either::Either::Left(result) => {
+                    $crate::either::Either::Left(result) => {
                         match result {
                             $crate::FailpointResult::Continue => {},
                             $crate::FailpointResult::Return(value) => {
@@ -67,7 +67,7 @@ macro_rules! fail_point {
                             $crate::FailpointResult::Cancelled => {},
                         }
                     },
-                    either::Either::Right(future) => {
+                    $crate::either::Either::Right(future) => {
                         match future.await {
                             $crate::FailpointResult::Continue => {},
                             $crate::FailpointResult::Return(value) => {
@@ -89,7 +89,7 @@ macro_rules! fail_point_sync {
     ($name:literal) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, None) {
-                either::Either::Left(result) => {
+                $crate::either::Either::Left(result) => {
                     match result {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(_) => {
@@ -98,7 +98,7 @@ macro_rules! fail_point_sync {
                         $crate::FailpointResult::Cancelled => {},
                     }
                 },
-                either::Either::Right(_) => {
+                $crate::either::Either::Right(_) => {
                     panic!("failpoint '{}' triggered an async action (sleep/pause) but fail_point_sync! was used. Use fail_point! instead.", $name);
                 },
             }
@@ -107,7 +107,7 @@ macro_rules! fail_point_sync {
     ($name:literal, $closure:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, None) {
-                either::Either::Left(result) => {
+                $crate::either::Either::Left(result) => {
                     match result {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(value) => {
@@ -117,7 +117,7 @@ macro_rules! fail_point_sync {
                         $crate::FailpointResult::Cancelled => {},
                     }
                 },
-                either::Either::Right(_) => {
+                $crate::either::Either::Right(_) => {
                     panic!("failpoint '{}' triggered an async action (sleep/pause) but fail_point_sync! was used. Use fail_point! instead.", $name);
                 },
             }
@@ -127,7 +127,7 @@ macro_rules! fail_point_sync {
         if cfg!(feature = "testing") {
             if $condition {
                 match $crate::failpoint($name, None) {
-                    either::Either::Left(result) => {
+                    $crate::either::Either::Left(result) => {
                         match result {
                             $crate::FailpointResult::Continue => {},
                             $crate::FailpointResult::Return(value) => {
@@ -137,7 +137,7 @@ macro_rules! fail_point_sync {
                             $crate::FailpointResult::Cancelled => {},
                         }
                     },
-                    either::Either::Right(_) => {
+                    $crate::either::Either::Right(_) => {
                         panic!("failpoint '{}' triggered an async action (sleep/pause) but fail_point_sync! was used. Use fail_point! instead.", $name);
                     },
                 }
@@ -152,7 +152,7 @@ macro_rules! fail_point_with_context {
     ($name:literal, $context:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, Some($context)) {
-                either::Either::Left(result) => {
+                $crate::either::Either::Left(result) => {
                     match result {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(_) => {
@@ -161,7 +161,7 @@ macro_rules! fail_point_with_context {
                         $crate::FailpointResult::Cancelled => {},
                     }
                 },
-                either::Either::Right(future) => {
+                $crate::either::Either::Right(future) => {
                     match future.await {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(_) => {
@@ -176,7 +176,7 @@ macro_rules! fail_point_with_context {
     ($name:literal, $context:expr, $closure:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, Some($context)) {
-                either::Either::Left(result) => {
+                $crate::either::Either::Left(result) => {
                     match result {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(value) => {
@@ -186,7 +186,7 @@ macro_rules! fail_point_with_context {
                         $crate::FailpointResult::Cancelled => {},
                     }
                 },
-                either::Either::Right(future) => {
+                $crate::either::Either::Right(future) => {
                     match future.await {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(value) => {
@@ -203,7 +203,7 @@ macro_rules! fail_point_with_context {
         if cfg!(feature = "testing") {
             if $condition {
                 match $crate::failpoint($name, Some($context)) {
-                    either::Either::Left(result) => {
+                    $crate::either::Either::Left(result) => {
                         match result {
                             $crate::FailpointResult::Continue => {},
                             $crate::FailpointResult::Return(value) => {
@@ -213,7 +213,7 @@ macro_rules! fail_point_with_context {
                             $crate::FailpointResult::Cancelled => {},
                         }
                     },
-                    either::Either::Right(future) => {
+                    $crate::either::Either::Right(future) => {
                         match future.await {
                             $crate::FailpointResult::Continue => {},
                             $crate::FailpointResult::Return(value) => {
@@ -235,7 +235,7 @@ macro_rules! fail_point_with_context_sync {
     ($name:literal, $context:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, Some($context)) {
-                either::Either::Left(result) => {
+                $crate::either::Either::Left(result) => {
                     match result {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(_) => {
@@ -244,7 +244,7 @@ macro_rules! fail_point_with_context_sync {
                         $crate::FailpointResult::Cancelled => {},
                     }
                 },
-                either::Either::Right(_) => {
+                $crate::either::Either::Right(_) => {
                     panic!("failpoint '{}' triggered an async action (sleep/pause) but fail_point_with_context_sync! was used. Use fail_point_with_context! instead.", $name);
                 },
             }
@@ -253,7 +253,7 @@ macro_rules! fail_point_with_context_sync {
     ($name:literal, $context:expr, $closure:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, Some($context)) {
-                either::Either::Left(result) => {
+                $crate::either::Either::Left(result) => {
                     match result {
                         $crate::FailpointResult::Continue => {},
                         $crate::FailpointResult::Return(value) => {
@@ -263,7 +263,7 @@ macro_rules! fail_point_with_context_sync {
                         $crate::FailpointResult::Cancelled => {},
                     }
                 },
-                either::Either::Right(_) => {
+                $crate::either::Either::Right(_) => {
                     panic!("failpoint '{}' triggered an async action (sleep/pause) but fail_point_with_context_sync! was used. Use fail_point_with_context! instead.", $name);
                 },
             }
@@ -273,7 +273,7 @@ macro_rules! fail_point_with_context_sync {
         if cfg!(feature = "testing") {
             if $condition {
                 match $crate::failpoint($name, Some($context)) {
-                    either::Either::Left(result) => {
+                    $crate::either::Either::Left(result) => {
                         match result {
                             $crate::FailpointResult::Continue => {},
                             $crate::FailpointResult::Return(value) => {
@@ -283,7 +283,7 @@ macro_rules! fail_point_with_context_sync {
                             $crate::FailpointResult::Cancelled => {},
                         }
                     },
-                    either::Either::Right(_) => {
+                    $crate::either::Either::Right(_) => {
                         panic!("failpoint '{}' triggered an async action (sleep/pause) but fail_point_with_context_sync! was used. Use fail_point_with_context! instead.", $name);
                     },
                 }
@@ -304,14 +304,14 @@ macro_rules! pausable_failpoint {
     ($name:literal, $cancel:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint_with_cancellation($name, None, $cancel) {
-                either::Either::Left(result) => {
+                $crate::either::Either::Left(result) => {
                     match result {
                         $crate::FailpointResult::Continue => Ok(()),
                         $crate::FailpointResult::Return(_) => Ok(()),
                         $crate::FailpointResult::Cancelled => Err(()),
                     }
                 },
-                either::Either::Right(future) => {
+                $crate::either::Either::Right(future) => {
                     match future.await {
                         $crate::FailpointResult::Continue => Ok(()),
                         $crate::FailpointResult::Return(_) => Ok(()),
@@ -331,8 +331,8 @@ macro_rules! sleep_millis_async {
     ($name:literal) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, None) {
-                either::Either::Left(_) => {},
-                either::Either::Right(future) => {
+                $crate::either::Either::Left(_) => {},
+                $crate::either::Either::Right(future) => {
                     future.await;
                 },
             }
@@ -341,8 +341,8 @@ macro_rules! sleep_millis_async {
     ($name:literal, $cancel:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint_with_cancellation($name, None, $cancel) {
-                either::Either::Left(_) => {},
-                either::Either::Right(future) => {
+                $crate::either::Either::Left(_) => {},
+                $crate::either::Either::Right(future) => {
                     future.await;
                 },
             }

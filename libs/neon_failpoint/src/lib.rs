@@ -23,6 +23,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 pub mod macros;
+pub use either; // re-export for use in macros
 
 /// Global failpoint registry
 static FAILPOINTS: Lazy<Arc<RwLock<HashMap<String, FailpointConfig>>>> =
