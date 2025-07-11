@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -106,7 +106,10 @@ impl FailpointNotifiers {
     ///
     /// Returns a `FailpointNotifier` that automatically removes itself
     /// from the collection when dropped.
-    pub fn create_notifier(&mut self, notifiers_arc: Arc<std::sync::Mutex<FailpointNotifiers>>) -> FailpointNotifier {
+    pub fn create_notifier(
+        &mut self,
+        notifiers_arc: Arc<std::sync::Mutex<FailpointNotifiers>>,
+    ) -> FailpointNotifier {
         let notifier = Arc::new(Notify::new());
         self.notifiers.push(notifier.clone());
 
@@ -138,7 +141,10 @@ pub struct FailpointNotifier {
 
 impl FailpointNotifier {
     /// Create a new notifier
-    pub fn new(notifier: Arc<Notify>, notifiers_arc: Arc<std::sync::Mutex<FailpointNotifiers>>) -> Self {
+    pub fn new(
+        notifier: Arc<Notify>,
+        notifiers_arc: Arc<std::sync::Mutex<FailpointNotifiers>>,
+    ) -> Self {
         Self {
             notifier,
             notifiers_arc,
@@ -280,9 +286,8 @@ pub fn failpoint_with_cancellation(
     // Global lock is dropped here
 
     // Now work with the individual config's lock
-    let (action_spec, context_matchers) = {
-        (config.action_spec.clone(), config.context_matchers.clone())
-    };
+    let (action_spec, context_matchers) =
+        { (config.action_spec.clone(), config.context_matchers.clone()) };
 
     // Check context matchers if provided
     if let (Some(matchers), Some(ctx)) = (&context_matchers, context) {
