@@ -8,16 +8,57 @@ A modern, async-first failpoint library for Neon, replacing the `fail` crate wit
 - **Context matching**: Failpoints can be configured to trigger only when specific context conditions are met
 - **Regex support**: Context values can be matched using regular expressions
 - **Cancellation support**: All operations support cancellation tokens
+- **Dynamic reconfiguration**: Paused and sleeping tasks automatically resume when failpoint configurations change
 - **Backward compatibility**: Drop-in replacement for existing `fail` crate usage
 
 ## Supported Actions
 
 - `off` - Disable the failpoint
-- `pause` - Pause indefinitely until disabled or cancelled
-- `sleep(N)` - Sleep for N milliseconds
+- `pause` - Pause indefinitely until disabled, reconfigured, or cancelled
+- `sleep(N)` - Sleep for N milliseconds (can be interrupted by reconfiguration)
 - `return` - Return early (empty value)
 - `return(value)` - Return early with a specific value
 - `exit` - Exit the process immediately
+
+## Dynamic Behavior
+
+When a failpoint is reconfigured while tasks are waiting on it:
+
+- **Paused tasks** will immediately resume and continue normal execution
+- **Sleeping tasks** will wake up early and continue normal execution  
+- **Removed failpoints** will cause all waiting tasks to resume normally
+
+The new configuration only applies to future hits of the failpoint, not to tasks that are already waiting. This allows for flexible testing scenarios where you can pause execution, inspect state, and then resume execution dynamically.
+
+## Example: Dynamic Reconfiguration
+
+```rust
+use neon_failpoint::{configure_failpoint, failpoint, FailpointResult};
+use tokio::time::Duration;
+
+// Start a task that will hit a failpoint
+let task = tokio::spawn(async {
+    println!("About to hit failpoint");
+    match failpoint("test_pause", None).await {
+        FailpointResult::Return(value) => println!("Returned: {}", value),
+        FailpointResult::Continue => println!("Continued normally"),
+        FailpointResult::Cancelled => println!("Cancelled"),
+    }
+});
+
+// Configure the failpoint to pause
+configure_failpoint("test_pause", "pause").unwrap();
+
+// Let the task hit the failpoint and pause
+tokio::time::sleep(Duration::from_millis(10)).await;
+
+// Change the failpoint configuration - this will wake up the paused task
+// The task will resume and continue normally (not apply the new config)
+configure_failpoint("test_pause", "return(not_applied)").unwrap();
+
+// The task will complete with Continue, not Return
+let result = task.await.unwrap();
+```
 
 ## Basic Usage
 
