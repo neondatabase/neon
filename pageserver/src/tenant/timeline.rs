@@ -5602,10 +5602,11 @@ impl Timeline {
     /// Predicate function which indicates whether we should check if new image layers
     /// are required. Since checking if new image layers are required is expensive in
     /// terms of CPU, we only do it in the following cases:
-    /// 1. If the timeline has ingested sufficient WAL to justify the cost
+    /// 1. If the timeline has ingested sufficient WAL to justify the cost or ...
     /// 2. If enough time has passed since the last check:
     ///     1. For large tenants, we wish to perform the check more often since they
-    ///        suffer from the lack of image layers
+    ///        suffer from the lack of image layers. Note that we assume sharded tenants
+    ///        to be large since non-zero shards do not track the logical size.
     ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
         let large_timeline_threshold = self.conf.image_layer_generation_large_timeline_threshold;
@@ -5620,17 +5621,20 @@ impl Timeline {
         let distance_based_decision = distance.0 >= min_distance;
 
         let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
-        let mut check_required_after = self.get_checkpoint_timeout();
+        let check_required_after = (|| {
+            if self.shard_identity.is_unsharded() {
+                if let CurrentLogicalSize::Exact(logical_size) =
+                    self.current_logical_size.current_size()
+                {
+                    if Some(Into::<u64>::into(&logical_size)) < large_timeline_threshold {
+                        return Duration::from_secs(3600 * 48);
+                    }
+                }
+            }
 
-        if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
-            check_required_after =
-                if Some(Into::<u64>::into(&logical_size)) >= large_timeline_threshold {
-                    self.get_checkpoint_timeout()
-                } else {
-                    Duration::from_secs(3600 * 48)
-                };
-        }
-        // HADRON: we removed the check on self.current_logical_size non shard-0 because only shard 0 computes exact size.
+            self.get_checkpoint_timeout()
+        })();
+
         let time_based_decision = match *last_check_instant {
             Some(last_check) => {
                 let elapsed = last_check.elapsed();
