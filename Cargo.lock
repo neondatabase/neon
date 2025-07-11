@@ -6991,6 +6991,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "reqwest",
+ "safekeeper_api",
  "serde_json",
  "storage_controller_client",
  "tokio",
