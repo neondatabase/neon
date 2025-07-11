@@ -304,19 +304,15 @@ macro_rules! pausable_failpoint {
     ($name:literal, $cancel:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint_with_cancellation($name, None, $cancel) {
-                $crate::either::Either::Left(result) => {
-                    match result {
-                        $crate::FailpointResult::Continue => Ok(()),
-                        $crate::FailpointResult::Return(_) => Ok(()),
-                        $crate::FailpointResult::Cancelled => Err(()),
-                    }
+                $crate::either::Either::Left(result) => match result {
+                    $crate::FailpointResult::Continue => Ok(()),
+                    $crate::FailpointResult::Return(_) => Ok(()),
+                    $crate::FailpointResult::Cancelled => Err(()),
                 },
-                $crate::either::Either::Right(future) => {
-                    match future.await {
-                        $crate::FailpointResult::Continue => Ok(()),
-                        $crate::FailpointResult::Return(_) => Ok(()),
-                        $crate::FailpointResult::Cancelled => Err(()),
-                    }
+                $crate::either::Either::Right(future) => match future.await {
+                    $crate::FailpointResult::Continue => Ok(()),
+                    $crate::FailpointResult::Return(_) => Ok(()),
+                    $crate::FailpointResult::Cancelled => Err(()),
                 },
             }
         } else {
@@ -331,20 +327,20 @@ macro_rules! sleep_millis_async {
     ($name:literal) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, None) {
-                $crate::either::Either::Left(_) => {},
+                $crate::either::Either::Left(_) => {}
                 $crate::either::Either::Right(future) => {
                     future.await;
-                },
+                }
             }
         }
     }};
     ($name:literal, $cancel:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint_with_cancellation($name, None, $cancel) {
-                $crate::either::Either::Left(_) => {},
+                $crate::either::Either::Left(_) => {}
                 $crate::either::Either::Right(future) => {
                     future.await;
-                },
+                }
             }
         }
     }};

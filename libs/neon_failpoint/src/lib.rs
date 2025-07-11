@@ -7,10 +7,10 @@
 //! - Compatible API with the existing fail crate usage
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use std::pin::Pin;
-use std::future::Future;
 
 use anyhow::Result;
 use either::Either;
@@ -174,13 +174,18 @@ pub fn has_failpoints() -> bool {
 }
 
 pub fn list() -> Vec<(impl std::fmt::Display, impl std::fmt::Display)> {
-    FAILPOINTS.read().iter().map(|(name, config)| {
-        (name.clone(), format!("{config:?}"))
-    }).collect::<Vec<_>>()
+    FAILPOINTS
+        .read()
+        .iter()
+        .map(|(name, config)| (name.clone(), format!("{config:?}")))
+        .collect::<Vec<_>>()
 }
 
 /// Execute a failpoint with optional context
-pub fn failpoint(name: &str, context: Option<&FailpointContext>) -> Either<FailpointResult, Pin<Box<dyn Future<Output = FailpointResult> + Send>>> {
+pub fn failpoint(
+    name: &str,
+    context: Option<&FailpointContext>,
+) -> Either<FailpointResult, Pin<Box<dyn Future<Output = FailpointResult> + Send>>> {
     failpoint_with_cancellation(name, context, &CancellationToken::new())
 }
 
@@ -475,7 +480,6 @@ mod tests {
         matches!(result, FailpointResult::Continue);
     }
 
-
     #[tokio::test]
     async fn test_failpoint_sleep() {
         configure_failpoint("test_sleep", "sleep(10)").unwrap();
@@ -499,7 +503,12 @@ mod tests {
             cancel_token_clone.cancel();
         });
 
-        let result = await_failpoint_result(failpoint_with_cancellation("test_pause", None, &cancel_token)).await;
+        let result = await_failpoint_result(failpoint_with_cancellation(
+            "test_pause",
+            None,
+            &cancel_token,
+        ))
+        .await;
         matches!(result, FailpointResult::Cancelled);
     }
 
@@ -511,9 +520,10 @@ mod tests {
         let start = std::time::Instant::now();
 
         // Start a task that hits the failpoint
-        let task = tokio::spawn(async move {
-            await_failpoint_result(failpoint(failpoint_name, None)).await
-        });
+        let task =
+            tokio::spawn(
+                async move { await_failpoint_result(failpoint(failpoint_name, None)).await },
+            );
 
         // Give it time to hit the failpoint and pause
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -543,9 +553,10 @@ mod tests {
         configure_failpoint(failpoint_name, "pause").unwrap();
 
         // Start a task that hits the failpoint
-        let task = tokio::spawn(async move {
-            await_failpoint_result(failpoint(failpoint_name, None)).await
-        });
+        let task =
+            tokio::spawn(
+                async move { await_failpoint_result(failpoint(failpoint_name, None)).await },
+            );
 
         // Give it time to hit the failpoint and pause
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -571,9 +582,10 @@ mod tests {
         let start = std::time::Instant::now();
 
         // Start a task that hits the failpoint
-        let task = tokio::spawn(async move {
-            await_failpoint_result(failpoint(failpoint_name, None)).await
-        });
+        let task =
+            tokio::spawn(
+                async move { await_failpoint_result(failpoint(failpoint_name, None)).await },
+            );
 
         // Give it time to hit the failpoint and start sleeping
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -604,9 +616,10 @@ mod tests {
         let start = std::time::Instant::now();
 
         // Start a task that hits the failpoint
-        let task = tokio::spawn(async move {
-            await_failpoint_result(failpoint(failpoint_name, None)).await
-        });
+        let task =
+            tokio::spawn(
+                async move { await_failpoint_result(failpoint(failpoint_name, None)).await },
+            );
 
         // Give it time to hit the failpoint and start sleeping
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -635,9 +648,10 @@ mod tests {
         configure_failpoint(failpoint_name, "pause").unwrap();
 
         // Start a task that hits the failpoint
-        let task = tokio::spawn(async move {
-            await_failpoint_result(failpoint(failpoint_name, None)).await
-        });
+        let task =
+            tokio::spawn(
+                async move { await_failpoint_result(failpoint(failpoint_name, None)).await },
+            );
 
         // Give it time to hit the failpoint and pause
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -661,17 +675,20 @@ mod tests {
         configure_failpoint(failpoint_name, "pause").unwrap();
 
         // Start multiple tasks that hit the same failpoint
-        let task1 = tokio::spawn(async move {
-            await_failpoint_result(failpoint(failpoint_name, None)).await
-        });
+        let task1 =
+            tokio::spawn(
+                async move { await_failpoint_result(failpoint(failpoint_name, None)).await },
+            );
 
-        let task2 = tokio::spawn(async move {
-            await_failpoint_result(failpoint(failpoint_name, None)).await
-        });
+        let task2 =
+            tokio::spawn(
+                async move { await_failpoint_result(failpoint(failpoint_name, None)).await },
+            );
 
-        let task3 = tokio::spawn(async move {
-            await_failpoint_result(failpoint(failpoint_name, None)).await
-        });
+        let task3 =
+            tokio::spawn(
+                async move { await_failpoint_result(failpoint(failpoint_name, None)).await },
+            );
 
         // Give them time to hit the failpoint and pause
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -707,9 +724,10 @@ mod tests {
         configure_failpoint(failpoint_name, "pause").unwrap();
 
         // Start a task that will hit the failpoint
-        let task = tokio::spawn(async move {
-            await_failpoint_result(failpoint(failpoint_name, None)).await
-        });
+        let task =
+            tokio::spawn(
+                async move { await_failpoint_result(failpoint(failpoint_name, None)).await },
+            );
 
         // Rapidly change the configuration multiple times
         for i in 0..10 {
@@ -769,9 +787,7 @@ mod tests {
         let result = tokio::task::spawn_blocking(|| {
             std::panic::catch_unwind(|| {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    await_failpoint_result(failpoint("test_panic", None)).await
-                })
+                rt.block_on(async { await_failpoint_result(failpoint("test_panic", None)).await })
             })
         })
         .await

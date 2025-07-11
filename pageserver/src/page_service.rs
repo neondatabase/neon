@@ -336,18 +336,21 @@ async fn page_service_conn_main(
 
     let default_timeout_ms = 10 * 60 * 1000; // 10 minutes by default
     let socket_timeout_ms = (|| {
-        fail::fail_point_sync!("simulated-bad-compute-connection", |avg_timeout_ms: Option<String>| {
-            // Exponential distribution for simulating
-            // poor network conditions, expect about avg_timeout_ms to be around 15
-            // in tests
-            if let Some(avg_timeout_ms) = avg_timeout_ms {
-                let avg = avg_timeout_ms.parse::<i64>().unwrap() as f32;
-                let u = rand::random::<f32>();
-                ((1.0 - u).ln() / (-avg)) as u64
-            } else {
-                default_timeout_ms
+        fail::fail_point_sync!(
+            "simulated-bad-compute-connection",
+            |avg_timeout_ms: Option<String>| {
+                // Exponential distribution for simulating
+                // poor network conditions, expect about avg_timeout_ms to be around 15
+                // in tests
+                if let Some(avg_timeout_ms) = avg_timeout_ms {
+                    let avg = avg_timeout_ms.parse::<i64>().unwrap() as f32;
+                    let u = rand::random::<f32>();
+                    ((1.0 - u).ln() / (-avg)) as u64
+                } else {
+                    default_timeout_ms
+                }
             }
-        });
+        );
         default_timeout_ms
     })();
 

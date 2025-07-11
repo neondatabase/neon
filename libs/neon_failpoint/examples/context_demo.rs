@@ -1,6 +1,4 @@
-use neon_failpoint::{
-    configure_failpoint_with_context, failpoint, FailpointResult,
-};
+use neon_failpoint::{configure_failpoint_with_context, failpoint, FailpointResult};
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -27,32 +25,28 @@ async fn main() {
 
     println!("Testing with matching context...");
     match failpoint("backup_operation", Some(&context)) {
-        either::Either::Left(result) => {
-            match result {
-                FailpointResult::Return(value) => {
-                    println!("Failpoint triggered with value: {value:?}");
-                }
-                FailpointResult::Continue => {
-                    println!("Failpoint not triggered");
-                }
-                FailpointResult::Cancelled => {
-                    println!("Failpoint cancelled");
-                }
+        either::Either::Left(result) => match result {
+            FailpointResult::Return(value) => {
+                println!("Failpoint triggered with value: {value:?}");
             }
-        }
-        either::Either::Right(future) => {
-            match future.await {
-                FailpointResult::Return(value) => {
-                    println!("Failpoint triggered with value: {value:?}");
-                }
-                FailpointResult::Continue => {
-                    println!("Failpoint not triggered");
-                }
-                FailpointResult::Cancelled => {
-                    println!("Failpoint cancelled");
-                }
+            FailpointResult::Continue => {
+                println!("Failpoint not triggered");
             }
-        }
+            FailpointResult::Cancelled => {
+                println!("Failpoint cancelled");
+            }
+        },
+        either::Either::Right(future) => match future.await {
+            FailpointResult::Return(value) => {
+                println!("Failpoint triggered with value: {value:?}");
+            }
+            FailpointResult::Continue => {
+                println!("Failpoint not triggered");
+            }
+            FailpointResult::Cancelled => {
+                println!("Failpoint cancelled");
+            }
+        },
     }
 
     // Test with non-matching context
@@ -62,31 +56,27 @@ async fn main() {
 
     println!("Testing with non-matching context...");
     match failpoint("backup_operation", Some(&context)) {
-        either::Either::Left(result) => {
-            match result {
-                FailpointResult::Return(value) => {
-                    println!("Failpoint triggered with value: {value:?}");
-                }
-                FailpointResult::Continue => {
-                    println!("Failpoint not triggered (expected)");
-                }
-                FailpointResult::Cancelled => {
-                    println!("Failpoint cancelled");
-                }
+        either::Either::Left(result) => match result {
+            FailpointResult::Return(value) => {
+                println!("Failpoint triggered with value: {value:?}");
             }
-        }
-        either::Either::Right(future) => {
-            match future.await {
-                FailpointResult::Return(value) => {
-                    println!("Failpoint triggered with value: {value:?}");
-                }
-                FailpointResult::Continue => {
-                    println!("Failpoint not triggered (expected)");
-                }
-                FailpointResult::Cancelled => {
-                    println!("Failpoint cancelled");
-                }
+            FailpointResult::Continue => {
+                println!("Failpoint not triggered (expected)");
             }
-        }
+            FailpointResult::Cancelled => {
+                println!("Failpoint cancelled");
+            }
+        },
+        either::Either::Right(future) => match future.await {
+            FailpointResult::Return(value) => {
+                println!("Failpoint triggered with value: {value:?}");
+            }
+            FailpointResult::Continue => {
+                println!("Failpoint not triggered (expected)");
+            }
+            FailpointResult::Cancelled => {
+                println!("Failpoint cancelled");
+            }
+        },
     }
 }
