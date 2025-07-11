@@ -2168,7 +2168,8 @@ impl DatadirModification<'_> {
                 }
                 tracing::info!("initialized rel_size_v2 keyspace");
                 self.tline
-                    .update_rel_size_v2_status(RelSizeMigration::Migrating)?;
+                    .update_rel_size_v2_status(RelSizeMigration::Migrating)
+                    .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
                 Ok::<_, WalIngestError>(())
             };
             if let Err(e) = initialize.await {
