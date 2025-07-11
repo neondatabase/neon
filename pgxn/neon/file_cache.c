@@ -162,8 +162,34 @@ typedef struct FileCacheControl
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 	dlist_head  holes;          /* double linked list of punched holes */
-	HyperLogLogState wss_estimation; /* estimation of working set size */
+
 	ConditionVariable cv[N_COND_VARS]; /* turnstile of condition variables */
+
+	/*
+	 * Estimation of working set size.
+	 *
+	 * This is not guarded by the lock. No locking is needed because all the
+	 * writes to the "registers" are simple 64-bit stores, to update a
+	 * timestamp. We assume that:
+	 *
+	 * - 64-bit stores are atomic. We could enforce that by using
+	 *   pg_atomic_uint64 instead of TimestampTz as the datatype in hll.h, but
+	 *   for now we just rely on it implicitly.
+	 *
+	 * - Even if they're not, and there is a race between two stores, it
+	 *   doesn't matter much which one wins because they're both updating the
+	 *   register with the current timestamp. Or you have a race between
+	 *   resetting the register and updating it, in which case it also doesn't
+	 *   matter much which one wins.
+	 *
+	 * - If they're not atomic, you might get an occasional "torn write" if
+	 *   you're really unlucky, but we tolerate that too. It just means that
+	 *   the estimate will be a little off, until the register is updated
+	 *   again.
+	 */
+	HyperLogLogState wss_estimation;
+
+	/* Prewarmer state */
 	PrewarmWorkerState prewarm_workers[MAX_PREWARM_WORKERS];
 	size_t n_prewarm_workers;
 	size_t n_prewarm_entries;
@@ -1144,6 +1170,13 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
+	/* Update working set size estimate for the blocks */
+	for (int i = 0; i < nblocks; i++)
+	{
+		tag.blockNum = blkno + i;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
+
 	/*
 	 * For every chunk that has blocks we're interested in, we
 	 * 1. get the chunk header
@@ -1222,14 +1255,6 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
-
-		/* Approximate working set for the blocks assumed in this entry */
-		for (int i = 0; i < blocks_in_chunk; i++)
-		{
-			tag.blockNum = blkno + i;
-			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-		}
-
 		if (entry == NULL)
 		{
 			/* Pages are not cached */
@@ -1506,9 +1531,15 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		return false;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	tag.forkNum = forknum;
 
-	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	/* Update working set size estimate for the blocks */
+	if (lfc_prewarm_update_ws_estimation)
+	{
+		tag.blockNum = blkno;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
 
 	tag.blockNum = blkno - chunk_offs;
 	hash = get_hash_value(lfc_hash, &tag);
@@ -1526,19 +1557,13 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	if (lwlsn > lsn)
 	{
-		elog(DEBUG1, "Skip LFC write for %d because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",
+		elog(DEBUG1, "Skip LFC write for %u because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",
 			 blkno, LSN_FORMAT_ARGS(lwlsn), LSN_FORMAT_ARGS(lsn));
 		LWLockRelease(lfc_lock);
 		return false;
 	}
 
 	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
-
-	if (lfc_prewarm_update_ws_estimation)
-	{
-		tag.blockNum = blkno;
-		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-	}
 	if (found)
 	{
 		state = GET_STATE(entry, chunk_offs);
@@ -1651,9 +1676,15 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		return;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	tag.forkNum = forkNum;
 
-	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	/* Update working set size estimate for the blocks */
+	for (int i = 0; i < nblocks; i++)
+	{
+		tag.blockNum = blkno + i;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
@@ -1694,14 +1725,6 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		cv = &lfc_ctl->cv[hash % N_COND_VARS];
 
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
-
-		/* Approximate working set for the blocks assumed in this entry */
-		for (int i = 0; i < blocks_in_chunk; i++)
-		{
-			tag.blockNum = blkno + i;
-			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-		}
-
 		if (found)
 		{
 			/*
@@ -2150,11 +2173,9 @@ lfc_approximate_working_set_size_seconds(time_t duration, bool reset)
 	if (lfc_size_limit == 0)
 		return -1;
 
-	LWLockAcquire(lfc_lock, LW_SHARED);
 	dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration);
 	if (reset)
 		memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
-	LWLockRelease(lfc_lock);
 	return dc;
 }
 
