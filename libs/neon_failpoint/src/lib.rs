@@ -25,10 +25,12 @@ use tokio_util::sync::CancellationToken;
 pub mod macros;
 pub use either; // re-export for use in macros
 
+/// Type alias for the global failpoint registry to reduce complexity
+type FailpointRegistry = Arc<std::sync::RwLock<HashMap<String, Arc<FailpointConfig>>>>;
+
 /// Global failpoint registry
 // TODO: switch to simple_rcu, but it's in `utils`
-static FAILPOINTS: Lazy<Arc<std::sync::RwLock<HashMap<String, Arc<FailpointConfig>>>>> =
-    Lazy::new(|| Default::default());
+static FAILPOINTS: Lazy<FailpointRegistry> = Lazy::new(Default::default);
 
 /// Configuration for a single failpoint
 #[derive(Debug)]
@@ -252,7 +254,7 @@ pub fn list() -> Vec<(impl std::fmt::Display, impl std::fmt::Display)> {
         .read()
         .unwrap()
         .iter()
-        .map(|(name, config)| (name.clone(), format!("{:?}", config)))
+        .map(|(name, config)| (name.clone(), format!("{config:?}")))
         .collect::<Vec<_>>()
 }
 
