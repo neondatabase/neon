@@ -31,6 +31,7 @@ pub struct UnreliableWrapper {
     /* BEGIN_HADRON */
     // This the probability of failure for each operation, ranged from [0, 100].
     // The probability is default to 100, which means that all operations will fail.
+    // Storage will fail by probability up to attempts_to_fail times.
     attempt_failure_probability: u64,
     /* END_HADRON */
 }

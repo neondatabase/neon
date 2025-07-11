@@ -60,6 +60,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 use utils::completion::Barrier;
+use utils::env;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -483,6 +484,9 @@ pub struct Config {
 
     /// When set, actively checks and initiates heatmap downloads/uploads.
     pub kick_secondary_downloads: bool,
+
+    /// Timeout used for HTTP client of split requests. [`Duration::MAX`] if None.
+    pub shard_split_request_timeout: Duration,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -6406,18 +6410,39 @@ impl Service {
         // TODO: issue split calls concurrently (this only matters once we're splitting
         // N>1 shards into M shards -- initially we're usually splitting 1 shard into N).
 
+        // HADRON: set a timeout for splitting individual shards on page servers.
+        // Currently we do not perform any retry because it's not clear if page server can handle
+        // partially split shards correctly.
+        let shard_split_timeout =
+            if let Some(env::DeploymentMode::Local) = env::get_deployment_mode() {
+                Duration::from_secs(30)
+            } else {
+                self.config.shard_split_request_timeout
+            };
+        let mut http_client_builder = reqwest::ClientBuilder::new()
+            .pool_max_idle_per_host(0)
+            .timeout(shard_split_timeout);
+
+        for ssl_ca_cert in &self.config.ssl_ca_certs {
+            http_client_builder = http_client_builder.add_root_certificate(ssl_ca_cert.clone());
+        }
+        let http_client = http_client_builder
+            .build()
+            .expect("Failed to construct HTTP client");
         for target in &targets {
             let ShardSplitTarget {
                 parent_id,
                 node,
                 child_ids,
             } = target;
+
             let client = PageserverClient::new(
                 node.get_id(),
-                self.http_client.clone(),
+                http_client.clone(),
                 node.base_url(),
                 self.config.pageserver_jwt_token.as_deref(),
             );
+
             let response = client
                 .tenant_shard_split(
                     *parent_id,
