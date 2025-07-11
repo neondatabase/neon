@@ -100,7 +100,7 @@ def test_new_sk_set_validation(neon_env_builder: NeonEnvBuilder):
         mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
         assert mconf["generation"] == 1
 
-    expect_fail([], "must have at least 2 safekeepers")
+    expect_fail([], "safekeeper set is empty")
     expect_fail([1], "must have at least 2 safekeepers")
     expect_fail([1, 1], "duplicate safekeeper")
     expect_fail([1, 100500], "does not exist")

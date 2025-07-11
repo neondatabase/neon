@@ -1105,7 +1105,13 @@ impl Service {
             }
         }
 
-        if new_sk_set.len() < self.config.timeline_safekeeper_count {
+        if new_sk_set.is_empty() {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "new safekeeper set is empty"
+            )));
+        }
+
+        if new_sk_set.len() < self.config.timeline_safekeeper_count && !req.force {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "new safekeeper set must have at least {} safekeepers",
                 self.config.timeline_safekeeper_count
