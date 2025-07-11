@@ -85,7 +85,7 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["ring
 scopeguard = { version = "1" }
 sec1 = { version = "0.7", features = ["pem", "serde", "std", "subtle"] }
 serde = { version = "1", features = ["alloc", "derive"] }
-serde_json = { version = "1", features = ["alloc", "raw_value"] }
+serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
 sha2 = { version = "0.10", features = ["asm", "oid"] }
 signature = { version = "2", default-features = false, features = ["digest", "rand_core", "std"] }
 smallvec = { version = "1", default-features = false, features = ["const_new", "write"] }
