@@ -336,8 +336,8 @@ mod tests {
         // 2. The correct ports are extracted from `advertise_pg_addr` and `listen_http_addr`.
         let mut conf = SafeKeeperConf::dummy();
         conf.my_id = NodeId(1);
-        // conf.advertise_pg_addr_tenant_only =
-        //     Some("safe-keeper-1.safe-keeper.hadron.svc.cluster.local:5454".to_string());
+        conf.advertise_pg_addr_tenant_only =
+            Some("safe-keeper-1.safe-keeper.hadron.svc.cluster.local:5454".to_string());
         // `listen_pg_addr` and `listen_pg_addr_tenant_only` are not used for node registration. Set them to a different
         // host and port values and make sure that they don't show up in the node registration request.
         conf.listen_pg_addr = "0.0.0.0:5456".to_string();
@@ -357,9 +357,9 @@ mod tests {
             "safe-keeper-1.safe-keeper.hadron.svc.cluster.local"
         );
         assert_eq!(request.listen_http_port, 7676);
-        // assert_eq!(
-        //     request.node_ip_addr,
-        //     Some(IpAddr::V4("127.0.0.1".parse().unwrap()))
-        // );
+        assert_eq!(
+            request.node_ip_addr,
+            Some(IpAddr::V4("127.0.0.1".parse().unwrap()))
+        );
     }
 }
