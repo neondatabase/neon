@@ -4,13 +4,13 @@ import os
 import timeit
 import traceback
 from concurrent.futures import ThreadPoolExecutor as Exec
-from fixtures.log_helper import log
 from pathlib import Path
 from time import sleep
-from typing import TYPE_CHECKING, cast, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from fixtures.benchmark_fixture import NeonBenchmarker, PgBenchRunResult
+from fixtures.log_helper import log
 from fixtures.neon_api import NeonAPI, connection_parameters_to_env
 
 if TYPE_CHECKING:
@@ -82,19 +82,18 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
 
 
 def benchmark_impl(
-    pg_bin: PgBin,
-    neon_api: NeonAPI,
-    project: dict[str, Any],
-    zenbenchmark: NeonBenchmarker
+    pg_bin: PgBin, neon_api: NeonAPI, project: dict[str, Any], zenbenchmark: NeonBenchmarker
 ):
-    pgbench_size = 100  # 3424
+    pgbench_size = 50  # 3424
     offload_secs = 20
     test_duration_min = 2  # 5
     pgbench_duration = f"-T{test_duration_min * 60}"
 
     branch_id = project["branch"]["id"]
     project_id = project["project"]["id"]
-    normal_env = connection_parameters_to_env(project["connection_uris"][0]["connection_parameters"])
+    normal_env = connection_parameters_to_env(
+        project["connection_uris"][0]["connection_parameters"]
+    )
     normal_id = project["endpoints"][0]["id"]
 
     prewarmed_branch_id = neon_api.create_branch(
@@ -106,7 +105,7 @@ def benchmark_impl(
         project_id,
         prewarmed_branch_id,
         endpoint_type="read_write",
-        settings={"autoprewarm": True, "offload_lfc_interval_seconds": offload_secs}
+        settings={"autoprewarm": True, "offload_lfc_interval_seconds": offload_secs},
     )
     neon_api.wait_for_operation_to_finish(project_id)
 
