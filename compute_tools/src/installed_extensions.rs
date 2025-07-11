@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use compute_api::responses::{InstalledExtension, InstalledExtensions};
+use tokio_postgres::error::Error as PostgresError;
 use tokio_postgres::{Client, Config, NoTls};
 
 use crate::metrics::INSTALLED_EXTENSIONS;
@@ -10,7 +11,7 @@ use crate::metrics::INSTALLED_EXTENSIONS;
 /// and to make database listing query here more explicit.
 ///
 /// Limit the number of databases to 500 to avoid excessive load.
-async fn list_dbs(client: &mut Client) -> Result<Vec<String>> {
+async fn list_dbs(client: &mut Client) -> Result<Vec<String>, PostgresError> {
     // `pg_database.datconnlimit = -2` means that the database is in the
     // invalid state
     let databases = client
@@ -37,7 +38,9 @@ async fn list_dbs(client: &mut Client) -> Result<Vec<String>> {
 /// Same extension can be installed in multiple databases with different versions,
 /// so we report a separate metric (number of databases where it is installed)
 /// for each extension version.
-pub async fn get_installed_extensions(mut conf: Config) -> Result<InstalledExtensions> {
+pub async fn get_installed_extensions(
+    mut conf: Config,
+) -> Result<InstalledExtensions, PostgresError> {
     conf.application_name("compute_ctl:get_installed_extensions");
     let databases: Vec<String> = {
         let (mut client, connection) = conf.connect(NoTls).await?;
