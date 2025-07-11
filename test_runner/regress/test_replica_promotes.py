@@ -90,6 +90,7 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
         secondary_cur.execute("select count(*) from t")
         assert secondary_cur.fetchone() == (100,)
 
+    primary_spec = primary.get_compute_spec()
     primary_endpoint_id = primary.endpoint_id
     stop_and_check_lsn(primary, expected_primary_lsn)
 
@@ -99,10 +100,9 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
     if method == PromoteMethod.COMPUTE_CTL:
         client = secondary.http_client()
         client.prewarm_lfc(primary_endpoint_id)
-        # control plane knows safekeepers, simulate it by querying primary
         assert (lsn := primary.terminate_flush_lsn)
-        safekeepers_lsn = {"safekeepers": safekeepers, "wal_flush_lsn": lsn}
-        assert client.promote(safekeepers_lsn)["status"] == "completed"
+        primary_spec["wal_flush_lsn"] = str(lsn)
+        assert client.promote(primary_spec)["status"] == "completed"
     else:
         promo_cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
         promo_cur.execute("select pg_reload_conf()")
@@ -138,12 +138,10 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
         assert new_primary_cur.fetchall() == [(it,) for it in range(1, 201)]
 
     if method == PromoteMethod.COMPUTE_CTL:
-        # compute_ctl's /promote switches replica type to Primary so it syncs
-        # safekeepers on finish
+        # compute_ctl's /promote switches replica type to Primary so it syncs safekeepers on finish
         stop_and_check_lsn(secondary, expected_promoted_lsn)
     else:
-        # on testing postgres, we don't update replica type, secondaries don't
-        # sync so lsn should be None
+        # on testing postgres, we don't update replica type, secondaries don't sync so lsn should be None
         stop_and_check_lsn(secondary, None)
 
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary2")

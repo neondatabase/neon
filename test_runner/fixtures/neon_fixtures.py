@@ -4951,6 +4951,9 @@ class Endpoint(PgProtocol, LogUtils):
             log.debug(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
+    def get_compute_spec(self) -> dict[str, Any]:
+        return json.loads((Path(self.endpoint_path()) / "config.json").read_text())["spec"]
+
     def respec_deep(self, **kwargs: Any) -> None:
         """
         Update the endpoint.json file taking into account nested keys.
