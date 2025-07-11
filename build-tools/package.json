@@ -1,7 +1,8 @@
 {
-  "name": "neon-compute",
+  "name": "build-tools",
   "private": true,
   "dependencies": {
+    "@redocly/cli": "1.34.4",
     "@sourcemeta/jsonschema": "9.3.4"
   }
-} 
+}
