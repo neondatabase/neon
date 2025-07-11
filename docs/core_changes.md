@@ -130,7 +130,7 @@ changes in xlog.c, to allow starting the compute node without reading the last c
 from WAL.
 
 This includes code to read the `neon.signal` (also `zenith.signal`) file, which tells the startup 
-code the LSN to start  at. When the `neon.signal` file is present, the startup uses that LSN
+code the LSN to start at. When the `neon.signal` file is present, the startup uses that LSN
 instead of the last checkpoint's LSN. The system is known to be consistent at that LSN, without 
 any WAL redo.
 
