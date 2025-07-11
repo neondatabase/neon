@@ -80,6 +80,8 @@ impl Eq for OrderedValueMeta {}
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SerializedValueMeta {
     pub key: CompactKey,
+    // The `next_record_lsn` emitted by the wal_decoder for the WAL record
+    // that corresponds to this value.
     pub lsn: Lsn,
     /// Starting offset of the value for the (key, LSN) tuple
     /// in [`SerializedValueBatch::raw`]
@@ -92,6 +94,8 @@ pub struct SerializedValueMeta {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ObservedValueMeta {
     pub key: CompactKey,
+    // The `next_record_lsn` emitted by the wal_decoder for the WAL record
+    // that corresponds to this value.
     pub lsn: Lsn,
 }
 
@@ -109,7 +113,12 @@ pub struct SerializedValueBatch {
     /// by LSN. Note that entries for a key do not have to be contiguous.
     pub metadata: Vec<ValueMeta>,
 
-    /// The highest LSN of any value in the batch
+    /// The highest LSN of any value in the batch.
+    ///
+    /// The "LSN of a Value" is the `next_record_lsn` that the wal_decoder
+    /// emitted for that value, i.e., the LSN of a Value is
+    /// an LSN that is >= the next byte after the last byte of this value's
+    /// WAL record.
     pub max_lsn: Lsn,
 
     /// Number of values encoded by [`Self::raw`]

@@ -1494,7 +1494,7 @@ pub struct DatadirModification<'a> {
     /// in the state in 'tline' yet.
     pub tline: &'a Timeline,
 
-    /// Current LSN of the modification
+    /// Current LSN of the modification.
     lsn: Lsn,
 
     // The modifications are not applied directly to the underlying key-value store.

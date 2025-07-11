@@ -162,9 +162,9 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
                     // Fast path for the common case that the whole record fits on the page.
                     let pageleft = self.lsn.remaining_in_block() as u32;
                     if self.inputbuf.remaining() >= xl_tot_len as usize && xl_tot_len <= pageleft {
-                        self.lsn += xl_tot_len as u64;
+                        self.lsn += xl_tot_len as u64; /* we set self.lsn to the exclusive end of the record */
                         let recordbuf = self.inputbuf.copy_to_bytes(xl_tot_len as usize);
-                        return Ok(Some(self.complete_record(recordbuf)?));
+                        return Ok(Some(self.complete_record(recordbuf)?)); // this returns (start LSN of NEXT!? record, this record's Bytes), wtf
                     } else {
                         // Need to assemble the record from pieces. Remember the size of the
                         // record, and loop back. On next iterations, we will reach the branch

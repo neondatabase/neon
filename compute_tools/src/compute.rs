@@ -1280,7 +1280,7 @@ impl ComputeNode {
         let start_time = Utc::now();
 
         let mut sync_handle = maybe_cgexec(&self.params.pgbin)
-            .args(["--sync-safekeepers"])
+            .args(["--sync-safekeepers"]) // CF walproposer.c:289
             .env("PGDATA", &self.params.pgdata) // we cannot use -D in this mode
             .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]

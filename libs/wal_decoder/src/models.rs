@@ -80,8 +80,8 @@ pub struct InterpretedWalRecord {
     /// by the pageserver
     pub batch: SerializedValueBatch,
     /// Byte offset within WAL for the start of the next PG WAL record.
-    /// Usually this is the end LSN of the current record, but in case of
-    /// XLOG SWITCH records it will be within the next segment.
+    /// Usually this is the byte following the last byte of this record here,
+    /// but in case of XLOG SWITCH records it will be within the next segment.
     pub next_record_lsn: Lsn,
     /// Whether to flush all uncommitted modifications to the storage engine
     /// before ingesting this record. This is currently only used for legacy PG
@@ -213,6 +213,7 @@ pub struct XactCommon {
     pub origin_id: u16,
     // Fields below are only used for logging
     pub xl_xid: TransactionId,
+    // The `next_record_lsn` returned by wal decoder when we decoded this record.
     pub lsn: Lsn,
 }
 
@@ -255,6 +256,7 @@ pub enum XlogRecord {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RawXlogRecord {
     pub info: u8,
+    // The `next_record_lsn` returned by wal decoder when we decoded this record.
     pub lsn: Lsn,
     pub buf: Bytes,
 }
