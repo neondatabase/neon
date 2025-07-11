@@ -1,6 +1,6 @@
 use crate::compute::ComputeNode;
 use anyhow::{Context, Result, bail};
-use compute_api::responses::{LfcPrewarmState, PromoteState, PromoteConfig};
+use compute_api::responses::{LfcPrewarmState, PromoteConfig, PromoteState};
 use compute_api::spec::ComputeMode;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -121,8 +121,11 @@ impl ComputeNode {
             bail!("replica in read only mode after promotion");
         }
 
-        let mut state = self.state.lock().unwrap();
-        state.pspec.as_mut().unwrap().spec.mode = ComputeMode::Primary;
-        Ok(())
+        {
+            let mut state = self.state.lock().unwrap();
+            state.pspec.as_mut().unwrap().spec = cfg.compute_spec;
+        }
+        tracing::info!("applied new spec, reconfiguring as primary");
+        self.reconfigure()
     }
 }
