@@ -30,7 +30,7 @@ async fn main() {
         either::Either::Left(result) => {
             match result {
                 FailpointResult::Return(value) => {
-                    println!("Failpoint triggered with value: {:?}", value);
+                    println!("Failpoint triggered with value: {value:?}");
                 }
                 FailpointResult::Continue => {
                     println!("Failpoint not triggered");
@@ -43,7 +43,7 @@ async fn main() {
         either::Either::Right(future) => {
             match future.await {
                 FailpointResult::Return(value) => {
-                    println!("Failpoint triggered with value: {:?}", value);
+                    println!("Failpoint triggered with value: {value:?}");
                 }
                 FailpointResult::Continue => {
                     println!("Failpoint not triggered");
@@ -65,7 +65,7 @@ async fn main() {
         either::Either::Left(result) => {
             match result {
                 FailpointResult::Return(value) => {
-                    println!("Failpoint triggered with value: {:?}", value);
+                    println!("Failpoint triggered with value: {value:?}");
                 }
                 FailpointResult::Continue => {
                     println!("Failpoint not triggered (expected)");
@@ -78,7 +78,7 @@ async fn main() {
         either::Either::Right(future) => {
             match future.await {
                 FailpointResult::Return(value) => {
-                    println!("Failpoint triggered with value: {:?}", value);
+                    println!("Failpoint triggered with value: {value:?}");
                 }
                 FailpointResult::Continue => {
                     println!("Failpoint not triggered (expected)");

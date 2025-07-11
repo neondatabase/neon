@@ -260,7 +260,7 @@ fn execute_action(
         }
         FailpointAction::Panic(message) => {
             tracing::error!("Failpoint {} panicking with message: {}", name, message);
-            panic!("Failpoint panicked: {}", message);
+            panic!("Failpoint panicked: {message}");
         }
         FailpointAction::Sleep(millis) => {
             let millis = *millis;
@@ -784,7 +784,7 @@ mod tests {
         } else if let Some(msg) = panic_msg.downcast_ref::<&str>() {
             assert!(msg.contains("test message"));
         } else {
-            panic!("Expected panic with string message, got: {:?}", panic_msg);
+            panic!("Expected panic with string message, got: {panic_msg:?}");
         }
     }
 
