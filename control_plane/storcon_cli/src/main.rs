@@ -296,9 +296,6 @@ enum Command {
         /// Example: --new-sk-set 1,2,3
         #[arg(long, required = true, value_delimiter = ',')]
         new_sk_set: Vec<NodeId>,
-        /// Disable not-mandatory safety checks before the migration.
-        #[arg(long)]
-        force: bool,
     },
 }
 
@@ -1380,7 +1377,6 @@ async fn main() -> anyhow::Result<()> {
             tenant_id,
             timeline_id,
             new_sk_set,
-            force,
         } => {
             let path = format!("v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate");
 
@@ -1388,7 +1384,7 @@ async fn main() -> anyhow::Result<()> {
                 .dispatch::<_, ()>(
                     Method::POST,
                     path,
-                    Some(TimelineSafekeeperMigrateRequest { new_sk_set, force }),
+                    Some(TimelineSafekeeperMigrateRequest { new_sk_set }),
                 )
                 .await?;
         }

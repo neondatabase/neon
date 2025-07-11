@@ -562,10 +562,6 @@ pub struct TimelineImportRequest {
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct TimelineSafekeeperMigrateRequest {
     pub new_sk_set: Vec<NodeId>,
-    /// If true, disable not-mandatory safety checks before the migration,
-    /// e.g. allow to migrate to a sk set smaller than timeline_safekeeper_count.
-    #[serde(default)]
-    pub force: bool,
 }
 
 #[cfg(test)]

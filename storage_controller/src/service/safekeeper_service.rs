@@ -1111,7 +1111,7 @@ impl Service {
             )));
         }
 
-        if new_sk_set.len() < self.config.timeline_safekeeper_count && !req.force {
+        if new_sk_set.len() < self.config.timeline_safekeeper_count {
             return Err(ApiError::BadRequest(anyhow::anyhow!(
                 "new safekeeper set must have at least {} safekeepers",
                 self.config.timeline_safekeeper_count
