@@ -491,10 +491,15 @@ async fn request_handler(
     } else {
         #[cfg(feature = "rest_broker")]
         {
-            if config.rest_config.is_rest_broker && {
-                let path_parts: Vec<&str> = request.uri().path().splitn(3, '/').collect();
-                path_parts.len() == 3 && path_parts[2].starts_with("rest")
-            } {
+            if config.rest_config.is_rest_broker
+            // we are testing for the path to be /database_name/rest/...
+                && request
+                    .uri()
+                    .path()
+                    .split('/')
+                    .nth(2)
+                    .is_some_and(|part| part.starts_with("rest"))
+            {
                 let ctx =
                     RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
                 let span = ctx.span();

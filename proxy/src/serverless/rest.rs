@@ -658,15 +658,15 @@ async fn handle_inner(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_else(|| request.uri().host().unwrap_or(""));
 
-    let path_parts: Vec<&str> = request.uri().path().splitn(3, '/').collect();
-    // a valid path is /database/rest/v1/... so parts should be ["", "database", "rest", "v1", ...]
-    let database_name = if path_parts.len() == 3 && !path_parts[1].is_empty() {
-        Ok(path_parts[1])
-    } else {
-        Err(RestError::SubzeroCore(NotFound {
+    // a valid path is /database/rest/v1/... so splitting should be ["", "database", "rest", "v1", ...]
+    let database_name = request
+        .uri()
+        .path()
+        .split('/')
+        .nth(1)
+        .ok_or(RestError::SubzeroCore(NotFound {
             target: request.uri().path().to_string(),
-        }))
-    }?;
+        }))?;
 
     // we always use the authenticator role to connect to the database
     let authenticator_role = "authenticator";
