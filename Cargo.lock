@@ -1764,19 +1764,6 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
-version = "5.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6943ae99c34386c84a470c499d3414f66502a41340aa895406e0d2e4a207b91d"
-dependencies = [
- "cfg-if",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core 0.9.10",
-]
-
-[[package]]
-name = "dashmap"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
@@ -2610,7 +2597,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "842dc78579ce01e6a1576ad896edc92fca002dd60c9c3746b7fc2bec6fb429d0"
 dependencies = [
  "cfg-if",
- "dashmap 6.1.0",
+ "dashmap",
  "futures-sink",
  "futures-timer",
  "futures-util",
@@ -3316,7 +3303,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "crossbeam-utils",
- "dashmap 6.1.0",
+ "dashmap",
  "env_logger",
  "indexmap 2.9.0",
  "itoa",
@@ -3574,16 +3561,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lasso"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4644821e1c3d7a560fe13d842d13f587c07348a1a05d3a797152d41c90c56df2"
-dependencies = [
- "dashmap 5.5.0",
- "hashbrown 0.13.2",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3721,7 +3698,6 @@ dependencies = [
  "crossbeam-utils",
  "hashbrown 0.14.5",
  "itoa",
- "lasso",
  "measured-derive",
  "memchr",
  "paracord",
@@ -6973,12 +6949,12 @@ dependencies = [
  "hyper 0.14.30",
  "itertools 0.10.5",
  "json-structural-diff",
- "lasso",
  "measured",
  "metrics",
  "once_cell",
  "pageserver_api",
  "pageserver_client",
+ "paracord",
  "postgres_connection",
  "posthog_client_lite",
  "rand 0.8.5",

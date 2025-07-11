@@ -128,10 +128,9 @@ itertools = "0.10"
 itoa = "1.0.11"
 jemalloc_pprof = { version = "0.7", features = ["symbolize", "flamegraph"] }
 jsonwebtoken = "9"
-lasso = "0.7"
 libc = "0.2"
 md5 = "0.7.0"
-measured = { version = "0.0.23", features = ["paracord", "lasso"], path = "../../code/measured/core" }
+measured = { version = "0.0.23", features = ["paracord"], path = "../../code/measured/core" }
 measured-process = { version = "0.0.23", path = "../../code/measured/process" }
 measured-tokio = { version = "0.0.23", path = "../../code/measured/tokio" }
 memoffset = "0.9"
