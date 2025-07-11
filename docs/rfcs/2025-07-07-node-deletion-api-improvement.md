@@ -16,8 +16,23 @@ has several limitations:
 - Deleted nodes can re-add themselves if they restart (e.g., a flaky node that keeps restarting and
 we cannot reach via SSH to stop the pageserver). This issue has been resolved by tombstone
 mechanism in [#12036](https://github.com/neondatabase/neon/issues/12036)
-- Process of node deletion is not graceful, i.e. it just imitates a node failure, which can cause
-issues for user processes
+- Process of node deletion is not graceful, i.e. it just imitates a node failure
+
+In this context, "graceful" node deletion means that users do not experience any disruption or
+negative effects, provided the system remains in a healthy state (i.e., the remaining pageservers
+can handle the workload and all requirements are met). To achieve this, the system must perform
+live migration of all tenant shards from the node being deleted while the node is still running
+and continue processing all incoming requests. The node is removed only after all tenant shards
+have been safely migrated.
+
+If we delete a node before its tenant shards are fully moved, the new node won't have all the
+needed data (e.g. heatmaps) ready. This means user requests to the new node will be much slower at
+first. If there are many tenant shards, this slowdown affects a huge amount of users.
+
+Graceful node deletion is more complicated and can introduce new issues. It takes longer because
+live migration of each tenant shard can last several minutes. Using non-blocking accessors may
+also cause deletion to wait if other processes are holding inner state lock. It also gets trickier
+because we need to handle other requests, like drain and fill, at the same time.
 
 ## Impacted components (e.g. pageserver, safekeeper, console, etc)
 
@@ -40,40 +55,94 @@ available for listing and deleting tombstones via the `/debug/v1/tombstone` path
 
 The problem of making node deletion graceful is complex and involves several challenges:
 
-- **Cancellable**: Since graceful deletion can be time-consuming, the operation must be cancellable
-to allow administrators to abort the process if needed, e.g. if run by mistake.
-- **Non-blocking**: Since graceful deletion can be time-consuming, we don't want to block
-deployment operations like draining/filling on the node deletion process. We need clear policies
-for handling concurrent operations: what happens when a drain/fill request arrives while deletion
-is in progress, and what happens when a delete request arrives while drain/fill is in progress.
+- **Cancellable**: The operation must be cancellable to allow administrators to abort the process
+if needed, e.g. if run by mistake.
+- **Non-blocking**: We don't want to block deployment operations like draining/filling on the node
+deletion process. We need clear policies for handling concurrent operations: what happens when a
+drain/fill request arrives while deletion is in progress, and what happens when a delete request
+arrives while drain/fill is in progress.
 - **Persistent**: If the storage controller restarts during this long-running operation, we must
 preserve progress and automatically resume the deletion process after the storage controller
 restarts.
-- **Migrated correctly**: We cannot simply use the existing drain mechanism for nodes scheduled for
-deletion, as this would move shards to irrelevant locations. This could result in unnecessary load
-on the storage controller and inefficient resource utilization.
-- **Context-aware**: We need to improve our scheduling context awareness mechanism beyond the basic
-API to correctly calculate preferred node when using non-locked state operations.
+- **Migrated correctly**: We cannot simply use the existing drain mechanism for nodes scheduled
+for deletion, as this would move shards to irrelevant locations. The drain process expects the
+node to return, so it only moves shards to backup locations, not to their preferred AZs. It also
+leaves secondary locations unmoved. This could result in unnecessary load on the storage
+controller and inefficient resource utilization.
 - **Force option**: Administrators need the ability to force immediate, non-graceful deletion when
 time constraints or emergency situations require it, bypassing the normal graceful migration
 process.
 
-The proposed solution addresses these challenges through the following components:
+See below for a detailed breakdown of the proposed changes and mechanisms.
 
-- **New NodeLifecycle**: Introduce `NodeLifecycle::ScheduledForDeletion` to track nodes pending
-deletion. This state persists across storage controller restarts and prevents re-registration.
-- **New NodeSchedulingPolicy**: Introduce `NodeSchedulingPolicy::Deleting` to track the current
-deletion process if any.
-- **OperationTracker**: A service state object that manages all long-running operations with the
-following capabilities:
-  - Execute operations (drain/delete/fill) with proper concurrency control
-  - Cancel ongoing operation
-  - Queue deletion intents when there are another running operations
-  - Enforce operation rules (e.g., only one drain/fill operation at a time)
-  - Maintain persistent intent tracking for queued deletions
-  - Provide better thread safety than the existing `Option<OperationHandler>` approach
-- **Fast cancellation**: Implement fast cancellation for delete operations to prevent blocking
-deployment operations.
+#### Node lifecycle
+
+New `NodeLifecycle` enum and a matching database field with these values:
+- `Active`: The normal state. All operations are allowed.
+- `ScheduledForDeletion`: The node is marked to be deleted soon. Deletion may be in progress or
+will happen later, but the node will eventually be removed. All operations are allowed.
+- `Deleted`: The node is fully deleted. No operations are allowed, and the node cannot be brought
+back. The only action left is to remove its record from the database. Any attempt to register a
+node in this state will fail.
+
+This state persists across pageserver restarts.
+
+**State transition**
+```
+        +--------------------+
+    +---|       Active       |<---------------------+
+    |   +--------------------+                      |
+    |                     ^                         |
+    | start_node_delete   | cancel_node_delete      |
+    v                     |                         |
+  +----------------------------------+              |
+  |       ScheduledForDeletion       |              |
+  +----------------------------------+              |
+       |                                            |
+       |                              node_register |
+       |                                            |
+       | delete_node (at the finish)                |
+       |                                            |
+       v                                            |
+  +---------+         tombstone_delete        +----------+
+  | Deleted |-------------------------------->|  no row  |
+  +---------+                                 +----------+
+```
+
+#### NodeSchedulingPolicy::Deleting
+
+A `Deleting` variant to the `NodeSchedulingPolicy` enum. This means the deletion function is
+running for the node right now. Only one node can have the `Deleting` policy at a time.
+
+The `NodeSchedulingPolicy::Deleting` state is persisted in the database. However, after a storage
+controller restart, any node previously marked as `Deleting` will have its scheduling policy reset
+to `Pause`. The policy will only transition back to `Deleting` when the deletion operation is
+actively started again, as triggered by the node's `NodeLifecycle::ScheduledForDeletion` state.
+
+`NodeSchedulingPolicy` transition details:
+1. When `node_delete` begins, set the policy to `NodeSchedulingPolicy::Deleting`.
+2. If `node_delete` is cancelled (for example, due to a concurrent drain operation), revert the
+policy to its previous value.
+3. After `node_delete` completes, the final value of the scheduling policy is irrelevant, since
+`NodeLifecycle::Deleted` prevents any further access to this field.
+
+The deletion process cannot be initiated for nodes currently undergoing deployment-related
+operations (`Draining`, `Filling`, or `PauseForRestart` policies). Deletion will only be triggered
+once the node transitions to either the `Active` or `Pause` state.
+
+#### OperationTracker
+
+A replacement for `Option<OperationHandler> ongoing_operation`, the `OperationTracker` is a
+dedicated service state object responsible for managing all long-running node operations (drain,
+fill, delete) with robust concurrency control.
+
+Key responsibilities:
+- Orchestrates the execution of operations
+- Supports cancellation of currently running operations
+- Queues delete operations if another operation is already in progress
+- Enforces operation constraints, e.g. allowing only single drain/fill operation at a time
+- Persists deletion state, enabling recovery of pending deletions across restarts
+- Ensures thread safety across concurrent requests
 
 ### Reliability, failure modes and corner cases
 
@@ -88,12 +157,13 @@ multiple nodes with `ScheduledForDeletion` state, additional deletion tasks will
 
 In case of a pageserver node failure during deletion, the behavior depends on the `force` flag:
 - If `force` is set: The node deletion will proceed regardless of the node's availability.
-- If `force` is not set: The deletion will be cancelled after some number of retry attempts.
+- If `force` is not set: The deletion will be retried a limited number of times. If the node
+remains unavailable, the deletion process will pause and automatically resume when the node
+becomes healthy again.
 
 ### Operations concurrency
 
-The following sections describe the behavior when different types of requests arrive at the storage
-controller and how they interact with ongoing operations.
+The following sections describe the behavior when different types of requests arrive at the storage controller and how they interact with ongoing operations.
 
 #### Delete request
 
@@ -128,12 +198,6 @@ controller and how they interact with ongoing operations.
     - Return `400 Bad Request`: cancellation request is incorrect, operations are not the same
 2. Cancel the active operation
 3. Try to find another candidate to delete and run the deletion process for that node
-
-### Unresolved questions
-
-- Should fill operations be treated differently than drain operations when processing deletion? For
-example, should a fill operation be cancelled immediately when a deletion is requested, while drain
-operations might be allowed to complete first?
 
 ## Definition of Done
 
