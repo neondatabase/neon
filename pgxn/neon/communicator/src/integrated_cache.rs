@@ -46,6 +46,7 @@ pub struct IntegratedCacheInitStruct<'t> {
 }
 
 /// Represents write-access to the integrated cache. This is used by the communicator process.
+#[derive(Debug)]
 pub struct IntegratedCacheWriteAccess<'t> {
     relsize_cache: neon_shmem::hash::HashMapAccess<'t, RelKey, RelEntry>,
     block_map: neon_shmem::hash::HashMapAccess<'t, BlockKey, BlockEntry>,
@@ -330,6 +331,13 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
             CacheResult::NotFound(lsn)
         }
+    }
+
+    /// Returns the last written LSN.
+    pub fn get_lsn(&'t self) -> Lsn {
+        // TODO: supposedly, this should be the last written LSN, but it is not
+        // , perhaps
+        Lsn(self.global_lw_lsn.load(Ordering::Relaxed))
     }
 
     pub fn get_db_size(&'t self, _db_oid: u32) -> CacheResult<u64> {

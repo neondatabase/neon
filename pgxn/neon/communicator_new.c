@@ -997,10 +997,48 @@ communicator_new_dbsize(Oid dbNode)
 }
 
 int
-communicator_new_read_slru_segment(SlruKind kind, int64 segno, void *buffer)
+communicator_new_read_slru_segment(
+	SlruKind kind,
+	uint32_t segno,
+	neon_request_lsns *request_lsns,
+	void *buffer)
 {
-	/* TODO */
-	elog(ERROR, "not implemented");
+	NeonIOResult result = {};
+	NeonIORequest request = {
+		.tag = NeonIORequest_ReadSlruSegment,
+		.read_slru_segment = {
+			.request_id = assign_request_id(),
+			.slru_kind = kind,
+			.segment_number = segno,
+			.request_lsn = request_lsns->request_lsn,
+			.dest.ptr = bounce_buf(),
+		}
+	};
+
+	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u", kind, segno);
+
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(request_lsns->request_lsn);
+
+	perform_request(&request, &result);
+
+	switch (result.tag)
+	{
+		case NeonIOResult_ReadSlruSegment:
+			memcpy(buffer, request.read_slru_segment.dest.ptr, 8192);
+			return result.read_slru_segment;
+		case NeonIOResult_Error:
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read slru segment, kind=%u, segno=%u: %s",
+							kind, segno, pg_strerror(result.error))));
+			break;
+		default:
+			elog(ERROR, "unexpected result for read SLRU operation: %d", result.tag);
+			break;
+	}
+
+	return 0;
 }
 
 /* Write requests */

@@ -17,7 +17,9 @@ def check_tenant(
     config_lines = [
         f"neon.safekeeper_proto_version = {safekeeper_proto_version}",
     ]
-    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id, config_lines=config_lines, grpc=True)
+    endpoint = env.endpoints.create_start(
+        "main", tenant_id=tenant_id, config_lines=config_lines, grpc=True
+    )
     # we rely upon autocommit after each statement
     res_1 = endpoint.safe_psql_many(
         queries=[
