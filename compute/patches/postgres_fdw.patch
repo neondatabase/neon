@@ -1,0 +1,17 @@
+diff --git a/contrib/postgres_fdw/postgres_fdw--1.0.sql b/contrib/postgres_fdw/postgres_fdw--1.0.sql
+index a0f0fc1bf45..ee077f2eea6 100644
+--- a/contrib/postgres_fdw/postgres_fdw--1.0.sql
++++ b/contrib/postgres_fdw/postgres_fdw--1.0.sql
+@@ -16,3 +16,12 @@ LANGUAGE C STRICT;
+ CREATE FOREIGN DATA WRAPPER postgres_fdw
+   HANDLER postgres_fdw_handler
+   VALIDATOR postgres_fdw_validator;
++
++DO $$
++DECLARE
++  privileged_role_name text;
++BEGIN
++  privileged_role_name := current_setting('neon.privileged_role_name');
++
++  EXECUTE format('GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO %I', privileged_role_name);
++END $$;
