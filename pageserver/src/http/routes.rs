@@ -455,6 +455,7 @@ async fn build_timeline_info_common(
     let state = timeline.current_state();
     // Report is_archived = false if the timeline is still loading
     let is_archived = timeline.is_archived().unwrap_or(false);
+    let read_only = timeline.is_read_only().unwrap_or(false);
     let remote_consistent_lsn_projected = timeline
         .get_remote_consistent_lsn_projected()
         .unwrap_or(Lsn(0));
@@ -506,6 +507,7 @@ async fn build_timeline_info_common(
 
         state,
         is_archived: Some(is_archived),
+        read_only,
         rel_size_migration: Some(timeline.get_rel_size_v2_status()),
         is_invisible: Some(is_invisible),
 
@@ -594,12 +596,13 @@ async fn timeline_create_handler(
         TimelineCreateRequestMode::Branch {
             ancestor_timeline_id,
             ancestor_start_lsn,
-            read_only: _,
+            read_only,
             pg_version: _,
         } => tenant::CreateTimelineParams::Branch(tenant::CreateTimelineParamsBranch {
             new_timeline_id,
             ancestor_timeline_id,
             ancestor_start_lsn,
+            read_only,
         }),
         TimelineCreateRequestMode::ImportPgdata {
             import_pgdata:
