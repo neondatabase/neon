@@ -383,16 +383,31 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
 
         macro_rules! check_cache {
             () => {
-                if let Some(cached) = self.caches.node_info.get(&key) {
-                    let (cached, info) = cached.take_value();
-                    let info = info.map_err(|c| {
-                        info!(key = &*key, "found cached wake_compute error");
-                        WakeComputeError::ControlPlane(ControlPlaneError::Message(Box::new(*c)))
-                    })?;
+                if let Some(cached) = self.caches.node_info.get_with_created_at(&key) {
+                    let (cached, (info, created_at)) = cached.take_value();
+                    return match info {
+                        Err(mut msg) => {
+                            info!(key = &*key, "found cached wake_compute error");
 
-                    debug!(key = &*key, "found cached compute node info");
-                    ctx.set_project(info.aux.clone());
-                    return Ok(cached.map(|()| info));
+                            // if retry_delay_ms is set, reduce it by the amount of time it spent in cache
+                            if let Some(status) = &mut msg.status {
+                                if let Some(retry_info) = &mut status.details.retry_info {
+                                    retry_info.retry_delay_ms = retry_info
+                                        .retry_delay_ms
+                                        .saturating_sub(created_at.elapsed().as_millis() as u64)
+                                }
+                            }
+
+                            Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
+                                msg,
+                            )))
+                        }
+                        Ok(info) => {
+                            debug!(key = &*key, "found cached compute node info");
+                            ctx.set_project(info.aux.clone());
+                            Ok(cached.map(|()| info))
+                        }
+                    };
                 }
             };
         }
@@ -436,24 +451,22 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
             }
             Err(err) => match err {
                 WakeComputeError::ControlPlane(ControlPlaneError::Message(ref msg)) => {
-                    // if we can retry this error, do not cache it.
-                    if msg.could_retry() {
+                    let retry_info = msg.status.as_ref().and_then(|s| s.details.retry_info);
+
+                    // If we can retry this error, do not cache it,
+                    // unless we were given a retry delay.
+                    if msg.could_retry() && retry_info.is_none() {
                         return Err(err);
                     }
 
-                    // at this point, we should only have quota errors and other non-transient failures.
                     debug!(
                         key = &*key,
                         "created a cache entry for the wake compute error"
                     );
 
-                    let ttl = msg
-                        .status
-                        .as_ref()
-                        .and_then(|s| s.details.retry_info)
-                        .map_or(Duration::from_secs(30), |r| {
-                            Duration::from_millis(r.retry_delay_ms)
-                        });
+                    let ttl = retry_info.map_or(Duration::from_secs(30), |r| {
+                        Duration::from_millis(r.retry_delay_ms)
+                    });
 
                     self.caches.node_info.insert_ttl(key, Err(msg.clone()), ttl);
 
