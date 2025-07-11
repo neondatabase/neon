@@ -34,7 +34,9 @@ class NeonAPI:
         self.retries524 = 0
         self.retries4xx = 0
 
-    def __request(self, method: str | bytes, endpoint: str, retry404: bool = False, **kwargs: Any) -> requests.Response:
+    def __request(
+        self, method: str | bytes, endpoint: str, retry404: bool = False, **kwargs: Any
+    ) -> requests.Response:
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 

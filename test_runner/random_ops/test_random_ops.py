@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from fixtures.log_helper import log
-from requests import HTTPError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -155,7 +154,9 @@ class NeonBranch:
         parent_id: str = res["branch"]["parent_id"]
         # Creates an object for the parent branch
         # After the reset operation a new parent branch is created
-        parent = NeonBranch(self.project, self.neon_api.get_branch_details(self.project_id, parent_id), True)
+        parent = NeonBranch(
+            self.project, self.neon_api.get_branch_details(self.project_id, parent_id), True
+        )
         self.project.branches[parent_id] = parent
         self.parent = parent
         parent.children[self.id] = self
