@@ -16,32 +16,76 @@ macro_rules! pausable_failpoint {
     };
 }
 
-/// Mere forward to neon_failpoint::failpoint
+/// DEPRECATED! - use with fail::cfg("$name", "return(2000)")
+///
+/// The effect is similar to a "sleep(2000)" action, i.e. we sleep for the
+/// specified time (in milliseconds). The main difference is that we use async
+/// tokio sleep function. Another difference is that we print lines to the log,
+/// which can be useful in tests to check that the failpoint was hit.
+///
+/// Optionally pass a cancellation token, and this failpoint will drop out of
+/// its sleep when the cancellation token fires.  This is useful for testing
+/// cases where we would like to block something, but test its clean shutdown behavior.
 #[macro_export]
 macro_rules! __failpoint_sleep_millis_async {
     ($name:literal) => {{
-        let _ = ::neon_failpoint::pausable_failpoint!($name);
+        // If the failpoint is used with a "return" action, set should_sleep to the
+        // returned value (as string). Otherwise it's set to None.
+        let should_sleep = (|| {
+            ::neon_failpoint::fail_point_sync!($name, |x| x);
+            ::std::option::Option::None
+        })();
+
+        // Sleep if the action was a returned value
+        if let ::std::option::Option::Some(duration_str) = should_sleep {
+            $crate::failpoint_support::failpoint_sleep_helper($name, duration_str).await
+        }
     }};
     ($name:literal, $cancel:expr) => {{
-        let _ = ::neon_failpoint::pausable_failpoint!($name, $cancel);
+        // If the failpoint is used with a "return" action, set should_sleep to the
+        // returned value (as string). Otherwise it's set to None.
+        let should_sleep = (|| {
+            ::neon_failpoint::fail_point_sync!($name, |x| x);
+            ::std::option::Option::None
+        })();
+
+        // Sleep if the action was a returned value
+        if let ::std::option::Option::Some(duration_str) = should_sleep {
+            $crate::failpoint_support::failpoint_sleep_cancellable_helper(
+                $name,
+                duration_str,
+                $cancel,
+            )
+            .await
+        }
     }};
 }
 pub use __failpoint_sleep_millis_async as sleep_millis_async;
 
-// Helper functions are no longer needed as the new implementation handles this internally
-// but we keep them for backward compatibility
+// Helper function used by the macro. (A function has nicer scoping so we
+// don't need to decorate everything with "::")
 #[doc(hidden)]
-pub async fn failpoint_sleep_helper(_name: &'static str, _duration_str: String) {
-    // This is now handled by the neon_failpoint crate internally
-    tracing::warn!("failpoint_sleep_helper is deprecated, use neon_failpoint directly");
+pub async fn failpoint_sleep_helper(name: &'static str, duration_str: String) {
+    let millis = duration_str.parse::<u64>().unwrap();
+    let d = std::time::Duration::from_millis(millis);
+
+    tracing::info!("failpoint {:?}: sleeping for {:?}", name, d);
+    tokio::time::sleep(d).await;
+    tracing::info!("failpoint {:?}: sleep done", name);
 }
 
+// Helper function used by the macro. (A function has nicer scoping so we
+// don't need to decorate everything with "::")
 #[doc(hidden)]
 pub async fn failpoint_sleep_cancellable_helper(
-    _name: &'static str,
-    _duration_str: String,
-    _cancel: &CancellationToken,
+    name: &'static str,
+    duration_str: String,
+    cancel: &CancellationToken,
 ) {
-    // This is now handled by the neon_failpoint crate internally
-    tracing::warn!("failpoint_sleep_cancellable_helper is deprecated, use neon_failpoint directly");
+    let millis = duration_str.parse::<u64>().unwrap();
+    let d = std::time::Duration::from_millis(millis);
+
+    tracing::info!("failpoint {:?}: sleeping for {:?}", name, d);
+    tokio::time::timeout(d, cancel.cancelled()).await.ok();
+    tracing::info!("failpoint {:?}: sleep done", name);
 }
