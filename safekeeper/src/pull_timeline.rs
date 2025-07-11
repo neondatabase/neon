@@ -451,6 +451,7 @@ pub async fn handle_request(
     sk_auth_token: Option<SecretString>,
     ssl_ca_certs: Vec<Certificate>,
     global_timelines: Arc<GlobalTimelines>,
+    wait_for_peer_timeline_status: bool,
 ) -> Result<PullTimelineResponse, ApiError> {
     let existing_tli = global_timelines.get(TenantTimelineId::new(
         request.tenant_id,
@@ -475,7 +476,7 @@ pub async fn handle_request(
 
     // Figure out statuses of potential donors.
     let mut statuses = Vec::new();
-    if true {
+    if !wait_for_peer_timeline_status {
         let responses: Vec<Result<TimelineStatus, mgmt_api::Error>> =
             futures::future::join_all(http_hosts.iter().map(|url| async {
                 let cclient = Client::new(http_client.clone(), url.clone(), sk_auth_token.clone());

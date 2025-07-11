@@ -213,6 +213,7 @@ pub async fn hcc_pull_timeline(
         conf.sk_auth_token.clone(),
         ca_certs,
         global_timelines.clone(),
+        true,
     )
     .await
     {
