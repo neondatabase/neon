@@ -16,27 +16,14 @@ macro_rules! pausable_failpoint {
     };
 }
 
-/// use with neon_failpoint::configure_failpoint("$name", "sleep(2000)")
-///
-/// The effect is similar to a "sleep(2000)" action, i.e. we sleep for the
-/// specified time (in milliseconds). The main difference is that we use async
-/// tokio sleep function. Another difference is that we print lines to the log,
-/// which can be useful in tests to check that the failpoint was hit.
-///
-/// Optionally pass a cancellation token, and this failpoint will drop out of
-/// its sleep when the cancellation token fires.  This is useful for testing
-/// cases where we would like to block something, but test its clean shutdown behavior.
+/// Mere forward to neon_failpoint::failpoint
 #[macro_export]
 macro_rules! __failpoint_sleep_millis_async {
     ($name:literal) => {{
-        if cfg!(feature = "testing") {
-            ::neon_failpoint::failpoint($name, None).await;
-        }
+        let _ = ::neon_failpoint::pausable_failpoint!($name);
     }};
     ($name:literal, $cancel:expr) => {{
-        if cfg!(feature = "testing") {
-            ::neon_failpoint::failpoint_with_cancellation($name, None, $cancel).await;
-        }
+        let _ = ::neon_failpoint::pausable_failpoint!($name, $cancel);
     }};
 }
 pub use __failpoint_sleep_millis_async as sleep_millis_async;

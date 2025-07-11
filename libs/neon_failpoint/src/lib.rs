@@ -173,6 +173,12 @@ pub fn has_failpoints() -> bool {
     cfg!(feature = "testing") || std::env::var("FAILPOINTS").is_ok()
 }
 
+pub fn list() -> Vec<(impl std::fmt::Display, impl std::fmt::Display)> {
+    FAILPOINTS.read().iter().map(|(name, config)| {
+        (name.clone(), format!("{config:?}"))
+    }).collect::<Vec<_>>()
+}
+
 /// Execute a failpoint with optional context
 pub fn failpoint(name: &str, context: Option<&FailpointContext>) -> Either<FailpointResult, Pin<Box<dyn Future<Output = FailpointResult> + Send>>> {
     failpoint_with_cancellation(name, context, &CancellationToken::new())

@@ -66,6 +66,7 @@ use utils::lsn::Lsn;
 use utils::shard::ShardIndex;
 use utils::sync::gate::{Gate, GateGuard};
 use utils::{failpoint_support, pausable_failpoint};
+use neon_failpoint as fail;
 
 use crate::background_node_operations::{
     Delete, Drain, Fill, MAX_RECONCILES_PER_OPERATION, Operation, OperationError, OperationHandler,
@@ -6026,7 +6027,7 @@ impl Service {
         tenant_id: TenantId,
         split_req: TenantShardSplitRequest,
     ) -> Result<ShardSplitAction, ApiError> {
-        fail::fail_point!("shard-split-validation", |_| Err(ApiError::BadRequest(
+        fail::fail_point_sync!("shard-split-validation", |_| Err(ApiError::BadRequest(
             anyhow::anyhow!("failpoint")
         )));
 

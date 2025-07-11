@@ -154,7 +154,7 @@ impl Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let scenario = failpoint_support::init();
+    failpoint_support::init().unwrap();
 
     // For historical reasons, the main thread that processes the config and launches postgres
     // is synchronous, but we always have this tokio runtime available and we "enter" it so
@@ -200,8 +200,6 @@ fn main() -> Result<()> {
     )?;
 
     let exit_code = compute_node.run()?;
-
-    scenario.teardown();
 
     deinit_and_exit(exit_code);
 }
