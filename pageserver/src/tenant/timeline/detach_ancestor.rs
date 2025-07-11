@@ -1114,7 +1114,7 @@ pub(super) async fn detach_and_reparent(
     // others will fail as if those timelines had been stopped for whatever reason.
     #[cfg(feature = "testing")]
     let failpoint_sem = || -> Option<Arc<Semaphore>> {
-        fail::fail_point!("timeline-detach-ancestor::allow_one_reparented", |_| Some(
+        fail::fail_point_sync!("timeline-detach-ancestor::allow_one_reparented", |_| Some(
             Arc::new(Semaphore::new(1))
         ));
         None

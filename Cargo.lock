@@ -3857,6 +3857,7 @@ name = "neon_failpoint"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "either",
  "once_cell",
  "parking_lot 0.12.1",
  "rand 0.8.5",
@@ -8180,6 +8181,7 @@ dependencies = [
  "const_format",
  "criterion",
  "diatomic-waker",
+ "either",
  "futures",
  "git-version",
  "hex",

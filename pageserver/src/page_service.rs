@@ -336,7 +336,7 @@ async fn page_service_conn_main(
 
     let default_timeout_ms = 10 * 60 * 1000; // 10 minutes by default
     let socket_timeout_ms = (|| {
-        fail::fail_point!("simulated-bad-compute-connection", |avg_timeout_ms| {
+        fail::fail_point_sync!("simulated-bad-compute-connection", |avg_timeout_ms| {
             // Exponential distribution for simulating
             // poor network conditions, expect about avg_timeout_ms to be around 15
             // in tests
@@ -3044,7 +3044,7 @@ where
         _pgb: &mut PostgresBackend<IO>,
         sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
-        fail::fail_point!("ps::connection-start::startup-packet");
+        fail::fail_point_sync!("ps::connection-start::startup-packet");
 
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
             if let Some(app_name) = params.get("application_name") {

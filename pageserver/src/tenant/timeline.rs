@@ -5184,7 +5184,7 @@ impl Timeline {
             *self.applied_gc_cutoff_lsn.read(),
         );
 
-        fail_point!("checkpoint-before-saving-metadata", |x| bail!(
+        neon_failpoint::fail_point_sync!("checkpoint-before-saving-metadata", |x| bail!(
             "{}",
             x.unwrap()
         ));

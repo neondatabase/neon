@@ -131,7 +131,7 @@ pub(super) async fn flush_metrics_to_disk(
             tempfile.flush()?;
             tempfile.as_file().sync_all()?;
 
-            fail::fail_point!("before-persist-last-metrics-collected");
+            fail::fail_point_sync!("before-persist-last-metrics-collected");
 
             drop(tempfile.persist(&*path).map_err(|e| e.error)?);
 

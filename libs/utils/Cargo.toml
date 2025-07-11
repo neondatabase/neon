@@ -21,6 +21,7 @@ bytes.workspace = true
 camino.workspace = true
 chrono.workspace = true
 diatomic-waker.workspace = true
+either.workspace = true
 git-version.workspace = true
 hex = { workspace = true, features = ["serde"] }
 humantime.workspace = true

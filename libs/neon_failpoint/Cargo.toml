@@ -13,6 +13,7 @@ regex = { workspace = true }
 once_cell = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
+either = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true, features = ["fmt"] }
@@ -23,4 +24,4 @@ testing = []
 
 [[example]]
 name = "context_demo"
-required-features = ["testing"] 
+required-features = ["testing"]

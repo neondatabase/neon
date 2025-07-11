@@ -5,37 +5,16 @@
 pub use neon_failpoint::{configure_failpoint as apply_failpoint, has_failpoints, init};
 use tokio_util::sync::CancellationToken;
 
-/// Declare a failpoint that can use to `pause` failpoint action.
-/// This is now a compatibility wrapper around the new neon_failpoint crate.
-///
-/// Optionally pass a cancellation token, and this failpoint will drop out of
-/// its pause when the cancellation token fires. This is useful for testing
-/// cases where we would like to block something, but test its clean shutdown behavior.
-/// The macro evaluates to a Result in that case, where Ok(()) is the case
-/// where the failpoint was not paused, and Err() is the case where cancellation
-/// token fired while evaluating the failpoint.
+/// Mere forward to neon_failpoint::pausable_failpoint
 #[macro_export]
 macro_rules! pausable_failpoint {
-    ($name:literal) => {{
-        if cfg!(feature = "testing") {
-            let cancel = ::tokio_util::sync::CancellationToken::new();
-            let _ = $crate::pausable_failpoint!($name, &cancel);
-        }
-    }};
-    ($name:literal, $cancel:expr) => {{
-        if cfg!(feature = "testing") {
-            match ::neon_failpoint::failpoint_with_cancellation($name, None, $cancel).await {
-                ::neon_failpoint::FailpointResult::Continue => Ok(()),
-                ::neon_failpoint::FailpointResult::Return(_) => Ok(()),
-                ::neon_failpoint::FailpointResult::Cancelled => Err(()),
-            }
-        } else {
-            Ok(())
-        }
-    }};
+    ($name:literal) => {
+        ::neon_failpoint::pausable_failpoint!($name)
+    };
+    ($name:literal, $cancel:expr) => {
+        ::neon_failpoint::pausable_failpoint!($name, $cancel)
+    };
 }
-
-pub use pausable_failpoint;
 
 /// use with neon_failpoint::configure_failpoint("$name", "sleep(2000)")
 ///
