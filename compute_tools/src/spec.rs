@@ -229,9 +229,7 @@ pub async fn handle_migrations(params: ComputeNodeParams, client: &mut Client) -
             privileged_role_name = params.privileged_role_name
         ),
         &format!(
-            include_str!(
-                "./migrations/0012-grant_pg_signal_backend_to_privileged_role.sql"
-            ),
+            include_str!("./migrations/0012-grant_pg_signal_backend_to_privileged_role.sql"),
             privileged_role_name = params.privileged_role_name
         ),
     ];
