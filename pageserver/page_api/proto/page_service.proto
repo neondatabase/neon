@@ -208,12 +208,25 @@ enum GetPageClass {
 message GetPageResponse {
   // The original request's ID.
   RequestID request_id = 1;
-  // The response status code.
+  // The response status code. If not OK, the rel and page fields will be empty.
   GetPageStatusCode status_code = 2;
   // A string describing the status, if any.
   string reason = 3;
-  // The 8KB page images, in the same order as the request. Empty if status_code != OK.
-  repeated bytes page_image = 4;
+  // The relation that the pages belong to.
+  RelTag rel = 4;
+  // The page(s), in the same order as the request.
+  repeated Page page = 5;
+}
+
+// A page.
+//
+// TODO: it would be slightly more efficient (but less convenient) to have separate arrays of block
+// numbers and images, but given the 8KB page size it's probably negligible. Benchmark it anyway.
+message Page {
+  // The page number.
+  uint32 block_number = 1;
+  // The materialized page image, as an 8KB byte vector.
+  bytes image = 2;
 }
 
 // A GetPageResponse status code.

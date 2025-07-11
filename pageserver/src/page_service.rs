@@ -3483,12 +3483,16 @@ impl GrpcPageServiceHandler {
             request_id: req.request_id,
             status_code: page_api::GetPageStatusCode::Ok,
             reason: None,
-            page_images: Vec::with_capacity(results.len()),
+            rel: req.rel,
+            pages: Vec::with_capacity(results.len()),
         };
 
         for result in results {
             match result {
-                Ok((PagestreamBeMessage::GetPage(r), _, _)) => resp.page_images.push(r.page),
+                Ok((PagestreamBeMessage::GetPage(r), _, _)) => resp.pages.push(page_api::Page {
+                    block_number: r.req.blkno,
+                    image: r.page,
+                }),
                 Ok((resp, _, _)) => {
                     return Err(tonic::Status::internal(format!(
                         "unexpected response: {resp:?}"
