@@ -307,9 +307,22 @@ extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
  */
 typedef enum
 {
+    /* The persistence is not known */
 	RELKIND_UNKNOWN,
+
+    /* The relation is a permanent relation that is WAL-logged normally */
 	RELKIND_PERMANENT,
+
+    /* The relation is an unlogged table/index, stored only on local disk */
 	RELKIND_UNLOGGED,
+
+    /*
+     * The relation is a permanent (index) relation, but it is being built by an in-progress
+     * transaction. It currently only lives on local disk and hasn't been WAL-logged yet.
+     * It will turn into a permanent relation later when the index build completes.
+     * This is currently used for GiST, SP-GiST and GIN indexes, as well as the pgvector
+     * extension.
+     */
 	RELKIND_UNLOGGED_BUILD /* buildig index for permanent relation */
 } RelKind;
 
