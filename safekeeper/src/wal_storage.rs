@@ -301,7 +301,7 @@ impl PhysicalStorage {
                 format!("Failed to open tmp wal file {:?}", &tmp_path)
             })?;
 
-            fail::fail_point!("sk-zero-segment", |_| {
+            neon_failpoint::fail_point!("sk-zero-segment", |_| {
                 info!("sk-zero-segment failpoint hit");
                 Err(anyhow::anyhow!("failpoint: sk-zero-segment"))
             });

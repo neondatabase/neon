@@ -16,13 +16,13 @@ macro_rules! fail_point {
             }
         }
     }};
-    ($name:literal, |$var:ident| $body:expr) => {{
+    ($name:literal, $closure:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, None).await {
                 $crate::FailpointResult::Continue => {},
                 $crate::FailpointResult::Return(value) => {
-                    let $var = value.as_str();
-                    $body
+                    let closure = $closure;
+                    return closure(value.as_str());
                 },
                 $crate::FailpointResult::Cancelled => {},
             }
@@ -44,13 +44,13 @@ macro_rules! fail_point_with_context {
             }
         }
     }};
-    ($name:literal, $context:expr, |$var:ident| $body:expr) => {{
+    ($name:literal, $context:expr, $closure:expr) => {{
         if cfg!(feature = "testing") {
             match $crate::failpoint($name, Some($context)).await {
                 $crate::FailpointResult::Continue => {},
                 $crate::FailpointResult::Return(value) => {
-                    let $var = value.as_str();
-                    $body
+                    let closure = $closure;
+                    return closure(value.as_str());
                 },
                 $crate::FailpointResult::Cancelled => {},
             }
