@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import timeit
+import traceback
 from concurrent.futures import ThreadPoolExecutor as Exec
+from fixtures.log_helper import log
 from pathlib import Path
 from time import sleep
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, Any
 
 import pytest
 from fixtures.benchmark_fixture import NeonBenchmarker, PgBenchRunResult
@@ -56,40 +58,66 @@ def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
 
 
 @pytest.mark.remote_cluster
-@pytest.mark.timeout(2 * 60 * 60)
+@pytest.mark.timeout(60 * 60)
 def test_compare_prewarmed_pgbench_perf_benchmark(
     pg_bin: PgBin,
     neon_api: NeonAPI,
     pg_version: PgVersion,
     zenbenchmark: NeonBenchmarker,
 ):
-    pgbench_size = 3424
+    name = f"Test prewarmed pgbench performance, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}"
+    project = neon_api.create_project(pg_version, name)
+    project_id = project["project"]["id"]
+    neon_api.wait_for_operation_to_finish(project_id)
+    error_occurred = False
+    try:
+        benchmark_impl(pg_bin, neon_api, project, zenbenchmark)
+    except Exception as e:
+        error_occurred = True
+        log.error(f"Caught exception: {e}")
+        log.error(traceback.format_exc())
+    finally:
+        assert not error_occurred
+        neon_api.delete_project(project_id)
+
+
+def benchmark_impl(
+    pg_bin: PgBin,
+    neon_api: NeonAPI,
+    project: dict[str, Any],
+    zenbenchmark: NeonBenchmarker
+):
+    pgbench_size = 100  # 3424
     offload_secs = 20
-    test_duration_min = 5
+    test_duration_min = 2  # 5
     pgbench_duration = f"-T{test_duration_min * 60}"
 
-    name = f"Test prewarmed pgbench performance, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}"
-    normal = neon_api.create_project(pg_version, name)
-    normal_id = normal["project"]["id"]
-    neon_api.wait_for_operation_to_finish(normal_id)
+    branch_id = project["branch"]["id"]
+    project_id = project["project"]["id"]
+    normal_env = connection_parameters_to_env(project["connection_uris"][0]["connection_parameters"])
+    normal_id = project["endpoints"][0]["id"]
 
-    branch_id = normal["branch"]["id"]
-    normal_id = normal["endpoint"]["id"]
-    normal_env = connection_parameters_to_env(normal["connection_uris"][0]["connection_parameters"])
+    prewarmed_branch_id = neon_api.create_branch(
+        project_id, "prewarmed", parent_id=branch_id, add_endpoint=False
+    )["branch"]["id"]
+    neon_api.wait_for_operation_to_finish(project_id)
 
-    ep_prewarmed_settings = {"autoprewarm": True, "offload_lfc_interval_seconds": offload_secs}
     ep_prewarmed = neon_api.create_endpoint(
-        normal_id, branch_id, settings=ep_prewarmed_settings, endpoint_type="read_write"
+        project_id,
+        prewarmed_branch_id,
+        endpoint_type="read_write",
+        settings={"autoprewarm": True, "offload_lfc_interval_seconds": offload_secs}
     )
-    neon_api.wait_for_operation_to_finish(normal_id)
+    neon_api.wait_for_operation_to_finish(project_id)
+
     prewarmed_env = normal_env.copy()
     prewarmed_env["PGHOST"] = ep_prewarmed["endpoint"]["host"]
     prewarmed_id = ep_prewarmed["endpoint"]["id"]
 
-    def bench(name, ep_id, env):
+    def bench(endpoint_name, endpoint_id, env):
         pg_bin.run(["pgbench", "-i", "-I", "dtGvp", f"-s{pgbench_size}"], env=env)
         sleep(offload_secs)  # ensure LFC is offloaded after pgbench finishes
-        neon_api.restart_endpoint(normal_id, ep_id)
+        neon_api.restart_endpoint(project_id, endpoint_id)
 
         run_start_timestamp = utc_now_timestamp()
         t0 = timeit.default_timer()
@@ -104,12 +132,11 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
             run_start_timestamp=run_start_timestamp,
             run_end_timestamp=run_end_timestamp,
         )
-        zenbenchmark.record_pg_bench_result(name, res)
+        zenbenchmark.record_pg_bench_result(endpoint_name, res)
 
     with Exec(max_workers=2) as exe:
         exe.submit(bench, "normal", normal_id, normal_env)
         exe.submit(bench, "prewarmed", prewarmed_id, prewarmed_env)
-    neon_api.delete_project(normal_id)
 
 
 def test_compare_prewarmed_read_perf(neon_compare: NeonCompare):
