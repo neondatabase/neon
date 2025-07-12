@@ -194,6 +194,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
                         listen_http_port: m.http_port,
                         listen_https_port: m.https_port,
                         availability_zone_id: az_id.expect("Checked above"),
+                        node_ip_addr: None,
                     })
                 }
                 Err(e) => {

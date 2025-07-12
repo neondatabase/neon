@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tarfile
 import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -198,3 +199,115 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder, broken_tenant: bool)
     # the table is back now!
     restored = env.endpoints.create_start("main")
     assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]
+
+
+# BEGIN_HADRON
+# TODO: re-enable once CM python is integreated.
+# def clear_directory(directory):
+#     for item in os.listdir(directory):
+#         item_path = os.path.join(directory, item)
+#         if os.path.isdir(item_path):
+#             log.info(f"removing SK directory: {item_path}")
+#             shutil.rmtree(item_path)
+#         else:
+#             log.info(f"removing SK file: {item_path}")
+#             os.remove(item_path)
+
+
+# def test_sk_pull_timelines(
+#     neon_env_builder: NeonEnvBuilder,
+# ):
+#     DBNAME = "regression"
+#     superuser_name = "databricks_superuser"
+#     neon_env_builder.num_safekeepers = 3
+#     neon_env_builder.num_pageservers = 4
+#     neon_env_builder.safekeeper_extra_opts = ["--enable-pull-timeline-on-startup"]
+#     neon_env_builder.enable_safekeeper_remote_storage(s3_storage())
+
+#     env = neon_env_builder.init_start(initial_tenant_shard_count=4)
+
+#     env.compute_manager.start(base_port=env.compute_manager_port)
+
+#     test_creator = "test_creator"
+#     test_metastore_id = uuid4()
+#     test_account_id = uuid4()
+#     test_workspace_id = 1
+#     test_workspace_url = "http://test_workspace_url"
+#     test_metadata_version = 1
+#     test_metadata = {
+#         "state": "INSTANCE_PROVISIONING",
+#         "admin_rolename": "admin",
+#         "admin_password_scram": "abc123456",
+#     }
+
+#     test_instance_name_1 = "test_instance_1"
+#     test_instance_read_write_compute_pool_1 = {
+#         "instance_name": test_instance_name_1,
+#         "compute_pool_name": "compute_pool_1",
+#         "creator": test_creator,
+#         "capacity": 2.0,
+#         "node_count": 1,
+#         "metadata_version": 0,
+#         "metadata": {
+#             "state": "INSTANCE_PROVISIONING",
+#         },
+#     }
+
+#     test_instance_1_readable_secondaries_enabled = False
+
+#     # Test creation
+#     create_instance_with_retries(
+#         env,
+#         test_instance_name_1,
+#         test_creator,
+#         test_metastore_id,
+#         test_account_id,
+#         test_workspace_id,
+#         test_workspace_url,
+#         test_instance_read_write_compute_pool_1,
+#         test_metadata_version,
+#         test_metadata,
+#         test_instance_1_readable_secondaries_enabled,
+#     )
+#     instance = env.compute_manager.get_instance_by_name(test_instance_name_1, test_workspace_id)
+#     log.info(f"haoyu Instance created: {instance}")
+#     assert instance["instance_name"] == test_instance_name_1
+#     test_instance_id = instance["instance_id"]
+#     instance_detail = env.compute_manager.describe_instance(test_instance_id)
+#     log.info(f"haoyu Instance detail: {instance_detail}")
+
+#     env.initial_tenant = instance_detail[0]["tenant_id"]
+#     env.initial_timeline = instance_detail[0]["timeline_id"]
+
+#     # Connect to postgres and create a database called "regression".
+#     endpoint = env.endpoints.create_start("main")
+#     endpoint.safe_psql(f"CREATE ROLE {superuser_name}")
+#     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
+
+#     endpoint.safe_psql("CREATE TABLE usertable ( YCSB_KEY INT, FIELD0 TEXT);")
+#     # Write some data. ~20 MB.
+#     num_rows = 0
+#     for _i in range(0, 20000):
+#         endpoint.safe_psql(
+#             "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+#         )
+#         num_rows += 1
+
+#     log.info(f"SKs {env.storage_controller.hcc_sk_node_list()}")
+
+#     env.safekeepers[0].stop(immediate=True)
+#     clear_directory(env.safekeepers[0].data_dir)
+#     env.safekeepers[0].start()
+
+#     # PG can still write data. ~20 MB.
+#     for _i in range(0, 20000):
+#         endpoint.safe_psql(
+#             "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
+#         )
+#         num_rows += 1
+
+#     tuples = endpoint.safe_psql("SELECT COUNT(*) FROM usertable;")
+#     assert tuples[0][0] == num_rows
+#     endpoint.stop_and_destroy()
+
+# END_HADRON

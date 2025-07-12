@@ -6,10 +6,10 @@
 use std::error::Error as _;
 
 use http_utils::error::HttpErrorBody;
-use reqwest::{IntoUrl, Method, StatusCode};
+use reqwest::{IntoUrl, Method, Response, StatusCode};
 use safekeeper_api::models::{
     self, PullTimelineRequest, PullTimelineResponse, SafekeeperStatus, SafekeeperUtilization,
-    TimelineCreateRequest, TimelineStatus,
+    TimelineCreateRequest,
 };
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
@@ -161,13 +161,12 @@ impl Client {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> Result<TimelineStatus> {
+    ) -> Result<Response> {
         let uri = format!(
             "{}/v1/tenant/{}/timeline/{}",
             self.mgmt_api_endpoint, tenant_id, timeline_id
         );
-        let resp = self.get(&uri).await?;
-        resp.json().await.map_err(Error::ReceiveBody)
+        self.get(&uri).await
     }
 
     pub async fn snapshot(

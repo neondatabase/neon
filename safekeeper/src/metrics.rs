@@ -85,6 +85,43 @@ pub static WAL_STORAGE_LIMIT_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_wal_storage_limit_errors counter")
 });
+pub static SK_RECOVERY_PULL_TIMELINE_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_recovery_pull_timeline_errors",
+        concat!(
+            "Number of errors due to pull_timeline errors during SK lost disk recovery.",
+            "An increase in this metric indicates pull timelines runs into error."
+        )
+    )
+    .expect("Failed to register safekeeper_recovery_pull_timeline_errors counter")
+});
+pub static SK_RECOVERY_PULL_TIMELINE_OKS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_recovery_pull_timeline_oks",
+        concat!(
+            "Number of successful pull_timeline during SK lost disk recovery.",
+            "An increase in this metric indicates pull timelines is successful."
+        )
+    )
+    .expect("Failed to register safekeeper_recovery_pull_timeline_oks counter")
+});
+pub static SK_RECOVERY_PULL_TIMELINES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_recovery_pull_timelines_seconds",
+        "Seconds to pull timelines",
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_recovery_pull_timelines_seconds histogram")
+});
+pub static SK_RECOVERY_PULL_TIMELINE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "safekeeper_recovery_pull_timeline_seconds",
+        "Seconds to pull timeline",
+        &["tenant_id", "timeline_id"],
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_recovery_pull_timeline_seconds histogram vec")
+});
 /* END_HADRON */
 pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(

@@ -10,6 +10,7 @@ use pem::Pem;
 use remote_storage::RemoteStorageConfig;
 use storage_broker::Uri;
 use tokio::runtime::Runtime;
+use url::Url;
 use utils::auth::SwappableJwtAuth;
 use utils::id::NodeId;
 use utils::logging::SecretString;
@@ -20,6 +21,7 @@ pub mod control_file;
 pub mod control_file_upgrade;
 pub mod copy_timeline;
 pub mod debug_dump;
+pub mod hadron;
 pub mod handler;
 pub mod http;
 pub mod metrics;
@@ -100,6 +102,11 @@ pub struct SafeKeeperConf {
     pub advertise_pg_addr: Option<String>,
     pub availability_zone: Option<String>,
     pub no_sync: bool,
+    /* BEGIN_HADRON */
+    pub advertise_pg_addr_tenant_only: Option<String>,
+    pub enable_pull_timeline_on_startup: bool,
+    pub hcc_base_url: Option<Url>,
+    /* END_HADRON */
     pub broker_endpoint: Uri,
     pub broker_keepalive_interval: Duration,
     pub heartbeat_timeout: Duration,
@@ -185,6 +192,11 @@ impl SafeKeeperConf {
             use_https_safekeeper_api: false,
             enable_tls_wal_service_api: false,
             force_metric_collection_on_scrape: true,
+            /* BEGIN_HADRON */
+            advertise_pg_addr_tenant_only: None,
+            enable_pull_timeline_on_startup: false,
+            hcc_base_url: None,
+            /* END_HADRON */
         }
     }
 }

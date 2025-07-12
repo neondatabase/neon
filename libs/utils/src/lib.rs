@@ -26,6 +26,9 @@ pub mod auth;
 // utility functions and helper traits for unified unique id generation/serialization etc.
 pub mod id;
 
+// utility functions to obtain reachable IP addresses in PS/SK nodes.
+pub mod ip_address;
+
 pub mod shard;
 
 mod hex;
