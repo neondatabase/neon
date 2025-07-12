@@ -1587,11 +1587,11 @@ hexdump_page(char *page)
 	return result.data;
 }
 
-static bool determine_entry_relkind(RelKindEntry *entry, SMgrRelation reln, ForkNumber forknum)
+static RelKind determine_entry_relkind(RelKindEntry *entry, SMgrRelation reln, ForkNumber forknum)
 {
 	PG_TRY();
 	{
-		return mdexists(reln, forknum);
+		return mdexists(reln, forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
 	}
 	PG_CATCH();
 	{
@@ -1628,7 +1628,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			{
 				Assert(relkind == RELKIND_UNKNOWN);
 				/* We do not know relation persistence: let's determine it */
-				relkind = determine_entry_relkind(entry, reln, debug_compare_local ? INIT_FORKNUM : forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
+				relkind = determine_entry_relkind(entry, reln, debug_compare_local ? INIT_FORKNUM : forknum);
 				store_cached_relkind(entry, relkind);
 			}
 			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
@@ -1713,7 +1713,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			{
 				Assert(relkind == RELKIND_UNKNOWN);
 				/* We do not know relation persistence: let's determine it */
-				relkind = determine_entry_relkind(entry, reln, debug_compare_local ? INIT_FORKNUM : forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
+				relkind = determine_entry_relkind(entry, reln, debug_compare_local ? INIT_FORKNUM : forknum);
 				store_cached_relkind(entry, relkind);
 			}
 			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
