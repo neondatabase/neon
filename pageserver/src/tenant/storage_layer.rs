@@ -75,7 +75,7 @@ where
 /// the same ValueReconstructState struct in the next 'get_value_reconstruct_data'
 /// call, to collect more records.
 ///
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ValueReconstructState {
     pub(crate) records: Vec<(Lsn, NeonWalRecord)>,
     pub(crate) img: Option<(Lsn, Bytes)>,
@@ -307,6 +307,9 @@ pub struct ValuesReconstructState {
     // Statistics that are still accessible as a caller of `get_vectored_impl`.
     layers_visited: u32,
     delta_layers_visited: u32,
+
+    pub(crate) enable_debug: bool,
+    pub(crate) debug_state: ValueReconstructState,
 
     pub(crate) io_concurrency: IoConcurrency,
     num_active_ios: Arc<AtomicUsize>,
@@ -657,6 +660,23 @@ impl ValuesReconstructState {
             layers_visited: 0,
             delta_layers_visited: 0,
             io_concurrency,
+            enable_debug: false,
+            debug_state: ValueReconstructState::default(),
+            num_active_ios: Arc::new(AtomicUsize::new(0)),
+            read_path: None,
+        }
+    }
+
+    pub(crate) fn new_with_debug(io_concurrency: IoConcurrency) -> Self {
+        Self {
+            keys: HashMap::new(),
+            keys_done: KeySpaceRandomAccum::new(),
+            keys_with_image_coverage: None,
+            layers_visited: 0,
+            delta_layers_visited: 0,
+            io_concurrency,
+            enable_debug: true,
+            debug_state: ValueReconstructState::default(),
             num_active_ios: Arc::new(AtomicUsize::new(0)),
             read_path: None,
         }
@@ -668,6 +688,12 @@ impl ValuesReconstructState {
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         self.io_concurrency.spawn_io(fut).await;
+    }
+
+    pub(crate) fn set_debug_state(&mut self, debug_state: &ValueReconstructState) {
+        if self.enable_debug {
+            self.debug_state = debug_state.clone();
+        }
     }
 
     pub(crate) fn on_layer_visited(&mut self, layer: &ReadableLayer) {
