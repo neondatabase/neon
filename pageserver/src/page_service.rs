@@ -2167,7 +2167,7 @@ impl PageServerHandler {
     fn effective_request_lsn(
         timeline: &Timeline,
         last_record_lsn: Lsn,
-        request_lsn: Lsn,
+        mut request_lsn: Lsn,
         not_modified_since: Lsn,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
     ) -> Result<Lsn, PageStreamError> {
@@ -2195,12 +2195,14 @@ impl PageServerHandler {
         if request_lsn < **latest_gc_cutoff_lsn && !timeline.is_gc_blocked_by_lsn_lease_deadline() {
             let gc_info = &timeline.gc_info.read().unwrap();
             if !gc_info.lsn_covered_by_lease(request_lsn) {
-                return Err(
-                    PageStreamError::BadRequest(format!(
-                        "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
-                        request_lsn, **latest_gc_cutoff_lsn
-                    ).into())
-                );
+			    // While request was in flight, replica apply_lsn may be advanced.
+				// latest_gc_cutoff_lsn is conservative estimation for min(redo_lsn) for all replicas,
+				// so it is safe to move request_lsn forward to latest_gc_cutoff_lsn.
+				// If replica lease is expired and latest_gc_cutoff_lsn>redo_lsn for this replica,
+				// then check of page LSN at replia protects it from getting too new version of the page.
+			    warn!("Tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
+			        request_lsn, **latest_gc_cutoff_lsn);
+				request_lsn = **latest_gc_cutoff_lsn;
             }
         }
 
