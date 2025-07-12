@@ -1593,9 +1593,10 @@ hexdump_page(char *page)
 
 static RelKind determine_entry_relkind(RelKindEntry *entry, SMgrRelation reln, ForkNumber forknum)
 {
+	RelKind relkind = RELKIND_UNKNOWN;
 	PG_TRY();
 	{
-		return mdexists(reln, forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
+		relkind = mdexists(reln, forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
 	}
 	PG_CATCH();
 	{
@@ -1603,6 +1604,7 @@ static RelKind determine_entry_relkind(RelKindEntry *entry, SMgrRelation reln, F
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	return relkind;
 }
 
 #if PG_MAJORVERSION_NUM < 17
