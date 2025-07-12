@@ -298,4 +298,47 @@ extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
+/*
+ * Relation kind enum.
+ */
+typedef enum
+{
+    /* The persistence is not known */
+	RELKIND_UNKNOWN,
+
+    /* The relation is a permanent relation that is WAL-logged normally */
+	RELKIND_PERMANENT,
+
+    /* The relation is an unlogged table/index, stored only on local disk */
+	RELKIND_UNLOGGED,
+
+    /*
+     * The relation is a permanent (index) relation, but it is being built by an in-progress
+     * transaction. It currently only lives on local disk and hasn't been WAL-logged yet.
+     * It will turn into a permanent relation later when the index build completes.
+     * This is currently used for GiST, SP-GiST and GIN indexes, as well as the pgvector
+     * extension.
+     */
+	RELKIND_UNLOGGED_BUILD /* buildig index for permanent relation */
+} RelKind;
+
+/* utils for neon relkind cache */
+typedef struct
+{
+	NRelFileInfo rel;
+	uint8		relkind;		/* See RelKind */
+	uint16		access_count;
+	dlist_node	lru_node;	/* LRU list node */
+} RelKindEntry;
+
+
+extern void relkind_hash_init(void);
+extern RelKindEntry* set_cached_relkind(NRelFileInfo rinfo, RelKind relkind);
+extern RelKindEntry* get_cached_relkind(NRelFileInfo rinfo, RelKind* relkind);
+extern void store_cached_relkind(RelKindEntry* entry, RelKind relkind);
+extern void update_cached_relkind(RelKindEntry* entry, RelKind relkind);
+extern void unpin_cached_relkind(RelKindEntry* entry);
+extern void unlock_cached_relkind(void);
+extern void forget_cached_relkind(NRelFileInfo rinfo);
+
 #endif							/* PAGESTORE_CLIENT_H */

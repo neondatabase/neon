@@ -66,7 +66,7 @@ static void relsize_shmem_request(void);
 #define DEFAULT_RELSIZE_HASH_SIZE (64 * 1024)
 
 static void
-neon_smgr_shmem_startup(void)
+relsize_cache_startup(void)
 {
 	static HASHCTL info;
 	bool found;
@@ -85,13 +85,13 @@ neon_smgr_shmem_startup(void)
 									 relsize_hash_size, relsize_hash_size,
 									 &info,
 									 HASH_ELEM | HASH_BLOBS);
-		LWLockRelease(AddinShmemInitLock);
 		relsize_ctl->size = 0;
 		relsize_ctl->hits = 0;
 		relsize_ctl->misses = 0;
 		relsize_ctl->writes = 0;
 		dlist_init(&relsize_ctl->lru);
 	}
+	LWLockRelease(AddinShmemInitLock);
 }
 
 bool
@@ -254,7 +254,7 @@ relsize_hash_init(void)
 #endif
 
 		prev_shmem_startup_hook = shmem_startup_hook;
-		shmem_startup_hook = neon_smgr_shmem_startup;
+		shmem_startup_hook = relsize_cache_startup;
 	}
 }
 
