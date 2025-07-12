@@ -1533,10 +1533,10 @@ pub enum RelSizeMigration {
     /// `None` is the same as `Some(RelSizeMigration::Legacy)`.
     Legacy,
     /// The tenant is migrating to the new rel_size format. Both old and new rel_size format are
-    /// persisted in the index part. The read path will read both formats and merge them.
+    /// persisted in the storage. The read path will read both formats and validate them.
     Migrating,
     /// The tenant has migrated to the new rel_size format. Only the new rel_size format is persisted
-    /// in the index part, and the read path will not read the old format.
+    /// in the storage, and the read path will not read the old format.
     Migrated,
 }
 
