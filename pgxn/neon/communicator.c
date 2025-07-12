@@ -2227,6 +2227,19 @@ Retry:
 			case T_NeonGetPageResponse:
 			{
 				NeonGetPageResponse* getpage_resp = (NeonGetPageResponse *) resp;
+				if (resp->lsn != UINT64_MAX) /* replica */
+				{
+					XLogRecPtr page_lsn = PageGetLSN((Page)getpage_resp->page);
+					XLogRecPtr replay_lsn = GetXLogReplayRecPtr(NULL);
+					if (page_lsn > replay_lsn)
+					{
+						/* Alternative to throw error is to repeat the query with request_lsn=replay_lsn */
+						ereport(ERROR,
+								(errcode(ERRCODE_IO_ERROR),
+								 errmsg("There is no more version of page %u of relation %u/%u/%u.%u at LSN %X/%X at page server, latest version is at LSN %X/%X",
+										blockno, RelFileInfoFmt(rinfo), forkNum, LSN_FORMAT_ARGS(replay_lsn), LSN_FORMAT_ARGS(page_lsn))));
+					}
+				}
 				memcpy(buffer, getpage_resp->page, BLCKSZ);
 
 				/*
