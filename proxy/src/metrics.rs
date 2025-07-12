@@ -376,6 +376,7 @@ pub enum Waiting {
 pub enum RedisMsgKind {
     Set,
     Get,
+    Expire,
     HGet,
 }
 
