@@ -17,6 +17,7 @@ mod cmd {
     pub(super) mod aux_files;
     pub(super) mod basebackup;
     pub(super) mod getpage_latest_lsn;
+    pub(super) mod idle_streams;
     pub(super) mod ondemand_download_churn;
     pub(super) mod trigger_initial_size_calculation;
 }
@@ -29,6 +30,7 @@ enum Args {
     TriggerInitialSizeCalculation(cmd::trigger_initial_size_calculation::Args),
     OndemandDownloadChurn(cmd::ondemand_download_churn::Args),
     AuxFiles(cmd::aux_files::Args),
+    IdleStreams(cmd::idle_streams::Args),
 }
 
 fn main() {
@@ -49,6 +51,7 @@ fn main() {
         }
         Args::OndemandDownloadChurn(args) => cmd::ondemand_download_churn::main(args),
         Args::AuxFiles(args) => cmd::aux_files::main(args),
+        Args::IdleStreams(args) => cmd::idle_streams::main(args),
     }
     .unwrap()
 }
