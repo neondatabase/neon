@@ -374,11 +374,9 @@ pub enum Waiting {
 #[label(singleton = "kind")]
 #[allow(clippy::enum_variant_names)]
 pub enum RedisMsgKind {
-    HSet,
-    HSetMultiple,
+    Set,
+    Get,
     HGet,
-    HGetAll,
-    HDel,
 }
 
 #[derive(Default, Clone)]

@@ -359,14 +359,14 @@ impl<T: Types> Cache<T> {
                 Err(e) => {
                     // Retry on tenant manager error to handle tenant split more gracefully
                     if attempt < GET_MAX_RETRIES {
-                        tracing::warn!(
-                            "Fail to resolve tenant shard in attempt {}: {:?}. Retrying...",
-                            attempt,
-                            e
-                        );
                         tokio::time::sleep(RETRY_BACKOFF).await;
                         continue;
                     } else {
+                        tracing::warn!(
+                            "Failed to resolve tenant shard after {} attempts: {:?}",
+                            GET_MAX_RETRIES,
+                            e
+                        );
                         return Err(e);
                     }
                 }

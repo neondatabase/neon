@@ -217,6 +217,9 @@ pub struct NeonStorageControllerConf {
     pub posthog_config: Option<PostHogConfig>,
 
     pub kick_secondary_downloads: Option<bool>,
+
+    #[serde(with = "humantime_serde")]
+    pub shard_split_request_timeout: Option<Duration>,
 }
 
 impl NeonStorageControllerConf {
@@ -250,6 +253,7 @@ impl Default for NeonStorageControllerConf {
             timeline_safekeeper_count: None,
             posthog_config: None,
             kick_secondary_downloads: None,
+            shard_split_request_timeout: None,
         }
     }
 }

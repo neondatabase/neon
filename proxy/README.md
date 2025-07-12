@@ -123,6 +123,11 @@ docker exec -it proxy-postgres psql -U postgres -c "CREATE TABLE neon_control_pl
 docker exec -it proxy-postgres psql -U postgres -c "CREATE ROLE proxy WITH SUPERUSER LOGIN PASSWORD 'password';"
 ```
 
+If you want to test query cancellation, redis is also required:
+```sh
+docker run --detach --name proxy-redis --publish 6379:6379 redis:7.0
+```
+
 Let's create self-signed certificate by running:
 ```sh
 openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key -subj "/CN=*.local.neon.build"
@@ -130,7 +135,10 @@ openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key
 
 Then we need to build proxy with 'testing' feature and run, e.g.:
 ```sh
-RUST_LOG=proxy LOGFMT=text cargo run -p proxy --bin proxy --features testing -- --auth-backend postgres --auth-endpoint 'postgresql://postgres:proxy-postgres@127.0.0.1:5432/postgres' -c server.crt -k server.key
+RUST_LOG=proxy LOGFMT=text cargo run -p proxy --bin proxy --features testing -- \
+  --auth-backend postgres --auth-endpoint 'postgresql://postgres:proxy-postgres@127.0.0.1:5432/postgres' \
+  --redis-auth-type="plain" --redis-plain="redis://127.0.0.1:6379" \
+  -c server.crt -k server.key
 ```
 
 Now from client you can start a new session:

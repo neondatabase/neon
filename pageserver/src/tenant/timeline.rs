@@ -351,13 +351,6 @@ pub struct Timeline {
     last_image_layer_creation_check_at: AtomicLsn,
     last_image_layer_creation_check_instant: std::sync::Mutex<Option<Instant>>,
 
-    // HADRON
-    /// If a key range has writes with LSN > force_image_creation_lsn, then we should force image layer creation
-    /// on this key range.
-    force_image_creation_lsn: AtomicLsn,
-    /// The last time instant when force_image_creation_lsn is computed.
-    force_image_creation_lsn_computed_at: std::sync::Mutex<Option<Instant>>,
-
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
 
@@ -2854,7 +2847,7 @@ impl Timeline {
     }
 
     // HADRON
-    fn get_image_creation_timeout(&self) -> Option<Duration> {
+    fn get_image_layer_force_creation_period(&self) -> Option<Duration> {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
             .tenant_conf
@@ -3134,9 +3127,6 @@ impl Timeline {
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
                 last_image_layer_creation_check_instant: Mutex::new(None),
-                // HADRON
-                force_image_creation_lsn: AtomicLsn::new(0),
-                force_image_creation_lsn_computed_at: std::sync::Mutex::new(None),
                 last_received_wal: Mutex::new(None),
                 rel_size_latest_cache: RwLock::new(HashMap::new()),
                 rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),
@@ -5381,13 +5371,16 @@ impl Timeline {
         }
 
         // HADRON
+        // for child timelines, we consider all pages up to ancestor_LSN are redone successfully by the parent timeline
+        min_image_lsn = min_image_lsn.max(self.get_ancestor_lsn());
         if min_image_lsn < force_image_creation_lsn.unwrap_or(Lsn(0)) && max_deltas > 0 {
             info!(
-                "forcing image creation for partitioned range {}-{}. Min image LSN: {}, force image creation LSN: {}",
+                "forcing image creation for partitioned range {}-{}. Min image LSN: {}, force image creation LSN: {}, num deltas: {}",
                 partition.ranges[0].start,
                 partition.ranges[0].end,
                 min_image_lsn,
-                force_image_creation_lsn.unwrap()
+                force_image_creation_lsn.unwrap(),
+                max_deltas
             );
             return true;
         }
@@ -5611,10 +5604,11 @@ impl Timeline {
     /// Predicate function which indicates whether we should check if new image layers
     /// are required. Since checking if new image layers are required is expensive in
     /// terms of CPU, we only do it in the following cases:
-    /// 1. If the timeline has ingested sufficient WAL to justify the cost
+    /// 1. If the timeline has ingested sufficient WAL to justify the cost or ...
     /// 2. If enough time has passed since the last check:
     ///     1. For large tenants, we wish to perform the check more often since they
-    ///        suffer from the lack of image layers
+    ///        suffer from the lack of image layers. Note that we assume sharded tenants
+    ///        to be large since non-zero shards do not track the logical size.
     ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
         let large_timeline_threshold = self.conf.image_layer_generation_large_timeline_threshold;
@@ -5628,30 +5622,39 @@ impl Timeline {
 
         let distance_based_decision = distance.0 >= min_distance;
 
-        let mut time_based_decision = false;
         let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
-        if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
-            let check_required_after =
-                if Some(Into::<u64>::into(&logical_size)) >= large_timeline_threshold {
-                    self.get_checkpoint_timeout()
-                } else {
-                    Duration::from_secs(3600 * 48)
-                };
-
-            time_based_decision = match *last_check_instant {
-                Some(last_check) => {
-                    let elapsed = last_check.elapsed();
-                    elapsed >= check_required_after
+        let check_required_after = (|| {
+            if self.shard_identity.is_unsharded() {
+                if let CurrentLogicalSize::Exact(logical_size) =
+                    self.current_logical_size.current_size()
+                {
+                    if Some(Into::<u64>::into(&logical_size)) < large_timeline_threshold {
+                        return Duration::from_secs(3600 * 48);
+                    }
                 }
-                None => true,
-            };
-        }
+            }
+
+            self.get_checkpoint_timeout()
+        })();
+
+        let time_based_decision = match *last_check_instant {
+            Some(last_check) => {
+                let elapsed = last_check.elapsed();
+                elapsed >= check_required_after
+            }
+            None => true,
+        };
 
         // Do the expensive delta layer counting only if this timeline has ingested sufficient
         // WAL since the last check or a checkpoint timeout interval has elapsed since the last
         // check.
         let decision = distance_based_decision || time_based_decision;
-
+        tracing::info!(
+            "Decided to check image layers: {}. Distance-based decision: {}, time-based decision: {}",
+            decision,
+            distance_based_decision,
+            time_based_decision
+        );
         if decision {
             self.last_image_layer_creation_check_at.store(lsn);
             *last_check_instant = Some(Instant::now());
@@ -7153,6 +7156,19 @@ impl Timeline {
             .unwrap()
             .clone()
     }
+
+    /* BEGIN_HADRON */
+    pub(crate) async fn compute_image_consistent_lsn(&self) -> anyhow::Result<Lsn> {
+        let guard = self
+            .layers
+            .read(LayerManagerLockHolder::ComputeImageConsistentLsn)
+            .await;
+        let layer_map = guard.layer_map()?;
+        let disk_consistent_lsn = self.get_disk_consistent_lsn();
+
+        Ok(layer_map.compute_image_consistent_lsn(disk_consistent_lsn))
+    }
+    /* END_HADRON */
 }
 
 impl Timeline {

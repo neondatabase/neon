@@ -1067,11 +1067,34 @@ impl ComputeNode {
             self.try_get_basebackup_libpq(spec, lsn)?
         };
 
+        self.fix_zenith_signal_neon_signal()?;
+
         let mut state = self.state.lock().unwrap();
         state.metrics.pageserver_connect_micros =
             connected.duration_since(started).as_micros() as u64;
         state.metrics.basebackup_bytes = size as u64;
         state.metrics.basebackup_ms = started.elapsed().as_millis() as u64;
+
+        Ok(())
+    }
+
+    /// Move the Zenith signal file to Neon signal file location.
+    /// This makes Compute compatible with older PageServers that don't yet
+    /// know about the Zenith->Neon rename.
+    fn fix_zenith_signal_neon_signal(&self) -> Result<()> {
+        let datadir = Path::new(&self.params.pgdata);
+
+        let neonsig = datadir.join("neon.signal");
+
+        if neonsig.is_file() {
+            return Ok(());
+        }
+
+        let zenithsig = datadir.join("zenith.signal");
+
+        if zenithsig.is_file() {
+            fs::copy(zenithsig, neonsig)?;
+        }
 
         Ok(())
     }

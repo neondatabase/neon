@@ -4,12 +4,11 @@ use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::anyhow;
 use futures::FutureExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use postgres_client::RawCancelToken;
 use postgres_client::tls::MakeTlsConnect;
-use redis::{Cmd, FromRedisValue, Value};
+use redis::{Cmd, FromRedisValue, SetExpiry, SetOptions, Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -18,7 +17,7 @@ use tracing::{debug, error, info};
 
 use crate::auth::AuthError;
 use crate::auth::backend::ComputeUserInfo;
-use crate::batch::{BatchQueue, QueueProcessing};
+use crate::batch::{BatchQueue, BatchQueueError, QueueProcessing};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::ControlPlaneApi;
@@ -28,7 +27,7 @@ use crate::metrics::{CancelChannelSizeGuard, CancellationRequest, Metrics, Redis
 use crate::pqproto::CancelKeyData;
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::keys::KeyPrefix;
-use crate::redis::kv_ops::RedisKVClient;
+use crate::redis::kv_ops::{RedisKVClient, RedisKVClientError};
 
 type IpSubnetKey = IpNet;
 
@@ -45,6 +44,17 @@ pub enum CancelKeyOp {
     GetCancelData {
         key: CancelKeyData,
     },
+    GetCancelDataOld {
+        key: CancelKeyData,
+    },
+}
+
+#[derive(thiserror::Error, Debug, Clone)]
+pub enum PipelineError {
+    #[error("could not send cmd to redis: {0}")]
+    RedisKVClient(Arc<RedisKVClientError>),
+    #[error("incorrect number of responses from redis")]
+    IncorrectNumberOfResponses,
 }
 
 pub struct Pipeline {
@@ -60,7 +70,7 @@ impl Pipeline {
         }
     }
 
-    async fn execute(self, client: &mut RedisKVClient) -> Vec<anyhow::Result<Value>> {
+    async fn execute(self, client: &mut RedisKVClient) -> Result<Vec<Value>, PipelineError> {
         let responses = self.replies;
         let batch_size = self.inner.len();
 
@@ -78,29 +88,19 @@ impl Pipeline {
                     batch_size,
                     responses, "successfully completed cancellation jobs",
                 );
-                values.into_iter().map(Ok).collect()
+                Ok(values.into_iter().collect())
             }
             Ok(value) => {
                 error!(batch_size, ?value, "unexpected redis return value");
-                std::iter::repeat_with(|| Err(anyhow!("incorrect response type from redis")))
-                    .take(responses)
-                    .collect()
+                Err(PipelineError::IncorrectNumberOfResponses)
             }
-            Err(err) => {
-                std::iter::repeat_with(|| Err(anyhow!("could not send cmd to redis: {err}")))
-                    .take(responses)
-                    .collect()
-            }
+            Err(err) => Err(PipelineError::RedisKVClient(Arc::new(err))),
         }
     }
 
-    fn add_command_with_reply(&mut self, cmd: Cmd) {
+    fn add_command(&mut self, cmd: Cmd) {
         self.inner.add_command(cmd);
         self.replies += 1;
-    }
-
-    fn add_command_no_reply(&mut self, cmd: Cmd) {
-        self.inner.add_command(cmd).ignore();
     }
 }
 
@@ -109,12 +109,19 @@ impl CancelKeyOp {
         match self {
             CancelKeyOp::StoreCancelKey { key, value, expire } => {
                 let key = KeyPrefix::Cancel(*key).build_redis_key();
-                pipe.add_command_with_reply(Cmd::hset(&key, "data", &**value));
-                pipe.add_command_no_reply(Cmd::expire(&key, expire.as_secs() as i64));
+                pipe.add_command(Cmd::set_options(
+                    &key,
+                    &**value,
+                    SetOptions::default().with_expiration(SetExpiry::EX(expire.as_secs())),
+                ));
+            }
+            CancelKeyOp::GetCancelDataOld { key } => {
+                let key = KeyPrefix::Cancel(*key).build_redis_key();
+                pipe.add_command(Cmd::hget(key, "data"));
             }
             CancelKeyOp::GetCancelData { key } => {
                 let key = KeyPrefix::Cancel(*key).build_redis_key();
-                pipe.add_command_with_reply(Cmd::hget(key, "data"));
+                pipe.add_command(Cmd::get(key));
             }
         }
     }
@@ -127,13 +134,14 @@ pub struct CancellationProcessor {
 
 impl QueueProcessing for CancellationProcessor {
     type Req = (CancelChannelSizeGuard<'static>, CancelKeyOp);
-    type Res = anyhow::Result<redis::Value>;
+    type Res = redis::Value;
+    type Err = PipelineError;
 
     fn batch_size(&self, _queue_size: usize) -> usize {
         self.batch_size
     }
 
-    async fn apply(&mut self, batch: Vec<Self::Req>) -> Vec<Self::Res> {
+    async fn apply(&mut self, batch: Vec<Self::Req>) -> Result<Vec<Self::Res>, Self::Err> {
         if !self.client.credentials_refreshed() {
             // this will cause a timeout for cancellation operations
             tracing::debug!(
@@ -244,18 +252,18 @@ impl CancellationHandler {
         &self,
         key: CancelKeyData,
     ) -> Result<Option<CancelClosure>, CancelError> {
-        let guard = Metrics::get()
-            .proxy
-            .cancel_channel_size
-            .guard(RedisMsgKind::HGet);
-        let op = CancelKeyOp::GetCancelData { key };
+        const TIMEOUT: Duration = Duration::from_secs(5);
 
         let Some(tx) = self.tx.get() else {
             tracing::warn!("cancellation handler is not available");
             return Err(CancelError::InternalError);
         };
 
-        const TIMEOUT: Duration = Duration::from_secs(5);
+        let guard = Metrics::get()
+            .proxy
+            .cancel_channel_size
+            .guard(RedisMsgKind::Get);
+        let op = CancelKeyOp::GetCancelData { key };
         let result = timeout(
             TIMEOUT,
             tx.call((guard, op), std::future::pending::<Infallible>()),
@@ -264,10 +272,37 @@ impl CancellationHandler {
         .map_err(|_| {
             tracing::warn!("timed out waiting to receive GetCancelData response");
             CancelError::RateLimit
-        })?
-        // cannot be cancelled
-        .unwrap_or_else(|x| match x {})
-        .map_err(|e| {
+        })?;
+
+        // We may still have cancel keys set with HSET <key> "data".
+        // Check error type and retry with HGET.
+        // TODO: remove code after HSET is not used anymore.
+        let result = if let Err(err) = result.as_ref()
+            && let BatchQueueError::Result(err) = err
+            && let PipelineError::RedisKVClient(err) = err
+            && let RedisKVClientError::Redis(err) = &**err
+            && let Some(errcode) = err.code()
+            && errcode == "WRONGTYPE"
+        {
+            let guard = Metrics::get()
+                .proxy
+                .cancel_channel_size
+                .guard(RedisMsgKind::HGet);
+            let op = CancelKeyOp::GetCancelDataOld { key };
+            timeout(
+                TIMEOUT,
+                tx.call((guard, op), std::future::pending::<Infallible>()),
+            )
+            .await
+            .map_err(|_| {
+                tracing::warn!("timed out waiting to receive GetCancelData response");
+                CancelError::RateLimit
+            })?
+        } else {
+            result
+        };
+
+        let result = result.map_err(|e| {
             tracing::warn!("failed to receive GetCancelData response: {e}");
             CancelError::InternalError
         })?;
@@ -442,7 +477,7 @@ impl Session {
             let guard = Metrics::get()
                 .proxy
                 .cancel_channel_size
-                .guard(RedisMsgKind::HSet);
+                .guard(RedisMsgKind::Set);
             let op = CancelKeyOp::StoreCancelKey {
                 key: self.key,
                 value: closure_json.clone(),
@@ -456,7 +491,7 @@ impl Session {
             );
 
             match tx.call((guard, op), cancel.as_mut()).await {
-                Ok(Ok(_)) => {
+                Ok(_) => {
                     tracing::debug!(
                         src=%self.key,
                         dest=?cancel_closure.cancel_token,
@@ -467,10 +502,10 @@ impl Session {
                     tokio::time::sleep(CANCEL_KEY_REFRESH).await;
                 }
                 // retry immediately.
-                Ok(Err(error)) => {
+                Err(BatchQueueError::Result(error)) => {
                     tracing::warn!(?error, "error registering cancellation key");
                 }
-                Err(Err(_cancelled)) => break,
+                Err(BatchQueueError::Cancelled(Err(_cancelled))) => break,
             }
         }
 

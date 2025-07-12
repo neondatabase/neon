@@ -522,15 +522,7 @@ pub async fn run() -> anyhow::Result<()> {
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
     }
 
-    if let Either::Left(auth::Backend::ControlPlane(api, ())) = &auth_backend
-        && let crate::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api
-        && let Some(client) = redis_client
-    {
-        // project info cache and invalidation of that cache.
-        let cache = api.caches.project_info.clone();
-        maintenance_tasks.spawn(notifications::task_main(client.clone(), cache.clone()));
-        maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
-
+    if let Some(client) = redis_client {
         // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
         // This prevents immediate exit and pod restart,
         // which can cause hammering of the redis in case of connection issues.
@@ -559,6 +551,16 @@ pub async fn run() -> anyhow::Result<()> {
                     tokio::time::sleep(Duration::from_millis(1000 + jitter)).await;
                 }
             }
+        }
+
+        #[allow(irrefutable_let_patterns)]
+        if let Either::Left(auth::Backend::ControlPlane(api, ())) = &auth_backend
+            && let crate::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api
+        {
+            // project info cache and invalidation of that cache.
+            let cache = api.caches.project_info.clone();
+            maintenance_tasks.spawn(notifications::task_main(client, cache.clone()));
+            maintenance_tasks.spawn(async move { cache.gc_worker().await });
         }
     }
 

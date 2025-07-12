@@ -7,13 +7,17 @@ use std::pin::pin;
 use std::sync::Mutex;
 
 use scopeguard::ScopeGuard;
+use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 
 use crate::ext::LockExt;
 
+type ProcResult<P> = Result<<P as QueueProcessing>::Res, <P as QueueProcessing>::Err>;
+
 pub trait QueueProcessing: Send + 'static {
     type Req: Send + 'static;
     type Res: Send;
+    type Err: Send + Clone;
 
     /// Get the desired batch size.
     fn batch_size(&self, queue_size: usize) -> usize;
@@ -24,7 +28,18 @@ pub trait QueueProcessing: Send + 'static {
     /// If this apply can error, it's expected that errors be forwarded to each Self::Res.
     ///
     /// Batching does not need to happen atomically.
-    fn apply(&mut self, req: Vec<Self::Req>) -> impl Future<Output = Vec<Self::Res>> + Send;
+    fn apply(
+        &mut self,
+        req: Vec<Self::Req>,
+    ) -> impl Future<Output = Result<Vec<Self::Res>, Self::Err>> + Send;
+}
+
+#[derive(thiserror::Error)]
+pub enum BatchQueueError<E: Clone, C> {
+    #[error(transparent)]
+    Result(E),
+    #[error(transparent)]
+    Cancelled(C),
 }
 
 pub struct BatchQueue<P: QueueProcessing> {
@@ -34,7 +49,7 @@ pub struct BatchQueue<P: QueueProcessing> {
 
 struct BatchJob<P: QueueProcessing> {
     req: P::Req,
-    res: tokio::sync::oneshot::Sender<P::Res>,
+    res: tokio::sync::oneshot::Sender<Result<P::Res, P::Err>>,
 }
 
 impl<P: QueueProcessing> BatchQueue<P> {
@@ -55,11 +70,11 @@ impl<P: QueueProcessing> BatchQueue<P> {
         &self,
         req: P::Req,
         cancelled: impl Future<Output = R>,
-    ) -> Result<P::Res, R> {
+    ) -> Result<P::Res, BatchQueueError<P::Err, R>> {
         let (id, mut rx) = self.inner.lock_propagate_poison().register_job(req);
 
         let mut cancelled = pin!(cancelled);
-        let resp = loop {
+        let resp: Option<Result<P::Res, P::Err>> = loop {
             // try become the leader, or try wait for success.
             let mut processor = tokio::select! {
                 // try become leader.
@@ -72,7 +87,7 @@ impl<P: QueueProcessing> BatchQueue<P> {
                     if inner.queue.remove(&id).is_some() {
                         tracing::warn!("batched task cancelled before completion");
                     }
-                    return Err(cancel);
+                    return Err(BatchQueueError::Cancelled(cancel));
                 },
             };
 
@@ -96,18 +111,30 @@ impl<P: QueueProcessing> BatchQueue<P> {
             // good: we didn't get cancelled.
             ScopeGuard::into_inner(cancel_safety);
 
-            if values.len() != resps.len() {
-                tracing::error!(
-                    "batch: invalid response size, expected={}, got={}",
-                    resps.len(),
-                    values.len()
-                );
-            }
+            match values {
+                Ok(values) => {
+                    if values.len() != resps.len() {
+                        tracing::error!(
+                            "batch: invalid response size, expected={}, got={}",
+                            resps.len(),
+                            values.len()
+                        );
+                    }
 
-            // send response values.
-            for (tx, value) in std::iter::zip(resps, values) {
-                if tx.send(value).is_err() {
-                    // receiver hung up but that's fine.
+                    // send response values.
+                    for (tx, value) in std::iter::zip(resps, values) {
+                        if tx.send(Ok(value)).is_err() {
+                            // receiver hung up but that's fine.
+                        }
+                    }
+                }
+
+                Err(err) => {
+                    for tx in resps {
+                        if tx.send(Err(err.clone())).is_err() {
+                            // receiver hung up but that's fine.
+                        }
+                    }
                 }
             }
 
@@ -129,7 +156,8 @@ impl<P: QueueProcessing> BatchQueue<P> {
 
         tracing::debug!(id, "batch: job completed");
 
-        Ok(resp.expect("no response found. batch processer should not panic"))
+        resp.expect("no response found. batch processer should not panic")
+            .map_err(BatchQueueError::Result)
     }
 }
 
@@ -139,8 +167,8 @@ struct BatchQueueInner<P: QueueProcessing> {
 }
 
 impl<P: QueueProcessing> BatchQueueInner<P> {
-    fn register_job(&mut self, req: P::Req) -> (u64, tokio::sync::oneshot::Receiver<P::Res>) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+    fn register_job(&mut self, req: P::Req) -> (u64, oneshot::Receiver<ProcResult<P>>) {
+        let (tx, rx) = oneshot::channel();
 
         let id = self.version;
 
@@ -158,7 +186,7 @@ impl<P: QueueProcessing> BatchQueueInner<P> {
         (id, rx)
     }
 
-    fn get_batch(&mut self, p: &P) -> (Vec<P::Req>, Vec<tokio::sync::oneshot::Sender<P::Res>>) {
+    fn get_batch(&mut self, p: &P) -> (Vec<P::Req>, Vec<oneshot::Sender<ProcResult<P>>>) {
         let batch_size = p.batch_size(self.queue.len());
         let mut reqs = Vec::with_capacity(batch_size);
         let mut resps = Vec::with_capacity(batch_size);

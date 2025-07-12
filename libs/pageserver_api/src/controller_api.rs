@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 
-use crate::models::{PageserverUtilization, ShardParameters, TenantConfig};
+use crate::models::{PageserverUtilization, ShardParameters, TenantConfig, TimelineInfo};
 use crate::shard::{ShardStripeSize, TenantShardId};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -124,6 +124,13 @@ pub struct TenantDescribeResponse {
     pub stripe_size: ShardStripeSize,
     pub policy: PlacementPolicy,
     pub config: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantTimelineDescribeResponse {
+    pub shards: Vec<TimelineInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_consistent_lsn: Option<Lsn>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

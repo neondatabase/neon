@@ -652,8 +652,8 @@ approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
 Datum
 approximate_working_set_size(PG_FUNCTION_ARGS)
 {
-	int32		dc;
 	bool		reset = PG_GETARG_BOOL(0);
+	int32		dc;
 
 	if (neon_enable_new_communicator)
 		dc = communicator_new_approximate_working_set_size_seconds(-1, reset);
