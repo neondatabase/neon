@@ -364,7 +364,12 @@ impl SafekeeperReconcilerInner {
                     http_hosts,
                     tenant_id: req.tenant_id,
                     timeline_id,
-                    ignore_tombstone: Some(false),
+                    // TODO(diko): get mconf from "timelines" table and pass it here.
+                    // Now we use pull_timeline reconciliation only for the timeline creation,
+                    // so it's not critical right now.
+                    // It could be fixed together with other reconciliation issues:
+                    // https://github.com/neondatabase/neon/issues/12189
+                    mconf: None,
                 };
                 success = self
                     .reconcile_inner(

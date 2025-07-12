@@ -964,6 +964,7 @@ impl Service {
         timeline_id: TimelineId,
         to_safekeepers: &[Safekeeper],
         from_safekeepers: &[Safekeeper],
+        mconf: membership::Configuration,
     ) -> Result<(), ApiError> {
         let http_hosts = from_safekeepers
             .iter()
@@ -982,14 +983,11 @@ impl Service {
                 .collect::<Vec<_>>()
         );
 
-        // TODO(diko): need to pass mconf/generation with the request
-        // to properly handle tombstones. Ignore tombstones for now.
-        // Worst case: we leave a timeline on a safekeeper which is not in the current set.
         let req = PullTimelineRequest {
             tenant_id,
             timeline_id,
             http_hosts,
-            ignore_tombstone: Some(true),
+            mconf: Some(mconf),
         };
 
         const SK_PULL_TIMELINE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1027,10 +1025,10 @@ impl Service {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         safekeepers: &[Safekeeper],
-        config: &membership::Configuration,
+        mconf: &membership::Configuration,
     ) -> Result<(), ApiError> {
         let req = TimelineMembershipSwitchRequest {
-            mconf: config.clone(),
+            mconf: mconf.clone(),
         };
 
         const SK_EXCLUDE_TIMELINE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1054,7 +1052,7 @@ impl Service {
                 let pending_op = TimelinePendingOpPersistence {
                     tenant_id: tenant_id.to_string(),
                     timeline_id: timeline_id.to_string(),
-                    generation: config.generation.into_inner() as i32,
+                    generation: mconf.generation.into_inner() as i32,
                     op_kind: SafekeeperTimelineOpKind::Exclude,
                     sk_id,
                 };
@@ -1066,7 +1064,7 @@ impl Service {
                     host_list: Vec::new(),
                     tenant_id,
                     timeline_id: Some(timeline_id),
-                    generation: config.generation.into_inner(),
+                    generation: mconf.generation.into_inner(),
                     kind: SafekeeperTimelineOpKind::Exclude,
                 };
                 reconcile_requests.push(req);
@@ -1267,6 +1265,7 @@ impl Service {
             timeline_id,
             &pull_to_safekeepers,
             &cur_safekeepers,
+            joint_config.clone(),
         )
         .await?;
 
