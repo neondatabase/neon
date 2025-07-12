@@ -53,7 +53,7 @@ typedef struct
 } RelKindHashControl;
 
 static HTAB *relkind_hash;
-static LWLockId relkind_lock;
+static LWLockId finish_unlogged_build_lock;
 static int	relkind_hash_size;
 static RelKindHashControl* relkind_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -88,7 +88,7 @@ relkind_cache_startup(void)
 	relkind_ctl = (RelKindHashControl *) ShmemInitStruct("relkind_hash", sizeof(RelKindHashControl), &found);
 	if (!found)
 	{
-		relkind_lock = (LWLockId) GetNamedLWLockTranche("neon_relkind");
+		finish_unlogged_build_lock = (LWLockId) GetNamedLWLockTranche("neon_relkind");
 		info.keysize = sizeof(NRelFileInfo);
 		info.entrysize = sizeof(RelKindEntry);
 		relkind_hash = ShmemInitHash("neon_relkind",
@@ -114,7 +114,7 @@ get_entry(NRelFileInfo rinfo, bool* found)
 	RelKindEntry* entry;
 
 	/*
-	 * This should actually never happen! Below we check if hash is full and delete least recently user item in this case.
+	 * This should actually never happen! Below we check if hash is full and delete least recently used item in this case.
 	 * But for further safety we also perform check here.
 	 */
 	while ((entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, found)) == NULL)
@@ -143,7 +143,6 @@ get_entry(NRelFileInfo rinfo, bool* found)
 	}
 	else if (entry->access_count++ == 0)
 	{
-		Assert(entry->relkind != RELKIND_UNKNOWN);
 		dlist_delete(&entry->lru_node);
 		relkind_ctl->pinned += 1;
 	}
@@ -202,12 +201,12 @@ get_cached_relkind(NRelFileInfo rinfo, RelKind* relkind)
 			 * This backend will set exclsuive lock before unlinking files.
 			 * Shared locks allows other backends to perform write in parallel.
 			 */
-			LWLockAcquire(relkind_lock, LW_SHARED);
+			LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
 			/* Recheck relkind under lock */
 			if (entry->relkind != RELKIND_UNLOGGED_BUILD)
 			{
 				/* Unlogged build is already completed: release lock - we do not need to do any writes to local disk */
-				LWLockRelease(relkind_lock);
+				LWLockRelease(finish_unlogged_build_lock);
 			}
 		}
 		*relkind = entry->relkind;
@@ -247,9 +246,9 @@ store_cached_relkind(RelKindEntry* entry, RelKind relkind)
 void
 update_cached_relkind(RelKindEntry* entry, RelKind relkind)
 {
-	LWLockAcquire(relkind_lock, LW_EXCLUSIVE);
+	LWLockAcquire(finish_unlogged_build_lock, LW_EXCLUSIVE);
 	entry->relkind = relkind;
-	LWLockRelease(relkind_lock);
+	LWLockRelease(finish_unlogged_build_lock);
 }
 
 void
@@ -272,7 +271,7 @@ unpin_cached_relkind(RelKindEntry* entry)
 void
 unlock_cached_relkind(void)
 {
-	LWLockRelease(relkind_lock);
+	LWLockRelease(finish_unlogged_build_lock);
 }
 
 void
