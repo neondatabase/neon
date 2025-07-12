@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::num::NonZero;
+use std::pin::pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use tonic::codec::CompressionEncoding;
-use tracing::instrument;
+use tracing::{debug, instrument};
+use utils::logging::warn_slow;
 
 use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
 use crate::retry::Retry;
@@ -44,6 +47,23 @@ const MAX_BULK_STREAMS: NonZero<usize> = NonZero::new(16).unwrap();
 /// get a larger queue depth.
 const MAX_BULK_STREAM_QUEUE_DEPTH: NonZero<usize> = NonZero::new(4).unwrap();
 
+/// The overall request call timeout, including retries and pool acquisition.
+/// TODO: should we retry forever? Should the caller decide?
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The per-request (retry attempt) timeout, including any lazy connection establishment.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The initial request retry backoff duration. The first retry does not back off.
+/// TODO: use a different backoff for ResourceExhausted (rate limiting)? Needs server support.
+const BASE_BACKOFF: Duration = Duration::from_millis(5);
+
+/// The maximum request retry backoff duration.
+const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Threshold and interval for warning about slow operation.
+const SLOW_THRESHOLD: Duration = Duration::from_secs(3);
+
 /// A rich Pageserver gRPC client for a single tenant timeline. This client is more capable than the
 /// basic `page_api::Client` gRPC client, and supports:
 ///
@@ -67,8 +87,6 @@ pub struct PageserverClient {
     compression: Option<CompressionEncoding>,
     /// The shards for this tenant.
     shards: ArcSwap<Shards>,
-    /// The retry configuration.
-    retry: Retry,
 }
 
 impl PageserverClient {
@@ -94,7 +112,6 @@ impl PageserverClient {
             auth_token,
             compression,
             shards: ArcSwap::new(Arc::new(shards)),
-            retry: Retry,
         })
     }
 
@@ -142,13 +159,15 @@ impl PageserverClient {
         &self,
         req: page_api::CheckRelExistsRequest,
     ) -> tonic::Result<page_api::CheckRelExistsResponse> {
-        self.retry
-            .with(async |_| {
-                // Relation metadata is only available on shard 0.
-                let mut client = self.shards.load_full().get_zero().client().await?;
-                client.check_rel_exists(req).await
-            })
-            .await
+        debug!("sending request: {req:?}");
+        let resp = Self::with_retries(CALL_TIMEOUT, async |_| {
+            // Relation metadata is only available on shard 0.
+            let mut client = self.shards.load_full().get_zero().client().await?;
+            Self::with_timeout(REQUEST_TIMEOUT, client.check_rel_exists(req)).await
+        })
+        .await?;
+        debug!("received response: {resp:?}");
+        Ok(resp)
     }
 
     /// Returns the total size of a database, as # of bytes.
@@ -157,13 +176,15 @@ impl PageserverClient {
         &self,
         req: page_api::GetDbSizeRequest,
     ) -> tonic::Result<page_api::GetDbSizeResponse> {
-        self.retry
-            .with(async |_| {
-                // Relation metadata is only available on shard 0.
-                let mut client = self.shards.load_full().get_zero().client().await?;
-                client.get_db_size(req).await
-            })
-            .await
+        debug!("sending request: {req:?}");
+        let resp = Self::with_retries(CALL_TIMEOUT, async |_| {
+            // Relation metadata is only available on shard 0.
+            let mut client = self.shards.load_full().get_zero().client().await?;
+            Self::with_timeout(REQUEST_TIMEOUT, client.get_db_size(req)).await
+        })
+        .await?;
+        debug!("received response: {resp:?}");
+        Ok(resp)
     }
 
     /// Fetches pages. The `request_id` must be unique across all in-flight requests, and the
@@ -193,6 +214,8 @@ impl PageserverClient {
             return Err(tonic::Status::invalid_argument("request attempt must be 0"));
         }
 
+        debug!("sending request: {req:?}");
+
         // The shards may change while we're fetching pages. We execute the request using a stable
         // view of the shards (especially important for requests that span shards), but retry the
         // top-level (pre-split) request to pick up shard changes. This can lead to unnecessary
@@ -201,13 +224,16 @@ impl PageserverClient {
         //
         // TODO: the gRPC server and client doesn't yet properly support shard splits. Revisit this
         // once we figure out how to handle these.
-        self.retry
-            .with(async |attempt| {
-                let mut req = req.clone();
-                req.request_id.attempt = attempt as u32;
-                Self::get_page_with_shards(req, &self.shards.load_full()).await
-            })
-            .await
+        let resp = Self::with_retries(CALL_TIMEOUT, async |attempt| {
+            let mut req = req.clone();
+            req.request_id.attempt = attempt as u32;
+            let shards = self.shards.load_full();
+            Self::with_timeout(REQUEST_TIMEOUT, Self::get_page_with_shards(req, &shards)).await
+        })
+        .await?;
+
+        debug!("received response: {resp:?}");
+        Ok(resp)
     }
 
     /// Fetches pages using the given shards. This uses a stable view of the shards, regardless of
@@ -290,13 +316,15 @@ impl PageserverClient {
         &self,
         req: page_api::GetRelSizeRequest,
     ) -> tonic::Result<page_api::GetRelSizeResponse> {
-        self.retry
-            .with(async |_| {
-                // Relation metadata is only available on shard 0.
-                let mut client = self.shards.load_full().get_zero().client().await?;
-                client.get_rel_size(req).await
-            })
-            .await
+        debug!("sending request: {req:?}");
+        let resp = Self::with_retries(CALL_TIMEOUT, async |_| {
+            // Relation metadata is only available on shard 0.
+            let mut client = self.shards.load_full().get_zero().client().await?;
+            Self::with_timeout(REQUEST_TIMEOUT, client.get_rel_size(req)).await
+        })
+        .await?;
+        debug!("received response: {resp:?}");
+        Ok(resp)
     }
 
     /// Fetches an SLRU segment.
@@ -305,13 +333,45 @@ impl PageserverClient {
         &self,
         req: page_api::GetSlruSegmentRequest,
     ) -> tonic::Result<page_api::GetSlruSegmentResponse> {
-        self.retry
-            .with(async |_| {
-                // SLRU segments are only available on shard 0.
-                let mut client = self.shards.load_full().get_zero().client().await?;
-                client.get_slru_segment(req).await
-            })
-            .await
+        debug!("sending request: {req:?}");
+        let resp = Self::with_retries(CALL_TIMEOUT, async |_| {
+            // SLRU segments are only available on shard 0.
+            let mut client = self.shards.load_full().get_zero().client().await?;
+            Self::with_timeout(REQUEST_TIMEOUT, client.get_slru_segment(req)).await
+        })
+        .await?;
+        debug!("received response: {resp:?}");
+        Ok(resp)
+    }
+
+    /// Runs the given async closure with retries up to the given timeout. Only certain gRPC status
+    /// codes are retried, see [`Retry::should_retry`]. Returns `DeadlineExceeded` on timeout.
+    async fn with_retries<T, F, O>(timeout: Duration, f: F) -> tonic::Result<T>
+    where
+        F: FnMut(usize) -> O, // pass attempt number, starting at 0
+        O: Future<Output = tonic::Result<T>>,
+    {
+        Retry {
+            timeout: Some(timeout),
+            base_backoff: BASE_BACKOFF,
+            max_backoff: MAX_BACKOFF,
+        }
+        .with(f)
+        .await
+    }
+
+    /// Runs the given future with a timeout. Returns `DeadlineExceeded` on timeout.
+    async fn with_timeout<T>(
+        timeout: Duration,
+        f: impl Future<Output = tonic::Result<T>>,
+    ) -> tonic::Result<T> {
+        let started = Instant::now();
+        tokio::time::timeout(timeout, f).await.map_err(|_| {
+            tonic::Status::deadline_exceeded(format!(
+                "request timed out after {:.3}s",
+                started.elapsed().as_secs_f64()
+            ))
+        })?
     }
 }
 
@@ -525,19 +585,25 @@ impl Shard {
     }
 
     /// Returns a pooled client for this shard.
+    #[instrument(skip_all)]
     async fn client(&self) -> tonic::Result<ClientGuard> {
-        self.client_pool
-            .get()
-            .await
-            .map_err(|err| tonic::Status::internal(format!("failed to get client: {err}")))
+        warn_slow(
+            "client pool acquisition",
+            SLOW_THRESHOLD,
+            pin!(self.client_pool.get()),
+        )
+        .await
+        .map_err(|err| tonic::Status::internal(format!("failed to get client: {err}")))
     }
 
     /// Returns a pooled stream for this shard. If `bulk` is `true`, uses the dedicated bulk stream
     /// pool (e.g. for prefetches).
+    #[instrument(skip_all, fields(bulk))]
     async fn stream(&self, bulk: bool) -> StreamGuard {
-        match bulk {
-            false => self.stream_pool.get().await,
-            true => self.bulk_stream_pool.get().await,
-        }
+        let pool = match bulk {
+            false => &self.stream_pool,
+            true => &self.bulk_stream_pool,
+        };
+        warn_slow("stream pool acquisition", SLOW_THRESHOLD, pin!(pool.get())).await
     }
 }
