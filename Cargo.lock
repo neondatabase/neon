@@ -1330,7 +1330,6 @@ dependencies = [
  "chrono",
  "clap",
  "compute_api",
- "fail",
  "flate2",
  "futures",
  "hostname-validator",
@@ -1339,6 +1338,7 @@ dependencies = [
  "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
+ "neon_failpoint",
  "nix 0.30.1",
  "notify",
  "num_cpus",
@@ -2891,13 +2891,13 @@ dependencies = [
  "arc-swap",
  "bytes",
  "camino",
- "fail",
  "futures",
  "hyper 0.14.30",
  "itertools 0.10.5",
  "jemalloc_pprof",
  "jsonwebtoken",
  "metrics",
+ "neon_failpoint",
  "once_cell",
  "pprof",
  "regex",
@@ -3853,6 +3853,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "neon_failpoint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "either",
+ "once_cell",
+ "parking_lot 0.12.1",
+ "rand 0.8.5",
+ "regex",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "never-say-never"
 version = "6.6.666"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4357,7 +4374,6 @@ dependencies = [
  "either",
  "enum-map",
  "enumset",
- "fail",
  "futures",
  "hashlink",
  "hex",
@@ -4372,6 +4388,7 @@ dependencies = [
  "jsonwebtoken",
  "md5",
  "metrics",
+ "neon_failpoint",
  "nix 0.30.1",
  "num-traits",
  "num_cpus",
@@ -6193,7 +6210,6 @@ dependencies = [
  "criterion",
  "desim",
  "env_logger",
- "fail",
  "futures",
  "hex",
  "http 1.1.0",
@@ -6203,6 +6219,7 @@ dependencies = [
  "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
+ "neon_failpoint",
  "once_cell",
  "pageserver_api",
  "parking_lot 0.12.1",
@@ -6889,7 +6906,6 @@ dependencies = [
  "diesel",
  "diesel-async",
  "diesel_migrations",
- "fail",
  "futures",
  "governor",
  "hex",
@@ -6902,6 +6918,7 @@ dependencies = [
  "lasso",
  "measured",
  "metrics",
+ "neon_failpoint",
  "once_cell",
  "pageserver_api",
  "pageserver_client",
@@ -8167,7 +8184,7 @@ dependencies = [
  "const_format",
  "criterion",
  "diatomic-waker",
- "fail",
+ "either",
  "futures",
  "git-version",
  "hex",
@@ -8175,6 +8192,7 @@ dependencies = [
  "humantime",
  "jsonwebtoken",
  "metrics",
+ "neon_failpoint",
  "nix 0.30.1",
  "once_cell",
  "pem",

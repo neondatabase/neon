@@ -65,7 +65,7 @@ const FEATURES: &[&str] = &[
 fn version() -> String {
     format!(
         "{GIT_VERSION} failpoints: {}, features: {:?}",
-        fail::has_failpoints(),
+        neon_failpoint::has_failpoints(),
         FEATURES,
     )
 }

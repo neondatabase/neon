@@ -68,7 +68,7 @@ const FEATURES: &[&str] = &[
 fn version() -> String {
     format!(
         "{GIT_VERSION} failpoints: {}, features: {:?}",
-        fail::has_failpoints(),
+        neon_failpoint::has_failpoints(),
         FEATURES,
     )
 }
@@ -84,7 +84,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Initialize up failpoints support
-    let scenario = failpoint_support::init();
+    failpoint_support::init().unwrap();
 
     let workdir = arg_matches
         .get_one::<String>("workdir")
@@ -221,7 +221,6 @@ fn main() -> anyhow::Result<()> {
 
     start_pageserver(launch_ts, conf, ignored, otel_guard).context("Failed to start pageserver")?;
 
-    scenario.teardown();
     Ok(())
 }
 
@@ -366,16 +365,9 @@ fn start_pageserver(
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
-    let failpoints = fail::list();
-    if !failpoints.is_empty() {
-        info!(
-            "started with failpoints: {}",
-            failpoints
-                .iter()
-                .map(|(name, actions)| format!("{name}={actions}"))
-                .collect::<Vec<String>>()
-                .join(";")
-        )
+    let failpoints = neon_failpoint::list();
+    for (name, actions) in failpoints {
+        info!("starting with failpoint: {name} {actions}");
     }
 
     // Create and lock PID file. This ensures that there cannot be more than one

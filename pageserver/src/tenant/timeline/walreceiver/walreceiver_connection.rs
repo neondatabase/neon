@@ -11,6 +11,7 @@ use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
+use neon_failpoint as fail;
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::WAL_SEGMENT_SIZE;

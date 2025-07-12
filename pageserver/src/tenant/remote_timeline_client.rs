@@ -194,6 +194,7 @@ pub(crate) use download::{
 };
 use index::GcCompactionState;
 pub(crate) use index::LayerFileMetadata;
+use neon_failpoint as fail;
 use pageserver_api::models::{RelSizeMigration, TimelineArchivalState, TimelineVisibilityState};
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use regex::Regex;

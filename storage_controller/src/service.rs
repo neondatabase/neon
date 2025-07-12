@@ -25,6 +25,7 @@ use futures::stream::FuturesUnordered;
 use http_utils::error::ApiError;
 use hyper::Uri;
 use itertools::Itertools;
+use neon_failpoint as fail;
 use pageserver_api::config::PostHogConfig;
 use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
@@ -6119,7 +6120,7 @@ impl Service {
         tenant_id: TenantId,
         split_req: TenantShardSplitRequest,
     ) -> Result<ShardSplitAction, ApiError> {
-        fail::fail_point!("shard-split-validation", |_| Err(ApiError::BadRequest(
+        fail::fail_point_sync!("shard-split-validation", |_| Err(ApiError::BadRequest(
             anyhow::anyhow!("failpoint")
         )));
 

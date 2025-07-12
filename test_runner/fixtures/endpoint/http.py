@@ -159,16 +159,59 @@ class EndpointHttpClient(requests.Session):
         res.raise_for_status()
         return res.json()
 
-    def configure_failpoints(self, *args: tuple[str, str]) -> None:
-        body: list[dict[str, str]] = []
+    def configure_failpoints(
+        self, *args: tuple[str, str] | list[dict[str, str | dict[str, str]]]
+    ) -> None:
+        """Configure failpoints for testing purposes.
 
-        for fp in args:
-            body.append(
-                {
-                    "name": fp[0],
-                    "action": fp[1],
+        Args:
+            *args: Can be one of:
+                - Variable number of (name, actions) tuples
+                - Single list of dicts with keys: name, actions, and optionally context_matchers
+
+        Examples:
+            # Basic failpoints
+            client.configure_failpoints(("test_fp", "return(error)"))
+            client.configure_failpoints(("fp1", "return"), ("fp2", "sleep(1000)"))
+
+            # Probability-based failpoint
+            client.configure_failpoints(("test_fp", "50%return(error)"))
+
+            # Context-based failpoint
+            client.configure_failpoints([{
+                "name": "test_fp",
+                "actions": "return(error)",
+                "context_matchers": {"tenant_id": ".*test.*"}
+            }])
+        """
+
+        request_body: list[dict[str, Any]] = []
+
+        if (
+            len(args) == 1
+            and isinstance(args[0], list)
+            and args[0]
+            and isinstance(args[0][0], dict)
+        ):
+            # Handle list of dicts (context-based failpoints)
+            failpoint_configs = args[0]
+            for config in failpoint_configs:
+                server_config: dict[str, Any] = {
+                    "name": config["name"],
+                    "actions": config["actions"],
                 }
-            )
+                if "context_matchers" in config:
+                    server_config["context_matchers"] = config["context_matchers"]
+                request_body.append(server_config)
+        else:
+            # Handle tuples (basic failpoints)
+            for fp in args:
+                request_body.append(
+                    {
+                        "name": fp[0],
+                        "actions": fp[1],
+                    }
+                )
 
-        res = self.post(f"http://localhost:{self.internal_port}/failpoints", json=body)
+        res = self.post(f"http://localhost:{self.internal_port}/failpoints", json=request_body)
         res.raise_for_status()

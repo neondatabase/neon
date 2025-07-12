@@ -6,9 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-# Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
-# which adds some runtime cost to run tests on outage conditions
-testing = ["fail/failpoints"]
+testing = ["neon_failpoint/testing"]
 benchmarking = []
 
 [dependencies]
@@ -21,7 +19,7 @@ camino-tempfile.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 crc32c.workspace = true
-fail.workspace = true
+neon_failpoint.workspace = true
 hex.workspace = true
 humantime.workspace = true
 http.workspace = true

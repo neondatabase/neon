@@ -8,6 +8,7 @@
 
 use std::time::Duration;
 
+use neon_failpoint as fail;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
