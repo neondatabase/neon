@@ -481,7 +481,7 @@ impl Session {
 
         let mut cancel = pin!(cancel);
 
-        let cancelled = loop {
+        'outer: loop {
             let guard = Metrics::get()
                 .proxy
                 .cancel_channel_size
@@ -509,54 +509,59 @@ impl Session {
                     // wait before continuing.
                     tokio::time::sleep(CANCEL_KEY_REFRESH).await;
 
-                    break false;
+                    loop {
+                        let guard = Metrics::get()
+                            .proxy
+                            .cancel_channel_size
+                            .guard(RedisMsgKind::Expire);
+                        let op = CancelKeyOp::Refresh {
+                            key: self.key,
+                            expire: CANCEL_KEY_TTL,
+                        };
+
+                        tracing::debug!(
+                            src=%self.key,
+                            dest=?cancel_closure.cancel_token,
+                            "refreshing cancellation key"
+                        );
+
+                        match tx.call((guard, op), cancel.as_mut()).await {
+                            Ok(Value::Int(1)) => {
+                                tracing::debug!(
+                                    src=%self.key,
+                                    dest=?cancel_closure.cancel_token,
+                                    "refreshed cancellation key"
+                                );
+
+                                // wait before continuing.
+                                tokio::time::sleep(CANCEL_KEY_REFRESH).await;
+                            }
+
+                            Ok(_) => {
+                                // Any other response likely means the key expired.
+                                tracing::warn!(src=%self.key, "refreshing cancellation key failed");
+                                // Re-enter the SET loop to repush full data.
+                                continue 'outer;
+                            }
+
+                            // retry immediately.
+                            Err(BatchQueueError::Result(error)) => {
+                                tracing::warn!(?error, "error refreshing cancellation key");
+                                // Small delay to prevent busy loop with high cpu and logging.
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            Err(BatchQueueError::Cancelled(Err(_cancelled))) => break 'outer,
+                        }
+                    }
                 }
+
                 // retry immediately.
                 Err(BatchQueueError::Result(error)) => {
                     tracing::warn!(?error, "error registering cancellation key");
                     // Small delay to prevent busy loop with high cpu and logging.
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                Err(BatchQueueError::Cancelled(Err(_cancelled))) => break true,
-            }
-        };
-
-        if !cancelled {
-            loop {
-                let guard = Metrics::get()
-                    .proxy
-                    .cancel_channel_size
-                    .guard(RedisMsgKind::Expire);
-                let op = CancelKeyOp::Refresh {
-                    key: self.key,
-                    expire: CANCEL_KEY_TTL,
-                };
-
-                tracing::debug!(
-                    src=%self.key,
-                    dest=?cancel_closure.cancel_token,
-                    "refreshing cancellation key"
-                );
-
-                match tx.call((guard, op), cancel.as_mut()).await {
-                    Ok(_) => {
-                        tracing::debug!(
-                            src=%self.key,
-                            dest=?cancel_closure.cancel_token,
-                            "refreshed cancellation key"
-                        );
-
-                        // wait before continuing.
-                        tokio::time::sleep(CANCEL_KEY_REFRESH).await;
-                    }
-                    // retry immediately.
-                    Err(BatchQueueError::Result(error)) => {
-                        tracing::warn!(?error, "error refreshing cancellation key");
-                        // Small delay to prevent busy loop with high cpu and logging.
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                    Err(BatchQueueError::Cancelled(Err(_cancelled))) => break,
-                }
+                Err(BatchQueueError::Cancelled(Err(_cancelled))) => break 'outer,
             }
         }
 
