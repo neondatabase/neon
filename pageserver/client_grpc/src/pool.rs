@@ -436,7 +436,6 @@ struct BiStream {
     /// enforced by `StreamGuard::send`.
     sender: watch::Sender<page_api::GetPageRequest>,
     /// Stream for receiving responses.
-    /// TODO: consider returning a concrete type from `Client::get_pages`.
     receiver: Pin<Box<dyn Stream<Item = tonic::Result<page_api::GetPageResponse>> + Send>>,
 }
 
