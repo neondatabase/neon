@@ -204,7 +204,7 @@ tokio = { version = "1.43.1", features = ["macros"] }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "io-util", "rt"] }
 toml = "0.8"
