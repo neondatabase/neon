@@ -1591,22 +1591,6 @@ hexdump_page(char *page)
 	return result.data;
 }
 
-static RelKind determine_entry_relkind(RelKindEntry *entry, SMgrRelation reln, ForkNumber forknum)
-{
-	RelKind relkind = RELKIND_UNKNOWN;
-	PG_TRY();
-	{
-		relkind = mdexists(reln, forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
-	}
-	PG_CATCH();
-	{
-		unpin_cached_relkind(entry);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	return relkind;
-}
-
 #if PG_MAJORVERSION_NUM < 17
 /*
  *	neon_write() -- Write the supplied block at the appropriate location.
@@ -1623,19 +1607,31 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 #endif
 {
 	XLogRecPtr	lsn;
-	RelKindEntry *entry;
-	RelKind relkind = RELKIND_UNKNOWN;
+	RelKind relkind;
+	bool fs_locked = false;
+	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
 
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			entry = get_cached_relkind(InfoFromSMgrRel(reln), &relkind);
-			if (entry)
+			relkind = get_cached_relkind(rinfo);
+			if (relkind == RELKIND_UNKNOWN)
 			{
-				Assert(relkind == RELKIND_UNKNOWN);
 				/* We do not know relation persistence: let's determine it */
-				relkind = determine_entry_relkind(entry, reln, debug_compare_local ? INIT_FORKNUM : forknum);
-				store_cached_relkind(entry, relkind);
+				relkind = mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
+				set_cached_relkind(rinfo, relkind);
+			}
+			if (relkind == RELKIND_UNLOGGED_BUILD)
+			{
+				/* In case of unlogged build we need to avoid race condition at unlogged build end.
+				 * Obtain shared lock here to prevent backend completing unlogged build from performing cleanup amnd remvong files.
+				 */
+				fs_shared_lock();
+				fs_locked = true;
+				/*
+				 * Recheck relkind under lock - may be unlogged build is already finished
+				 */
+				relkind = get_cached_relkind(rinfo);
 			}
 			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
 			{
@@ -1644,16 +1640,19 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 #else
 				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 #endif
-				if (relkind == RELKIND_UNLOGGED_BUILD)
-				{
-					unlock_cached_relkind();
-				}
+			}
+			if (fs_locked)
+			{
+				fs_unlock();
+			}
+			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
+			{
 				return;
 			}
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (RelFileInfoEquals(unlogged_build_rel_info, rinfo))
 			{
 #if PG_MAJORVERSION_NUM >= 17
 				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
@@ -1684,7 +1683,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 		 forknum, blocknum,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
+	lfc_write(rinfo, forknum, blocknum, buffer);
 
 	communicator_prefetch_pump_state();
 
@@ -1709,33 +1708,48 @@ static void
 neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 const void **buffers, BlockNumber nblocks, bool skipFsync)
 {
-	RelKindEntry *entry;
-	RelKind relkind = RELKIND_UNKNOWN;
+	RelKind relkind;
+	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
+	bool fs_locked = false;
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			entry = get_cached_relkind(InfoFromSMgrRel(reln), &relkind);
-			if (entry)
+			relkind = get_cached_relkind(rinfo);
+			if (relkind == RELKIND_UNKNOWN)
 			{
-				Assert(relkind == RELKIND_UNKNOWN);
 				/* We do not know relation persistence: let's determine it */
-				relkind = determine_entry_relkind(entry, reln, debug_compare_local ? INIT_FORKNUM : forknum);
-				store_cached_relkind(entry, relkind);
+				relkind = mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
+				set_cached_relkind(rinfo, relkind);
+			}
+			if (relkind == RELKIND_UNLOGGED_BUILD)
+			{
+				/* In case of unlogged build we need to avoid race condition at unlogged build end.
+				 * Obtain shared lock here to prevent backend completing unlogged build from performing cleanup amnd remvong files.
+				 */
+				fs_shared_lock();
+				fs_locked = true;
+				/*
+				 * Recheck relkind under lock - may be unlogged build is already finished
+				 */
+				relkind = get_cached_relkind(rinfo);
 			}
 			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
 			{
 				/* It exists locally. Guess it's unlogged then. */
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
-				if (relkind == RELKIND_UNLOGGED_BUILD)
-				{
-					unlock_cached_relkind();
-				}
+			}
+			if (fs_locked)
+			{
+				fs_unlock();
+			}
+			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
+			{
 				return;
 			}
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (RelFileInfoEquals(unlogged_build_rel_info, rinfo))
 			{
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
 				return;
@@ -1752,7 +1766,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 	neon_wallog_pagev(reln, forknum, blkno, nblocks, (const char **) buffers, false);
 
-	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
+	lfc_writev(rinfo, forknum, blkno, buffers, nblocks);
 
 	communicator_prefetch_pump_state();
 
@@ -2017,7 +2031,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			unlogged_build_rel_info = InfoFromSMgrRel(reln);
-			unlogged_build_rel_entry = set_cached_relkind(unlogged_build_rel_info, RELKIND_UNLOGGED);
+			unlogged_build_rel_entry = pin_cached_relkind(unlogged_build_rel_info, RELKIND_UNLOGGED);
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
 			if (debug_compare_local)
 			{
@@ -2040,7 +2054,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 #endif
 
 	unlogged_build_rel_info = InfoFromSMgrRel(reln);
-	unlogged_build_rel_entry = set_cached_relkind(unlogged_build_rel_info, RELKIND_UNLOGGED_BUILD);
+	unlogged_build_rel_entry = pin_cached_relkind(unlogged_build_rel_info, RELKIND_UNLOGGED_BUILD);
 	unlogged_build_phase = UNLOGGED_BUILD_PHASE_1;
 
 	/*
@@ -2110,8 +2124,9 @@ static void
 neon_end_unlogged_build(SMgrRelation reln)
 {
 	NRelFileInfoBackend rinfob = InfoBFromSMgrRel(reln);
+	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
 
-	Assert(RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)));
+	Assert(RelFileInfoEquals(unlogged_build_rel_info, rinfo));
 
 	ereport(SmgrTrace,
 			(errmsg(NEON_TAG "ending unlogged build of relation %u/%u/%u",
@@ -2137,23 +2152,26 @@ neon_end_unlogged_build(SMgrRelation reln)
 		recptr = GetXLogInsertRecPtr();
 
 		neon_set_lwlsn_block_range(recptr,
-								   InfoFromNInfoB(rinfob),
+								   rinfo,
 								   MAIN_FORKNUM, 0, nblocks);
 		neon_set_lwlsn_relation(recptr,
-								InfoFromNInfoB(rinfob),
+								rinfo,
 								MAIN_FORKNUM);
 
-		update_cached_relkind(unlogged_build_rel_entry, RELKIND_PERMANENT);
+		/* Obtain exclusive lock to prevent concrrent writes to the file while we performing cleanup */
+		fs_exclusive_lock();
+		unlogged_build_rel_entry->relkind = RELKIND_PERMANENT;
+		fs_unlock();
 
 		/* Remove local copy */
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
 		{
 			neon_log(SmgrTrace, "forgetting cached relsize for %u/%u/%u.%u",
-				 RelFileInfoFmt(InfoFromNInfoB(rinfob)),
+				 RelFileInfoFmt(rinfo),
 				 forknum);
 
-			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
-			lfc_invalidate(InfoFromNInfoB(rinfob), forknum, nblocks);
+			forget_cached_relsize(rinfo, forknum);
+			lfc_invalidate(rinfo, forknum, nblocks);
 
 			mdclose(reln, forknum);
 			if (!debug_compare_local)
