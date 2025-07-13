@@ -2634,7 +2634,7 @@ def test_storage_controller_node_deletion(
     elif deletion_api == DeletionAPIKind.OLD:
         env.storage_controller.node_delete_old(victim.id)
     else:
-        assert False, f"Invalid deletion API: {deletion_api}"
+        raise AssertionError(f"Invalid deletion API: {deletion_api}")
 
     if not while_offline:
 
@@ -2655,7 +2655,7 @@ def test_storage_controller_node_deletion(
     elif deletion_api == DeletionAPIKind.OLD:
         assert_node_is_gone()
     else:
-       assert False, f"Invalid deletion API: {deletion_api}"
+        raise AssertionError(f"Invalid deletion API: {deletion_api}")
 
     # No tenants should refer to the node in their intent
     for tenant_id in tenant_ids:
@@ -3285,8 +3285,7 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
 
 @pytest.mark.parametrize("deletion_api", [DeletionAPIKind.OLD, DeletionAPIKind.FORCE])
 def test_ps_unavailable_after_delete(
-    neon_env_builder: NeonEnvBuilder,
-    deletion_api: DeletionAPIKind
+    neon_env_builder: NeonEnvBuilder, deletion_api: DeletionAPIKind
 ):
     neon_env_builder.num_pageservers = 3
 
@@ -3308,7 +3307,7 @@ def test_ps_unavailable_after_delete(
         env.storage_controller.node_delete_old(ps.id)
         assert_nodes_count(2)
     else:
-        assert False, f"Invalid deletion API: {deletion_api}"
+        raise AssertionError(f"Invalid deletion API: {deletion_api}")
 
     # Running pageserver CLI init in a separate thread
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:

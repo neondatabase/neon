@@ -7467,7 +7467,8 @@ impl Service {
                 .await;
         }
 
-        if let Err(_) = pausable_failpoint!("delete-node-after-reconciles-spawned", &cancel) {
+        let pf = pausable_failpoint!("delete-node-after-reconciles-spawned", &cancel);
+        if pf.is_err() {
             // An error from pausable_failpoint indicates the cancel token was triggered.
             return Err(get_error_on_cancel().await);
         }
