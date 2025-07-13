@@ -466,7 +466,7 @@ impl StreamPool {
     ///
     /// This is very performance-sensitive, as it is on the GetPage hot path.
     ///
-    /// TODO: is a Mutex<BTreeMap> performant enough? Will it become too contended? We can't
+    /// TODO: is a `Mutex<BTreeMap>` performant enough? Will it become too contended? We can't
     /// trivially use e.g. DashMap or sharding, because we want to pop lower-ordered streams first
     /// to free up higher-ordered channels.
     pub async fn get(self: &Arc<Self>) -> tonic::Result<StreamGuard> {
