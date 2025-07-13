@@ -2119,11 +2119,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
-    def node_delete(self, node_id):
+    def node_delete(self, node_id, force: bool = False):
         log.info(f"node_delete({node_id})")
+        query = f"{self.api}/control/v1/node/{node_id}/delete"
+        if force:
+            query += "?force=true"
         self.request(
             "PUT",
-            f"{self.api}/control/v1/node/{node_id}/delete",
+            query,
             headers=self.headers(TokenScope.ADMIN),
         )
 

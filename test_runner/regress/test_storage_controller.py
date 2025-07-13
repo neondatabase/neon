@@ -72,6 +72,12 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
+class DeletionAPIKind(Enum):
+    OLD = "old"
+    FORCE = "force"
+    GRACEFUL = "graceful"
+
+
 @pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
 def test_storage_controller_smoke(
     neon_env_builder: NeonEnvBuilder, compute_reconfigure_listener: ComputeReconfigure, combination
@@ -2572,9 +2578,11 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
 
 
 @pytest.mark.parametrize("while_offline", [True, False])
+@pytest.mark.parametrize("deletion_api", [DeletionAPIKind.OLD, DeletionAPIKind.FORCE])
 def test_storage_controller_node_deletion(
     neon_env_builder: NeonEnvBuilder,
     while_offline: bool,
+    deletion_api: DeletionAPIKind,
 ):
     """
     Test that deleting a node works & properly reschedules everything that was on the node.
@@ -2621,7 +2629,12 @@ def test_storage_controller_node_deletion(
         wait_until(assert_shards_migrated)
 
     log.info(f"Deleting pageserver {victim.id}")
-    env.storage_controller.node_delete_old(victim.id)
+    if deletion_api == DeletionAPIKind.FORCE:
+        env.storage_controller.node_delete(victim.id, force=True)
+    elif deletion_api == DeletionAPIKind.OLD:
+        env.storage_controller.node_delete_old(victim.id)
+    else:
+        assert False, f"Invalid deletion API: {deletion_api}"
 
     if not while_offline:
 
@@ -2634,7 +2647,15 @@ def test_storage_controller_node_deletion(
         wait_until(assert_victim_evacuated)
 
     # The node should be gone from the list API
-    assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+    def assert_node_is_gone():
+        assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+
+    if deletion_api == DeletionAPIKind.FORCE:
+        wait_until(assert_node_is_gone)
+    elif deletion_api == DeletionAPIKind.OLD:
+        assert_node_is_gone()
+    else:
+       assert False, f"Invalid deletion API: {deletion_api}"
 
     # No tenants should refer to the node in their intent
     for tenant_id in tenant_ids:
@@ -2656,7 +2677,11 @@ def test_storage_controller_node_deletion(
     env.storage_controller.consistency_check()
 
 
-def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("deletion_api", [DeletionAPIKind.FORCE, DeletionAPIKind.GRACEFUL])
+def test_storage_controller_node_delete_cancellation(
+    neon_env_builder: NeonEnvBuilder,
+    deletion_api: DeletionAPIKind,
+):
     neon_env_builder.num_pageservers = 3
     neon_env_builder.num_azs = 3
     env = neon_env_builder.init_configs()
@@ -2680,12 +2705,16 @@ def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBu
     assert len(nodes) == 3
 
     env.storage_controller.configure_failpoints(("sleepy-delete-loop", "return(10000)"))
+    env.storage_controller.configure_failpoints(("delete-node-after-reconciles-spawned", "pause"))
 
     ps_id_to_delete = env.pageservers[0].id
 
     env.storage_controller.warm_up_all_secondaries()
+
+    assert deletion_api in [DeletionAPIKind.FORCE, DeletionAPIKind.GRACEFUL]
+    force = deletion_api == DeletionAPIKind.FORCE
     env.storage_controller.retryable_node_operation(
-        lambda ps_id: env.storage_controller.node_delete(ps_id),
+        lambda ps_id: env.storage_controller.node_delete(ps_id, force),
         ps_id_to_delete,
         max_attempts=3,
         backoff=2,
@@ -2700,6 +2729,8 @@ def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBu
     )
 
     env.storage_controller.cancel_node_delete(ps_id_to_delete)
+
+    env.storage_controller.configure_failpoints(("delete-node-after-reconciles-spawned", "off"))
 
     env.storage_controller.poll_node_status(
         ps_id_to_delete,
@@ -3252,7 +3283,11 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
     wait_until(reconfigure_node_again)
 
 
-def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("deletion_api", [DeletionAPIKind.OLD, DeletionAPIKind.FORCE])
+def test_ps_unavailable_after_delete(
+    neon_env_builder: NeonEnvBuilder,
+    deletion_api: DeletionAPIKind
+):
     neon_env_builder.num_pageservers = 3
 
     env = neon_env_builder.init_start()
@@ -3265,10 +3300,15 @@ def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
     assert_nodes_count(3)
 
     ps = env.pageservers[0]
-    env.storage_controller.node_delete_old(ps.id)
 
-    # After deletion, the node count must be reduced
-    assert_nodes_count(2)
+    if deletion_api == DeletionAPIKind.FORCE:
+        env.storage_controller.node_delete(ps.id, force=True)
+        wait_until(lambda: assert_nodes_count(2))
+    elif deletion_api == DeletionAPIKind.OLD:
+        env.storage_controller.node_delete_old(ps.id)
+        assert_nodes_count(2)
+    else:
+        assert False, f"Invalid deletion API: {deletion_api}"
 
     # Running pageserver CLI init in a separate thread
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:

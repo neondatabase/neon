@@ -76,6 +76,12 @@ enum Command {
     NodeStartDelete {
         #[arg(long)]
         node_id: NodeId,
+        /// When `force` is true, skip waiting for shards to prewarm during migration.
+        /// This can significantly speed up node deletion since prewarming all shards
+        /// can take considerable time, but may result in slower initial access to
+        /// migrated shards until they warm up naturally.
+        #[arg(long)]
+        force: bool,
     },
     /// Cancel deletion of the specified pageserver and wait for `timeout`
     /// for the operation to be canceled. May be retried.
@@ -951,13 +957,14 @@ async fn main() -> anyhow::Result<()> {
                 .dispatch::<(), ()>(Method::DELETE, format!("control/v1/node/{node_id}"), None)
                 .await?;
         }
-        Command::NodeStartDelete { node_id } => {
+        Command::NodeStartDelete { node_id, force } => {
+            let query = if force {
+                format!("control/v1/node/{node_id}/delete?force=true")
+            } else {
+                format!("control/v1/node/{node_id}/delete")
+            };
             storcon_client
-                .dispatch::<(), ()>(
-                    Method::PUT,
-                    format!("control/v1/node/{node_id}/delete"),
-                    None,
-                )
+                .dispatch::<(), ()>(Method::PUT, query, None)
                 .await?;
             println!("Delete started for {node_id}");
         }
