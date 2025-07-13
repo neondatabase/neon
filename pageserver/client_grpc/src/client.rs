@@ -32,20 +32,12 @@ const MAX_CLIENTS_PER_CHANNEL: NonZero<usize> = NonZero::new(16).unwrap();
 /// Max number of concurrent unary request clients per shard.
 const MAX_UNARY_CLIENTS: NonZero<usize> = NonZero::new(64).unwrap();
 
-/// Max number of concurrent GetPage streams per shard. The max number of concurrent GetPage
-/// requests is given by `MAX_STREAMS * MAX_STREAM_QUEUE_DEPTH`.
+/// Max number of concurrent GetPage streams per shard.
 const MAX_STREAMS: NonZero<usize> = NonZero::new(64).unwrap();
 
-/// Max number of pipelined requests per stream.
-const MAX_STREAM_QUEUE_DEPTH: NonZero<usize> = NonZero::new(2).unwrap();
-
 /// Max number of concurrent bulk GetPage streams per shard, used e.g. for prefetches. Because these
-/// are more throughput-oriented, we have a smaller limit but higher queue depth.
+/// are more throughput-oriented, we have a smaller limit.
 const MAX_BULK_STREAMS: NonZero<usize> = NonZero::new(16).unwrap();
-
-/// Max number of pipelined requests per bulk stream. These are more throughput-oriented and thus
-/// get a larger queue depth.
-const MAX_BULK_STREAM_QUEUE_DEPTH: NonZero<usize> = NonZero::new(4).unwrap();
 
 /// The overall request call timeout, including retries and pool acquisition.
 /// TODO: should we retry forever? Should the caller decide?
@@ -272,7 +264,7 @@ impl PageserverClient {
         req: page_api::GetPageRequest,
         shard: &Shard,
     ) -> tonic::Result<page_api::GetPageResponse> {
-        let stream = shard.stream(req.request_class.is_bulk()).await;
+        let mut stream = shard.stream(req.request_class.is_bulk()).await?;
         let resp = stream.send(req.clone()).await?;
 
         // Convert per-request errors into a tonic::Status.
@@ -557,7 +549,6 @@ impl Shard {
                 None, // unbounded, limited by stream pool
             ),
             Some(MAX_STREAMS),
-            MAX_STREAM_QUEUE_DEPTH,
         );
 
         // Bulk GetPage stream pool, e.g. for prefetches. Uses dedicated channel/client/stream pools
@@ -573,7 +564,6 @@ impl Shard {
                 None, // unbounded, limited by stream pool
             ),
             Some(MAX_BULK_STREAMS),
-            MAX_BULK_STREAM_QUEUE_DEPTH,
         );
 
         Ok(Self {
@@ -593,13 +583,12 @@ impl Shard {
             pin!(self.client_pool.get()),
         )
         .await
-        .map_err(|err| tonic::Status::internal(format!("failed to get client: {err}")))
     }
 
     /// Returns a pooled stream for this shard. If `bulk` is `true`, uses the dedicated bulk stream
     /// pool (e.g. for prefetches).
     #[instrument(skip_all, fields(bulk))]
-    async fn stream(&self, bulk: bool) -> StreamGuard {
+    async fn stream(&self, bulk: bool) -> tonic::Result<StreamGuard> {
         let pool = match bulk {
             false => &self.stream_pool,
             true => &self.bulk_stream_pool,
