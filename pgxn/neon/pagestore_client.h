@@ -333,12 +333,13 @@ typedef struct
 
 
 extern void relkind_hash_init(void);
-extern RelKindEntry* set_cached_relkind(NRelFileInfo rinfo, RelKind relkind);
-extern RelKindEntry* get_cached_relkind(NRelFileInfo rinfo, RelKind* relkind);
-extern void store_cached_relkind(RelKindEntry* entry, RelKind relkind);
-extern void update_cached_relkind(RelKindEntry* entry, RelKind relkind);
+extern void set_cached_relkind(NRelFileInfo rinfo, RelKind relkind);
+extern RelKind get_cached_relkind(NRelFileInfo rinfo);
+extern RelKindEntry* pin_cached_relkind(NRelFileInfo rinfo, RelKind relkind);
 extern void unpin_cached_relkind(RelKindEntry* entry);
-extern void unlock_cached_relkind(void);
+extern void fs_exclusive_lock(void);
+extern void fs_shared_lock(void);
+extern void fs_unlock(void);
 extern void forget_cached_relkind(NRelFileInfo rinfo);
 
 #endif							/* PAGESTORE_CLIENT_H */

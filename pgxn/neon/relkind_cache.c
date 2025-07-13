@@ -10,6 +10,7 @@
  */
 #include "postgres.h"
 
+#include "miscadmin.h"
 #include "neon_pgversioncompat.h"
 
 #include "pagestore_client.h"
@@ -62,10 +63,7 @@ static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static void relkind_shmem_request(void);
 #endif
 
-#define MAX_CONCURRENTLY_ACCESSED_UNLOGGED_RELS 100 /* MaxBackend? */
-
 /*
- * Should not be smaller than MAX_CONCURRENTLY_ACCESSED_UNLOGGED_RELS.
  * Size of a cache entry is 32 bytes. So this default will take about 2 MB,
  * which seems reasonable.
  */
@@ -88,11 +86,17 @@ relkind_cache_startup(void)
 	relkind_ctl = (RelKindHashControl *) ShmemInitStruct("relkind_hash", sizeof(RelKindHashControl), &found);
 	if (!found)
 	{
+		/*
+		 * In the worst case, the hash needs to be large enough for the case that all backends are performing an unlogged index build at the same time.
+		 * Or actually twice that, because while performing an unlogged index build, each backend can also be trying to write out a page for another
+		 * relation and hence hold one more entry in the cache pinned.
+		 */
+		size_t hash_size = Max(2 * MaxBackends, relkind_hash_size);
 		finish_unlogged_build_lock = (LWLockId) GetNamedLWLockTranche("neon_relkind");
 		info.keysize = sizeof(NRelFileInfo);
 		info.entrysize = sizeof(RelKindEntry);
 		relkind_hash = ShmemInitHash("neon_relkind",
-									 relkind_hash_size, relkind_hash_size,
+									 hash_size, hash_size,
 									 &info,
 									 HASH_ELEM | HASH_BLOBS);
 		SpinLockInit(&relkind_ctl->mutex);
@@ -109,37 +113,29 @@ relkind_cache_startup(void)
  * Lookup existed entry or create new one
  */
 static RelKindEntry*
-get_entry(NRelFileInfo rinfo, bool* found)
+get_pinned_entry(NRelFileInfo rinfo)
 {
+	bool found;
 	RelKindEntry* entry;
 
-	/*
-	 * This should actually never happen! Below we check if hash is full and delete least recently used item in this case.
-	 * But for further safety we also perform check here.
-	 */
-	while ((entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, found)) == NULL)
+	while ((entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, &found)) == NULL)
 	{
+		/*
+		 * Remove least recently used elment from the hash.
+		 * Hash size after is becomes `relkind_hash_size-1`.
+		 * But it is not considered to be a problem, because size of this hash is expecrted large enough and +-1 doesn't matter.
+		 */
 		RelKindEntry *victim = dlist_container(RelKindEntry, lru_node, dlist_pop_head_node(&relkind_ctl->lru));
 		hash_search(relkind_hash, &victim->rel, HASH_REMOVE, NULL);
 		Assert(relkind_ctl->size > 0);
 		relkind_ctl->size -= 1;
 	}
-	if (!*found)
+	if (!found)
 	{
-		if (++relkind_ctl->size == relkind_hash_size)
-		{
-			/*
-			 * Remove least recently used elment from the hash.
-			 * Hash size after is becomes `relkind_hash_size-1`.
-			 * But it is not considered to be a problem, because size of this hash is expecrted large enough and +-1 doesn't matter.
-			 */
-			RelKindEntry *victim = dlist_container(RelKindEntry, lru_node, dlist_pop_head_node(&relkind_ctl->lru));
-			hash_search(relkind_hash, &victim->rel, HASH_REMOVE, NULL);
-			relkind_ctl->size -= 1;
-		}
 		entry->relkind = RELKIND_UNKNOWN; /* information about relation kind is not yet available */
 		relkind_ctl->pinned += 1;
 		entry->access_count = 1;
+		relkind_ctl->size += 1;
 	}
 	else if (entry->access_count++ == 0)
 	{
@@ -150,19 +146,33 @@ get_entry(NRelFileInfo rinfo, bool* found)
 }
 
 /*
+ * Unpin entry and place it at the end of LRU list
+ */
+static void
+unpin_entry(RelKindEntry *entry)
+{
+	Assert(entry->access_count != 0);
+	if (--entry->access_count == 0)
+	{
+		Assert(relkind_ctl->pinned != 0);
+		relkind_ctl->pinned -= 1;
+		dlist_push_tail(&relkind_ctl->lru, &entry->lru_node);
+	}
+}
+
+/*
  * Intialize new entry. This function is used by neon_start_unlogged_build to mark relation involved in unlogged build.
  * In case of overflow removes least recently used entry.
  * Return pinned entry. It will be released by unpin_cached_relkind at the end of unlogged build.
  */
 RelKindEntry*
-set_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
+pin_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
 {
-	RelKindEntry *entry = NULL;
-	bool found;
+	RelKindEntry *entry;
 
 	/* Use spinlock to prevent concurrent hash modifitcation */
 	SpinLockAcquire(&relkind_ctl->mutex);
-	entry = get_entry(rinfo, &found);
+	entry = get_pinned_entry(rinfo);
 	entry->relkind = relkind;
 	SpinLockRelease(&relkind_ctl->mutex);
 	return entry;
@@ -175,79 +185,60 @@ set_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
  * If entry is not found then new one is created, pinned and returned. Entry should be updated using store_cached_relkind.
  * Shared lock is obtained if relation is involved in inlogged build.
  */
-RelKindEntry*
-get_cached_relkind(NRelFileInfo rinfo, RelKind* relkind)
+RelKind
+get_cached_relkind(NRelFileInfo rinfo)
 {
 	RelKindEntry *entry;
-	bool found;
+	RelKind relkind = RELKIND_UNKNOWN;
 
 	SpinLockAcquire(&relkind_ctl->mutex);
-	entry = get_entry(rinfo, &found);
-	if (found)
+	entry = hash_search(relkind_hash, &rinfo, HASH_FIND, NULL);
+	if (entry != NULL)
 	{
-		/* If relation persistence is known, then there is no need to pin it */
-		if (entry->relkind != RELKIND_UNKNOWN)
+		if (entry->access_count++ == 0)
 		{
-			/* Fast path: normal (persistent) relation with kind stored in the cache */
-			if (--entry->access_count == 0)
-			{
-				dlist_push_tail(&relkind_ctl->lru, &entry->lru_node);
-			}
+			dlist_delete(&entry->lru_node);
+			relkind_ctl->pinned += 1;
 		}
-		/* Need to set shared lock in case of unlogged build to prevent race condition at unlogged build end */
-		if (entry->relkind == RELKIND_UNLOGGED_BUILD)
-		{
-			/* Set shared lock to prevent unlinking relation files by backend completed unlogged build.
-			 * This backend will set exclsuive lock before unlinking files.
-			 * Shared locks allows other backends to perform write in parallel.
-			 */
-			LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
-			/* Recheck relkind under lock */
-			if (entry->relkind != RELKIND_UNLOGGED_BUILD)
-			{
-				/* Unlogged build is already completed: release lock - we do not need to do any writes to local disk */
-				LWLockRelease(finish_unlogged_build_lock);
-			}
-		}
-		*relkind = entry->relkind;
-		if (entry->relkind != RELKIND_UNKNOWN)
-		{
-			/* We do not need this entry any more */
-			entry = NULL;
-		}
+		relkind = entry->relkind;
+		unpin_entry(entry);
 	}
 	SpinLockRelease(&relkind_ctl->mutex);
-	return entry;
+	return relkind;
 }
+
 
 /*
  * Store relation kind as a result of mdexists check. Unpin entry.
  */
 void
-store_cached_relkind(RelKindEntry* entry, RelKind relkind)
+set_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
 {
+	RelKindEntry *entry;
+
 	SpinLockAcquire(&relkind_ctl->mutex);
+	entry = get_pinned_entry(rinfo);
 	Assert(entry->relkind == RELKIND_UNKNOWN || entry->relkind == relkind);
 	entry->relkind = relkind;
-	Assert(entry->access_count != 0);
-	if (--entry->access_count == 0)
-	{
-		Assert(relkind_ctl->pinned != 0);
-		relkind_ctl->pinned -= 1;
-		dlist_push_tail(&relkind_ctl->lru, &entry->lru_node);
-	}
+	unpin_entry(entry);
 	SpinLockRelease(&relkind_ctl->mutex);
 }
 
-/*
- * Change relation persistence.
- * This operation obtains exclusiove lock, preventing any concurrent writes.
- */
 void
-update_cached_relkind(RelKindEntry* entry, RelKind relkind)
+fs_exclusive_lock(void)
 {
 	LWLockAcquire(finish_unlogged_build_lock, LW_EXCLUSIVE);
-	entry->relkind = relkind;
+}
+
+void
+fs_shared_lock(void)
+{
+	LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
+}
+
+void
+fs_unlock(void)
+{
 	LWLockRelease(finish_unlogged_build_lock);
 }
 
@@ -257,21 +248,9 @@ unpin_cached_relkind(RelKindEntry* entry)
 	if (entry)
 	{
 		SpinLockAcquire(&relkind_ctl->mutex);
-		Assert(entry->access_count != 0);
-		if (--entry->access_count == 0)
-		{
-			Assert(relkind_ctl->pinned != 0);
-			relkind_ctl->pinned -= 1;
-			dlist_push_tail(&relkind_ctl->lru, &entry->lru_node);
-		}
+		unpin_entry(entry);
 		SpinLockRelease(&relkind_ctl->mutex);
 	}
-}
-
-void
-unlock_cached_relkind(void)
-{
-	LWLockRelease(finish_unlogged_build_lock);
 }
 
 void
@@ -299,7 +278,7 @@ relkind_hash_init(void)
 							NULL,
 							&relkind_hash_size,
 							DEFAULT_RELKIND_HASH_SIZE,
-							MAX_CONCURRENTLY_ACCESSED_UNLOGGED_RELS,
+							1,
 							INT_MAX,
 							PGC_POSTMASTER,
 							0,
