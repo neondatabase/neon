@@ -28,6 +28,7 @@ use crate::pqproto::CancelKeyData;
 use crate::rate_limiter::LeakyBucketRateLimiter;
 use crate::redis::keys::KeyPrefix;
 use crate::redis::kv_ops::{RedisKVClient, RedisKVClientError};
+use crate::util::run_until;
 
 type IpSubnetKey = IpNet;
 
@@ -498,8 +499,13 @@ impl Session {
                         "registered cancellation key"
                     );
 
-                    // wait before continuing.
-                    tokio::time::sleep(CANCEL_KEY_REFRESH).await;
+                    // wait before continuing. break immediately if cancelled.
+                    if run_until(tokio::time::sleep(CANCEL_KEY_REFRESH), cancel.as_mut())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 // retry immediately.
                 Err(BatchQueueError::Result(error)) => {
