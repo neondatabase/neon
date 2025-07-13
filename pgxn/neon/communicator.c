@@ -2231,7 +2231,7 @@ Retry:
 				{
 					XLogRecPtr page_lsn = PageGetLSN((Page)getpage_resp->page);
 					XLogRecPtr replay_lsn = GetXLogReplayRecPtr(NULL);
-					if (page_lsn > replay_lsn)
+					if (replay_lsn != 0 && page_lsn > replay_lsn)
 					{
 						/* Alternative to throw error is to repeat the query with request_lsn=replay_lsn */
 						ereport(ERROR,
