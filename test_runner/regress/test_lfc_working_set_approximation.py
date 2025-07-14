@@ -85,13 +85,15 @@ WITH (fillfactor='100');
     log.debug(f"Raw metrics: {autoscaling_metrics}")
     m = parse_metrics(autoscaling_metrics)
 
-    http_estimate = m.query_one("lfc_approximate_working_set_size_windows",
-                                {
-                                    "duration_seconds": "60",
-                                },
+    http_estimate = m.query_one(
+        "lfc_approximate_working_set_size_windows",
+        {
+            "duration_seconds": "60",
+        },
     ).value
     log.info(f"http estimate: {http_estimate}, blocks: {blocks}")
     assert http_estimate > 0 and http_estimate < 20
+
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
