@@ -60,7 +60,7 @@ def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
 
 
 @pytest.mark.remote_cluster
-@pytest.mark.timeout(30 * 60)
+@pytest.mark.timeout(2 * 60 * 60)
 def test_compare_prewarmed_pgbench_perf_benchmark(
     pg_bin: PgBin,
     neon_api: NeonAPI,
@@ -91,8 +91,9 @@ def benchmark_impl(
     test_duration_min = 5
     pgbench_duration = f"-T{test_duration_min * 60}"
     # prewarm API is not publicly exposed. In order to test performance of a
-    # fully prewarmed endpoint, wait after it restarts
-    prewarmed_sleep_secs = 30
+    # fully prewarmed endpoint, wait after it restarts.
+    # The number here is empirical, based on manual runs on staging
+    prewarmed_sleep_secs = 180
 
     branch_id = project["branch"]["id"]
     project_id = project["project"]["id"]
