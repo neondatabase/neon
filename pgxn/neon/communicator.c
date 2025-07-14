@@ -2230,14 +2230,18 @@ Retry:
 				if (resp->lsn != UINT64_MAX) /* replica */
 				{
 					XLogRecPtr page_lsn = PageGetLSN((Page)getpage_resp->page);
-					XLogRecPtr replay_lsn = GetXLogReplayRecPtr(NULL);
+#if PG_VERSION_NUM >= 150000
+					XLogRecPtr replay_lsn = GetCurrentReplayRecPtr(NULL);
+#else
+					XLogRecPtr replay_lsn = Max(GetXLogReplayRecPtr(NULL), resp->lsn);
+#endif
 					if (replay_lsn != 0 && page_lsn > replay_lsn)
 					{
 						/* Alternative to throw error is to repeat the query with request_lsn=replay_lsn */
 						ereport(ERROR,
 								(errcode(ERRCODE_IO_ERROR),
-								 errmsg("There is no more version of page %u of relation %u/%u/%u.%u at LSN %X/%X at page server, latest version is at LSN %X/%X",
-										blockno, RelFileInfoFmt(rinfo), forkNum, LSN_FORMAT_ARGS(replay_lsn), LSN_FORMAT_ARGS(page_lsn))));
+								 errmsg("There is no more version of page %u of relation %u/%u/%u.%u at LSN %X/%X at page server, request LSN %X/%X, latest version is at LSN %X/%X",
+										blockno, RelFileInfoFmt(rinfo), forkNum, LSN_FORMAT_ARGS(replay_lsn), LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(page_lsn))));
 					}
 				}
 				memcpy(buffer, getpage_resp->page, BLCKSZ);
