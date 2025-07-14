@@ -314,6 +314,10 @@ class NeonAPI:
         if endpoint_type:
             data["endpoint"]["type"] = endpoint_type
         if settings:
+            # otherwise we get 400 "settings must not be nil"
+            # TODO(myrrc): fix on cplane side
+            if "pg_settings" not in settings:
+                settings["pg_settings"] = {}
             data["endpoint"]["settings"] = settings
 
         resp = self.__request(
