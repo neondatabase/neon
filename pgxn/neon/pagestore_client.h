@@ -319,7 +319,7 @@ typedef enum
      * This is currently used for GiST, SP-GiST and GIN indexes, as well as the pgvector
      * extension.
      */
-	RELKIND_UNLOGGED_BUILD /* buildig index for permanent relation */
+	RELKIND_UNLOGGED_BUILD
 } RelKind;
 
 /* utils for neon relkind cache */
