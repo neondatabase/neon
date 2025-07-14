@@ -9,18 +9,22 @@
 //!
 //! * ChannelPool: manages gRPC channels (TCP connections) to a single Pageserver. Multiple clients
 //!   can acquire and use the same channel concurrently (via HTTP/2 stream multiplexing), up to a
-//!   per-channel client limit.
+//!   per-channel client limit. Channels are closed immediately when empty, and indirectly rely on
+//!   client/stream idle timeouts.
 //!
 //! * ClientPool: manages gRPC clients for a single tenant shard. Each client acquires a (shared)
 //!   channel from the ChannelPool for the client's lifetime. A client can only be acquired by a
-//!   single caller at a time, and is returned to the pool when dropped.
+//!   single caller at a time, and is returned to the pool when dropped. Idle clients are removed
+//!   from the pool after a while to free up resources.
 //!
 //! * StreamPool: manages bidirectional gRPC GetPage streams. Each stream acquires a client from the
 //!   ClientPool for the stream's lifetime. A stream can only be acquired by a single caller at a
-//!   time, and is returned to the pool when dropped. The stream only supports sending a single,
-//!   synchronous request at a time, and does not support pipelining multiple requests from
-//!   different callers onto the same stream -- instead, we scale out concurrent streams to improve
-//!   throughput. There are many reasons for this design choice:
+//!   time, and is returned to the pool when dropped. Idle streams are removed from the pool after
+//!   a while to free up resources.
+//!
+//!   The stream only supports sending a single, synchronous request at a time, and does not support
+//!   pipelining multiple requests from different callers onto the same stream -- instead, we scale
+//!   out concurrent streams to improve throughput. There are many reasons for this design choice:
 //!
 //!     * It (mostly) eliminates head-of-line blocking. A single stream is processed sequentially by
 //!       a single server task, which may block e.g. on layer downloads, LSN waits, etc.
@@ -29,15 +33,12 @@
 //!       (e.g. because of a timeout), the request would still be processed by the server and block
 //!       requests behind it in the stream. It might even block its own timeout retry.
 //!
-//!     * Individual callers can use client-side batching for pipelining.
-//!
 //!     * Stream scheduling becomes significantly simpler and cheaper.
+//!
+//!     * Individual callers can still use client-side batching for pipelining.
 //!
 //!     * Idle streams are cheap. Benchmarks show that an idle GetPage stream takes up about 26 KB
 //!       per stream (2.5 GB for 100,000 streams), so we can afford to scale out.
-//!
-//! Idle clients/streams are removed from the pools periodically, to free up server resources.
-//! Channels are reaped immediately when unused, and indirectly rely on client/stream idle timeouts.
 //!
 //! Each channel corresponds to one TCP connection. Each client unary request and each stream
 //! corresponds to one HTTP/2 stream and server task.
@@ -435,7 +436,6 @@ struct BiStream {
     /// enforced by `StreamGuard::send`.
     sender: watch::Sender<page_api::GetPageRequest>,
     /// Stream for receiving responses.
-    /// TODO: consider returning a concrete type from `Client::get_pages`.
     receiver: Pin<Box<dyn Stream<Item = tonic::Result<page_api::GetPageResponse>> + Send>>,
 }
 
@@ -465,7 +465,7 @@ impl StreamPool {
     ///
     /// This is very performance-sensitive, as it is on the GetPage hot path.
     ///
-    /// TODO: is a Mutex<BTreeMap> performant enough? Will it become too contended? We can't
+    /// TODO: is a `Mutex<BTreeMap>` performant enough? Will it become too contended? We can't
     /// trivially use e.g. DashMap or sharding, because we want to pop lower-ordered streams first
     /// to free up higher-ordered channels.
     pub async fn get(self: &Arc<Self>) -> tonic::Result<StreamGuard> {
@@ -480,7 +480,7 @@ impl StreamPool {
             return Ok(StreamGuard {
                 pool: Arc::downgrade(self),
                 stream: Some(entry.stream),
-                active: false,
+                can_reuse: true,
                 permit,
             });
         }
@@ -500,7 +500,7 @@ impl StreamPool {
                 sender: req_tx,
                 receiver: Box::pin(resp_stream),
             }),
-            active: false,
+            can_reuse: true,
             permit,
         })
     }
@@ -521,7 +521,7 @@ impl Reapable for StreamPool {
 pub struct StreamGuard {
     pool: Weak<StreamPool>,
     stream: Option<BiStream>,             // Some until dropped
-    active: bool,                         // not returned to pool if true
+    can_reuse: bool,                      // returned to pool if true
     permit: Option<OwnedSemaphorePermit>, // None if pool is unbounded
 }
 
@@ -543,17 +543,17 @@ impl StreamGuard {
         let req_id = req.request_id;
         let stream = self.stream.as_mut().expect("not dropped");
 
-        // Mark the stream as active. We only allow one request at a time, to avoid HoL-blocking.
-        // We also don't allow reuse of the stream after an error.
+        // Mark the stream as not reusable while the request is in flight. We can't return the
+        // stream to the pool until we receive the response, to avoid head-of-line blocking and
+        // stale responses. Failed streams can't be reused either.
+        if !self.can_reuse {
+            return Err(tonic::Status::internal("stream can't be reused"));
+        }
+        self.can_reuse = false;
+
+        // Send the request and receive the response.
         //
         // NB: this uses a watch channel, so it's unsafe to change this code to pipeline requests.
-        if self.active {
-            return Err(tonic::Status::internal("stream already active"));
-        }
-        self.active = true;
-
-        // Send the request and receive the response. If the stream errors for whatever reason, we
-        // don't reset `active` such that the stream won't be returned to the pool.
         stream
             .sender
             .send(req)
@@ -572,8 +572,8 @@ impl StreamGuard {
             )));
         }
 
-        // Success, mark the stream as inactive.
-        self.active = false;
+        // Success, mark the stream as reusable.
+        self.can_reuse = true;
 
         Ok(resp)
     }
@@ -585,10 +585,8 @@ impl Drop for StreamGuard {
             return; // pool was dropped
         };
 
-        // If the stream is still active, we can't return it to the pool. The next caller could be
-        // head-of-line blocked by an in-flight request, receive a stale response, or the stream may
-        // have failed.
-        if self.active {
+        // If the stream isn't reusable, it can't be returned to the pool.
+        if !self.can_reuse {
             return;
         }
 

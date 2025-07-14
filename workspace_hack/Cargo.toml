@@ -98,7 +98,7 @@ tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unpref
 time = { version = "0.3", features = ["macros", "serde-well-known"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = { version = "0.7", features = ["codec", "compat", "io-util", "rt"] }
 toml_edit = { version = "0.22", features = ["serde"] }
 tower = { version = "0.5", default-features = false, features = ["balance", "buffer", "limit", "log"] }

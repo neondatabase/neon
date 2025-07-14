@@ -1893,6 +1893,8 @@ impl Timeline {
     // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
     // ephemeral layer bytes has been breached.
     pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let Ok(mut write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.

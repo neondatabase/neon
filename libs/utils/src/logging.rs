@@ -396,16 +396,11 @@ pub async fn log_slow<O>(
             if !is_slow {
                 return;
             }
+            let elapsed = elapsed_total.as_secs_f64();
             if ready {
-                info!(
-                    "slow {name} completed after {:.3}s",
-                    elapsed_total.as_secs_f64()
-                );
+                info!("slow {name} completed after {elapsed:.3}s");
             } else {
-                info!(
-                    "slow {name} still running after {:.3}s",
-                    elapsed_total.as_secs_f64()
-                );
+                info!("slow {name} still running after {elapsed:.3}s");
             }
         },
     )
@@ -432,16 +427,11 @@ pub async fn warn_slow<O>(
             if !is_slow {
                 return;
             }
+            let elapsed = elapsed_total.as_secs_f64();
             if ready {
-                warn!(
-                    "slow {name} completed after {:.3}s",
-                    elapsed_total.as_secs_f64()
-                );
+                warn!("slow {name} completed after {elapsed:.3}s");
             } else {
-                warn!(
-                    "slow {name} still running after {:.3}s",
-                    elapsed_total.as_secs_f64()
-                );
+                warn!("slow {name} still running after {elapsed:.3}s");
             }
         },
     )
