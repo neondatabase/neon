@@ -990,7 +990,7 @@ def test_storage_controller_compute_hook_retry(
 
 
 @run_only_on_default_postgres("postgres behavior is not relevant")
-def test_storage_controller_compute_hook_keep_failing(
+def test_storage_controller_compute_hook_stuck_reconciles(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
     httpserver_listen_address: ListenAddress,
@@ -1040,7 +1040,7 @@ def test_storage_controller_compute_hook_keep_failing(
     env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
     env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
     env.storage_controller.allowed_errors.append(".*Keeping extra secondaries.*")
-    env.storage_controller.allowed_errors.append(".*Shard reconciliation is keep-failing.*")
+    env.storage_controller.allowed_errors.append(".*Shard reconciliation is stuck.*")
     env.storage_controller.node_configure(banned_tenant_ps.id, {"availability": "Offline"})
 
     # Migrate all allowed tenant shards to the first alive pageserver
@@ -1055,7 +1055,7 @@ def test_storage_controller_compute_hook_keep_failing(
 
     # Make some reconcile_all calls to trigger optimizations
     # RECONCILE_COUNT must be greater than storcon's MAX_CONSECUTIVE_RECONCILIATION_ERRORS
-    RECONCILE_COUNT = 12
+    RECONCILE_COUNT = 20
     for i in range(RECONCILE_COUNT):
         try:
             n = env.storage_controller.reconcile_all()
@@ -1067,6 +1067,8 @@ def test_storage_controller_compute_hook_keep_failing(
         banned_descr = env.storage_controller.tenant_describe(banned_tenant)
         assert banned_descr["shards"][0]["is_pending_compute_notification"] is True
         time.sleep(2)
+
+    env.storage_controller.assert_log_contains(".*Shard reconciliation is stuck.*")
 
     # Check that the allowed tenant shards are optimized due to affinity rules
     locations = alive_pageservers[0].http_client().tenant_list_locations()["tenant_shards"]

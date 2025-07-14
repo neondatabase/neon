@@ -211,9 +211,9 @@ pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 pub const PRIORITY_RECONCILER_CONCURRENCY_DEFAULT: usize = 256;
 pub const SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT: usize = 32;
 
-// Number of consecutive reconciliation errors, occured for one shard,
+// Number of consecutive reconciliations that have occurred for one shard,
 // after which the shard is ignored when considering to run optimizations.
-const MAX_CONSECUTIVE_RECONCILIATION_ERRORS: usize = 5;
+const MAX_CONSECUTIVE_RECONCILES: usize = 10;
 
 // Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
 // This channel is finite-size to avoid using excessive memory if we get into a state where reconciles are finishing more slowly
@@ -714,31 +714,31 @@ struct TenantMutationLocations(BTreeMap<TenantShardId, ShardMutationLocations>);
 
 struct ReconcileAllResult {
     spawned_reconciles: usize,
-    keep_failing_reconciles: usize,
+    stuck_reconciles: usize,
     has_delayed_reconciles: bool,
 }
 
 impl ReconcileAllResult {
     fn new(
         spawned_reconciles: usize,
-        keep_failing_reconciles: usize,
+        stuck_reconciles: usize,
         has_delayed_reconciles: bool,
     ) -> Self {
         assert!(
-            spawned_reconciles >= keep_failing_reconciles,
-            "It is impossible to have more keep-failing reconciles than spawned reconciles"
+            spawned_reconciles >= stuck_reconciles,
+            "It is impossible to have less spawned reconciles than stuck reconciles"
         );
         Self {
             spawned_reconciles,
-            keep_failing_reconciles,
+            stuck_reconciles,
             has_delayed_reconciles,
         }
     }
 
     /// We can run optimizations only if we don't have any delayed reconciles and
-    /// all spawned reconciles are also keep-failing reconciles.
+    /// all spawned reconciles are also stuck reconciles.
     fn can_run_optimizations(&self) -> bool {
-        !self.has_delayed_reconciles && self.spawned_reconciles == self.keep_failing_reconciles
+        !self.has_delayed_reconciles && self.spawned_reconciles == self.stuck_reconciles
     }
 }
 
@@ -1482,7 +1482,6 @@ impl Service {
 
         match result.result {
             Ok(()) => {
-                tenant.consecutive_errors_count = 0;
                 tenant.apply_observed_deltas(deltas);
                 tenant.waiter.advance(result.sequence);
             }
@@ -1501,8 +1500,6 @@ impl Service {
                     }
                 }
 
-                tenant.consecutive_errors_count = tenant.consecutive_errors_count.saturating_add(1);
-
                 // Ordering: populate last_error before advancing error_seq,
                 // so that waiters will see the correct error after waiting.
                 tenant.set_last_error(result.sequence, e);
@@ -1513,6 +1510,8 @@ impl Service {
                 tenant.apply_observed_deltas(upsert_deltas);
             }
         }
+
+        tenant.consecutive_reconciles_count = tenant.consecutive_reconciles_count.saturating_add(1);
 
         // If we just finished detaching all shards for a tenant, it might be time to drop it from memory.
         if tenant.policy == PlacementPolicy::Detached {
@@ -8582,7 +8581,7 @@ impl Service {
         // This function is an efficient place to update lazy statistics, since we are walking
         // all tenants.
         let mut pending_reconciles = 0;
-        let mut keep_failing_reconciles = 0;
+        let mut stuck_reconciles = 0;
         let mut az_violations = 0;
 
         // If we find any tenants to drop from memory, stash them to offload after
@@ -8618,30 +8617,32 @@ impl Service {
 
             // Eventual consistency: if an earlier reconcile job failed, and the shard is still
             // dirty, spawn another one
-            let consecutive_errors_count = shard.consecutive_errors_count;
             if self
                 .maybe_reconcile_shard(shard, &pageservers, ReconcilerPriority::Normal)
                 .is_some()
             {
                 spawned_reconciles += 1;
 
-                // Count shards that are keep-failing. We still want to reconcile them
-                // to avoid a situation where a shard is stuck.
-                // But we don't want to consider them when deciding to run optimizations.
-                if consecutive_errors_count >= MAX_CONSECUTIVE_RECONCILIATION_ERRORS {
+                if shard.consecutive_reconciles_count >= MAX_CONSECUTIVE_RECONCILES {
+                    // Count shards that are stuck, butwe still want to reconcile them.
+                    // We don't want to consider them when deciding to run optimizations.
                     tracing::warn!(
                         tenant_id=%shard.tenant_shard_id.tenant_id,
                         shard_id=%shard.tenant_shard_id.shard_slug(),
-                        "Shard reconciliation is keep-failing: {} errors",
-                        consecutive_errors_count
+                        "Shard reconciliation is stuck: {} consecutive launches",
+                        shard.consecutive_reconciles_count
                     );
-                    keep_failing_reconciles += 1;
+                    stuck_reconciles += 1;
                 }
-            } else if shard.delayed_reconcile {
-                // Shard wanted to reconcile but for some reason couldn't.
-                pending_reconciles += 1;
-            }
+            } else {
+                if shard.delayed_reconcile {
+                    // Shard wanted to reconcile but for some reason couldn't.
+                    pending_reconciles += 1;
+                }
 
+                // Reset the counter when we don't need to launch a reconcile.
+                shard.consecutive_reconciles_count = 0;
+            }
             // If this tenant is detached, try dropping it from memory. This is usually done
             // proactively in [`Self::process_results`], but we do it here to handle the edge
             // case where a reconcile completes while someone else is holding an op lock for the tenant.
@@ -8677,14 +8678,10 @@ impl Service {
 
         metrics::METRICS_REGISTRY
             .metrics_group
-            .storage_controller_keep_failing_reconciles
-            .set(keep_failing_reconciles as i64);
+            .storage_controller_stuck_reconciles
+            .set(stuck_reconciles as i64);
 
-        ReconcileAllResult::new(
-            spawned_reconciles,
-            keep_failing_reconciles,
-            has_delayed_reconciles,
-        )
+        ReconcileAllResult::new(spawned_reconciles, stuck_reconciles, has_delayed_reconciles)
     }
 
     /// `optimize` in this context means identifying shards which have valid scheduled locations, but
