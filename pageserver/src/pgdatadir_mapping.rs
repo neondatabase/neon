@@ -607,6 +607,7 @@ impl Timeline {
         }
 
         // fetch directory listing (v1)
+        // TODO: refactor to disable reads from v1 if we have fully migrated to v2
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
 
         if let Some((cached_key, dir)) = deserialized_reldir_v1 {
@@ -634,7 +635,10 @@ impl Timeline {
             let buf = RelDirExists::decode_option(version.sparse_get(self, key, ctx).await?)
                 .map_err(|_| PageReconstructError::Other(anyhow::anyhow!("invalid reldir key")))?;
             let exists_v2 = buf == RelDirExists::Exists;
-            if exists_v1 != exists_v2 {
+            if self.get_rel_size_v2_status() == RelSizeMigration::Migrated {
+                return Ok(exists_v2);
+            } else if exists_v1 != exists_v2 {
+                // Do a validation if we have not fully migrated to v2
                 tracing::warn!(
                     "inconsistent v1/v2 reldir keyspace for rel {}: exists_v1={}, exists_v2={}",
                     tag,
@@ -679,7 +683,7 @@ impl Timeline {
             return Ok(rels_v1);
         }
 
-        // scan directory listing (new), merge with the old results
+        // scan directory listing (new)
         let key_range = rel_tag_sparse_key_range(spcnode, dbnode);
         let io_concurrency = IoConcurrency::spawn_from_conf(
             self.conf.get_vectored_concurrent_io,
@@ -716,7 +720,9 @@ impl Timeline {
             debug_assert!(did_not_contain, "duplicate reltag in v2");
         }
 
-        if rels_v1 != rels {
+        if self.get_rel_size_v2_status() == RelSizeMigration::Migrated {
+            return Ok(rels);
+        } else if rels_v1 != rels {
             tracing::warn!(
                 "inconsistent v1/v2 reldir keyspace for db {} {}: v1_rels.len()={}, v2_rels.len()={}",
                 spcnode,
@@ -725,7 +731,7 @@ impl Timeline {
                 rels.len()
             );
         }
-        Ok(rels)
+        Ok(rels_v1)
     }
 
     /// Get the whole SLRU segment
@@ -1993,17 +1999,17 @@ impl DatadirModification<'_> {
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         }
         if r.is_none() {
-            // Create RelDirectory
-            // TODO: if we have fully migrated to v2, no need to create this directory
+            if v2_mode.v2_ready {
+                self.pending_directory_entries
+                    .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
+            }
+
+            // Create RelDirectory in v1 keyspace. TODO: if we have fully migrated to v2, no need to create this directory.
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
             })?;
             self.pending_directory_entries
                 .push((DirectoryKind::Rel, MetricsUpdate::Set(0)));
-            if v2_mode.v2_ready {
-                self.pending_directory_entries
-                    .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
-            }
             self.put(
                 rel_dir_to_key(spcnode, dbnode),
                 Value::Image(Bytes::from(buf)),
@@ -2178,7 +2184,7 @@ impl DatadirModification<'_> {
             }
         }
 
-        {
+        if self.tline.get_rel_size_v2_status() != RelSizeMigration::Migrated {
             // Reldir v1 write path
             let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
             let mut rel_dir = if !dbdir_exists {
@@ -2230,6 +2236,9 @@ impl DatadirModification<'_> {
                 Ok::<_, WalIngestError>(())
             };
             if let Err(e) = write_v2.await {
+                if self.tline.get_rel_size_v2_status() == RelSizeMigration::Migrated {
+                    return Err(e);
+                }
                 tracing::warn!("error writing rel_size_v2 keyspace: {}", e);
             }
         }
@@ -2316,13 +2325,17 @@ impl DatadirModification<'_> {
             .maybe_enable_rel_size_v2(false)
             .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
         for ((spc_node, db_node), rel_tags) in drop_relations {
+            // TODO: skip reading this directory if we have fully migrated to v2
             let dir_key = rel_dir_to_key(spc_node, db_node);
             let buf = self.get(dir_key, ctx).await?;
             let mut dir = RelDirectory::des(&buf)?;
 
             let mut dirty = false;
             for rel_tag in rel_tags {
-                let v1_found = if dir.rels.remove(&(rel_tag.relnode, rel_tag.forknum)) {
+                let v1_found = if self.tline.get_rel_size_v2_status() == RelSizeMigration::Migrated
+                {
+                    false // this value doesn't matter as data in v1 is invalid now
+                } else if dir.rels.remove(&(rel_tag.relnode, rel_tag.forknum)) {
                     self.pending_directory_entries
                         .push((DirectoryKind::Rel, MetricsUpdate::Sub(1)));
                     dirty = true;
@@ -2330,7 +2343,8 @@ impl DatadirModification<'_> {
                 } else {
                     false
                 };
-                if v2_mode.v2_ready {
+
+                let found = if v2_mode.v2_ready {
                     let get_v2 = async {
                         let key =
                             rel_tag_sparse_key(spc_node, db_node, rel_tag.relnode, rel_tag.forknum);
@@ -2350,7 +2364,11 @@ impl DatadirModification<'_> {
                     };
 
                     match get_v2.await {
-                        Ok(v2_found) => {
+                        Ok(v2_found)
+                            if self.tline.get_rel_size_v2_status()
+                                != RelSizeMigration::Migrated =>
+                        {
+                            // Do validation if we have not fully migrated to v2
                             if v1_found != v2_found {
                                 tracing::warn!(
                                     "inconsistent v1/v2 reldir keyspace for rel {}: v1_found={}, v2_found={}",
@@ -2359,18 +2377,29 @@ impl DatadirModification<'_> {
                                     v2_found
                                 );
                             }
+                            v1_found
                         }
-                        Err(e) => {
+                        Ok(v2_found) => v2_found,
+                        Err(e)
+                            if self.tline.get_rel_size_v2_status()
+                                != RelSizeMigration::Migrated =>
+                        {
+                            // Print a warning if we have not fully migrated to v2
                             tracing::warn!(
                                 "error dropping v2 reldir key for rel {}: {}",
                                 rel_tag,
                                 e
                             );
+                            false
+                        }
+                        Err(e) => {
+                            // Return an error if we have fully migrated to v2
+                            return Err(e);
                         }
                     }
-                }
-
-                let found = v1_found;
+                } else {
+                    v1_found
+                };
 
                 if found {
                     // update logical size
