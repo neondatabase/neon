@@ -322,7 +322,7 @@ typedef enum
 	RELKIND_UNLOGGED_BUILD
 } RelKind;
 
-/* utils for neon relkind cache */
+/* entry type stored in relkind_hash */
 typedef struct
 {
 	NRelFileInfo rel;
