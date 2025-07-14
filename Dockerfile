@@ -57,7 +57,7 @@ ENV BUILD_TYPE=release
 RUN set -e \
     && mold -run make -j $(nproc) -s postgres
 
-# 2. Prepare cargo-chef recipe and cook it
+# 2. Prepare cargo-chef recipe
 FROM $REPOSITORY/$IMAGE:$TAG AS plan
 WORKDIR /home/nonroot
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
@@ -81,13 +81,17 @@ WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 ARG BUILD_TAG
 ARG ADDITIONAL_RUSTFLAGS=""
-ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 ENV CARGO_FEATURES="default"
 
 # 3. Build cargo dependencies. Note that this step doesn't depend on anything else than
 # `recipe.json`, so the layer can be reused as long as none of the dependencies change.
 COPY --from=plan     /home/nonroot/recipe.json                              recipe.json
-RUN set -e \
+RUN --mount=type=secret,uid=1000,id=SUBZERO_ACCESS_TOKEN \
+    set -e \
+    && if [ -s /run/secrets/SUBZERO_ACCESS_TOKEN ]; then \
+        git config --global url."https://$(cat /run/secrets/SUBZERO_ACCESS_TOKEN)@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero" \
+        && export CARGO_NET_GIT_FETCH_WITH_CLI=true; \
+    fi \
     && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" \
     cargo chef cook --locked --release --recipe-path recipe.json
 
