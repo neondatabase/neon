@@ -121,9 +121,7 @@ get_pinned_entry(NRelFileInfo rinfo)
 	while ((entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, &found)) == NULL)
 	{
 		/*
-		 * Remove least recently used elment from the hash.
-		 * Hash size after is becomes `relkind_hash_size-1`.
-		 * But it is not considered to be a problem, because size of this hash is expecrted large enough and +-1 doesn't matter.
+		 * Remove least recently used element from the hash.
 		 */
 		RelKindEntry *victim = dlist_container(RelKindEntry, lru_node, dlist_pop_head_node(&relkind_ctl->lru));
 		hash_search(relkind_hash, &victim->rel, HASH_REMOVE, NULL);
