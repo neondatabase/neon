@@ -34,7 +34,9 @@ class NeonAPI:
         self.retries524 = 0
         self.retries4xx = 0
 
-    def __request(self, method: str | bytes, endpoint: str, **kwargs: Any) -> requests.Response:
+    def __request(
+        self, method: str | bytes, endpoint: str, retry404: bool = False, **kwargs: Any
+    ) -> requests.Response:
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
@@ -55,10 +57,12 @@ class NeonAPI:
                 resp.raise_for_status()
                 break
             elif resp.status_code >= 400:
-                if resp.status_code == 422:
-                    if resp.json()["message"] == "branch not ready yet":
-                        retry = True
-                        self.retries4xx += 1
+                if resp.status_code == 404 and retry404:
+                    retry = True
+                    self.retries4xx += 1
+                elif resp.status_code == 422 and resp.json()["message"] == "branch not ready yet":
+                    retry = True
+                    self.retries4xx += 1
                 elif resp.status_code == 423 and resp.json()["message"] in {
                     "endpoint is in some transitive state, could not suspend",
                     "project already has running conflicting operations, scheduling of new ones is prohibited",
@@ -66,7 +70,7 @@ class NeonAPI:
                     retry = True
                     self.retries4xx += 1
                 elif resp.status_code == 524:
-                    log.info("The request was timed out, trying to get operations")
+                    log.info("The request was timed out")
                     retry = True
                     self.retries524 += 1
             if retry:
@@ -203,6 +207,9 @@ class NeonAPI:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/branches/{branch_id}",
+            # XXX Retry get parent details to work around the issue
+            # https://databricks.atlassian.net/browse/LKB-279
+            retry404=True,
             headers={
                 "Accept": "application/json",
             },
