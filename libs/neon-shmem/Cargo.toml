@@ -8,6 +8,9 @@ license.workspace = true
 thiserror.workspace = true
 nix.workspace=true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+libc.workspace = true
+lock_api = "0.4.13"
+rustc-hash = "2.1.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tempfile = "3.14.0"
