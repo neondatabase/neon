@@ -128,7 +128,6 @@ get_pinned_entry(NRelFileInfo rinfo)
 		}
 		else
 		{
-			bool found;
 			/*
 			 * Remove least recently used element from the hash.
 			 */
