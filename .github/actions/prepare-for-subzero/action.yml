@@ -18,11 +18,6 @@ runs:
         SUBZERO_ACCESS_TOKEN: ${{ inputs.token }}
       with:
         main: |
-          if [[ "$(uname -s)" == "Darwin" ]]; then
-            git config --global credential.helper osxkeychain
-            printf "protocol=https\nhost=github.com\n" | git credential-osxkeychain erase
-          fi
-
           git config --global url."https://x-access-token:${SUBZERO_ACCESS_TOKEN}@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero"
         post: |
           git config --global --unset url."https://x-access-token:${SUBZERO_ACCESS_TOKEN}@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero"
