@@ -674,7 +674,8 @@ async fn handle_inner(
     // Strip the hostname prefix from the host to get the database hostname
     let database_host = host.replace(&config.rest_config.hostname_prefix, "");
 
-    let connection_string = format!("postgresql://{authenticator_role}@{database_host}/{database_name}");
+    let connection_string =
+        format!("postgresql://{authenticator_role}@{database_host}/{database_name}");
 
     let conn_info = get_conn_info(
         &config.authentication_config,
