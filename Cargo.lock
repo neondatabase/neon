@@ -1290,8 +1290,14 @@ dependencies = [
 name = "communicator"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "cbindgen",
- "neon-shmem",
+ "http 1.1.0",
+ "metrics",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "utils",
  "workspace_hack",
 ]
 
@@ -1335,6 +1341,9 @@ dependencies = [
  "futures",
  "hostname-validator",
  "http 1.1.0",
+ "http-body-util",
+ "hyper 1.4.1",
+ "hyper-util",
  "indexmap 2.9.0",
  "itertools 0.10.5",
  "jsonwebtoken",
@@ -1357,6 +1366,7 @@ dependencies = [
  "ring",
  "rlimit",
  "rust-ini",
+ "scopeguard",
  "serde",
  "serde_json",
  "serde_with",

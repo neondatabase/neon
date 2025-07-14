@@ -13,7 +13,14 @@ crate-type = ["staticlib"]
 testing = []
 
 [dependencies]
-neon-shmem.workspace = true
+axum.workspace = true
+http.workspace = true
+tokio = { version = "1.43.1", features = ["macros", "net", "io-util", "rt", "rt-multi-thread"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+metrics.workspace = true
+utils.workspace = true
 workspace_hack = { version = "0.1", path = "../../../workspace_hack" }
 
 [build-dependencies]
