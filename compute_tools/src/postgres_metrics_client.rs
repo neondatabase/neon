@@ -88,8 +88,8 @@ where
 
     // spawn a task to poll the connection and drive the HTTP state
     tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("Error in connection: {}", e);
+        if let Err(err) = connection.await {
+            eprintln!("Error in connection: {err}");
         }
     });
 
