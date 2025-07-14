@@ -480,7 +480,7 @@ impl StreamPool {
             return Ok(StreamGuard {
                 pool: Arc::downgrade(self),
                 stream: Some(entry.stream),
-                active: false,
+                can_reuse: true,
                 permit,
             });
         }
@@ -500,7 +500,7 @@ impl StreamPool {
                 sender: req_tx,
                 receiver: Box::pin(resp_stream),
             }),
-            active: false,
+            can_reuse: true,
             permit,
         })
     }
@@ -521,7 +521,7 @@ impl Reapable for StreamPool {
 pub struct StreamGuard {
     pool: Weak<StreamPool>,
     stream: Option<BiStream>,             // Some until dropped
-    active: bool,                         // not returned to pool if true
+    can_reuse: bool,                      // returned to pool if true
     permit: Option<OwnedSemaphorePermit>, // None if pool is unbounded
 }
 
@@ -543,17 +543,17 @@ impl StreamGuard {
         let req_id = req.request_id;
         let stream = self.stream.as_mut().expect("not dropped");
 
-        // Mark the stream as active. We only allow one request at a time, to avoid HoL-blocking.
-        // We also don't allow reuse of the stream after an error.
+        // Mark the stream as not reusable while the request is in flight. We can't return the
+        // stream to the pool until we receive the response, to avoid head-of-line blocking and
+        // stale responses. Failed streams can't be reused either.
+        if !self.can_reuse {
+            return Err(tonic::Status::internal("stream can't be reused"));
+        }
+        self.can_reuse = false;
+
+        // Send the request and receive the response.
         //
         // NB: this uses a watch channel, so it's unsafe to change this code to pipeline requests.
-        if self.active {
-            return Err(tonic::Status::internal("stream already active"));
-        }
-        self.active = true;
-
-        // Send the request and receive the response. If the stream errors for whatever reason, we
-        // don't reset `active` such that the stream won't be returned to the pool.
         stream
             .sender
             .send(req)
@@ -572,8 +572,8 @@ impl StreamGuard {
             )));
         }
 
-        // Success, mark the stream as inactive.
-        self.active = false;
+        // Success, mark the stream as reusable.
+        self.can_reuse = true;
 
         Ok(resp)
     }
@@ -585,10 +585,8 @@ impl Drop for StreamGuard {
             return; // pool was dropped
         };
 
-        // If the stream is still active, we can't return it to the pool. The next caller could be
-        // head-of-line blocked by an in-flight request, receive a stale response, or the stream may
-        // have failed.
-        if self.active {
+        // If the stream isn't reusable, it can't be returned to the pool.
+        if !self.can_reuse {
             return;
         }
 
