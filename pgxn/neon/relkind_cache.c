@@ -54,7 +54,6 @@ typedef struct
 } RelKindHashControl;
 
 static HTAB *relkind_hash;
-static LWLockId finish_unlogged_build_lock;
 static int	relkind_hash_size;
 static RelKindHashControl* relkind_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -62,6 +61,8 @@ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static void relkind_shmem_request(void);
 #endif
+
+LWLockId finish_unlogged_build_lock;
 
 /*
  * Size of a cache entry is 32 bytes. So this default will take about 2 MB,
@@ -116,17 +117,29 @@ static RelKindEntry*
 get_pinned_entry(NRelFileInfo rinfo)
 {
 	bool found;
-	RelKindEntry* entry;
+	RelKindEntry* entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, &found);
 
-	while ((entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, &found)) == NULL)
+	if (entry == NULL)
 	{
-		/*
-		 * Remove least recently used element from the hash.
-		 */
-		RelKindEntry *victim = dlist_container(RelKindEntry, lru_node, dlist_pop_head_node(&relkind_ctl->lru));
-		hash_search(relkind_hash, &victim->rel, HASH_REMOVE, NULL);
-		Assert(relkind_ctl->size > 0);
-		relkind_ctl->size -= 1;
+		if (&dlist_is_empty(relkind_ctl->lru))
+		{
+			neon_log(PANIC, "Not unpinned relkind entries");
+		}
+		else
+		{
+			bool found;
+			/*
+			 * Remove least recently used element from the hash.
+			 */
+			RelKindEntry *victim = dlist_container(RelKindEntry, lru_node, dlist_pop_head_node(&relkind_ctl->lru));
+			Assert(victim->access_count == 0);
+			hash_search(relkind_hash, &victim->rel, HASH_REMOVE, &found);
+			Assert(found);
+			Assert(relkind_ctl->size > 0);
+			relkind_ctl->size -= 1;
+		}
+		entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, &found);
+		Assert(!found);
 	}
 	if (!found)
 	{
@@ -193,6 +206,7 @@ get_cached_relkind(NRelFileInfo rinfo)
 	entry = hash_search(relkind_hash, &rinfo, HASH_FIND, NULL);
 	if (entry != NULL)
 	{
+		/* Do pin+unpin entry to move it to the end of LRU list */
 		if (entry->access_count++ == 0)
 		{
 			dlist_delete(&entry->lru_node);
@@ -215,29 +229,12 @@ set_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
 	RelKindEntry *entry;
 
 	SpinLockAcquire(&relkind_ctl->mutex);
+	/* Do pin+unpin entry to move it to the end of LRU list */
 	entry = get_pinned_entry(rinfo);
 	Assert(entry->relkind == RELKIND_UNKNOWN || entry->relkind == relkind);
 	entry->relkind = relkind;
 	unpin_entry(entry);
 	SpinLockRelease(&relkind_ctl->mutex);
-}
-
-void
-fs_exclusive_lock(void)
-{
-	LWLockAcquire(finish_unlogged_build_lock, LW_EXCLUSIVE);
-}
-
-void
-fs_shared_lock(void)
-{
-	LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
-}
-
-void
-fs_unlock(void)
-{
-	LWLockRelease(finish_unlogged_build_lock);
 }
 
 void
@@ -259,6 +256,7 @@ forget_cached_relkind(NRelFileInfo rinfo)
 	entry = hash_search(relkind_hash, &rinfo, HASH_REMOVE, NULL);
 	if (entry)
 	{
+		Assert(entry->access_count == 0);
 		dlist_delete(&entry->lru_node);
 		relkind_ctl->size -= 1;
 	}
