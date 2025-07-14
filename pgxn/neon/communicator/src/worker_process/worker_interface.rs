@@ -15,8 +15,16 @@ pub extern "C" fn communicator_worker_process_launch(
     timeline_id: *const c_char,
 ) -> &'static CommunicatorWorkerProcessStruct {
     // Convert the arguments into more convenient Rust types
-    let tenant_id = unsafe { CStr::from_ptr(tenant_id) }.to_str().unwrap();
-    let timeline_id = unsafe { CStr::from_ptr(timeline_id) }.to_str().unwrap();
+    let tenant_id = if tenant_id.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(tenant_id) }.to_str().unwrap())
+    };
+    let timeline_id = if timeline_id.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(timeline_id) }.to_str().unwrap())
+    };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -25,8 +33,8 @@ pub extern "C" fn communicator_worker_process_launch(
         .unwrap();
 
     let worker_struct = runtime.block_on(main_loop::init(
-        tenant_id.to_string(),
-        timeline_id.to_string(),
+        tenant_id,
+        timeline_id,
     ));
     let worker_struct = Box::leak(Box::new(worker_struct));
 

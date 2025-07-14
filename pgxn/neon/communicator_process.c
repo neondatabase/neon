@@ -94,8 +94,9 @@ communicator_new_bgworker_main(Datum main_arg)
 	logging = configure_logging();
 
 	proc_handle = communicator_worker_process_launch(
-		neon_tenant,
-		neon_timeline);
+		neon_tenant[0] == '\0' ? NULL : neon_tenant,
+		neon_timeline[0] == '\0' ? NULL : neon_timeline
+		);
 
 	/* proc_handle is not currently used, but will be in the future */
 	(void) proc_handle;

@@ -10,11 +10,11 @@ pub struct CommunicatorWorkerProcessStruct {
 }
 
 pub(super) async fn init(
-    tenant_id: String,
-    timeline_id: String,
+    tenant_id: Option<&str>,
+    timeline_id: Option<&str>,
 ) -> CommunicatorWorkerProcessStruct {
-    let _tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
-    let _timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
+    let _tenant_id = tenant_id.map(|s| TenantId::from_str(s).expect("invalid tenant ID"));
+    let _timeline_id = timeline_id.map(|s| TimelineId::from_str(s).expect("invalid timeline ID"));
 
     CommunicatorWorkerProcessStruct {
         // metrics
