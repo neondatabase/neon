@@ -69,26 +69,12 @@ pub(in crate::http) async fn get_autoscaling_metrics(
         .context("fetching metrics from Postgres metrics service")
         .map_err(|e| JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
 
-    // Check response status
-    let status = resp.status();
-    if status != StatusCode::OK {
-        return Err(JsonResponse::error(
-            status,
-            format!(
-                "Postgres metrics service returned error: {}",
-                status.to_string()
-            ),
-        ));
-    }
-
-    // Build an OK response, with the body forwarded from the response we got.
+    // Build a response that just forwards the response we got.
     let mut response = Response::builder();
-    response = response.status(StatusCode::OK);
+    response = response.status(resp.status());
     if let Some(content_type) = resp.headers().get(CONTENT_TYPE) {
         response = response.header(CONTENT_TYPE, content_type);
     }
-
     let body = tonic::service::AxumBody::from_stream(resp.into_body().into_data_stream());
-
     Ok(response.body(body).unwrap())
 }

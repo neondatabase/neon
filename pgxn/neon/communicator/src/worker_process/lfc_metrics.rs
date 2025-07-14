@@ -19,7 +19,7 @@ impl LfcMetricsCollector {
                 "lfc_approximate_working_set_size_windows",
                 "Approximate working set size in pages of 8192 bytes",
             ),
-            &[&"duration_seconds"],
+            &["duration_seconds"],
         )
         .unwrap();
 

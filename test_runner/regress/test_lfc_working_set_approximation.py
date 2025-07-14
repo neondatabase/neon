@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from logging import debug
 from pathlib import Path
 from typing import TYPE_CHECKING
 
