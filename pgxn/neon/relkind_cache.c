@@ -10,6 +10,7 @@
  */
 #include "postgres.h"
 
+#include "neon.h"
 #include "miscadmin.h"
 #include "neon_pgversioncompat.h"
 
@@ -121,7 +122,7 @@ get_pinned_entry(NRelFileInfo rinfo)
 
 	if (entry == NULL)
 	{
-		if (&dlist_is_empty(&relkind_ctl->lru))
+		if (dlist_is_empty(&relkind_ctl->lru))
 		{
 			neon_log(PANIC, "Not unpinned relkind entries");
 		}
