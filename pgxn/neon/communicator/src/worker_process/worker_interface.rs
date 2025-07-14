@@ -32,10 +32,7 @@ pub extern "C" fn communicator_worker_process_launch(
         .build()
         .unwrap();
 
-    let worker_struct = runtime.block_on(main_loop::init(
-        tenant_id,
-        timeline_id,
-    ));
+    let worker_struct = runtime.block_on(main_loop::init(tenant_id, timeline_id));
     let worker_struct = Box::leak(Box::new(worker_struct));
 
     runtime.block_on(worker_struct.launch_metrics_exporter());
