@@ -1604,7 +1604,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 {
 	XLogRecPtr	lsn;
 	RelKind relkind;
-	bool fs_locked = false;
+	bool is_locked = false;
 	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
 
 	switch (reln->smgr_relpersistence)
@@ -1622,8 +1622,8 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 				/* In case of unlogged build we need to avoid race condition at unlogged build end.
 				 * Obtain shared lock here to prevent backend completing unlogged build from performing cleanup amnd remvong files.
 				 */
-				fs_shared_lock();
-				fs_locked = true;
+				LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
+				is_locked = true;
 				/*
 				 * Recheck relkind under lock - may be unlogged build is already finished
 				 */
@@ -1637,9 +1637,9 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 #endif
 			}
-			if (fs_locked)
+			if (is_locked)
 			{
-				fs_unlock();
+				LWLockRelease(finish_unlogged_build_lock);
 			}
 			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
 			{
@@ -1706,7 +1706,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 {
 	RelKind relkind;
 	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
-	bool fs_locked = false;
+	bool is_locked = false;
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
@@ -1722,8 +1722,8 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 				/* In case of unlogged build we need to avoid race condition at unlogged build end.
 				 * Obtain shared lock here to prevent backend completing unlogged build from performing cleanup amnd remvong files.
 				 */
-				fs_shared_lock();
-				fs_locked = true;
+				LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
+				is_locked = true;
 				/*
 				 * Recheck relkind under lock - may be unlogged build is already finished
 				 */
@@ -1734,9 +1734,9 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 				/* It exists locally. Guess it's unlogged then. */
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
 			}
-			if (fs_locked)
+			if (is_locked)
 			{
-				fs_unlock();
+				LWLockRelease(finish_unlogged_build_lock);
 			}
 			if (relkind == RELKIND_UNLOGGED || relkind == RELKIND_UNLOGGED_BUILD)
 			{
@@ -2155,9 +2155,9 @@ neon_end_unlogged_build(SMgrRelation reln)
 								MAIN_FORKNUM);
 
 		/* Obtain exclusive lock to prevent concrrent writes to the file while we performing cleanup */
-		fs_exclusive_lock();
+		LWLockAcquire(finish_unlogged_build_lock, LW_EXCLUSIVE);
 		unlogged_build_rel_entry->relkind = RELKIND_PERMANENT;
-		fs_unlock();
+		LWLockRelease(finish_unlogged_build_lock);
 
 		/* Remove local copy */
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
