@@ -23,6 +23,28 @@ if TYPE_CHECKING:
     from fixtures.pg_version import PgVersion
 
 
+class NeonSnapshot:
+    """
+    A snapshot of the Neon Branch
+    Gets the output of the API call af a snapshot creation
+    """
+
+    def __init__(self, project: NeonProject, snapshot: dict[str, Any]):
+        self.project: NeonProject = project
+        snapshot = snapshot["snapshot"]
+        self.id: str = snapshot["id"]
+        self.name: str = snapshot["name"]
+        self.created_at: datetime = datetime.fromisoformat(snapshot["created_at"])
+        self.source_branch: NeonBranch = project.branches[snapshot["source_branch_id"]]
+        project.snapshots[self.id] = self
+
+    def __str__(self) -> str:
+        return f"id: {self.id}, name: {self.name}, created_at: {self.created_at}"
+
+    def delete(self) -> None:
+        self.project.delete_snapshot(self.id)
+
+
 class NeonEndpoint:
     """
     Neon Endpoint
@@ -258,6 +280,7 @@ class NeonProject:
         # Leaf branches are the branches, which do not have children
         self.leaf_branches: dict[str, NeonBranch] = {}
         self.branches: dict[str, NeonBranch] = {}
+        self.branch_num: int = 0
         self.reset_branches: set[str] = set()
         self.main_branch: NeonBranch = NeonBranch(self, proj)
         self.main_branch.connection_parameters = self.connection_parameters
@@ -271,6 +294,8 @@ class NeonProject:
         self.limits: dict[str, Any] = self.get_limits()["limits"]
         self.read_only_endpoints_total: int = 0
         self.min_time: datetime = datetime.now(UTC)
+        self.snapshots: dict[str, NeonSnapshot] = {}
+        self.snapshot_num: int = 0
 
     def get_limits(self) -> dict[str, Any]:
         return self.neon_api.get_project_limits(self.id)
@@ -351,6 +376,18 @@ class NeonProject:
             log.info("No leaf branches found")
         return target
 
+    def generate_branch_name(self) -> str:
+        self.branch_num += 1
+        return f"branch_{self.branch_num}"
+
+    def get_random_snapshot(self) -> NeonSnapshot | None:
+        snapshot: NeonSnapshot | None = None
+        if self.snapshots:
+            snapshot = random.choice(list(self.snapshots.values()))
+        else:
+            log.info("No snapshots found")
+        return snapshot
+
     def delete_endpoint(self, endpoint_id: str) -> None:
         self.terminate_benchmark(endpoint_id)
         self.neon_api.delete_endpoint(self.id, endpoint_id)
@@ -427,6 +464,42 @@ class NeonProject:
         self.restore_num += 1
         return f"restore{self.restore_num}"
 
+    def gen_snapshot_name(self) -> str:
+        self.snapshot_num += 1
+        return f"snapshot{self.snapshot_num}"
+
+    def create_snapshot(
+        self,
+        lsn: str | None = None,
+        timestamp: datetime | None = None,
+    ) -> NeonSnapshot:
+        return NeonSnapshot(
+            self,
+            self.neon_api.create_snapshot(
+                self.id,
+                self.main_branch.id,
+                lsn,
+                timestamp.isoformat().replace("+00:00", "Z") if timestamp else None,
+                self.gen_snapshot_name(),
+            ),
+        )
+
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        self.neon_api.delete_snapshot(self.id, snapshot_id)
+        self.snapshots.pop(snapshot_id)
+
+    def restore_snapshot(self, snapshot_id: str) -> NeonBranch | None:
+        target_branch = self.create_branch()
+        if not target_branch:
+            return None
+        self.neon_api.restore_snapshot(
+            self.id,
+            snapshot_id,
+            self.generate_branch_name(),
+            target_branch.id,
+        )
+        return target_branch
+
 
 @pytest.fixture()
 def setup_class(
@@ -497,6 +570,23 @@ def do_action(project: NeonProject, action: str) -> bool:
             return False
         log.info("Reset to parent %s", target)
         target.reset_to_parent()
+    elif action == "create_snapshot":
+        snapshot = project.create_snapshot()
+        if snapshot is None:
+            return False
+        log.info("Created snapshot %s", snapshot)
+    elif action == "restore_snapshot":
+        if (snapshot_to_restore := project.get_random_snapshot()) is None:
+            return False
+        log.info("Restoring snapshot %s", snapshot_to_restore)
+        if project.restore_snapshot(snapshot_to_restore.id) is None:
+            return False
+    elif action == "delete_snapshot":
+        snapshot_to_delete = project.get_random_snapshot()
+        if snapshot_to_delete is None:
+            return False
+        snapshot_to_delete.delete()
+        log.info("Deleted snapshot %s", snapshot_to_delete)
     else:
         raise ValueError(f"The action {action} is unknown")
     return True
@@ -530,6 +620,9 @@ def test_api_random(
         ("delete_branch", 1.2),
         ("restore_random_time", 0.9),
         ("reset_to_parent", 0.3),
+        ("create_snapshot", 0.15),
+        ("restore_snapshot", 0.1),
+        ("delete_snapshot", 0.1),
     )
     if num_ops_env := os.getenv("NUM_OPERATIONS"):
         num_operations = int(num_ops_env)
