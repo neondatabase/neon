@@ -4,10 +4,23 @@
 //! These are called from the communicator threads! Careful what you do, most Postgres functions are
 //! not safe to call in that context.
 
+#[cfg(not(test))]
 unsafe extern "C" {
     pub fn callback_set_my_latch_unsafe();
-
     pub fn callback_get_lfc_metrics_unsafe() -> LfcMetrics;
+}
+
+// Compile unit tests with dummy versions of the functions. Unit tests
+// cannot call back into the C code. (As of this writing, no unit tests
+// even exists in the communicator package, but the code coverage build
+// still builds these and tries to link with the external C code.)
+#[cfg(test)]
+unsafe fn callback_set_my_latch_unsafe() {
+    panic!("not usable in unit tests");
+}
+#[cfg(test)]
+unsafe fn callback_get_lfc_metrics_unsafe() -> LfcMetrics {
+    panic!("not usable in unit tests");
 }
 
 // safe wrappers
