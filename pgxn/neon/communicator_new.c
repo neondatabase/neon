@@ -1021,28 +1021,28 @@ communicator_new_read_slru_segment(
 	}
 
 	// Scoping should help deallocate the absolute path buffer.
-	{
-		char abs_path[PATH_MAX];
+	char *abs_path = bounce_buf();
 
-		if (path[0] != '/') {
-			char cwd[PATH_MAX];
-			getcwd(cwd, sizeof(cwd));
+	if (path[0] != '/') {
+		char cwd[PATH_MAX];
+		getcwd(cwd, sizeof(cwd));
 
-			const int size = snprintf(NULL, 0, "%s/%s", cwd, path);
-			if (size < 0 || size >= PATH_MAX) {
-				elog(ERROR, "read_slru_segment failed to create an absolute path for \"%s\"", path);
-				return -1;
-			}
+		const int size = snprintf(NULL, 0, "%s/%s", cwd, path);
 
-			snprintf(abs_path, size + 1, "%s/%s", cwd, path);
-		} else {
-			strncpy(abs_path, path, sizeof(abs_path));
+		if (size < 0 || size >= PATH_MAX) {
+			elog(ERROR, "read_slru_segment failed to create an absolute path for \"%s\"", path);
+			return -1;
 		}
-		strncpy(request.read_slru_segment.destination_file_path, abs_path, sizeof(request.read_slru_segment.destination_file_path));
+
+		snprintf(abs_path, size + 1, "%s/%s", cwd, path);
+	} else {
+		strncpy(abs_path, path, sizeof(abs_path));
 	}
 
+	request.read_slru_segment.destination_file_path.ptr = abs_path;
+
 	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u, file_path=\"%s\"",
-		kind, segno, request.read_slru_segment.destination_file_path);
+		kind, segno, request.read_slru_segment.destination_file_path.ptr);
 
 	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
 	XLogSetAsyncXactLSN(request_lsns->request_lsn);

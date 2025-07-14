@@ -190,13 +190,13 @@ pub struct CReadSlruSegmentRequest {
     pub request_lsn: CLsn,
     /// Must be a null-terminated C string containing **absolute**
     /// file path.
-    pub destination_file_path: [std::ffi::c_char; libc::PATH_MAX as usize],
+    pub destination_file_path: ShmemBuf,
 }
 
 impl CReadSlruSegmentRequest {
     /// Returns the path to the file where the segment is read into.
     pub(crate) fn destination_file_path(&self) -> String {
-        unsafe { CStr::from_ptr(self.destination_file_path.as_ptr()) }
+        unsafe { CStr::from_ptr(self.destination_file_path.as_mut_ptr() as *const _) }
             .to_string_lossy()
             .into_owned()
     }
