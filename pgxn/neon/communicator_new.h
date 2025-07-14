@@ -42,7 +42,7 @@ extern int communicator_new_read_slru_segment(
 	SlruKind kind,
 	uint32_t segno,
 	neon_request_lsns *request_lsns,
-	void *buffer
+	char *path
 );
 
 /* Write requests, to keep the caches up-to-date */

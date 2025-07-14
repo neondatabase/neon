@@ -24,7 +24,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::callbacks::{get_request_lsn, notify_proc};
 
-use tracing::{error, info, info_span, trace};
+use tracing::{debug, error, info, info_span, trace};
 
 use utils::lsn::Lsn;
 
@@ -107,9 +107,8 @@ pub(super) async fn init(
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
 
-    info!("Initialised integrated cache: {cache:?}");
+    debug!("Initialised integrated cache: {cache:?}");
 
-    // TODO: plumb through the stripe size.
     let tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
     let timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
     let shard_spec = ShardSpec::new(shard_map, stripe_size).expect("invalid shard spec");
@@ -428,6 +427,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             NeonIORequest::ReadSlruSegment(req) => {
                 self.request_read_slru_segment_counter.inc();
                 let lsn = Lsn(req.request_lsn);
+                let file_path = req.destination_file_path();
 
                 match self
                     .client
@@ -439,15 +439,12 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     .await
                 {
                     Ok(slru_bytes) => {
-                        let src: &[u8] = &slru_bytes.as_ref();
-                        let dest = req.dest;
-                        let len = std::cmp::min(src.len(), dest.bytes_total());
+                        if let Err(e) = std::fs::write(&file_path, &slru_bytes) {
+                            info!("could not write slru segment to file {file_path}: {e}");
+                            return NeonIOResult::Error(e.raw_os_error().unwrap_or(libc::EIO));
+                        }
 
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
-                        };
-
-                        let blocks_count = len / crate::BLCKSZ;
+                        let blocks_count = slru_bytes.len() / crate::BLCKSZ;
 
                         NeonIOResult::ReadSlruSegment(blocks_count as _)
                     }

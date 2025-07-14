@@ -4,6 +4,8 @@ pub type COid = u32;
 // This conveniently matches PG_IOV_MAX
 pub const MAX_GETPAGEV_PAGES: usize = 32;
 
+use std::ffi::CStr;
+
 use pageserver_page_api::{self as page_api, SlruKind};
 
 #[allow(clippy::large_enum_variant)]
@@ -186,9 +188,18 @@ pub struct CReadSlruSegmentRequest {
     pub slru_kind: SlruKind,
     pub segment_number: u32,
     pub request_lsn: CLsn,
+    /// Must be a null-terminated C string containing **absolute**
+    /// file path.
+    pub destination_file_path: [std::ffi::c_char; libc::PATH_MAX as usize],
+}
 
-    // These fields define where the result is written. Must point into a buffer in shared memory!
-    pub dest: ShmemBuf,
+impl CReadSlruSegmentRequest {
+    /// Returns the path to the file where the segment is read into.
+    pub(crate) fn destination_file_path(&self) -> String {
+        unsafe { CStr::from_ptr(self.destination_file_path.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 #[repr(C)]

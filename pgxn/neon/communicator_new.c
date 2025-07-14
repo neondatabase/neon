@@ -13,6 +13,7 @@
  */
 #include "postgres.h"
 
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "access/xlog.h"
@@ -1001,7 +1002,7 @@ communicator_new_read_slru_segment(
 	SlruKind kind,
 	uint32_t segno,
 	neon_request_lsns *request_lsns,
-	void *buffer)
+	char* path)
 {
 	NeonIOResult result = {};
 	NeonIORequest request = {
@@ -1011,22 +1012,50 @@ communicator_new_read_slru_segment(
 			.slru_kind = kind,
 			.segment_number = segno,
 			.request_lsn = request_lsns->request_lsn,
-			.dest.ptr = bounce_buf(),
 		}
 	};
 
-	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u", kind, segno);
+	if (path == NULL) {
+		elog(ERROR, "read_slru_segment called with NULL path");
+		return -1;
+	}
+
+	// Scoping should help deallocate the absolute path buffer.
+	{
+		char abs_path[PATH_MAX];
+
+		if (path[0] != '/') {
+			char cwd[PATH_MAX];
+			getcwd(cwd, sizeof(cwd));
+
+			const int size = snprintf(NULL, 0, "%s/%s", cwd, path);
+			if (size < 0 || size >= PATH_MAX) {
+				elog(ERROR, "read_slru_segment failed to create an absolute path for \"%s\"", path);
+				return -1;
+			}
+
+			snprintf(abs_path, size + 1, "%s/%s", cwd, path);
+		} else {
+			strncpy(abs_path, path, sizeof(abs_path));
+		}
+		strncpy(request.read_slru_segment.destination_file_path, abs_path, sizeof(request.read_slru_segment.destination_file_path));
+	}
+
+	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u, file_path=\"%s\"",
+		kind, segno, request.read_slru_segment.destination_file_path);
 
 	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
 	XLogSetAsyncXactLSN(request_lsns->request_lsn);
 
 	perform_request(&request, &result);
 
+	int nblocks = -1;
+
 	switch (result.tag)
 	{
 		case NeonIOResult_ReadSlruSegment:
-			memcpy(buffer, request.read_slru_segment.dest.ptr, 8192);
-			return result.read_slru_segment;
+			nblocks = result.read_slru_segment;
+			break;
 		case NeonIOResult_Error:
 			ereport(ERROR,
 					(errcode_for_file_access(),
@@ -1038,7 +1067,7 @@ communicator_new_read_slru_segment(
 			break;
 	}
 
-	return 0;
+	return nblocks;
 }
 
 /* Write requests */
@@ -1341,6 +1370,18 @@ print_neon_io_request(NeonIORequest *request)
 				snprintf(buf, sizeof(buf), "GetPageV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
 								r->request_id,
 								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+				return buf;
+			}
+		case NeonIORequest_ReadSlruSegment:
+			{
+				CReadSlruSegmentRequest *r = &request->read_slru_segment;
+
+				snprintf(buf, sizeof(buf), "ReadSlruSegment: req " UINT64_FORMAT " slrukind=%u, segno=%u, lsn=%X/%X, file_path=\"%s\"",
+								r->request_id,
+								r->slru_kind,
+								r->segment_number,
+								LSN_FORMAT_ARGS(r->request_lsn),
+								r->destination_file_path);
 				return buf;
 			}
 		case NeonIORequest_PrefetchV:
