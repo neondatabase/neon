@@ -354,26 +354,40 @@ where
         map.clear();
 	}
 	
-    pub fn rehash(
+    fn begin_rehash(
 		&self,
 		shards: &mut Vec<RwLockWriteGuard<'_, DictShard<'_, K>>>,
 		rehash_buckets: usize
-	) {
+	) -> bool {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 		assert!(rehash_buckets <= map.get_num_buckets(), "rehashing subset of buckets");
+
+		if map.rehash_index.load(Ordering::Relaxed) >= map.rehash_end.load(Ordering::Relaxed) {
+			return false;
+		}
+		
 		shards.iter_mut().for_each(|x| x.keys.iter_mut().for_each(|key| {
-			if let EntryType::Occupied = key.tag {
-				key.tag = EntryType::Rehash;
+			match key.tag {
+				EntryType::Occupied => key.tag = EntryType::Rehash,
+				EntryType::Tombstone => key.tag = EntryType::RehashTombstone,
+				_ => (),
 			}
 		}));
-		
-		todo!("solution with no memory allocation: split out metadata?")
+
+		map.rehash_index.store(0, Ordering::Relaxed);
+		map.rehash_end.store(rehash_buckets, Ordering::Relaxed);
+		true
     }
+
+	pub fn finish_rehash(&self) {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		while map.do_rehash() {}
+	}
 
 	pub fn shuffle(&self) {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 		let mut shards: Vec<_> = map.dict_shards.iter().map(|x| x.write()).collect();
-		self.rehash(&mut shards, map.get_num_buckets());
+		self.begin_rehash(&mut shards, map.get_num_buckets());
     }
 	
 	fn reshard(&self, shards: &mut Vec<RwLockWriteGuard<'_, DictShard<'_, K>>>, num_buckets: usize) {
@@ -451,10 +465,10 @@ where
         }
 
 		self.reshard(&mut shards, num_buckets);
-        self.rehash(&mut shards, old_num_buckets);
         map.bucket_arr.free_head.store(
 			BucketIdx::new(old_num_buckets), Ordering::Relaxed
 		);
+        self.begin_rehash(&mut shards, old_num_buckets);
         Ok(())
     }
 
@@ -500,30 +514,12 @@ where
             "called finish_shrink before enough entries were removed"
         );
 
-		// let shard_size = shards[0].len();
-        // for i in (num_buckets as usize)..map.buckets.len() {
-		// 	let shard_start = num_buckets / shard_size;
-		// 	let shard = shards[shard_start];
-		// 	let entry_start = num_buckets % shard_size;
-		// 	for entry_idx in entry_start..shard.len() {
-				
-		// 	}
-			
-		// 	if let EntryKey::Occupied(v) = map.[i].inner.take() {
-        //         // alloc_bucket increases count, so need to decrease since we're just moving
-        //         map.buckets_in_use.fetch_sub(1, Ordering::Relaxed);
-        //         map.alloc_bucket(k, v).unwrap();
-        //     }
-        // }
-
-		todo!("dry way to handle reinsertion");
-
 		self.resize_shmem(num_buckets)?;
 
 		self.reshard(&mut shards, num_buckets);
 		
-        self.rehash(&mut shards, num_buckets);
         map.bucket_arr.alloc_limit.store(BucketIdx::INVALID, Ordering::Relaxed);
+        self.begin_rehash(&mut shards, num_buckets);
 
         Ok(())
     }

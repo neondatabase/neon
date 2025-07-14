@@ -7,6 +7,8 @@ use atomic::Atomic;
 #[repr(transparent)]
 pub(crate) struct BucketIdx(pub(super) u32);
 
+const _: () = assert!(Atomic::<BucketIdx>::is_lock_free());
+
 impl BucketIdx {
 	const MARK_TAG: u32 = 0x80000000;
 	pub const INVALID: Self = Self(0x7FFFFFFF);
@@ -104,8 +106,7 @@ pub(crate) struct BucketArray<'a, V> {
 }
 
 impl<'a, V> BucketArray<'a, V> {
-	pub fn new(buckets: &'a mut [Bucket<V>]) -> Self {
-		debug_assert!(Atomic::<BucketIdx>::is_lock_free());
+	pub fn new(buckets: &'a mut [Bucket<V>]) -> Self {		
 		Self {
 			buckets,
 			free_head: Atomic::new(BucketIdx(0)),
