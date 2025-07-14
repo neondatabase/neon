@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import time
+from logging import debug
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.utils import USE_LFC, query_scalar
 
 if TYPE_CHECKING:
@@ -75,10 +77,22 @@ WITH (fillfactor='100');
     cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid = 104242")
     cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid = 204242")
     # verify working set size after some index access of a few select pages only
-    blocks = query_scalar(cur, "select approximate_working_set_size(true)")
+    blocks = query_scalar(cur, "select approximate_working_set_size(false)")
     log.info(f"working set size after some index access of a few select pages only {blocks}")
     assert blocks < 20
 
+    # Also test the metrics from the /autoscaling_metrics endpoint
+    autoscaling_metrics = endpoint.http_client().autoscaling_metrics()
+    log.debug(f"Raw metrics: {autoscaling_metrics}")
+    m = parse_metrics(autoscaling_metrics)
+
+    http_estimate = m.query_one("lfc_approximate_working_set_size_windows",
+                                {
+                                    "duration_seconds": "60",
+                                },
+    ).value
+    log.info(f"http estimate: {http_estimate}, blocks: {blocks}")
+    assert http_estimate > 0 and http_estimate < 20
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):

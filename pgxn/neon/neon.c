@@ -30,6 +30,7 @@
 #include "utils/guc_tables.h"
 
 #include "communicator.h"
+#include "communicator_process.h"
 #include "extension_server.h"
 #include "file_cache.h"
 #include "neon.h"
@@ -455,13 +456,12 @@ _PG_init(void)
 	shmem_startup_hook = neon_shmem_startup_hook;
 #endif
 
-	/* dummy call to a Rust function in the communicator library, to check that it works */
-	(void) communicator_dummy(123);
-
 	pg_init_libpagestore();
 	lfc_init();
 	pg_init_walproposer();
 	init_lwlsncache();
+
+	register_communicator_bgworker();
 
 	pg_init_communicator();
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;

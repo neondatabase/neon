@@ -24,6 +24,7 @@ pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
 pub mod pgbouncer;
+pub mod postgres_metrics_client;
 pub mod rsyslog;
 pub mod spec;
 mod spec_apply;
