@@ -111,7 +111,8 @@ def test_rest_broker_happy(
 
     # Test REST API call - following SUBZERO.md pattern
     # REST API is served on the WSS port with HTTPS and includes database name
-    url = f"https://foo.local.neon.build:{rest_broker_proxy.wss_port}/postgres/rest/v1/items"
+    # ep-purple-glitter-adqior4l-pooler.c-2.us-east-1.aws.neon.tech
+    url = f"https://foo.apirest.c-2.local.neon.build:{rest_broker_proxy.wss_port}/postgres/rest/v1/items"
 
     response = requests.get(
         url,

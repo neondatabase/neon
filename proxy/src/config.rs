@@ -89,6 +89,7 @@ pub struct RestConfig {
     pub is_rest_broker: bool,
     pub db_schema_cache: Option<DbSchemaCache>,
     pub max_schema_size: usize,
+    pub hostname_prefix: String,
 }
 
 #[derive(Debug)]

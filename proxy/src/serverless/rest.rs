@@ -670,7 +670,11 @@ async fn handle_inner(
 
     // we always use the authenticator role to connect to the database
     let authenticator_role = "authenticator";
-    let connection_string = format!("postgresql://{authenticator_role}@{host}/{database_name}");
+
+    // Strip the hostname prefix from the host to get the database hostname
+    let database_host = host.replace(&config.rest_config.hostname_prefix, "");
+
+    let connection_string = format!("postgresql://{authenticator_role}@{database_host}/{database_name}");
 
     let conn_info = get_conn_info(
         &config.authentication_config,

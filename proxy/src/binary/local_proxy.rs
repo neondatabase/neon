@@ -283,6 +283,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             is_rest_broker: false,
             db_schema_cache: None,
             max_schema_size: 0,
+            hostname_prefix: String::new(),
         },
         proxy_protocol_v2: config::ProxyProtocolV2::Rejected,
         handshake_timeout: Duration::from_secs(10),

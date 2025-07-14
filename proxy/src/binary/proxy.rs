@@ -262,6 +262,11 @@ struct ProxyCliArgs {
     #[clap(long, default_value_t = 5 * 1024 * 1024)] // 5MB
     #[cfg(feature = "rest_broker")]
     max_schema_size: usize,
+
+    /// Hostname prefix to strip from request hostname to get database hostname
+    #[clap(long, default_value = "apirest.")]
+    #[cfg(feature = "rest_broker")]
+    hostname_prefix: String,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -721,6 +726,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             is_rest_broker: args.is_rest_broker,
             db_schema_cache,
             max_schema_size: args.max_schema_size,
+            hostname_prefix: args.hostname_prefix.clone(),
         }
     };
 
