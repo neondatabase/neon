@@ -13,19 +13,19 @@ impl ComputeNode {
     /// Called by control plane on secondary after primary endpoint is terminated
     pub async fn promote(self: &Arc<Self>, cfg: PromoteConfig) -> PromoteState {
         let cloned = self.clone();
+        let promote_fn = async move || {
+            let Err(err) = cloned.promote_impl(cfg).await else {
+                return PromoteState::Completed;
+            };
+            tracing::error!(%err, "promoting");
+            PromoteState::Failed {
+                error: err.to_string(),
+            }
+        };
+
         let start_promotion = || {
             let (tx, rx) = tokio::sync::watch::channel(PromoteState::NotPromoted);
-            tokio::spawn(async move {
-                tx.send(match cloned.promote_impl(cfg).await {
-                    Ok(_) => PromoteState::Completed,
-                    Err(err) => {
-                        tracing::error!(%err, "promoting");
-                        PromoteState::Failed {
-                            error: err.to_string(),
-                        }
-                    }
-                })
-            });
+            tokio::spawn(async move { tx.send(promote_fn().await) });
             rx
         };
 
@@ -45,7 +45,7 @@ impl ComputeNode {
         task.borrow().clone()
     }
 
-    async fn promote_impl(&self, cfg: PromoteConfig) -> Result<()> {
+    async fn promote_impl(&self, mut cfg: PromoteConfig) -> Result<()> {
         {
             let state = self.state.lock().unwrap();
             let mode = &state.pspec.as_ref().unwrap().spec.mode;
@@ -123,7 +123,14 @@ impl ComputeNode {
 
         {
             let mut state = self.state.lock().unwrap();
-            state.pspec.as_mut().unwrap().spec = cfg.compute_spec;
+            let spec_old = &mut state.pspec.as_mut().unwrap().spec;
+            // TODO(myrrc) Applying primary's postgresql_conf causes promoted endpoint to freeze
+            // E.g. listen_addresses / port are different
+            std::mem::swap(
+                &mut spec_old.cluster.postgresql_conf,
+                &mut cfg.compute_spec.cluster.postgresql_conf,
+            );
+            *spec_old = cfg.compute_spec;
         }
         tracing::info!("applied new spec, reconfiguring as primary");
         self.reconfigure()
