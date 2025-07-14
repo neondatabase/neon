@@ -32,4 +32,3 @@ docker-compose/docker-compose-parallel.yml
 
 # Node
 **/node_modules/
-**/package-lock.json
