@@ -39,6 +39,7 @@ use layer_manager::{
     LayerManagerLockHolder, LayerManagerReadGuard, LayerManagerWriteGuard, LockedLayerManager,
     Shutdown,
 };
+use neon_failpoint as fail;
 
 use once_cell::sync::Lazy;
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
@@ -5173,7 +5174,9 @@ impl Timeline {
             *self.applied_gc_cutoff_lsn.read(),
         );
 
-        fail_point!("checkpoint-before-saving-metadata", |x| bail!(
+        neon_failpoint::fail_point_sync!("checkpoint-before-saving-metadata", |x: Option<
+            String,
+        >| bail!(
             "{}",
             x.unwrap()
         ));

@@ -6,6 +6,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use super::{NewMetricsRoot, NewRawMetric, RawMetric};
 use crate::consumption_metrics::NewMetricsRefRoot;
 
+use neon_failpoint as fail;
+
 pub(super) fn read_metrics_from_serde_value(
     json_value: serde_json::Value,
 ) -> anyhow::Result<Vec<NewRawMetric>> {
@@ -129,7 +131,7 @@ pub(super) async fn flush_metrics_to_disk(
             tempfile.flush()?;
             tempfile.as_file().sync_all()?;
 
-            fail::fail_point!("before-persist-last-metrics-collected");
+            fail::fail_point_sync!("before-persist-last-metrics-collected");
 
             drop(tempfile.persist(&*path).map_err(|e| e.error)?);
 

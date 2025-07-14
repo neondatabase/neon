@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
+use neon_failpoint as fail;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{
     DownloadError, DownloadKind, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,

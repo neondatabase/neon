@@ -12,6 +12,7 @@ use anyhow::Context;
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
+use neon_failpoint as fail;
 use pageserver_api::key::Key;
 use pageserver_api::models::{DetachBehavior, LocationConfigMode};
 use pageserver_api::shard::{

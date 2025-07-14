@@ -1,0 +1,27 @@
+[package]
+name = "neon_failpoint"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+anyhow = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+either = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+[features]
+default = []
+testing = []
+
+[[example]]
+name = "context_demo"
+required-features = ["testing"]

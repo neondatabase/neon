@@ -657,7 +657,7 @@ pub async fn delete_timeline(
 
     pausable_failpoint!("sk-delete-timeline-remote-pause");
 
-    fail::fail_point!("sk-delete-timeline-remote", |_| {
+    neon_failpoint::fail_point!("sk-delete-timeline-remote", |_| {
         Err(anyhow::anyhow!("failpoint: sk-delete-timeline-remote"))
     });
 

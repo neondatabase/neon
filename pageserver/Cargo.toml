@@ -8,7 +8,7 @@ license.workspace = true
 default = []
 # Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
 # which adds some runtime cost to run tests on outage conditions
-testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing", "pageserver_client/testing"]
+testing = ["neon_failpoint/testing", "pageserver_api/testing", "wal_decoder/testing", "pageserver_client/testing"]
 
 fuzz-read-path = ["testing"]
 
@@ -33,7 +33,7 @@ crc32c.workspace = true
 either.workspace = true
 enum-map.workspace = true
 enumset = { workspace = true, features = ["serde"]}
-fail.workspace = true
+neon_failpoint.workspace = true
 futures.workspace = true
 hashlink.workspace = true
 hex.workspace = true

@@ -1,59 +1,22 @@
 //! Failpoint support code shared between pageserver and safekeepers.
+//!
+//! This module provides a compatibility layer over the new neon_failpoint crate.
 
+pub use neon_failpoint::{configure_failpoint as apply_failpoint, has_failpoints, init};
 use tokio_util::sync::CancellationToken;
 
-/// Declare a failpoint that can use to `pause` failpoint action.
-/// We don't want to block the executor thread, hence, spawn_blocking + await.
-///
-/// Optionally pass a cancellation token, and this failpoint will drop out of
-/// its pause when the cancellation token fires. This is useful for testing
-/// cases where we would like to block something, but test its clean shutdown behavior.
-/// The macro evaluates to a Result in that case, where Ok(()) is the case
-/// where the failpoint was not paused, and Err() is the case where cancellation
-/// token fired while evaluating the failpoint.
-///
-/// Remember to unpause the failpoint in the test; until that happens, one of the
-/// limited number of spawn_blocking thread pool threads is leaked.
+/// Mere forward to neon_failpoint::pausable_failpoint
 #[macro_export]
 macro_rules! pausable_failpoint {
-    ($name:literal) => {{
-        if cfg!(feature = "testing") {
-            let cancel = ::tokio_util::sync::CancellationToken::new();
-            let _ = $crate::pausable_failpoint!($name, &cancel);
-        }
-    }};
-    ($name:literal, $cancel:expr) => {{
-        if cfg!(feature = "testing") {
-            let failpoint_fut = ::tokio::task::spawn_blocking({
-                let current = ::tracing::Span::current();
-                move || {
-                    let _entered = current.entered();
-                    ::tracing::info!("at failpoint {}", $name);
-                    ::fail::fail_point!($name);
-                }
-            });
-            let cancel_fut = async move {
-                $cancel.cancelled().await;
-            };
-            ::tokio::select! {
-                res = failpoint_fut => {
-                    res.expect("spawn_blocking");
-                    // continue with execution
-                    Ok(())
-                },
-                _ = cancel_fut => {
-                    Err(())
-                }
-            }
-        } else {
-            Ok(())
-        }
-    }};
+    ($name:literal) => {
+        ::neon_failpoint::pausable_failpoint!($name)
+    };
+    ($name:literal, $cancel:expr) => {
+        ::neon_failpoint::pausable_failpoint!($name, $cancel)
+    };
 }
 
-pub use pausable_failpoint;
-
-/// use with fail::cfg("$name", "return(2000)")
+/// DEPRECATED! - use with fail::cfg("$name", "return(2000)")
 ///
 /// The effect is similar to a "sleep(2000)" action, i.e. we sleep for the
 /// specified time (in milliseconds). The main difference is that we use async
@@ -69,7 +32,7 @@ macro_rules! __failpoint_sleep_millis_async {
         // If the failpoint is used with a "return" action, set should_sleep to the
         // returned value (as string). Otherwise it's set to None.
         let should_sleep = (|| {
-            ::fail::fail_point!($name, |x| x);
+            ::neon_failpoint::fail_point_sync!($name, |x| x);
             ::std::option::Option::None
         })();
 
@@ -82,7 +45,7 @@ macro_rules! __failpoint_sleep_millis_async {
         // If the failpoint is used with a "return" action, set should_sleep to the
         // returned value (as string). Otherwise it's set to None.
         let should_sleep = (|| {
-            ::fail::fail_point!($name, |x| x);
+            ::neon_failpoint::fail_point_sync!($name, |x| x);
             ::std::option::Option::None
         })();
 
@@ -125,61 +88,4 @@ pub async fn failpoint_sleep_cancellable_helper(
     tracing::info!("failpoint {:?}: sleeping for {:?}", name, d);
     tokio::time::timeout(d, cancel.cancelled()).await.ok();
     tracing::info!("failpoint {:?}: sleep done", name);
-}
-
-/// Initialize the configured failpoints
-///
-/// You must call this function before any concurrent threads do operations.
-pub fn init() -> fail::FailScenario<'static> {
-    // The failpoints lib provides support for parsing the `FAILPOINTS` env var.
-    // We want non-default behavior for `exit`, though, so, we handle it separately.
-    //
-    // Format for FAILPOINTS is "name=actions" separated by ";".
-    let actions = std::env::var("FAILPOINTS");
-    if actions.is_ok() {
-        // SAFETY: this function should before any threads start and access env vars concurrently
-        unsafe {
-            std::env::remove_var("FAILPOINTS");
-        }
-    } else {
-        // let the library handle non-utf8, or nothing for not present
-    }
-
-    let scenario = fail::FailScenario::setup();
-
-    if let Ok(val) = actions {
-        val.split(';')
-            .enumerate()
-            .map(|(i, s)| s.split_once('=').ok_or((i, s)))
-            .for_each(|res| {
-                let (name, actions) = match res {
-                    Ok(t) => t,
-                    Err((i, s)) => {
-                        panic!(
-                            "startup failpoints: missing action on the {}th failpoint; try `{s}=return`",
-                            i + 1,
-                        );
-                    }
-                };
-                if let Err(e) = apply_failpoint(name, actions) {
-                    panic!("startup failpoints: failed to apply failpoint {name}={actions}: {e}");
-                }
-            });
-    }
-
-    scenario
-}
-
-pub fn apply_failpoint(name: &str, actions: &str) -> Result<(), String> {
-    if actions == "exit" {
-        fail::cfg_callback(name, exit_failpoint)
-    } else {
-        fail::cfg(name, actions)
-    }
-}
-
-#[inline(never)]
-fn exit_failpoint() {
-    tracing::info!("Exit requested by failpoint");
-    std::process::exit(1);
 }
