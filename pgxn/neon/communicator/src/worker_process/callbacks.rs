@@ -30,6 +30,6 @@ pub struct LfcMetrics {
     // index 59 is size of working set accessed within last 60 minutes.
     pub lfc_approximate_working_set_size_windows: [i64; 60],
 }
-pub extern "C" fn callback_get_lfc_metrics() -> LfcMetrics {
+pub fn callback_get_lfc_metrics() -> LfcMetrics {
     unsafe { callback_get_lfc_metrics_unsafe() }
 }
