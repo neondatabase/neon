@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import requests
-import requests_unixsocket
+import requests_unixsocket  # type: ignore [import-untyped]
 from fixtures.metrics import parse_metrics
 
 if TYPE_CHECKING:
@@ -23,8 +23,10 @@ def test_communicator_metrics(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create("main")
     endpoint.start()
 
-    os.chdir(endpoint.pgdata_dir)
-
+    # Change current directory to the data directory, so that we can use
+    # a short relative path to refer to the socket. (There's a 100 char
+    # limitation on the path.)
+    os.chdir(str(endpoint.pgdata_dir))
     session = requests_unixsocket.Session()
     r = session.get(f"http+unix://{NEON_COMMUNICATOR_SOCKET_NAME}/metrics")
     assert r.status_code == 200
