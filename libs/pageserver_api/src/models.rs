@@ -1619,7 +1619,8 @@ pub struct TimelineInfo {
     pub is_archived: Option<bool>,
 
     /// The status of the rel_size migration.
-    pub rel_size_migration: Option<(RelSizeMigration, Option<Lsn>)>,
+    pub rel_size_migration: Option<RelSizeMigration>,
+    pub rel_size_migrated_at: Option<Lsn>,
 
     /// Whether the timeline is invisible in synthetic size calculations.
     pub is_invisible: Option<bool>,

@@ -480,6 +480,8 @@ async fn build_timeline_info_common(
         *timeline.get_applied_gc_cutoff_lsn(),
     );
 
+    let (rel_size_migration, rel_size_migrated_at) = timeline.get_rel_size_v2_status();
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,
         timeline_id: timeline.timeline_id,
@@ -511,7 +513,8 @@ async fn build_timeline_info_common(
 
         state,
         is_archived: Some(is_archived),
-        rel_size_migration: Some(timeline.get_rel_size_v2_status()),
+        rel_size_migration: Some(rel_size_migration),
+        rel_size_migrated_at,
         is_invisible: Some(is_invisible),
 
         walreceiver_status,
