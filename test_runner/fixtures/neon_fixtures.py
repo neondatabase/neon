@@ -4324,6 +4324,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
     ) -> Self:
         """
         Create a new Postgres endpoint.
@@ -4351,6 +4352,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             update_catalog=update_catalog,
+            privileged_role_name=privileged_role_name,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = self.env.repo_dir / path
@@ -4800,6 +4802,7 @@ class EndpointFactory:
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4823,6 +4826,7 @@ class EndpointFactory:
             config_lines=config_lines,
             pageserver_id=pageserver_id,
             update_catalog=update_catalog,
+            privileged_role_name=privileged_role_name,
         )
 
     def stop_all(self, fail_on_error=True) -> Self:
