@@ -118,8 +118,6 @@ class NeonBranch:
         )
         self.benchmark: subprocess.Popen[Any] | None = None
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
-        # XXX for debug only, remove before merge
-        log.info("%s", branch["branch"])
         self.parent_timestamp: datetime = (
             datetime.fromisoformat(branch["branch"]["parent_timestamp"])
             if "parent_timestamp" in branch["branch"]
@@ -362,7 +360,7 @@ class NeonProject:
 
     def generate_branch_name(self) -> str:
         self.branch_num += 1
-        return f"branch_{self.branch_num}"
+        return f"branch{self.branch_num}"
 
     def get_random_snapshot(self) -> NeonSnapshot | None:
         snapshot: NeonSnapshot | None = None
