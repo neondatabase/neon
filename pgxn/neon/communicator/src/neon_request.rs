@@ -6,6 +6,7 @@ pub const MAX_GETPAGEV_PAGES: usize = 32;
 
 use pageserver_page_api as page_api;
 
+/// Request from a Postgres backend to the communicator process
 #[allow(clippy::large_enum_variant)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -60,6 +61,10 @@ pub enum NeonIOResult {
 }
 
 impl NeonIORequest {
+    /// All requests include a unique request ID, which can be used to trace the execution
+    /// of a request all the way to the pageservers. The request ID needs to be unique
+    /// within the lifetime of the Postgres instance (but not across servers or across
+    /// restarts of the same server).
     pub fn request_id(&self) -> u64 {
         use NeonIORequest::*;
         match self {
@@ -80,6 +85,9 @@ impl NeonIORequest {
     }
 }
 
+/// Special quick result to a CGetPageVRequest request, indicating that the
+/// the requested pages are present in the local file cache. The backend can
+/// read the blocks directly from the given LFC blocks.
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CCachedGetPageVResult {
@@ -96,7 +104,7 @@ pub struct CCachedGetPageVResult {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct ShmemBuf {
-    // These fields define where the result is written. Must point into a buffer in shared memory!
+    // Pointer to where the result is written or where to read from. Must point into a buffer in shared memory!
     pub ptr: *mut u8,
 }
 
@@ -204,7 +212,7 @@ pub struct CWritePageRequest {
     pub block_number: u32,
     pub lsn: CLsn,
 
-    // These fields define where the result is written. Must point into a buffer in shared memory!
+    // `src` defines the new page contents. Must point into a buffer in shared memory!
     pub src: ShmemBuf,
 }
 
@@ -219,7 +227,7 @@ pub struct CRelExtendRequest {
     pub block_number: u32,
     pub lsn: CLsn,
 
-    // These fields define page contents. Must point into a buffer in shared memory!
+    // `src` defines the new page contents. Must point into a buffer in shared memory!
     pub src: ShmemBuf,
 }
 
