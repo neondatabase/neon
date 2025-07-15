@@ -25,15 +25,18 @@ macro_rules! libc_checked {
 }
 
 impl PthreadRwLock {
-	/// Creates a new `PthreadRwLock` on top of a pointer to a pthread rwlock.
-	///
-	/// # Safety
-	/// `lock` must be non-null. Every unsafe operation will panic in the event of an error. 
+    /// Creates a new `PthreadRwLock` on top of a pointer to a pthread rwlock.
+    ///
+    /// # Safety
+    /// `lock` must be non-null. Every unsafe operation will panic in the event of an error.
     pub unsafe fn new(lock: *mut libc::pthread_rwlock_t) -> Self {
         unsafe {
             let mut attrs = MaybeUninit::uninit();
-			libc_checked!(pthread_rwlockattr_init(attrs.as_mut_ptr()));
-            libc_checked!(pthread_rwlockattr_setpshared(attrs.as_mut_ptr(), libc::PTHREAD_PROCESS_SHARED));
+            libc_checked!(pthread_rwlockattr_init(attrs.as_mut_ptr()));
+            libc_checked!(pthread_rwlockattr_setpshared(
+                attrs.as_mut_ptr(),
+                libc::PTHREAD_PROCESS_SHARED
+            ));
             libc_checked!(pthread_rwlock_init(lock, attrs.as_mut_ptr()));
             // Safety: POSIX specifies that "any function affecting the attributes
             // object (including destruction) shall not affect any previously
@@ -63,7 +66,10 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
             match res {
                 0 => true,
                 libc::EAGAIN => false,
-                _ => panic!("pthread_rwlock_tryrdlock failed with {}", Errno::from_raw(res)),
+                _ => panic!(
+                    "pthread_rwlock_tryrdlock failed with {}",
+                    Errno::from_raw(res)
+                ),
             }
         }
     }
@@ -79,9 +85,9 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
         }
     }
 
-    fn lock_shared(&self) {		
+    fn lock_shared(&self) {
         unsafe {
-			libc_checked!(pthread_rwlock_rdlock(self.inner().as_ptr()));
+            libc_checked!(pthread_rwlock_rdlock(self.inner().as_ptr()));
         }
     }
 
@@ -93,13 +99,13 @@ unsafe impl lock_api::RawRwLock for PthreadRwLock {
 
     unsafe fn unlock_exclusive(&self) {
         unsafe {
-			libc_checked!(pthread_rwlock_unlock(self.inner().as_ptr()));
+            libc_checked!(pthread_rwlock_unlock(self.inner().as_ptr()));
         }
     }
-	
+
     unsafe fn unlock_shared(&self) {
         unsafe {
-			libc_checked!(pthread_rwlock_unlock(self.inner().as_ptr()));
+            libc_checked!(pthread_rwlock_unlock(self.inner().as_ptr()));
         }
     }
 }

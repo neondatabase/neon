@@ -117,7 +117,7 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
 
         let hashmap = CoreHashMap::new(buckets, dictionary);
         unsafe {
-			let lock = RwLock::from_raw(PthreadRwLock::new(raw_lock_ptr.cast()), hashmap);
+            let lock = RwLock::from_raw(PthreadRwLock::new(raw_lock_ptr.cast()), hashmap);
             std::ptr::write(shared_ptr, lock);
         }
 

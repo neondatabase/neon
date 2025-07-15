@@ -349,8 +349,7 @@ fn test_bucket_ops() {
     let pos = match writer.entry(1.into()) {
         Entry::Occupied(e) => {
             assert_eq!(e._key, 1.into());
-            let pos = e.bucket_pos as usize;
-            pos
+            e.bucket_pos as usize
         }
         Entry::Vacant(_) => {
             panic!("Insert didn't affect entry");
