@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from data.profile_pb2 import Profile  # type: ignore
 from fixtures.log_helper import log
-from fixtures.utils import run_only_on_default_postgres
+from fixtures.utils import run_only_on_default_postgres, run_only_on_linux_kernel_higher_than
 from google.protobuf.message import Message
 from requests import HTTPError
 
@@ -17,7 +17,9 @@ if TYPE_CHECKING:
     from fixtures.endpoint.http import EndpointHttpClient
     from fixtures.neon_fixtures import NeonEnv
 
-REASON = "test doesn't use postgres"
+LINUX_VERSION_REQUIRED = 6.0
+PG_REASON = "test doesn't use postgres"
+LINUX_REASON = f"test requires linux {LINUX_VERSION_REQUIRED} for ebpfs"
 
 
 def _start_profiling_cpu(
@@ -135,7 +137,8 @@ def _wait_and_assert_cpu_profiling(http_client: EndpointHttpClient, event: threa
     )
 
 
-@run_only_on_default_postgres(reason=REASON)
+@run_only_on_default_postgres(reason=PG_REASON)
+@run_only_on_linux_kernel_higher_than(version=LINUX_VERSION_REQUIRED, reason=LINUX_REASON)
 def test_compute_profiling_cpu_with_timeout(neon_simple_env: NeonEnv):
     """
     Test that CPU profiling works correctly with timeout.
@@ -185,7 +188,8 @@ def test_compute_profiling_cpu_with_timeout(neon_simple_env: NeonEnv):
     thread2.join(timeout=60)
 
 
-@run_only_on_default_postgres(reason=REASON)
+@run_only_on_default_postgres(reason=PG_REASON)
+@run_only_on_linux_kernel_higher_than(version=LINUX_VERSION_REQUIRED, reason=LINUX_REASON)
 def test_compute_profiling_cpu_with_archiving_the_response(neon_simple_env: NeonEnv):
     """
     Test that CPU profiling works correctly with archiving the data.
@@ -199,7 +203,8 @@ def test_compute_profiling_cpu_with_archiving_the_response(neon_simple_env: Neon
     )
 
 
-@run_only_on_default_postgres(reason=REASON)
+@run_only_on_default_postgres(reason=PG_REASON)
+@run_only_on_linux_kernel_higher_than(version=LINUX_VERSION_REQUIRED, reason=LINUX_REASON)
 def test_compute_profiling_cpu_start_and_stop(neon_simple_env: NeonEnv):
     """
     Test that CPU profiling can be started and stopped correctly.
@@ -225,7 +230,8 @@ def test_compute_profiling_cpu_start_and_stop(neon_simple_env: NeonEnv):
     thread.join(timeout=60)
 
 
-@run_only_on_default_postgres(reason=REASON)
+@run_only_on_default_postgres(reason=PG_REASON)
+@run_only_on_linux_kernel_higher_than(version=LINUX_VERSION_REQUIRED, reason=LINUX_REASON)
 def test_compute_profiling_cpu_conflict(neon_simple_env: NeonEnv):
     """
     Test that CPU profiling can be started once and the second time
@@ -281,7 +287,8 @@ def test_compute_profiling_cpu_conflict(neon_simple_env: NeonEnv):
     thread2.join(timeout=600)
 
 
-@run_only_on_default_postgres(reason=REASON)
+@run_only_on_default_postgres(reason=PG_REASON)
+@run_only_on_linux_kernel_higher_than(version=LINUX_VERSION_REQUIRED, reason=LINUX_REASON)
 def test_compute_profiling_cpu_stop_when_not_running(neon_simple_env: NeonEnv):
     """
     Test that CPU profiling throws the expected error when is attempted
@@ -296,7 +303,8 @@ def test_compute_profiling_cpu_stop_when_not_running(neon_simple_env: NeonEnv):
         assert status == 412
 
 
-@run_only_on_default_postgres(reason=REASON)
+@run_only_on_default_postgres(reason=PG_REASON)
+@run_only_on_linux_kernel_higher_than(version=LINUX_VERSION_REQUIRED, reason=LINUX_REASON)
 def test_compute_profiling_cpu_start_arguments_validation_works(neon_simple_env: NeonEnv):
     """
     Test that CPU profiling start request properly validated the

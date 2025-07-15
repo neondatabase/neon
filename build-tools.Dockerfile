@@ -167,32 +167,7 @@ RUN set -ex \
         xz-utils \
         zlib1g-dev \
         zstd \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-    && git clone --depth 1 --branch v${KERNEL_VERSION} https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
-    && cd linux \
-    && make mrproper \
-    && make defconfig \
-    && scripts/config --module CONFIG_IKHEADERS \
-    && scripts/config --enable CONFIG_MODULE_COMPRESS \
-    && scripts/config --disable CONFIG_MODULE_COMPRESS_GZIP \
-    && scripts/config --enable CONFIG_MODULE_COMPRESS_ZSTD \
-    && make olddefconfig \
-    && make WERROR=0 NO_WERROR=1 modules_prepare -j \
-    && make WERROR=0 NO_WERROR=1 -j 10 \
-    && make WERROR=0 NO_WERROR=1 modules -j10 \
-    && mkdir -p /lib/modules/$(uname -r)/build \
-    && mkdir -p /lib/modules/$(uname -r)/kernel/kernel \
-    && cp -a include arch/${KERNEL_ARCH}/include scripts Module.symvers .config Makefile /lib/modules/$(uname -r)/build/ \
-    && make headers_install INSTALL_HDR_PATH=/lib/modules/$(uname -r)/build \
-    && mkdir -p /lib/modules/$(uname -r)/build/arch/${KERNEL_ARCH}/include \
-    && rsync -a arch/${KERNEL_ARCH}/include /lib/modules/$(uname -r)/build/arch/${KERNEL_ARCH}/ \
-    && zstd -19 ./kernel/kheaders.ko -o ./kernel/kheaders.ko.zst \
-    && cp -a kernel/kheaders.ko.zst /lib/modules/$(uname -r)/kernel/kernel \
-    && find /lib/modules/ -iname "*rwonce.h*" \
-    && mkdir -p /virtual/include \
-    && cp -a /lib/modules/$(uname -r)/build/include /virtual/include/ \
-    && execsnoop-bpfcc \
-    && rm -rf linux
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # sql_exporter
 
