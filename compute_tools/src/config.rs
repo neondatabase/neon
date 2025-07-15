@@ -15,6 +15,8 @@ use crate::pg_helpers::{
 };
 use crate::tls::{self, SERVER_CRT, SERVER_KEY};
 
+use utils::shard::{ShardIndex, ShardNumber};
+
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
 pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
@@ -61,15 +63,26 @@ pub fn write_postgres_conf(
     if let Some(conninfo) = &spec.pageserver_connection_info {
         let mut libpq_urls: Option<Vec<String>> = Some(Vec::new());
 
-        for shardno in 0..conninfo.shards.len() {
-            let info = conninfo.shards.get(&(shardno as u32)).ok_or_else(|| {
-                anyhow::anyhow!("shard {shardno} missing from pageserver_connection_info shard map")
+        for shard_number in 0..conninfo.shard_count.0 {
+            let shard_index = ShardIndex {
+                shard_number: ShardNumber(shard_number),
+                shard_count: conninfo.shard_count,
+            };
+            let info = conninfo.shards.get(&shard_index).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "shard {shard_index} missing from pageserver_connection_info shard map"
+                )
             })?;
+
+            let first_pageserver = info
+                .pageservers
+                .first()
+                .expect("must have at least one pageserver");
 
             // Add the libpq URL to the array, or if the URL is missing, reset the array
             // forgetting any previous entries. All servers must have a libpq URL, or none
             // at all.
-            if let Some(url) = &info.libpq_url {
+            if let Some(url) = &first_pageserver.libpq_url {
                 if let Some(ref mut urls) = libpq_urls {
                     urls.push(url.clone());
                 }

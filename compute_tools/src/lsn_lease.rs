@@ -4,13 +4,13 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
-use compute_api::spec::{ComputeMode, PageserverConnectionInfo};
+use compute_api::spec::{ComputeMode, PageserverConnectionInfo, PageserverProtocol};
 use pageserver_page_api as page_api;
 use postgres::{NoTls, SimpleQueryMessage};
 use tracing::{info, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
-use utils::shard::{ShardCount, ShardNumber, TenantShardId};
+use utils::shard::TenantShardId;
 
 use crate::compute::ComputeNode;
 
@@ -116,37 +116,38 @@ fn try_acquire_lsn_lease(
     timeline_id: TimelineId,
     lsn: Lsn,
 ) -> Result<Option<SystemTime>> {
-    let shard_count = conninfo.shards.len();
     let mut leases = Vec::new();
 
-    for (shard_number, shard) in conninfo.shards.into_iter() {
-        let tenant_shard_id = match shard_count {
-            0 | 1 => TenantShardId::unsharded(tenant_id),
-            shard_count => TenantShardId {
-                tenant_id,
-                shard_number: ShardNumber(shard_number as u8),
-                shard_count: ShardCount::new(shard_count as u8),
-            },
+    for (shard_index, shard) in conninfo.shards.into_iter() {
+        let tenant_shard_id = TenantShardId {
+            tenant_id,
+            shard_number: shard_index.shard_number,
+            shard_count: shard_index.shard_count,
         };
 
-        let lease = if conninfo.prefer_grpc {
-            acquire_lsn_lease_grpc(
-                &shard.grpc_url.unwrap(),
-                auth,
-                tenant_shard_id,
-                timeline_id,
-                lsn,
-            )?
-        } else {
-            acquire_lsn_lease_libpq(
-                &shard.libpq_url.unwrap(),
-                auth,
-                tenant_shard_id,
-                timeline_id,
-                lsn,
-            )?
-        };
-        leases.push(lease);
+        // XXX: If there are more than pageserver for the one shard, do we need to get a
+        // leas on all of them? Currently, that's what we assume, but this is hypothetical
+        // as of this writing, as we never pass the info for more than one pageserver per
+        // shard.
+        for pageserver in shard.pageservers {
+            let lease = match conninfo.prefer_protocol {
+                PageserverProtocol::Grpc => acquire_lsn_lease_grpc(
+                    &pageserver.grpc_url.unwrap(),
+                    auth,
+                    tenant_shard_id,
+                    timeline_id,
+                    lsn,
+                )?,
+                PageserverProtocol::Libpq => acquire_lsn_lease_libpq(
+                    &pageserver.libpq_url.unwrap(),
+                    auth,
+                    tenant_shard_id,
+                    timeline_id,
+                    lsn,
+                )?,
+            };
+            leases.push(lease);
+        }
     }
 
     Ok(leases.into_iter().min().flatten())

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use utils::shard::{ShardCount, ShardIndex};
 
 use crate::responses::TlsConfig;
 
@@ -152,7 +153,7 @@ pub struct ComputeSpec {
 
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
-    pub shard_stripe_size: Option<usize>,
+    pub shard_stripe_size: Option<u32>,
 
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
@@ -226,15 +227,28 @@ pub enum ComputeFeature {
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct PageserverConnectionInfo {
-    pub shards: HashMap<u32, PageserverShardConnectionInfo>,
+    /// NB: 0 for unsharded tenants, 1 for sharded tenants with 1 shard, following storage
+    pub shard_count: ShardCount,
 
-    pub prefer_grpc: bool,
+    /// INVARIANT: null if shard_count is 0, otherwise non-null and immutable
+    pub stripe_size: Option<u32>,
+
+    pub shards: HashMap<ShardIndex, PageserverShardInfo>,
+
+    #[serde(default)]
+    pub prefer_protocol: PageserverProtocol,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverShardInfo {
+    pub pageservers: Vec<PageserverShardConnectionInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct PageserverShardConnectionInfo {
+    pub id: Option<String>,
     pub libpq_url: Option<String>,
     pub grpc_url: Option<String>,
 }
@@ -472,13 +486,15 @@ pub struct JwksSettings {
     pub jwt_audience: Option<String>,
 }
 
-/// Protocol used to connect to a Pageserver. Parsed from the connstring scheme.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Protocol used to connect to a Pageserver.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum PageserverProtocol {
     /// The original protocol based on libpq and COPY. Uses postgresql:// or postgres:// scheme.
     #[default]
+    #[serde(rename = "libpq")]
     Libpq,
     /// A newer, gRPC-based protocol. Uses grpc:// scheme.
+    #[serde(rename = "grpc")]
     Grpc,
 }
 

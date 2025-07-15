@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use compute_api::spec::PageserverProtocol;
+use compute_api::spec::PageserverShardInfo;
 use control_plane::endpoint::{
     ComputeControlPlane, EndpointStatus, PageserverConnectionInfo, PageserverShardConnectionInfo,
 };
@@ -13,7 +15,7 @@ use futures::StreamExt;
 use hyper::StatusCode;
 use pageserver_api::config::DEFAULT_GRPC_LISTEN_PORT;
 use pageserver_api::controller_api::AvailabilityZone;
-use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
+use pageserver_api::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId};
 use postgres_connection::parse_host_port;
 use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
@@ -507,7 +509,16 @@ impl ApiMethod for ComputeHookTenant {
             if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("Reconfiguring pageservers for endpoint {endpoint_name}");
 
-                let mut shard_conninfos = HashMap::new();
+                let shard_count = ShardCount(shards.len().try_into().expect("too many shards"));
+
+                let mut shard_infos: HashMap<ShardIndex, PageserverShardInfo> = HashMap::new();
+
+                let prefer_protocol = if endpoint.grpc {
+                    PageserverProtocol::Grpc
+                } else {
+                    PageserverProtocol::Libpq
+                };
+
                 for shard in shards.iter() {
                     let ps_conf = env
                         .get_pageserver_conf(shard.node_id)
@@ -528,19 +539,31 @@ impl ApiMethod for ComputeHookTenant {
                         None
                     };
                     let pageserver = PageserverShardConnectionInfo {
+                        id: Some(shard.node_id.to_string()),
                         libpq_url,
                         grpc_url,
                     };
-                    shard_conninfos.insert(shard.shard_number.0 as u32, pageserver);
+                    let shard_info = PageserverShardInfo {
+                        pageservers: vec![pageserver],
+                    };
+                    shard_infos.insert(
+                        ShardIndex {
+                            shard_number: shard.shard_number,
+                            shard_count,
+                        },
+                        shard_info,
+                    );
                 }
 
                 let pageserver_conninfo = PageserverConnectionInfo {
-                    shards: shard_conninfos,
-                    prefer_grpc: endpoint.grpc,
+                    shard_count: ShardCount::unsharded(),
+                    stripe_size: stripe_size.map(|val| val.0),
+                    shards: shard_infos,
+                    prefer_protocol,
                 };
 
                 endpoint
-                    .reconfigure_pageservers(pageserver_conninfo, *stripe_size)
+                    .reconfigure_pageservers(&pageserver_conninfo)
                     .await
                     .map_err(NotifyError::NeonLocal)?;
             }
