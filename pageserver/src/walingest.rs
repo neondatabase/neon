@@ -32,9 +32,10 @@ use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::walrecord::*;
 use postgres_ffi::{
-    PgMajorVersion, TimestampTz, TransactionId, dispatch_pgversion, enum_pgversion,
-    enum_pgversion_dispatch, fsm_logical_to_physical, pg_constants,
+    PgMajorVersion, TransactionId, dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch,
+    fsm_logical_to_physical, pg_constants,
 };
+use postgres_ffi_types::TimestampTz;
 use postgres_ffi_types::forknum::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use tracing::*;
 use utils::bin_ser::{DeserializeError, SerializeError};
