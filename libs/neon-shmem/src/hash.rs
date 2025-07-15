@@ -29,6 +29,19 @@ mod tests;
 use core::{Bucket, CoreHashMap, INVALID_POS};
 use entry::{Entry, OccupiedEntry, PrevPos, VacantEntry};
 
+use thiserror::Error;
+
+/// Error type for a hashmap shrink operation.
+#[derive(Error, Debug)]
+pub enum HashMapShrinkError {
+    /// There was an error encountered while resizing the memory area.
+    #[error("shmem resize failed: {0}")]
+    ResizeError(shmem::Error),
+    /// Occupied entries in to-be-shrunk space were encountered beginning at the given index.
+    #[error("occupied entry in deallocated space found at {0}")]
+    RemainingEntries(usize),
+}
+
 /// This represents a hash table that (possibly) lives in shared memory.
 /// If a new process is launched with fork(), the child process inherits
 /// this struct.
@@ -153,8 +166,8 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
 ///
 /// [`libc::pthread_rwlock_t`]
 /// [`HashMapShared`]
-/// [buckets]
-/// [dictionary]
+/// buckets
+/// dictionary
 ///
 /// In between the above parts, there can be padding bytes to align the parts correctly.
 type HashMapShared<'a, K, V> = RwLock<CoreHashMap<'a, K, V>>;
@@ -519,12 +532,7 @@ where
     /// The following cases result in a panic:
     /// - Calling this function on a map initialized with [`HashMapInit::with_fixed`].
     /// - Calling this function on a map when no shrink operation is in progress.
-    /// - Calling this function on a map with `shrink_mode` set to [`HashMapShrinkMode::Remap`] and
-    ///   there are more buckets in use than the value returned by [`HashMapAccess::shrink_goal`].
-    ///
-    /// # Errors
-    /// Returns an [`shmem::Error`] if any errors occur resizing the memory region.
-    pub fn finish_shrink(&self) -> Result<(), shmem::Error> {
+    pub fn finish_shrink(&self) -> Result<(), HashMapShrinkError> {
         let mut map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
         assert!(
             map.alloc_limit != INVALID_POS,
@@ -543,10 +551,8 @@ where
         );
 
         for i in (num_buckets as usize)..map.buckets.len() {
-            if let Some((k, v)) = map.buckets[i].inner.take() {
-                // alloc_bucket increases count, so need to decrease since we're just moving
-                map.buckets_in_use -= 1;
-                map.alloc_bucket(k, v).unwrap();
+            if map.buckets[i].inner.is_some() {
+                return Err(HashMapShrinkError::RemainingEntries(i));
             }
         }
 
@@ -556,7 +562,9 @@ where
             .expect("shrink called on a fixed-size hash table");
 
         let size_bytes = HashMapInit::<K, V, S>::estimate_size(num_buckets);
-        shmem_handle.set_size(size_bytes)?;
+        if let Err(e) = shmem_handle.set_size(size_bytes) {
+            return Err(HashMapShrinkError::ResizeError(e));
+        }
         let end_ptr: *mut u8 = unsafe { shmem_handle.data_ptr.as_ptr().add(size_bytes) };
         let buckets_ptr = map.buckets.as_mut_ptr();
         self.rehash_dict(&mut map, buckets_ptr, end_ptr, num_buckets, num_buckets);
