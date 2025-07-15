@@ -1,91 +1,89 @@
-use metrics::{IntGauge, IntGaugeVec};
+use measured::{
+    FixedCardinalityLabel, Gauge, GaugeVec, LabelGroup, MetricGroup,
+    label::{LabelName, LabelValue, StaticLabelSet},
+    metric::{MetricEncoding, gauge::GaugeState, group::Encoding},
+};
 
 use super::callbacks::callback_get_lfc_metrics;
 
-pub(crate) struct LfcMetricsCollector {
-    lfc_cache_size_limit: IntGauge,
-    lfc_hits: IntGauge,
-    lfc_misses: IntGauge,
-    lfc_used: IntGauge,
-    lfc_writes: IntGauge,
-    lfc_approximate_working_set_size_windows_vec: IntGaugeVec,
-    lfc_approximate_working_set_size_windows: [IntGauge; 60],
-}
+pub(crate) struct LfcMetricsCollector;
 
 impl LfcMetricsCollector {
-    pub fn new() -> LfcMetricsCollector {
-        let lfc_approximate_working_set_size_windows_vec = IntGaugeVec::new(
-            metrics::opts!(
-                "lfc_approximate_working_set_size_windows",
-                "Approximate working set size in pages of 8192 bytes",
-            ),
-            &["duration_seconds"],
-        )
-        .unwrap();
-
-        let lfc_approximate_working_set_size_windows: [IntGauge; 60] = (1..=60)
-            .map(|minutes| {
-                lfc_approximate_working_set_size_windows_vec
-                    .with_label_values(&[&(minutes * 60).to_string()])
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-
-        LfcMetricsCollector {
-            lfc_cache_size_limit: IntGauge::new(
-                "lfc_cache_size_limit",
-                "LFC cache size limit in bytes",
-            )
-            .unwrap(),
-            lfc_hits: IntGauge::new("lfc_hits", "LFC cache hits").unwrap(),
-            lfc_misses: IntGauge::new("lfc_misses", "LFC cache misses").unwrap(),
-            lfc_used: IntGauge::new("lfc_used", "LFC chunks used (chunk = 1MB)").unwrap(),
-            lfc_writes: IntGauge::new("lfc_writes", "LFC cache writes").unwrap(),
-
-            lfc_approximate_working_set_size_windows_vec,
-            lfc_approximate_working_set_size_windows,
-        }
+    pub(crate) fn new() -> Self {
+        Self
     }
 }
 
-impl metrics::core::Collector for LfcMetricsCollector {
-    fn desc(&self) -> Vec<&metrics::core::Desc> {
-        let mut descs = Vec::new();
+#[derive(MetricGroup)]
+#[metric(new())]
+struct LfcMetricsGroup {
+    /// LFC cache size limit in bytes
+    lfc_cache_size_limit: Gauge,
+    /// LFC cache hits
+    lfc_hits: Gauge,
+    /// LFC cache misses
+    lfc_misses: Gauge,
+    /// LFC chunks used (chunk = 1MB)
+    lfc_used: Gauge,
+    /// LFC cache writes
+    lfc_writes: Gauge,
+    /// Approximate working set size in pages of 8192 bytes
+    #[metric(init = GaugeVec::dense())]
+    lfc_approximate_working_set_size_windows: GaugeVec<StaticLabelSet<MinuteAsSeconds>>,
+}
 
-        descs.append(&mut self.lfc_cache_size_limit.desc());
-        descs.append(&mut self.lfc_hits.desc());
-        descs.append(&mut self.lfc_misses.desc());
-        descs.append(&mut self.lfc_used.desc());
-        descs.append(&mut self.lfc_writes.desc());
-        descs.append(&mut self.lfc_approximate_working_set_size_windows_vec.desc());
+impl<T: Encoding> MetricGroup<T> for LfcMetricsCollector
+where
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_group_into(&self, enc: &mut T) -> Result<(), <T as Encoding>::Err> {
+        let g = LfcMetricsGroup::new();
 
-        descs
-    }
-
-    fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
-        let mut values = Vec::new();
-
-        // update the gauges
         let lfc_metrics = callback_get_lfc_metrics();
-        self.lfc_cache_size_limit
-            .set(lfc_metrics.lfc_cache_size_limit);
-        self.lfc_hits.set(lfc_metrics.lfc_hits);
-        self.lfc_misses.set(lfc_metrics.lfc_misses);
-        self.lfc_used.set(lfc_metrics.lfc_used);
-        self.lfc_writes.set(lfc_metrics.lfc_writes);
+
+        g.lfc_cache_size_limit.set(lfc_metrics.lfc_cache_size_limit);
+        g.lfc_hits.set(lfc_metrics.lfc_hits);
+        g.lfc_misses.set(lfc_metrics.lfc_misses);
+        g.lfc_used.set(lfc_metrics.lfc_used);
+        g.lfc_writes.set(lfc_metrics.lfc_writes);
+
         for i in 0..60 {
             let val = lfc_metrics.lfc_approximate_working_set_size_windows[i];
-            self.lfc_approximate_working_set_size_windows[i].set(val);
+            g.lfc_approximate_working_set_size_windows
+                .set(MinuteAsSeconds(i), val);
         }
 
-        values.append(&mut self.lfc_cache_size_limit.collect());
-        values.append(&mut self.lfc_hits.collect());
-        values.append(&mut self.lfc_misses.collect());
-        values.append(&mut self.lfc_used.collect());
-        values.append(&mut self.lfc_writes.collect());
-        values.append(&mut self.lfc_approximate_working_set_size_windows_vec.collect());
+        g.collect_group_into(enc)
+    }
+}
 
-        values
+/// This stores the values in range 0..60,
+/// encodes them as seconds (0, 60, 120, 180, ..., 3540)
+#[derive(Clone, Copy)]
+struct MinuteAsSeconds(usize);
+
+impl FixedCardinalityLabel for MinuteAsSeconds {
+    fn cardinality() -> usize {
+        60
+    }
+
+    fn encode(&self) -> usize {
+        self.0
+    }
+
+    fn decode(value: usize) -> Self {
+        Self(value)
+    }
+}
+
+impl LabelValue for MinuteAsSeconds {
+    fn visit<V: measured::label::LabelVisitor>(&self, v: V) -> V::Output {
+        v.write_int(self.0 as i64 * 60)
+    }
+}
+
+impl LabelGroup for MinuteAsSeconds {
+    fn visit_values(&self, v: &mut impl measured::label::LabelGroupVisitor) {
+        v.write_value(LabelName::from_str("duration_seconds"), self);
     }
 }
