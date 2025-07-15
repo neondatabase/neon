@@ -115,6 +115,39 @@ class EndpointHttpClient(requests.Session):
         json: dict[str, str] = res.json()
         return json
 
+    def start_profiling_cpu(
+        self, sampling_frequency: int, timeout_seconds: int, archive: bool = False
+    ) -> tuple[int, bytes]:
+        url = f"http://localhost:{self.external_port}/profile/cpu"
+        params = {
+            "profiler": {"BccProfile": None},
+            "sampling_frequency": sampling_frequency,
+            "timeout_seconds": timeout_seconds,
+            "archive": archive,
+        }
+
+        res = self.post(
+            url,
+            json=params,
+            auth=self.auth,
+        )
+
+        return res.status_code, res.content
+
+    def stop_profiling_cpu(self) -> int:
+        url = f"http://localhost:{self.external_port}/profile/cpu"
+        res = self.delete(url, auth=self.auth)
+        return res.status_code
+
+    def get_profiling_cpu_status(self) -> bool:
+        """
+        Returns True if CPU profiling is currently running, False otherwise.
+        """
+        url = f"http://localhost:{self.external_port}/profile/cpu"
+        res = self.get(url, auth=self.auth)
+        res.raise_for_status()
+        return res.status_code == 200
+
     def database_schema(self, database: str):
         res = self.get(
             f"http://localhost:{self.external_port}/database_schema?database={urllib.parse.quote(database, safe='')}",

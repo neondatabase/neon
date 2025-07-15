@@ -61,6 +61,9 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         libpq5 \
         libpq-dev \
         libzstd-dev \
+        linux-perf \
+        bpfcc-tools \
+        linux-headers-$(case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; esac) \
         postgresql-16 \
         postgresql-server-dev-16 \
         postgresql-common  \
@@ -105,15 +108,21 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
 #
 # 'gdb' is included so that we get backtraces of core dumps produced in
 # regression tests
-RUN set -e \
+RUN set -ex \
+    && KERNEL_VERSION="$(uname -r | cut -d'-' -f1 | sed 's/\.0$//')" \
+    && echo KERNEL_VERSION=${KERNEL_VERSION} >> /etc/environment \
+    && KERNEL_ARCH=$(uname -m | awk '{ if ($1 ~ /^(x86_64|i[3-6]86)$/) print "x86"; else if ($1 ~ /^(aarch64|arm.*)$/) print "aarch"; else print $1 }') \
+    && echo KERNEL_ARCH=${KERNEL_ARCH} >> /etc/environment \
     && apt update \
     && apt install -y \
         autoconf \
         automake \
+        bc \
         bison \
         build-essential \
         ca-certificates \
         cmake \
+        cpio \
         curl \
         flex \
         gdb \
@@ -122,8 +131,10 @@ RUN set -e \
         gzip \
         jq \
         jsonnet \
+        kmod \
         libcurl4-openssl-dev \
         libbz2-dev \
+        libelf-dev \
         libffi-dev \
         liblzma-dev \
         libncurses5-dev \
@@ -137,6 +148,11 @@ RUN set -e \
         libxml2-dev \
         libxmlsec1-dev \
         libxxhash-dev \
+        linux-perf \
+        bpfcc-tools \
+        libbpfcc \
+        libbpfcc-dev \
+        linux-headers-$(case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; esac) \
         lsof \
         make \
         netcat-openbsd \
@@ -144,6 +160,8 @@ RUN set -e \
         openssh-client \
         parallel \
         pkg-config \
+        rsync \
+        sudo \
         unzip \
         wget \
         xz-utils \
@@ -198,6 +216,8 @@ RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /
 # Configure sudo & docker
 RUN usermod -aG sudo nonroot && \
     echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
+    mkdir -p /etc/sudoers.d && \
+    echo 'nonroot ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/nonroot && \
     usermod -aG docker nonroot
 
 # AWS CLI

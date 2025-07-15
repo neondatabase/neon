@@ -65,7 +65,7 @@ files:
       # regardless of hostname (ALL)
       #
       # Also allow it to shut down the VM. The fast_import job does that when it's finished.
-      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff, /usr/sbin/rsyslogd
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota, /neonvm/bin/poweroff, /usr/sbin/rsyslogd, /neonvm/tools/bin/perf, /usr/sbin/profile-bpfcc
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes
@@ -147,6 +147,8 @@ merge: |
 
   RUN set -e \
       && chmod 0644 /etc/cgconfig.conf
+
+  ENV PERF_BINARY_PATH=/neonvm/tools/bin/perf
 
   COPY compute_rsyslog.conf /etc/compute_rsyslog.conf
   RUN chmod 0666 /etc/compute_rsyslog.conf

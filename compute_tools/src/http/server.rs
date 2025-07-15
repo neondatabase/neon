@@ -27,6 +27,7 @@ use super::{
     },
 };
 use crate::compute::ComputeNode;
+use crate::http::routes::profile;
 
 /// `compute_ctl` has two servers: internal and external. The internal server
 /// binds to the loopback interface and handles communication from clients on
@@ -81,8 +82,14 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
             Server::External {
                 config, compute_id, ..
             } => {
-                let unauthenticated_router =
-                    Router::<Arc<ComputeNode>>::new().route("/metrics", get(metrics::get_metrics));
+                let unauthenticated_router = Router::<Arc<ComputeNode>>::new()
+                    .route("/metrics", get(metrics::get_metrics))
+                    .route(
+                        "/profile/cpu",
+                        get(profile::profile_status)
+                            .post(profile::profile_start)
+                            .delete(profile::profile_stop),
+                    );
 
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
                     .route("/lfc/prewarm", get(lfc::prewarm_state).post(lfc::prewarm))

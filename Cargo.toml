@@ -130,6 +130,7 @@ jemalloc_pprof = { version = "0.7", features = ["symbolize", "flamegraph"] }
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
+libproc = "0.14"
 md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
@@ -278,6 +279,7 @@ safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
 safekeeper_client = { path = "./safekeeper/client" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
 storage_controller_client = { path = "./storage_controller/client" }
+tempfile = "3"
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }

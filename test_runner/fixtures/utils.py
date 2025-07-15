@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -713,6 +714,33 @@ def run_only_on_postgres(versions: Iterable[PgVersion], reason: str):
 def skip_in_debug_build(reason: str):
     return pytest.mark.skipif(
         os.getenv("BUILD_TYPE", "debug") == "debug",
+        reason=reason,
+    )
+
+
+def run_only_on_linux_kernel_higher_than(version: float, reason: str):
+    """
+    Skip tests if the Linux kernel version is lower than the specified version.
+    The version is specified as a float, e.g. 5.4 for kernel.
+
+    Also skips if the host is not Linux.
+    """
+
+    should_skip = False
+    if sys.platform != "linux":
+        should_skip = True
+    else:
+        try:
+            kernel_version_list = os.uname()[2].split("-")[0].split(".")
+            kernel_version = float(f"{kernel_version_list[0]}.{kernel_version_list[1]}")
+            if kernel_version < version:
+                should_skip = True
+        except ValueError:
+            log.error(f"Failed to parse kernel version: {os.uname()[2]}")
+            should_skip = True
+
+    return pytest.mark.skipif(
+        should_skip,
         reason=reason,
     )
 
