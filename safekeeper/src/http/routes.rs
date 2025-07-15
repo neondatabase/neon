@@ -746,7 +746,7 @@ pub fn make_router(
                 failpoints_handler(r, cancel).await
             })
         })
-        .get("/v1/uzilization", |r| request_span(r, utilization_handler))
+        .get("/v1/utilization", |r| request_span(r, utilization_handler))
         /* BEGIN_HADRON */
         .get("/v1/debug/filesystem_usage", |r| {
             request_span(r, filesystem_usage_handler)
