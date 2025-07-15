@@ -1022,7 +1022,7 @@ communicator_new_read_slru_segment(
 		return -1;
 	}
 
-	strlcpy(temp_path, path, Min(PATH_MAX, strlen(path) + 1));
+	strlcpy(temp_path, path, Min(BLCKSZ, strlen(path) + 1));
 	request.read_slru_segment.destination_file_path.ptr = (uint8_t *) temp_path;
 
 	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u, file_path=\"%s\"",
