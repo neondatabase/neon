@@ -460,7 +460,7 @@ impl Service {
         let persistence = TimelinePersistence {
             tenant_id: req.tenant_id.to_string(),
             timeline_id: req.timeline_id.to_string(),
-            start_lsn: Lsn::INVALID.into(),
+            start_lsn: req.start_lsn.into(),
             generation: 1,
             sk_set: req.sk_set.iter().map(|sk_id| sk_id.0 as i64).collect(),
             new_sk_set: None,
@@ -470,9 +470,34 @@ impl Service {
         let inserted = self.persistence.insert_timeline(persistence).await?;
         if inserted {
             tracing::info!("imported timeline into db");
-        } else {
-            tracing::info!("didn't import timeline into db, as it is already present in db");
+            return Ok(());
         }
+        tracing::info!("timeline already present in db, updating");
+        let Some(mut present) = self
+            .persistence
+            .get_timeline(req.tenant_id, req.timeline_id)
+            .await?
+        else {
+            tracing::info!("timeline removed in the meantime");
+            return Err(ApiError::ResourceUnavailable(
+                "Timeline removed in the meantime, please retry".into(),
+            ));
+        };
+        present.start_lsn = req.start_lsn;
+        present.sk_set = req.sk_set.iter().map(|sk_id| sk_id.0 as i64).collect();
+        present.new_sk_set = None;
+
+        let updated = self.persistence.update_timeline(present).await?;
+
+        if updated {
+            tracing::info!("timeline update successful");
+        } else {
+            tracing::info!("timeline update not successful");
+            return Err(ApiError::ResourceUnavailable(
+                "Timeline update not successful (probably generation change due to race), please retry".into(),
+            ));
+        }
+
         Ok(())
     }
 

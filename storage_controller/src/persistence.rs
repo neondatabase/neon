@@ -129,6 +129,7 @@ pub(crate) enum DatabaseOperation {
     UpdateLeader,
     SetPreferredAzs,
     InsertTimeline,
+    UpdateTimeline,
     UpdateTimelineMembership,
     GetTimeline,
     InsertTimelineReconcile,
@@ -1448,6 +1449,35 @@ impl Persistence {
                     .values(entry)
                     .on_conflict((timelines::tenant_id, timelines::timeline_id))
                     .do_nothing()
+                    .execute(conn)
+                    .await?;
+
+                match inserted_updated {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({inserted_updated})"
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Update an already present timeline.
+    /// The generation values are never allowed to go down, but they can stay constant or go up.
+    pub(crate) async fn update_timeline(&self, entry: TimelinePersistence) -> DatabaseResult<bool> {
+        use crate::schema::timelines;
+
+        let entry = &entry;
+        self.with_measured_conn(DatabaseOperation::UpdateTimeline, move |conn| {
+            Box::pin(async move {
+                let inserted_updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(entry.tenant_id))
+                    .filter(timelines::timeline_id.eq(entry.timeline_id))
+                    .filter(timelines::generation.le(entry.generation))
+                    .filter(timelines::cplane_notified_generation.le(entry.cplane_notified_generation))
+                    .set(&entry)
                     .execute(conn)
                     .await?;
 
