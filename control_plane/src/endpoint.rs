@@ -769,6 +769,7 @@ impl Endpoint {
                 endpoint_id: Some(self.endpoint_id.clone()),
                 mode: self.mode,
                 pageserver_connection_info: Some(args.pageserver_conninfo),
+                pageserver_connstring: None,
                 safekeepers_generation: args.safekeepers_generation.map(|g| g.into_inner()),
                 safekeeper_connstrings,
                 storage_auth_token: args.auth_token.clone(),

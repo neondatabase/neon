@@ -106,10 +106,17 @@ pub struct ComputeSpec {
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
 
-    // Pageserver information can be passed in two different ways:
-    // 1. Here
-    // 2. in cluster.settings. This is legacy, we are switching to method 1.
+    /// Pageserver information can be passed in three different ways:
+    /// 1. Here in `pageserver_connection_info`
+    /// 2. In the `pageserver_connstring` field.
+    /// 3. in `cluster.settings`.
+    ///
+    /// The goal is to use method 1. everywhere. But for backwards-compatibility with old
+    /// versions of the control plane, `compute_ctl` will check 2. and 3. if the
+    /// `pageserver_connection_info` field is missing.
     pub pageserver_connection_info: Option<PageserverConnectionInfo>,
+
+    pub pageserver_connstring: Option<String>,
 
     // More neon ids that we expose to the compute_ctl
     // and to postgres as neon extension GUCs.
