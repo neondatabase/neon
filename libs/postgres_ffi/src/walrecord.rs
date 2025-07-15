@@ -4,13 +4,14 @@
 //! TODO: Generate separate types for each supported PG version
 
 use bytes::{Buf, Bytes};
+use postgres_ffi_types::TimestampTz;
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::DeserializeError;
 use utils::lsn::Lsn;
 
 use crate::{
     BLCKSZ, BlockNumber, MultiXactId, MultiXactOffset, MultiXactStatus, Oid, PgMajorVersion,
-    RepOriginId, TimestampTz, TransactionId, XLOG_SIZE_OF_XLOG_RECORD, XLogRecord, pg_constants,
+    RepOriginId, TransactionId, XLOG_SIZE_OF_XLOG_RECORD, XLogRecord, pg_constants,
 };
 
 #[repr(C)]
@@ -863,7 +864,8 @@ pub mod v17 {
         XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate, XlParameterChange,
         rm_neon,
     };
-    pub use crate::{TimeLineID, TimestampTz};
+    pub use crate::TimeLineID;
+    pub use postgres_ffi_types::TimestampTz;
 
     #[repr(C)]
     #[derive(Debug)]
