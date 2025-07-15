@@ -2606,6 +2606,8 @@ def test_storage_controller_node_deletion(
     assert env.storage_controller.reconcile_all() == 0
 
     victim = env.pageservers[-1]
+    if deletion_api == DeletionAPIKind.FORCE and not while_offline:
+        victim.allowed_errors.append(".*request was dropped before completing.*")
 
     # The procedure a human would follow is:
     # 1. Mark pageserver scheduling=pause
@@ -3301,6 +3303,7 @@ def test_ps_unavailable_after_delete(
     ps = env.pageservers[0]
 
     if deletion_api == DeletionAPIKind.FORCE:
+        ps.allowed_errors.append(".*request was dropped before completing.*")
         env.storage_controller.node_delete(ps.id, force=True)
         wait_until(lambda: assert_nodes_count(2))
     elif deletion_api == DeletionAPIKind.OLD:
