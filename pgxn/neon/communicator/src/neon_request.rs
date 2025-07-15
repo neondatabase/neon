@@ -188,8 +188,8 @@ pub struct CReadSlruSegmentRequest {
     pub slru_kind: SlruKind,
     pub segment_number: u32,
     pub request_lsn: CLsn,
-    /// Must be a null-terminated C string containing **absolute**
-    /// file path.
+    /// Must be a null-terminated C string containing the file path
+    /// where the communicator will write the SLRU segment.
     pub destination_file_path: ShmemBuf,
 }
 
