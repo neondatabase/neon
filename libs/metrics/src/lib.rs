@@ -4,12 +4,14 @@
 //! a default registry.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+use std::sync::RwLock;
+
 use measured::label::{LabelGroupSet, LabelGroupVisitor, LabelName, NoLabels};
 use measured::metric::counter::CounterState;
 use measured::metric::gauge::GaugeState;
 use measured::metric::group::Encoding;
 use measured::metric::name::{MetricName, MetricNameEncoder};
-use measured::metric::{MetricEncoding, MetricFamilyEncoding};
+use measured::metric::{MetricEncoding, MetricFamilyEncoding, MetricType};
 use measured::{FixedCardinalityLabel, LabelGroup, MetricGroup};
 use once_cell::sync::Lazy;
 use prometheus::Registry;
@@ -116,36 +118,58 @@ pub fn pow2_buckets(start: usize, end: usize) -> Vec<f64> {
         .collect()
 }
 
+pub struct InfoMetric<L: LabelGroup, M: MetricType = GaugeState> {
+    label: RwLock<L>,
+    metric: M,
+}
+
+impl<L: LabelGroup> InfoMetric<L> {
+    pub fn new(label: L) -> Self {
+        Self::with_metric(label, GaugeState::new(1))
+    }
+}
+
+impl<L: LabelGroup, M: MetricType<Metadata = ()>> InfoMetric<L, M> {
+    pub fn with_metric(label: L, metric: M) -> Self {
+        Self {
+            label: RwLock::new(label),
+            metric,
+        }
+    }
+
+    pub fn set_label(&self, label: L) {
+        *self.label.write().unwrap() = label;
+    }
+}
+
+impl<L, M, E> MetricFamilyEncoding<E> for InfoMetric<L, M>
+where
+    L: LabelGroup,
+    M: MetricEncoding<E, Metadata = ()>,
+    E: Encoding,
+{
+    fn collect_family_into(
+        &self,
+        name: impl measured::metric::name::MetricNameEncoder,
+        enc: &mut E,
+    ) -> Result<(), E::Err> {
+        M::write_type(&name, enc)?;
+        self.metric
+            .collect_into(&(), &*self.label.read().unwrap(), name, enc)
+    }
+}
+
 pub struct BuildInfo {
     pub revision: &'static str,
     pub build_tag: &'static str,
 }
 
-// todo: allow label group without the set
 impl LabelGroup for BuildInfo {
     fn visit_values(&self, v: &mut impl LabelGroupVisitor) {
         const REVISION: &LabelName = LabelName::from_str("revision");
         v.write_value(REVISION, &self.revision);
         const BUILD_TAG: &LabelName = LabelName::from_str("build_tag");
         v.write_value(BUILD_TAG, &self.build_tag);
-    }
-}
-
-impl<T: Encoding> MetricFamilyEncoding<T> for BuildInfo
-where
-    GaugeState: MetricEncoding<T>,
-{
-    fn collect_family_into(
-        &self,
-        name: impl measured::metric::name::MetricNameEncoder,
-        enc: &mut T,
-    ) -> Result<(), T::Err> {
-        enc.write_help(&name, "Build/version information")?;
-        GaugeState::write_type(&name, enc)?;
-        GaugeState {
-            count: std::sync::atomic::AtomicI64::new(1),
-        }
-        .collect_into(&(), self, name, enc)
     }
 }
 
@@ -165,8 +189,8 @@ pub struct NeonMetrics {
 #[derive(MetricGroup)]
 #[metric(new(build_info: BuildInfo))]
 pub struct LibMetrics {
-    #[metric(init = build_info)]
-    build_info: BuildInfo,
+    #[metric(init = InfoMetric::new(build_info))]
+    build_info: InfoMetric<BuildInfo>,
 
     #[metric(flatten)]
     rusage: Rusage,
