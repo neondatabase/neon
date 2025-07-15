@@ -7,7 +7,7 @@ use anyhow::{Context, anyhow};
 use bytes::{Bytes, BytesMut};
 use hyper::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, HeaderName};
 use hyper::http::HeaderValue;
-use hyper::{Body, Method, Request, Response};
+use hyper::{Body, Request, Response};
 use jsonwebtoken::TokenData;
 use metrics::{Encoder, IntCounter, TextEncoder, register_int_counter};
 use once_cell::sync::Lazy;
@@ -18,7 +18,7 @@ use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
-use tracing::{Instrument, debug, info, info_span, warn};
+use tracing::{Instrument, info, info_span, warn};
 use utils::auth::{AuthError, Claims, SwappableJwtAuth};
 use utils::metrics_collector::{METRICS_COLLECTOR, METRICS_STALE_MILLIS};
 
