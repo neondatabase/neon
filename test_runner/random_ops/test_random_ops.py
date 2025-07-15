@@ -174,6 +174,9 @@ class NeonBranch:
         self.project.terminate_benchmark(self.id)
 
     def reset_to_parent(self) -> None:
+        """
+        Resets the branch to the parent branch
+        """
         for ep in self.project.endpoints.values():
             if ep.type == "read_only":
                 ep.terminate_benchmark()
@@ -455,6 +458,11 @@ class NeonProject:
         lsn: str | None = None,
         timestamp: datetime | None = None,
     ) -> NeonSnapshot:
+        """
+        Create a new Neon snapshot for the current project
+        Two optional arguments: lsn and timestamp are mutually exclusive
+        they instruct to create a snapshot with the specific lns or timestamp
+        """
         return NeonSnapshot(
             self,
             self.neon_api.create_snapshot(
@@ -467,10 +475,17 @@ class NeonProject:
         )
 
     def delete_snapshot(self, snapshot_id: str) -> None:
+        """
+        Deletes the snapshot with the given id
+        """
         self.neon_api.delete_snapshot(self.id, snapshot_id)
         self.snapshots.pop(snapshot_id)
 
     def restore_snapshot(self, snapshot_id: str) -> NeonBranch | None:
+        """
+        Creates a new Neon branch for the current project, then restores the snapshot
+        with the given id
+        """
         target_branch = self.create_branch()
         if not target_branch:
             return None
