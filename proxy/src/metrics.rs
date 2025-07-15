@@ -378,6 +378,7 @@ pub enum RedisMsgKind {
     Get,
     Expire,
     HGet,
+    Unlink,
 }
 
 #[derive(Default, Clone)]
