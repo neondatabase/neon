@@ -110,7 +110,6 @@ fn main() -> anyhow::Result<()> {
             .allowlist_type("XLogRecPtr")
             .allowlist_type("XLogSegNo")
             .allowlist_type("TimeLineID")
-            .allowlist_type("TimestampTz")
             .allowlist_type("MultiXactId")
             .allowlist_type("MultiXactOffset")
             .allowlist_type("MultiXactStatus")

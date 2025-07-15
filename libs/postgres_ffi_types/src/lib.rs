@@ -11,3 +11,4 @@ pub mod forknum;
 
 pub type Oid = u32;
 pub type RepOriginId = u16;
+pub type TimestampTz = i64;
