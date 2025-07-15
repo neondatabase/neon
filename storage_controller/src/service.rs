@@ -7343,7 +7343,7 @@ impl Service {
         let mut waiters: Vec<ReconcilerWaiter> = Vec::new();
         let mut tid_iter = create_shared_shard_iterator(self.clone());
 
-        let get_error_on_cancel = || async {
+        let reset_node_policy_on_cancel = || async {
             match self
                 .node_configure(node_id, None, Some(policy_on_start))
                 .await
@@ -7363,7 +7363,7 @@ impl Service {
 
         while !tid_iter.finished() {
             if cancel.is_cancelled() {
-                return Err(get_error_on_cancel().await);
+                return Err(reset_node_policy_on_cancel().await);
             }
 
             operation_utils::validate_node_state(
@@ -7457,7 +7457,7 @@ impl Service {
 
         while !waiters.is_empty() {
             if cancel.is_cancelled() {
-                return Err(get_error_on_cancel().await);
+                return Err(reset_node_policy_on_cancel().await);
             }
 
             tracing::info!("Awaiting {} pending delete reconciliations", waiters.len());
@@ -7470,8 +7470,13 @@ impl Service {
         let pf = pausable_failpoint!("delete-node-after-reconciles-spawned", &cancel);
         if pf.is_err() {
             // An error from pausable_failpoint indicates the cancel token was triggered.
-            return Err(get_error_on_cancel().await);
+            return Err(reset_node_policy_on_cancel().await);
         }
+
+        self.persistence
+            .set_tombstone(node_id)
+            .await
+            .map_err(|e| OperationError::FinalizeError(e.to_string().into()))?;
 
         {
             let mut locked = self.inner.write().unwrap();
@@ -7497,11 +7502,6 @@ impl Service {
                 .storage_controller_https_pageserver_nodes
                 .set(nodes.values().filter(|n| n.has_https_port()).count() as i64);
         }
-
-        self.persistence
-            .set_tombstone(node_id)
-            .await
-            .map_err(|e| OperationError::FinalizeError(e.to_string().into()))?;
 
         Ok(())
     }
