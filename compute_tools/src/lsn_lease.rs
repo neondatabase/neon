@@ -4,8 +4,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
-use compute_api::spec::{ComputeMode, PageserverProtocol};
-use itertools::Itertools as _;
+use compute_api::spec::{ComputeMode, PageserverConnectionInfo};
 use pageserver_page_api as page_api;
 use postgres::{NoTls, SimpleQueryMessage};
 use tracing::{info, warn};
@@ -78,17 +77,16 @@ fn acquire_lsn_lease_with_retry(
 
     loop {
         // Note: List of pageservers is dynamic, need to re-read configs before each attempt.
-        let (connstrings, auth) = {
+        let (conninfo, auth) = {
             let state = compute.state.lock().unwrap();
             let spec = state.pspec.as_ref().expect("spec must be set");
             (
-                spec.pageserver_connstr.clone(),
+                spec.pageserver_conninfo.clone(),
                 spec.storage_auth_token.clone(),
             )
         };
 
-        let result =
-            try_acquire_lsn_lease(&connstrings, auth.as_deref(), tenant_id, timeline_id, lsn);
+        let result = try_acquire_lsn_lease(conninfo, auth.as_deref(), tenant_id, timeline_id, lsn);
         match result {
             Ok(Some(res)) => {
                 return Ok(res);
@@ -112,17 +110,16 @@ fn acquire_lsn_lease_with_retry(
 
 /// Tries to acquire LSN leases on all Pageserver shards.
 fn try_acquire_lsn_lease(
-    connstrings: &str,
+    conninfo: PageserverConnectionInfo,
     auth: Option<&str>,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
 ) -> Result<Option<SystemTime>> {
-    let connstrings = connstrings.split(',').collect_vec();
-    let shard_count = connstrings.len();
+    let shard_count = conninfo.shards.len();
     let mut leases = Vec::new();
 
-    for (shard_number, &connstring) in connstrings.iter().enumerate() {
+    for (shard_number, shard) in conninfo.shards.into_iter() {
         let tenant_shard_id = match shard_count {
             0 | 1 => TenantShardId::unsharded(tenant_id),
             shard_count => TenantShardId {
@@ -132,13 +129,22 @@ fn try_acquire_lsn_lease(
             },
         };
 
-        let lease = match PageserverProtocol::from_connstring(connstring)? {
-            PageserverProtocol::Libpq => {
-                acquire_lsn_lease_libpq(connstring, auth, tenant_shard_id, timeline_id, lsn)?
-            }
-            PageserverProtocol::Grpc => {
-                acquire_lsn_lease_grpc(connstring, auth, tenant_shard_id, timeline_id, lsn)?
-            }
+        let lease = if conninfo.prefer_grpc {
+            acquire_lsn_lease_grpc(
+                &shard.grpc_url.unwrap(),
+                auth,
+                tenant_shard_id,
+                timeline_id,
+                lsn,
+            )?
+        } else {
+            acquire_lsn_lease_libpq(
+                &shard.libpq_url.unwrap(),
+                auth,
+                tenant_shard_id,
+                timeline_id,
+                lsn,
+            )?
         };
         leases.push(lease);
     }

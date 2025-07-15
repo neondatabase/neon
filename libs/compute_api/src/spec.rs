@@ -105,7 +105,11 @@ pub struct ComputeSpec {
     // updated to fill these fields, we can make these non optional.
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
-    pub pageserver_connstring: Option<String>,
+
+    // Pageserver information can be passed in two different ways:
+    // 1. Here
+    // 2. in cluster.settings. This is legacy, we are switching to method 1.
+    pub pageserver_connection_info: Option<PageserverConnectionInfo>,
 
     // More neon ids that we expose to the compute_ctl
     // and to postgres as neon extension GUCs.
@@ -212,6 +216,20 @@ pub enum ComputeFeature {
     /// `parse_unknown_features()` for more details.
     #[serde(other)]
     UnknownFeature,
+}
+
+/// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverConnectionInfo {
+    pub shards: HashMap<u32, PageserverShardConnectionInfo>,
+
+    pub prefer_grpc: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverShardConnectionInfo {
+    pub libpq_url: Option<String>,
+    pub grpc_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -328,6 +346,12 @@ impl ComputeMode {
             ComputeMode::Static(_) => "static",
             ComputeMode::Replica => "replica",
         }
+    }
+}
+
+impl Display for ComputeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_type_str())
     }
 }
 

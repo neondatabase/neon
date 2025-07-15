@@ -57,9 +57,13 @@ use compute_api::responses::{
     TlsConfig,
 };
 use compute_api::spec::{
-    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PageserverProtocol,
-    PgIdent, RemoteExtSpec, Role,
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
+    RemoteExtSpec, Role,
 };
+
+// re-export these, because they're used in the reconfigure() function
+pub use compute_api::spec::{PageserverConnectionInfo, PageserverShardConnectionInfo};
+
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations,
     OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
@@ -75,7 +79,6 @@ use sha2::{Digest, Sha256};
 use spki::der::Decode;
 use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
-use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
 
 use crate::local_env::LocalEnv;
@@ -387,7 +390,7 @@ pub struct EndpointStartArgs {
     pub endpoint_storage_addr: String,
     pub safekeepers_generation: Option<SafekeeperGeneration>,
     pub safekeepers: Vec<NodeId>,
-    pub pageservers: Vec<(PageserverProtocol, Host, u16)>,
+    pub pageserver_conninfo: PageserverConnectionInfo,
     pub remote_ext_base_url: Option<String>,
     pub shard_stripe_size: usize,
     pub create_test_user: bool,
@@ -662,14 +665,6 @@ impl Endpoint {
         }
     }
 
-    fn build_pageserver_connstr(pageservers: &[(PageserverProtocol, Host, u16)]) -> String {
-        pageservers
-            .iter()
-            .map(|(scheme, host, port)| format!("{scheme}://no_user@{host}:{port}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-
     /// Map safekeepers ids to the actual connection strings.
     fn build_safekeepers_connstrs(&self, sk_ids: Vec<NodeId>) -> Result<Vec<String>> {
         let mut safekeeper_connstrings = Vec::new();
@@ -714,9 +709,6 @@ impl Endpoint {
         if self.pgdata().exists() {
             std::fs::remove_dir_all(self.pgdata())?;
         }
-
-        let pageserver_connstring = Self::build_pageserver_connstr(&args.pageservers);
-        assert!(!pageserver_connstring.is_empty());
 
         let safekeeper_connstrings = self.build_safekeepers_connstrs(args.safekeepers)?;
 
@@ -776,7 +768,7 @@ impl Endpoint {
                 branch_id: None,
                 endpoint_id: Some(self.endpoint_id.clone()),
                 mode: self.mode,
-                pageserver_connstring: Some(pageserver_connstring),
+                pageserver_connection_info: Some(args.pageserver_conninfo),
                 safekeepers_generation: args.safekeepers_generation.map(|g| g.into_inner()),
                 safekeeper_connstrings,
                 storage_auth_token: args.auth_token.clone(),
@@ -994,7 +986,7 @@ impl Endpoint {
 
     pub async fn reconfigure(
         &self,
-        pageservers: Option<Vec<(PageserverProtocol, Host, u16)>>,
+        pageserver_conninfo: Option<PageserverConnectionInfo>,
         stripe_size: Option<ShardStripeSize>,
         safekeepers: Option<Vec<NodeId>>,
         safekeeper_generation: Option<SafekeeperGeneration>,
@@ -1010,15 +1002,17 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        // If pageservers are not specified, don't change them.
-        if let Some(pageservers) = pageservers {
-            anyhow::ensure!(!pageservers.is_empty(), "no pageservers provided");
-
-            let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
-            spec.pageserver_connstring = Some(pageserver_connstr);
-            if stripe_size.is_some() {
-                spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
-            }
+        if let Some(pageserver_conninfo) = pageserver_conninfo {
+            // If pageservers are provided, we need to ensure that they are not empty.
+            // This is a requirement for the compute_ctl configuration.
+            anyhow::ensure!(
+                !pageserver_conninfo.shards.is_empty(),
+                "no pageservers provided"
+            );
+            spec.pageserver_connection_info = Some(pageserver_conninfo);
+        }
+        if stripe_size.is_some() {
+            spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
         }
 
         // If safekeepers are not specified, don't change them.
@@ -1067,7 +1061,7 @@ impl Endpoint {
 
     pub async fn reconfigure_pageservers(
         &self,
-        pageservers: Vec<(PageserverProtocol, Host, u16)>,
+        pageservers: PageserverConnectionInfo,
         stripe_size: Option<ShardStripeSize>,
     ) -> Result<()> {
         self.reconfigure(Some(pageservers), stripe_size, None, None)

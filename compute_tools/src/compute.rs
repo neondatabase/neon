@@ -6,7 +6,8 @@ use compute_api::responses::{
     LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
-    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverProtocol, PgIdent,
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverConnectionInfo,
+    PageserverShardConnectionInfo, PgIdent,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -233,7 +234,7 @@ pub struct ParsedSpec {
     pub spec: ComputeSpec,
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
-    pub pageserver_connstr: String,
+    pub pageserver_conninfo: PageserverConnectionInfo,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
     /// k8s dns name and port
@@ -280,6 +281,32 @@ impl ParsedSpec {
     }
 }
 
+/// Extract PageserverConnectionInfo from the 'neon.pageserver_connstring' GUC.
+///
+/// This is for compatibility with old control plane versions that stored the
+/// GUC directly in the 'cluster.settings' field in the compute spec, instead
+/// of filling in the 'pageserver_connection_info' field.
+fn extract_pageserver_conninfo_from_guc(
+    pageserver_connstring_guc: &str,
+) -> PageserverConnectionInfo {
+    PageserverConnectionInfo {
+        shards: pageserver_connstring_guc
+            .split(',')
+            .enumerate()
+            .map(|(i, connstr)| {
+                (
+                    i as u32,
+                    PageserverShardConnectionInfo {
+                        libpq_url: Some(connstr.to_string()),
+                        grpc_url: None,
+                    },
+                )
+            })
+            .collect(),
+        prefer_grpc: false,
+    }
+}
+
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
@@ -289,11 +316,17 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         // For backwards-compatibility, the top-level fields in the spec file
         // may be empty. In that case, we need to dig them from the GUCs in the
         // cluster.settings field.
-        let pageserver_connstr = spec
-            .pageserver_connstring
-            .clone()
-            .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
-            .ok_or("pageserver connstr should be provided")?;
+        let pageserver_conninfo = match &spec.pageserver_connection_info {
+            Some(x) => x.clone(),
+            None => {
+                if let Some(guc) = spec.cluster.settings.find("neon.pageserver_connstring") {
+                    extract_pageserver_conninfo_from_guc(&guc)
+                } else {
+                    return Err("pageserver connstr should be provided".to_string());
+                }
+            }
+        };
+
         let safekeeper_connstrings = if spec.safekeeper_connstrings.is_empty() {
             if matches!(spec.mode, ComputeMode::Primary) {
                 spec.cluster
@@ -343,7 +376,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
 
         let res = ParsedSpec {
             spec,
-            pageserver_connstr,
+            pageserver_conninfo,
             safekeeper_connstrings,
             storage_auth_token,
             tenant_id,
@@ -1040,12 +1073,11 @@ impl ComputeNode {
     fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
 
-        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
         let started = Instant::now();
-
-        let (connected, size) = match PageserverProtocol::from_connstring(shard0_connstr)? {
-            PageserverProtocol::Libpq => self.try_get_basebackup_libpq(spec, lsn)?,
-            PageserverProtocol::Grpc => self.try_get_basebackup_grpc(spec, lsn)?,
+        let (connected, size) = if spec.pageserver_conninfo.prefer_grpc {
+            self.try_get_basebackup_grpc(spec, lsn)?
+        } else {
+            self.try_get_basebackup_libpq(spec, lsn)?
         };
 
         self.fix_zenith_signal_neon_signal()?;
@@ -1083,20 +1115,21 @@ impl ComputeNode {
     /// Fetches a basebackup via gRPC. The connstring must use grpc://. Returns the timestamp when
     /// the connection was established, and the (compressed) size of the basebackup.
     fn try_get_basebackup_grpc(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
-        let shard0_connstr = spec
-            .pageserver_connstr
-            .split(',')
-            .next()
-            .unwrap()
-            .to_string();
-        let shard_index = match spec.pageserver_connstr.split(',').count() as u8 {
+        let shard0 = spec
+            .pageserver_conninfo
+            .shards
+            .get(&0)
+            .expect("shard 0 connection info missing");
+        let shard0_url = shard0.grpc_url.clone().expect("no grpc_url for shard 0");
+
+        let shard_index = match spec.pageserver_conninfo.shards.len() as u8 {
             0 | 1 => ShardIndex::unsharded(),
             count => ShardIndex::new(ShardNumber(0), ShardCount(count)),
         };
 
         let (reader, connected) = tokio::runtime::Handle::current().block_on(async move {
             let mut client = page_api::Client::connect(
-                shard0_connstr,
+                shard0_url,
                 spec.tenant_id,
                 spec.timeline_id,
                 shard_index,
@@ -1131,8 +1164,13 @@ impl ComputeNode {
     /// Fetches a basebackup via libpq. The connstring must use postgresql://. Returns the timestamp
     /// when the connection was established, and the (compressed) size of the basebackup.
     fn try_get_basebackup_libpq(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
-        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
-        let mut config = postgres::Config::from_str(shard0_connstr)?;
+        let shard0 = spec
+            .pageserver_conninfo
+            .shards
+            .get(&0)
+            .expect("shard 0 connection info missing");
+        let shard0_connstr = shard0.libpq_url.clone().expect("no libpq_url for shard 0");
+        let mut config = postgres::Config::from_str(&shard0_connstr)?;
 
         // Use the storage auth token from the config file, if given.
         // Note: this overrides any password set in the connection string.
@@ -1218,10 +1256,7 @@ impl ComputeNode {
                     return result;
                 }
                 Err(ref e) if attempts < max_attempts => {
-                    warn!(
-                        "Failed to get basebackup: {} (attempt {}/{})",
-                        e, attempts, max_attempts
-                    );
+                    warn!("Failed to get basebackup: {e:?} (attempt {attempts}/{max_attempts})");
                     std::thread::sleep(std::time::Duration::from_millis(retry_period_ms as u64));
                     retry_period_ms *= 1.5;
                 }
@@ -1429,16 +1464,8 @@ impl ComputeNode {
             }
         };
 
-        info!(
-            "getting basebackup@{} from pageserver {}",
-            lsn, &pspec.pageserver_connstr
-        );
-        self.get_basebackup(compute_state, lsn).with_context(|| {
-            format!(
-                "failed to get basebackup@{} from pageserver {}",
-                lsn, &pspec.pageserver_connstr
-            )
-        })?;
+        self.get_basebackup(compute_state, lsn)
+            .with_context(|| format!("failed to get basebackup@{lsn}"))?;
 
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
@@ -2381,22 +2408,22 @@ LIMIT 100",
     /// The operation will time out after a specified duration.
     pub fn wait_timeout_while_pageserver_connstr_unchanged(&self, duration: Duration) {
         let state = self.state.lock().unwrap();
-        let old_pageserver_connstr = state
+        let old_pageserver_conninfo = state
             .pspec
             .as_ref()
             .expect("spec must be set")
-            .pageserver_connstr
+            .pageserver_conninfo
             .clone();
         let mut unchanged = true;
         let _ = self
             .state_changed
             .wait_timeout_while(state, duration, |s| {
-                let pageserver_connstr = &s
+                let pageserver_conninfo = &s
                     .pspec
                     .as_ref()
                     .expect("spec must be set")
-                    .pageserver_connstr;
-                unchanged = pageserver_connstr == &old_pageserver_connstr;
+                    .pageserver_conninfo;
+                unchanged = pageserver_conninfo == &old_pageserver_conninfo;
                 unchanged
             })
             .unwrap();

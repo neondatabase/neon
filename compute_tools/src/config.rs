@@ -58,9 +58,36 @@ pub fn write_postgres_conf(
 
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
-    if let Some(s) = &spec.pageserver_connstring {
-        writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
+    if let Some(conninfo) = &spec.pageserver_connection_info {
+        let mut libpq_urls: Option<Vec<String>> = Some(Vec::new());
+
+        for shardno in 0..conninfo.shards.len() {
+            let info = conninfo.shards.get(&(shardno as u32)).ok_or_else(|| {
+                anyhow::anyhow!("shard {shardno} missing from pageserver_connection_info shard map")
+            })?;
+
+            // Add the libpq URL to the array, or if the URL is missing, reset the array
+            // forgetting any previous entries. All servers must have a libpq URL, or none
+            // at all.
+            if let Some(url) = &info.libpq_url {
+                if let Some(ref mut urls) = libpq_urls {
+                    urls.push(url.clone());
+                }
+            } else {
+                libpq_urls = None
+            }
+        }
+        if let Some(libpq_urls) = libpq_urls {
+            writeln!(
+                file,
+                "neon.pageserver_connstring={}",
+                escape_conf_value(&libpq_urls.join(","))
+            )?;
+        } else {
+            writeln!(file, "# no neon.pageserver_connstring")?;
+        }
     }
+
     if let Some(stripe_size) = spec.shard_stripe_size {
         writeln!(file, "neon.stripe_size={stripe_size}")?;
     }
