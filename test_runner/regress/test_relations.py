@@ -27,7 +27,7 @@ def test_pageserver_reldir_v2(
     assert (
         env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
             "rel_size_migration"
-        ]
+        ][0]
         == "legacy"
     )
 
@@ -46,7 +46,7 @@ def test_pageserver_reldir_v2(
     assert (
         env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
             "rel_size_migration"
-        ]
+        ][0]
         == "legacy"
     )
 
@@ -119,6 +119,13 @@ def test_pageserver_reldir_v2(
     assert (
         env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
             "rel_size_migration"
-        ]
+        ][0]
         == "migrating"
+    )
+
+    assert (
+        env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+            "rel_size_migration"
+        ][1]
+        is not None
     )
