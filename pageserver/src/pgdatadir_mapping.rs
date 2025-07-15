@@ -6,7 +6,7 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
-use std::collections::{HashMap, HashSet, hash_map};
+use std::collections::{BTreeSet, HashMap, HashSet, hash_map};
 use std::ops::{ControlFlow, Range};
 
 use crate::walingest::{WalIngestError, WalIngestErrorKind};
@@ -575,6 +575,50 @@ impl Timeline {
         self.get_rel_exists_in_reldir(tag, version, None, ctx).await
     }
 
+    async fn get_rel_exists_in_reldir_v1(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
+        ctx: &RequestContext,
+    ) -> Result<bool, PageReconstructError> {
+        let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
+        if let Some((cached_key, dir)) = deserialized_reldir_v1 {
+            if cached_key == key {
+                return Ok(dir.rels.contains(&(tag.relnode, tag.forknum)));
+            } else if cfg!(test) || cfg!(feature = "testing") {
+                panic!("cached reldir key mismatch: {cached_key} != {key}");
+            } else {
+                warn!("cached reldir key mismatch: {cached_key} != {key}");
+            }
+            // Fallback to reading the directory from the datadir.
+        }
+
+        let buf = version.get(self, key, ctx).await?;
+
+        let dir = RelDirectory::des(&buf)?;
+        Ok(dir.rels.contains(&(tag.relnode, tag.forknum)))
+    }
+
+    async fn get_rel_exists_in_reldir_v2(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<bool, PageReconstructError> {
+        let key = rel_tag_sparse_key(tag.spcnode, tag.dbnode, tag.relnode, tag.forknum);
+        let buf = RelDirExists::decode_option(version.sparse_get(self, key, ctx).await?).map_err(
+            |_| {
+                PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: decode failed, {}",
+                    key
+                ))
+            },
+        )?;
+        let exists_v2 = buf == RelDirExists::Exists;
+        Ok(exists_v2)
+    }
+
     /// Does the relation exist? With a cached deserialized `RelDirectory`.
     ///
     /// There are some cases where the caller loops across all relations. In that specific case,
@@ -606,70 +650,52 @@ impl Timeline {
             return Ok(false);
         }
 
-        // fetch directory listing (v1)
-        // TODO: refactor to disable reads from v1 if we have fully migrated to v2
-        let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
+        let v2_status = self.get_rel_size_v2_status();
 
-        if let Some((cached_key, dir)) = deserialized_reldir_v1 {
-            if cached_key == key {
-                return Ok(dir.rels.contains(&(tag.relnode, tag.forknum)));
-            } else if cfg!(test) || cfg!(feature = "testing") {
-                panic!("cached reldir key mismatch: {cached_key} != {key}");
-            } else {
-                warn!("cached reldir key mismatch: {cached_key} != {key}");
+        match v2_status {
+            RelSizeMigration::Legacy => {
+                let v1_exists = self
+                    .get_rel_exists_in_reldir_v1(tag, version, deserialized_reldir_v1, ctx)
+                    .await?;
+                Ok(v1_exists)
             }
-            // Fallback to reading the directory from the datadir.
-        }
-        let buf = version.get(self, key, ctx).await?;
-
-        let dir = RelDirectory::des(&buf)?;
-        let exists_v1 = dir.rels.contains(&(tag.relnode, tag.forknum));
-
-        // fetch directory listing (v2)
-        // TODO: if IndexPart::rel_size_migration is `Migrated`, we only need to read from v2.
-        if let RelSizeMigration::Migrated | RelSizeMigration::Migrating =
-            self.get_rel_size_v2_status()
-        {
-            // fetch directory listing (new)
-            let key = rel_tag_sparse_key(tag.spcnode, tag.dbnode, tag.relnode, tag.forknum);
-            let buf = RelDirExists::decode_option(version.sparse_get(self, key, ctx).await?)
-                .map_err(|_| PageReconstructError::Other(anyhow::anyhow!("invalid reldir key")))?;
-            let exists_v2 = buf == RelDirExists::Exists;
-            if self.get_rel_size_v2_status() == RelSizeMigration::Migrated {
-                return Ok(exists_v2);
-            } else if exists_v1 != exists_v2 {
-                // Do a validation if we have not fully migrated to v2
-                tracing::warn!(
-                    "inconsistent v1/v2 reldir keyspace for rel {}: exists_v1={}, exists_v2={}",
-                    tag,
-                    exists_v1,
-                    exists_v2
-                );
+            RelSizeMigration::Migrating => {
+                let v1_exists = self
+                    .get_rel_exists_in_reldir_v1(tag, version, deserialized_reldir_v1, ctx)
+                    .await?;
+                let v2_exists_res = self.get_rel_exists_in_reldir_v2(tag, version, ctx).await;
+                match v2_exists_res {
+                    Ok(v2_exists) if v1_exists == v2_exists => {}
+                    Ok(v2_exists) => {
+                        tracing::warn!(
+                            "inconsistent v1/v2 reldir keyspace for rel {}: v1_exists={}, v2_exists={}",
+                            tag,
+                            v1_exists,
+                            v2_exists
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to get rel exists in v2: {e}");
+                    }
+                }
+                Ok(v1_exists)
+            }
+            RelSizeMigration::Migrated => {
+                let v2_exists = self.get_rel_exists_in_reldir_v2(tag, version, ctx).await?;
+                Ok(v2_exists)
             }
         }
-
-        Ok(exists_v1)
     }
 
-    /// Get a list of all existing relations in given tablespace and database.
-    ///
-    /// Only shard 0 has a full view of the relations. Other shards only know about relations that
-    /// the shard stores pages for.
-    ///
-    /// # Cancel-Safety
-    ///
-    /// This method is cancellation-safe.
-    pub(crate) async fn list_rels(
+    async fn list_rels_v1(
         &self,
         spcnode: Oid,
         dbnode: Oid,
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<HashSet<RelTag>, PageReconstructError> {
-        // fetch directory listing (old)
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = version.get(self, key, ctx).await?;
-
         let dir = RelDirectory::des(&buf)?;
         let rels_v1: HashSet<RelTag> =
             HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
@@ -678,12 +704,16 @@ impl Timeline {
                 relnode: *relnode,
                 forknum: *forknum,
             }));
+        Ok(rels_v1)
+    }
 
-        if let RelSizeMigration::Legacy = self.get_rel_size_v2_status() {
-            return Ok(rels_v1);
-        }
-
-        // scan directory listing (new)
+    async fn list_rels_v2(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<HashSet<RelTag>, PageReconstructError> {
         let key_range = rel_tag_sparse_key_range(spcnode, dbnode);
         let io_concurrency = IoConcurrency::spawn_from_conf(
             self.conf.get_vectored_concurrent_io,
@@ -701,11 +731,30 @@ impl Timeline {
             .await?;
         let mut rels = HashSet::new();
         for (key, val) in results {
-            let val = RelDirExists::decode(&val?)
-                .map_err(|_| PageReconstructError::Other(anyhow::anyhow!("invalid reldir key")))?;
-            assert_eq!(key.field6, 1);
-            assert_eq!(key.field2, spcnode);
-            assert_eq!(key.field3, dbnode);
+            let val = RelDirExists::decode(&val?).map_err(|_| {
+                PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: decode failed, {}",
+                    key
+                ))
+            })?;
+            if key.field6 != 1 {
+                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: field6 != 1, {}",
+                    key
+                )));
+            }
+            if key.field2 != spcnode {
+                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: field2 != spcnode, {}",
+                    key
+                )));
+            }
+            if key.field3 != dbnode {
+                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: field3 != dbnode, {}",
+                    key
+                )));
+            }
             let tag = RelTag {
                 spcnode,
                 dbnode,
@@ -719,19 +768,56 @@ impl Timeline {
             let did_not_contain = rels.insert(tag);
             debug_assert!(did_not_contain, "duplicate reltag in v2");
         }
+        Ok(rels)
+    }
 
-        if self.get_rel_size_v2_status() == RelSizeMigration::Migrated {
-            return Ok(rels);
-        } else if rels_v1 != rels {
-            tracing::warn!(
-                "inconsistent v1/v2 reldir keyspace for db {} {}: v1_rels.len()={}, v2_rels.len()={}",
-                spcnode,
-                dbnode,
-                rels_v1.len(),
-                rels.len()
-            );
+    /// Get a list of all existing relations in given tablespace and database.
+    ///
+    /// Only shard 0 has a full view of the relations. Other shards only know about relations that
+    /// the shard stores pages for.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
+    pub(crate) async fn list_rels(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<HashSet<RelTag>, PageReconstructError> {
+        let v2_status = self.get_rel_size_v2_status();
+
+        match v2_status {
+            RelSizeMigration::Legacy => {
+                let rels_v1 = self.list_rels_v1(spcnode, dbnode, version, ctx).await?;
+                Ok(rels_v1)
+            }
+            RelSizeMigration::Migrating => {
+                let rels_v1 = self.list_rels_v1(spcnode, dbnode, version, ctx).await?;
+                let rels_v2_res = self.list_rels_v2(spcnode, dbnode, version, ctx).await;
+                match rels_v2_res {
+                    Ok(rels_v2) if rels_v1 == rels_v2 => {}
+                    Ok(rels_v2) => {
+                        tracing::warn!(
+                            "inconsistent v1/v2 reldir keyspace for db {} {}: v1_rels.len()={}, v2_rels.len()={}",
+                            spcnode,
+                            dbnode,
+                            rels_v1.len(),
+                            rels_v2.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to list rels in v2: {e}");
+                    }
+                }
+                Ok(rels_v1)
+            }
+            RelSizeMigration::Migrated => {
+                let rels_v2 = self.list_rels_v2(spcnode, dbnode, version, ctx).await?;
+                Ok(rels_v2)
+            }
         }
-        Ok(rels_v1)
     }
 
     /// Get the whole SLRU segment
@@ -1447,6 +1533,9 @@ impl Timeline {
     /// of the timeline and snapshot cache, which key includes LSN and so can be used by replicas to get relation size
     /// at the particular LSN (snapshot).
     pub fn get_cached_rel_size(&self, tag: &RelTag, version: Version<'_>) -> Option<BlockNumber> {
+        if cfg!(feature = "testing") {
+            return None;
+        }
         let lsn = version.get_lsn();
         {
             let rel_size_cache = self.rel_size_latest_cache.read().unwrap();
@@ -1566,7 +1655,7 @@ pub enum MetricsUpdate {
 /// Controls the behavior of the reldir keyspace.
 pub struct RelDirMode {
     // Whether we can read the v2 keyspace or not.
-    v2_ready: bool,
+    current_status: RelSizeMigration,
     // Whether we should initialize the v2 keyspace or not.
     initialize: bool,
 }
@@ -1936,14 +2025,14 @@ impl DatadirModification<'_> {
             (false, RelSizeMigration::Legacy) => {
                 // tenant config didn't enable it and we didn't write any reldir_v2 key yet
                 Ok(RelDirMode {
-                    v2_ready: false,
+                    current_status: RelSizeMigration::Legacy,
                     initialize: false,
                 })
             }
-            (false, RelSizeMigration::Migrating | RelSizeMigration::Migrated) => {
+            (false, status @ RelSizeMigration::Migrating | status @ RelSizeMigration::Migrated) => {
                 // index_part already persisted that the timeline has enabled rel_size_v2
                 Ok(RelDirMode {
-                    v2_ready: true,
+                    current_status: status,
                     initialize: false,
                 })
             }
@@ -1952,22 +2041,22 @@ impl DatadirModification<'_> {
                 // The caller should update the reldir status once the initialization is done.
                 if is_create {
                     Ok(RelDirMode {
-                        v2_ready: true,
+                        current_status: RelSizeMigration::Legacy,
                         initialize: true,
                     })
                 } else {
                     // Only initialize the v2 keyspace on new relation creation.
                     Ok(RelDirMode {
-                        v2_ready: false,
+                        current_status: RelSizeMigration::Legacy,
                         initialize: false,
                     })
                 }
             }
-            (true, RelSizeMigration::Migrating | RelSizeMigration::Migrated) => {
+            (true, status @ RelSizeMigration::Migrating | status @ RelSizeMigration::Migrated) => {
                 // index_part already persisted that the timeline has enabled rel_size_v2
                 // and we don't need to do anything
                 Ok(RelDirMode {
-                    v2_ready: true,
+                    current_status: status,
                     initialize: false,
                 })
             }
@@ -1999,7 +2088,7 @@ impl DatadirModification<'_> {
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         }
         if r.is_none() {
-            if v2_mode.v2_ready {
+            if v2_mode.current_status != RelSizeMigration::Legacy {
                 self.pending_directory_entries
                     .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
             }
@@ -2116,6 +2205,110 @@ impl DatadirModification<'_> {
         Ok(())
     }
 
+    async fn initialize_rel_size_v2_keyspace(
+        &mut self,
+        ctx: &RequestContext,
+        dbdir: &DbDirectory,
+    ) -> Result<(), WalIngestError> {
+        // Copy everything from relv1 to relv2; TODO: check if there's any key in the v2 keyspace, if so, abort.
+        tracing::info!("initializing rel_size_v2 keyspace");
+        let mut rel_cnt = 0;
+        // relmap_exists (the value of dbdirs hashmap) does not affect the migration: we need to copy things over anyways
+        for (spcnode, dbnode) in dbdir.dbdirs.keys() {
+            let spcnode = *spcnode;
+            let dbnode = *dbnode;
+            let rel_dir_key = rel_dir_to_key(spcnode, dbnode);
+            let rel_dir = RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?;
+            for (relnode, forknum) in rel_dir.rels {
+                let sparse_rel_dir_key = rel_tag_sparse_key(spcnode, dbnode, relnode, forknum);
+                self.put(
+                    sparse_rel_dir_key,
+                    Value::Image(RelDirExists::Exists.encode()),
+                );
+                tracing::info!(
+                    "migrated rel_size_v2: {}",
+                    RelTag {
+                        spcnode,
+                        dbnode,
+                        relnode,
+                        forknum
+                    }
+                );
+                rel_cnt += 1;
+            }
+        }
+        tracing::info!(
+            "initialized rel_size_v2 keyspace: migrated {} relations",
+            rel_cnt
+        );
+        self.tline
+            .update_rel_size_v2_status(RelSizeMigration::Migrating)
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
+        Ok::<_, WalIngestError>(())
+    }
+
+    async fn put_rel_creation_v1(
+        &mut self,
+        rel: RelTag,
+        dbdir_exists: bool,
+        ctx: &RequestContext,
+    ) -> Result<(), WalIngestError> {
+        // Reldir v1 write path
+        let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
+        let mut rel_dir = if !dbdir_exists {
+            // Create the RelDirectory
+            RelDirectory::default()
+        } else {
+            // reldir already exists, fetch it
+            RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?
+        };
+
+        // Add the new relation to the rel directory entry, and write it back
+        if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
+            Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
+        }
+        if !dbdir_exists {
+            self.pending_directory_entries
+                .push((DirectoryKind::Rel, MetricsUpdate::Set(0)))
+        }
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, MetricsUpdate::Add(1)));
+        self.put(
+            rel_dir_key,
+            Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
+        );
+        Ok(())
+    }
+
+    async fn put_rel_creation_v2(
+        &mut self,
+        rel: RelTag,
+        dbdir_exists: bool,
+        ctx: &RequestContext,
+    ) -> Result<(), WalIngestError> {
+        // Reldir v2 write path
+        let sparse_rel_dir_key =
+            rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
+        // check if the rel_dir_key exists in v2
+        let val = self.sparse_get(sparse_rel_dir_key, ctx).await?;
+        let val = RelDirExists::decode_option(val)
+            .map_err(|_| WalIngestErrorKind::InvalidRelDirKey(sparse_rel_dir_key))?;
+        if val == RelDirExists::Exists {
+            Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
+        }
+        self.put(
+            sparse_rel_dir_key,
+            Value::Image(RelDirExists::Exists.encode()),
+        );
+        if !dbdir_exists {
+            self.pending_directory_entries
+                .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
+        }
+        self.pending_directory_entries
+            .push((DirectoryKind::RelV2, MetricsUpdate::Add(1)));
+        Ok(())
+    }
+
     /// Create a relation fork.
     ///
     /// 'nblocks' is the initial size.
@@ -2149,94 +2342,27 @@ impl DatadirModification<'_> {
                 true
             };
 
-        let v2_mode = self
+        let mut v2_mode = self
             .maybe_enable_rel_size_v2(true)
             .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
 
         if v2_mode.initialize {
-            let initialize = async {
-                // Copy everything from relv1 to relv2; TODO: check if there's any key in the v2 keyspace, if so, abort.
-                tracing::info!("initializing rel_size_v2 keyspace");
-                for ((spcnode, dbnode), exists) in dbdir.dbdirs {
-                    if !exists {
-                        continue;
-                    }
-                    let rel_dir_key = rel_dir_to_key(spcnode, dbnode);
-                    let rel_dir = RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?;
-                    for (relnode, forknum) in rel_dir.rels {
-                        let sparse_rel_dir_key =
-                            rel_tag_sparse_key(spcnode, dbnode, relnode, forknum);
-                        self.put(
-                            sparse_rel_dir_key,
-                            Value::Image(RelDirExists::Exists.encode()),
-                        );
-                    }
-                }
-                tracing::info!("initialized rel_size_v2 keyspace");
-                self.tline
-                    .update_rel_size_v2_status(RelSizeMigration::Migrating)
-                    .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
-                Ok::<_, WalIngestError>(())
-            };
-            if let Err(e) = initialize.await {
+            if let Err(e) = self.initialize_rel_size_v2_keyspace(ctx, &dbdir).await {
                 tracing::warn!("error initializing rel_size_v2 keyspace: {}", e);
                 // TODO: circuit breaker so that it won't retry forever
-            }
-        }
-
-        if self.tline.get_rel_size_v2_status() != RelSizeMigration::Migrated {
-            // Reldir v1 write path
-            let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-            let mut rel_dir = if !dbdir_exists {
-                // Create the RelDirectory
-                RelDirectory::default()
             } else {
-                // reldir already exists, fetch it
-                RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?
-            };
-
-            // Add the new relation to the rel directory entry, and write it back
-            if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
+                v2_mode.current_status = RelSizeMigration::Migrating;
             }
-            if !dbdir_exists {
-                self.pending_directory_entries
-                    .push((DirectoryKind::Rel, MetricsUpdate::Set(0)))
-            }
-            self.pending_directory_entries
-                .push((DirectoryKind::Rel, MetricsUpdate::Add(1)));
-            self.put(
-                rel_dir_key,
-                Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
-            );
         }
 
-        if v2_mode.v2_ready {
-            let write_v2 = async {
-                // Reldir v2 write path
-                let sparse_rel_dir_key =
-                    rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
-                // check if the rel_dir_key exists in v2
-                let val = self.sparse_get(sparse_rel_dir_key, ctx).await?;
-                let val = RelDirExists::decode_option(val)
-                    .map_err(|_| WalIngestErrorKind::InvalidRelDirKey(sparse_rel_dir_key))?;
-                if val == RelDirExists::Exists {
-                    Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
-                }
-                self.put(
-                    sparse_rel_dir_key,
-                    Value::Image(RelDirExists::Exists.encode()),
-                );
-                if !dbdir_exists {
-                    self.pending_directory_entries
-                        .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
-                }
-                self.pending_directory_entries
-                    .push((DirectoryKind::RelV2, MetricsUpdate::Add(1)));
-                Ok::<_, WalIngestError>(())
-            };
-            if let Err(e) = write_v2.await {
-                if self.tline.get_rel_size_v2_status() == RelSizeMigration::Migrated {
+        if v2_mode.current_status != RelSizeMigration::Migrated {
+            self.put_rel_creation_v1(rel, dbdir_exists, ctx).await?;
+        }
+
+        if v2_mode.current_status != RelSizeMigration::Legacy {
+            let write_v2_res = self.put_rel_creation_v2(rel, dbdir_exists, ctx).await;
+            if let Err(e) = write_v2_res {
+                if v2_mode.current_status == RelSizeMigration::Migrated {
                     return Err(e);
                 }
                 tracing::warn!("error writing rel_size_v2 keyspace: {}", e);
@@ -2315,90 +2441,27 @@ impl DatadirModification<'_> {
         Ok(())
     }
 
-    /// Drop some relations
-    pub(crate) async fn put_rel_drops(
+    async fn put_rel_drop_v1(
         &mut self,
         drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
         ctx: &RequestContext,
-    ) -> Result<(), WalIngestError> {
-        let v2_mode = self
-            .maybe_enable_rel_size_v2(false)
-            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
+    ) -> Result<BTreeSet<RelTag>, WalIngestError> {
+        let mut dropped_rels = BTreeSet::new();
         for ((spc_node, db_node), rel_tags) in drop_relations {
-            // TODO: skip reading this directory if we have fully migrated to v2
             let dir_key = rel_dir_to_key(spc_node, db_node);
             let buf = self.get(dir_key, ctx).await?;
             let mut dir = RelDirectory::des(&buf)?;
 
             let mut dirty = false;
             for rel_tag in rel_tags {
-                let v1_found = if self.tline.get_rel_size_v2_status() == RelSizeMigration::Migrated
-                {
-                    false // this value doesn't matter as data in v1 is invalid now
-                } else if dir.rels.remove(&(rel_tag.relnode, rel_tag.forknum)) {
+                let found = if dir.rels.remove(&(rel_tag.relnode, rel_tag.forknum)) {
                     self.pending_directory_entries
                         .push((DirectoryKind::Rel, MetricsUpdate::Sub(1)));
                     dirty = true;
+                    dropped_rels.insert(rel_tag);
                     true
                 } else {
                     false
-                };
-
-                let found = if v2_mode.v2_ready {
-                    let get_v2 = async {
-                        let key =
-                            rel_tag_sparse_key(spc_node, db_node, rel_tag.relnode, rel_tag.forknum);
-                        let val = RelDirExists::decode_option(self.sparse_get(key, ctx).await?)
-                            .map_err(|_| WalIngestErrorKind::InvalidKey(key, self.lsn))?;
-                        let v2_found = if val == RelDirExists::Exists {
-                            self.pending_directory_entries
-                                .push((DirectoryKind::RelV2, MetricsUpdate::Sub(1)));
-                            // put tombstone
-                            self.put(key, Value::Image(RelDirExists::Removed.encode()));
-                            // no need to set dirty to true
-                            true
-                        } else {
-                            false
-                        };
-                        Ok::<_, WalIngestError>(v2_found)
-                    };
-
-                    match get_v2.await {
-                        Ok(v2_found)
-                            if self.tline.get_rel_size_v2_status()
-                                != RelSizeMigration::Migrated =>
-                        {
-                            // Do validation if we have not fully migrated to v2
-                            if v1_found != v2_found {
-                                tracing::warn!(
-                                    "inconsistent v1/v2 reldir keyspace for rel {}: v1_found={}, v2_found={}",
-                                    rel_tag,
-                                    v1_found,
-                                    v2_found
-                                );
-                            }
-                            v1_found
-                        }
-                        Ok(v2_found) => v2_found,
-                        Err(e)
-                            if self.tline.get_rel_size_v2_status()
-                                != RelSizeMigration::Migrated =>
-                        {
-                            // Print a warning if we have not fully migrated to v2
-                            tracing::warn!(
-                                "error dropping v2 reldir key for rel {}: {}",
-                                rel_tag,
-                                e
-                            );
-                            false
-                        }
-                        Err(e) => {
-                            // Return an error if we have fully migrated to v2
-                            return Err(e);
-                        }
-                    }
-                } else {
-                    v1_found
                 };
 
                 if found {
@@ -2419,7 +2482,65 @@ impl DatadirModification<'_> {
                 self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
             }
         }
+        Ok(dropped_rels)
+    }
 
+    async fn put_rel_drop_v2(
+        &mut self,
+        drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
+        ctx: &RequestContext,
+    ) -> Result<BTreeSet<RelTag>, WalIngestError> {
+        let mut dropped_rels = BTreeSet::new();
+        for ((spc_node, db_node), rel_tags) in drop_relations {
+            for rel_tag in rel_tags {
+                let key = rel_tag_sparse_key(spc_node, db_node, rel_tag.relnode, rel_tag.forknum);
+                let val = RelDirExists::decode_option(self.sparse_get(key, ctx).await?)
+                    .map_err(|_| WalIngestErrorKind::InvalidKey(key, self.lsn))?;
+                if val == RelDirExists::Exists {
+                    dropped_rels.insert(rel_tag);
+                    self.pending_directory_entries
+                        .push((DirectoryKind::RelV2, MetricsUpdate::Sub(1)));
+                    // put tombstone
+                    self.put(key, Value::Image(RelDirExists::Removed.encode()));
+                }
+            }
+        }
+        Ok(dropped_rels)
+    }
+
+    /// Drop some relations
+    pub(crate) async fn put_rel_drops(
+        &mut self,
+        drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
+        ctx: &RequestContext,
+    ) -> Result<(), WalIngestError> {
+        let v2_status = self.tline.get_rel_size_v2_status();
+        match v2_status {
+            RelSizeMigration::Legacy => {
+                self.put_rel_drop_v1(drop_relations, ctx).await?;
+            }
+            RelSizeMigration::Migrating => {
+                let dropped_rels_v1 = self.put_rel_drop_v1(drop_relations.clone(), ctx).await?;
+                let dropped_rels_v2_res = self.put_rel_drop_v2(drop_relations, ctx).await;
+                match dropped_rels_v2_res {
+                    Ok(dropped_rels_v2) => {
+                        if dropped_rels_v1 != dropped_rels_v2 {
+                            tracing::warn!(
+                                "inconsistent v1/v2 rel drop: dropped_rels_v1.len()={}, dropped_rels_v2.len()={}",
+                                dropped_rels_v1.len(),
+                                dropped_rels_v2.len()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("error dropping rels: {}", e);
+                    }
+                }
+            }
+            RelSizeMigration::Migrated => {
+                self.put_rel_drop_v2(drop_relations, ctx).await?;
+            }
+        }
         Ok(())
     }
 
