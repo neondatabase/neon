@@ -38,7 +38,6 @@ reqwest.workspace = true
 rand.workspace = true
 tracing.workspace = true
 tracing-utils.workspace = true
-once_cell.workspace = true
 
 [dev-dependencies]
 bincode.workspace = true

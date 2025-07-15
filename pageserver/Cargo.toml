@@ -55,7 +55,6 @@ pageserver_client.workspace = true # for ResponseErrorMessageExt TOOD refactor t
 pageserver_compaction.workspace = true
 pageserver_page_api.workspace = true
 pem.workspace = true
-pin-project-lite.workspace = true
 postgres_backend.workspace = true
 postgres_connection.workspace = true
 postgres_ffi.workspace = true
