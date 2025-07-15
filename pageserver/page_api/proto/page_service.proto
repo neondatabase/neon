@@ -38,9 +38,6 @@ package page_api;
 import "google/protobuf/timestamp.proto";
 
 service PageService {
-  // Returns whether a relation exists.
-  rpc CheckRelExists(CheckRelExistsRequest) returns (CheckRelExistsResponse);
-
   // Fetches a base backup.
   rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
 
@@ -95,17 +92,6 @@ message RelTag {
     uint32 db_oid = 2;
     uint32 rel_number = 3;
     uint32 fork_number = 4;
-}
-
-// Checks whether a relation exists, at the given LSN. Only valid on shard 0,
-// other shards will error.
-message CheckRelExistsRequest {
-  ReadLsn read_lsn = 1;
-  RelTag rel = 2;
-}
-
-message CheckRelExistsResponse {
-  bool exists = 1;
 }
 
 // Requests a base backup.
@@ -260,10 +246,15 @@ enum GetPageStatusCode {
 message GetRelSizeRequest {
   ReadLsn read_lsn = 1;
   RelTag rel = 2;
+  // If true, return missing=true for missing relations instead of a NotFound error.
+  bool allow_missing = 3;
 }
 
 message GetRelSizeResponse {
+  // The number of blocks in the relation.
   uint32 num_blocks = 1;
+  // If allow_missing=true, this is true for missing relations.
+  bool missing = 2;
 }
 
 // Requests an SLRU segment. Only valid on shard 0, other shards will error.
