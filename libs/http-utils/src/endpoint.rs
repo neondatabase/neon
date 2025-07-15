@@ -81,14 +81,10 @@ where
     let path = request.uri().path();
     let request_span = info_span!("request", %method, %path, %request_id);
 
-    let log_quietly = method == Method::GET;
     async move {
         let cancellation_guard = RequestCancelled::warn_when_dropped_without_responding();
-        if log_quietly {
-            debug!("Handling request");
-        } else {
-            info!("Handling request");
-        }
+
+        info!("Handling request");
 
         // No special handling for panics here. There's a `tracing_panic_hook` from another
         // module to do that globally.
@@ -109,11 +105,7 @@ where
         match res {
             Ok(response) => {
                 let response_status = response.status();
-                if log_quietly && response_status.is_success() {
-                    debug!("Request handled, status: {response_status}");
-                } else {
-                    info!("Request handled, status: {response_status}");
-                }
+                info!("Request handled, status: {response_status}");
                 Ok(response)
             }
             Err(err) => Ok(api_error_handler(err)),
