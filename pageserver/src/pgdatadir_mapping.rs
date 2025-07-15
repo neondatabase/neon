@@ -226,6 +226,25 @@ impl Timeline {
             pending_nblocks: 0,
             pending_directory_entries: Vec::new(),
             pending_metadata_bytes: 0,
+            is_importing_pgdata: false,
+            lsn,
+        }
+    }
+
+    pub fn begin_modification_for_import(&self, lsn: Lsn) -> DatadirModification
+    where
+        Self: Sized,
+    {
+        DatadirModification {
+            tline: self,
+            pending_lsns: Vec::new(),
+            pending_metadata_pages: HashMap::new(),
+            pending_data_batch: None,
+            pending_deletions: Vec::new(),
+            pending_nblocks: 0,
+            pending_directory_entries: Vec::new(),
+            pending_metadata_bytes: 0,
+            is_importing_pgdata: true,
             lsn,
         }
     }
@@ -1653,6 +1672,9 @@ pub struct DatadirModification<'a> {
 
     /// An **approximation** of how many metadata bytes will be written to the EphemeralFile.
     pending_metadata_bytes: usize,
+
+    /// Whether we are importing a pgdata directory.
+    is_importing_pgdata: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2055,7 +2077,7 @@ impl DatadirModification<'_> {
             (true, RelSizeMigration::Legacy) => {
                 // The first time we enable it, we need to persist it in `index_part.json`
                 // The caller should update the reldir status once the initialization is done.
-                if is_create {
+                if is_create && !self.is_importing_pgdata {
                     Ok(RelDirMode {
                         current_status: RelSizeMigration::Legacy,
                         initialize: true,
