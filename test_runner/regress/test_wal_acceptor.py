@@ -2824,7 +2824,6 @@ def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
             # 2000 rows from first insert + 1000 from last insert
             assert cur.fetchone() == (3000,)
 
-
 def test_global_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
     """
     Similar to `test_timeline_disk_usage_limit`, but test that the global disk usage circuit breaker
@@ -2850,7 +2849,7 @@ def test_global_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
             cur.execute("create table t2(key int, value text)")
 
     for sk in env.safekeepers:
-        sk.stop().start(extra_opts=["--global-disk-check-interval=1s"])
+        sk.stop().start(extra_opts=["--global-disk-check-interval=1s", "--max-global-disk-usage-ratio=0.8"])
 
     # Set the failpoint to have the disk usage check return u64::MAX, which definitely exceeds the practical
     # limits in the test environment.
