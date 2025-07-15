@@ -503,6 +503,7 @@ class NeonLocalCli(AbstractNeonCli):
         pageserver_id: int | None = None,
         allow_multiple=False,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -534,6 +535,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--allow-multiple"])
         if update_catalog:
             args.extend(["--update-catalog"])
+        if privileged_role_name is not None:
+            args.extend(["--privileged-role-name", privileged_role_name])
 
         res = self.raw_cli(args)
         res.check_returncode()
