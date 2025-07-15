@@ -51,8 +51,8 @@ jsonnetfmt-format:
 
 .PHONY: manifest-schema-validation
 manifest-schema-validation: ../build-tools/node_modules
-	../build-tools/node_modules/.bin/jsonschema validate -d https://json-schema.org/draft/2020-12/schema manifest.schema.json manifest.yaml
+	npx --prefix=../build-tools/ jsonschema validate -d https://json-schema.org/draft/2020-12/schema manifest.schema.json manifest.yaml
 
 ../build-tools/node_modules: ../build-tools/package.json
-	cd ../build-tools && npm install
+	cd ../build-tools && $(if $(CI),npm ci,npm install)
 	touch ../build-tools/node_modules

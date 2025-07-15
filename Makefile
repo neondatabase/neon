@@ -221,14 +221,14 @@ setup-pre-commit-hook:
 	ln -s -f $(ROOT_PROJECT_DIR)/pre-commit.py .git/hooks/pre-commit
 
 build-tools/node_modules: build-tools/package.json
-	cd build-tools && npm install
+	cd build-tools && $(if $(CI),npm ci,npm install)
 	touch build-tools/node_modules
 
 .PHONY: lint-openapi-spec
 lint-openapi-spec: build-tools/node_modules
 	# operation-2xx-response: pageserver timeline delete returns 404 on success
 	find . -iname "openapi_spec.y*ml" -exec\
-		build-tools/node_modules/.bin/redocly\
+		npx --prefix=build-tools/ redocly\
 			--skip-rule=operation-operationId --skip-rule=operation-summary --extends=minimal\
 			--skip-rule=no-server-example.com --skip-rule=operation-2xx-response\
 			lint {} \+
