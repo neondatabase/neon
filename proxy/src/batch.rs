@@ -63,16 +63,19 @@ impl<P: QueueProcessing> BatchQueue<P> {
         }
     }
 
+    pub fn enqueue(&self, req: P::Req) -> (u64, oneshot::Receiver<ProcResult<P>>) {
+        self.inner.lock_propagate_poison().register_job(req)
+    }
+
     /// Perform a single request-response process, this may be batched internally.
     ///
     /// This function is not cancel safe.
     pub async fn call<R>(
         &self,
-        req: P::Req,
+        id: u64,
+        mut rx: oneshot::Receiver<ProcResult<P>>,
         cancelled: impl Future<Output = R>,
     ) -> Result<P::Res, BatchQueueError<P::Err, R>> {
-        let (id, mut rx) = self.inner.lock_propagate_poison().register_job(req);
-
         let mut cancelled = pin!(cancelled);
         let resp: Option<Result<P::Res, P::Err>> = loop {
             // try become the leader, or try wait for success.
