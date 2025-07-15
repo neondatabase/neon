@@ -482,6 +482,7 @@ class NeonProject:
             target_branch.id,
             self.generate_branch_name(),
         )
+        target_branch.start_benchmark()
         return target_branch
 
 
