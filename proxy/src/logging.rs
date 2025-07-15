@@ -367,9 +367,24 @@ impl CallsiteSpanInfo {
     }
 }
 
+#[derive(Clone)]
+struct RawValue(Box<[u8]>);
+
+impl RawValue {
+    fn new(v: impl json::ValueEncoder) -> Self {
+        Self(json::value_to_vec!(|val| v.encode(val)).into_boxed_slice())
+    }
+}
+
+impl json::ValueEncoder for &RawValue {
+    fn encode(self, v: json::ValueSer<'_>) {
+        v.write_raw_json(&self.0);
+    }
+}
+
 /// Stores span field values recorded during the spans lifetime.
 struct SpanFields {
-    values: [serde_json::Value; MAX_TRACING_FIELDS],
+    values: [Option<RawValue>; MAX_TRACING_FIELDS],
 
     /// cached span info so we can avoid extra hashmap lookups in the hot path.
     span_info: CallsiteSpanInfo,
@@ -379,7 +394,7 @@ impl SpanFields {
     fn new(span_info: CallsiteSpanInfo) -> Self {
         Self {
             span_info,
-            values: [const { serde_json::Value::Null }; MAX_TRACING_FIELDS],
+            values: [const { None }; MAX_TRACING_FIELDS],
         }
     }
 }
@@ -387,55 +402,55 @@ impl SpanFields {
 impl tracing::field::Visit for SpanFields {
     #[inline]
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        self.values[field.index()] = serde_json::Value::from(value);
+        self.values[field.index()] = Some(RawValue::new(value));
     }
 
     #[inline]
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        self.values[field.index()] = serde_json::Value::from(value);
+        self.values[field.index()] = Some(RawValue::new(value));
     }
 
     #[inline]
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        self.values[field.index()] = serde_json::Value::from(value);
+        self.values[field.index()] = Some(RawValue::new(value));
     }
 
     #[inline]
     fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
         if let Ok(value) = i64::try_from(value) {
-            self.values[field.index()] = serde_json::Value::from(value);
+            self.values[field.index()] = Some(RawValue::new(value));
         } else {
-            self.values[field.index()] = serde_json::Value::from(format!("{value}"));
+            self.values[field.index()] = Some(RawValue::new(format_args!("{value}")));
         }
     }
 
     #[inline]
     fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
         if let Ok(value) = u64::try_from(value) {
-            self.values[field.index()] = serde_json::Value::from(value);
+            self.values[field.index()] = Some(RawValue::new(value));
         } else {
-            self.values[field.index()] = serde_json::Value::from(format!("{value}"));
+            self.values[field.index()] = Some(RawValue::new(format_args!("{value}")));
         }
     }
 
     #[inline]
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        self.values[field.index()] = serde_json::Value::from(value);
+        self.values[field.index()] = Some(RawValue::new(value));
     }
 
     #[inline]
     fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
-        self.values[field.index()] = serde_json::Value::from(value);
+        self.values[field.index()] = Some(RawValue::new(value));
     }
 
     #[inline]
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.values[field.index()] = serde_json::Value::from(value);
+        self.values[field.index()] = Some(RawValue::new(value));
     }
 
     #[inline]
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.values[field.index()] = serde_json::Value::from(format!("{value:?}"));
+        self.values[field.index()] = Some(RawValue::new(format_args!("{value:?}")));
     }
 
     #[inline]
@@ -444,7 +459,7 @@ impl tracing::field::Visit for SpanFields {
         field: &tracing::field::Field,
         value: &(dyn std::error::Error + 'static),
     ) {
-        self.values[field.index()] = serde_json::Value::from(format!("{value}"));
+        self.values[field.index()] = Some(RawValue::new(format_args!("{value}")));
     }
 }
 
@@ -565,11 +580,9 @@ impl EventFormatter {
                     let span_fields = spans.key(&*span_info.normalized_name);
                     json::value_as_object!(|span_fields| {
                         for (field, value) in std::iter::zip(span.metadata().fields(), values) {
-                            if value.is_null() {
-                                continue;
+                            if let Some(value) = value {
+                                span_fields.entry(field.name(), value);
                             }
-                            let raw = value.to_string();
-                            span_fields.key(field.name()).write_raw_json(raw.as_bytes());
                         }
                     });
                 }
@@ -627,11 +640,9 @@ impl EventFormatter {
                 let extract = serializer.key("extract");
                 json::value_as_object!(|extract| {
                     for (key, value) in std::iter::zip(extracted.names, extracted.values) {
-                        if value.is_null() {
-                            continue;
+                        if let Some(value) = value {
+                            extract.entry(*key, &value);
                         }
-                        let raw = value.to_string();
-                        extract.key(*key).write_raw_json(raw.as_bytes());
                     }
                 });
             }
@@ -817,14 +828,14 @@ impl tracing::field::Visit for MessageFieldSkipper<'_> {
 
 struct ExtractedSpanFields {
     names: &'static [&'static str],
-    values: Vec<serde_json::Value>,
+    values: Vec<Option<RawValue>>,
 }
 
 impl ExtractedSpanFields {
     fn new(names: &'static [&'static str]) -> Self {
         ExtractedSpanFields {
             names,
-            values: vec![serde_json::Value::Null; names.len()],
+            values: vec![None; names.len()],
         }
     }
 
@@ -833,18 +844,18 @@ impl ExtractedSpanFields {
 
         // extract the fields
         for (i, &j) in span_info.extract.iter().enumerate() {
-            let Some(value) = values.get(j) else { continue };
+            let Some(Some(value)) = values.get(j) else {
+                continue;
+            };
 
-            if !value.is_null() {
-                // TODO: replace clone with reference, if possible.
-                self.values[i] = value.clone();
-            }
+            // TODO: replace clone with reference, if possible.
+            self.values[i] = Some(value.clone());
         }
     }
 
     #[inline]
     fn has_values(&self) -> bool {
-        self.values.iter().any(|v| !v.is_null())
+        self.values.iter().any(|v| v.is_some())
     }
 }
 
