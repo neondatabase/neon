@@ -8,12 +8,10 @@ use std::{
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use utils::{backoff, critical, id::TenantTimelineId, ip_address};
+use utils::{backoff, critical_timeline, id::TenantTimelineId, ip_address};
 
 use anyhow::{Result, anyhow};
-use pageserver_api::controller_api::NodeRegisterRequest;
 
-use anyhow::Result;
 use pageserver_api::controller_api::{
     AvailabilityZone, NodeRegisterRequest, SafekeeperTimeline, SafekeeperTimelinesResponse,
 };
@@ -386,10 +384,9 @@ pub fn get_filesystem_usage(path: &std::path::Path) -> u64 {
             // The global disk usage watcher aren't associated with a tenant or timeline, so we just
             // pass placeholder (all-zero) tenant and timeline IDs to the critical!() macro.
             let placeholder_ttid = TenantTimelineId::empty();
-            critical!(
+            critical_timeline!(
                 placeholder_ttid.tenant_id,
                 placeholder_ttid.timeline_id,
-                None::<&AtomicBool>,
                 "Global disk usage watcher failed to read filesystem usage: {:?}",
                 e
             );

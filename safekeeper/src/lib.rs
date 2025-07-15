@@ -87,7 +87,7 @@ pub mod defaults {
 
     // Global disk watcher defaults
     pub const DEFAULT_GLOBAL_DISK_CHECK_INTERVAL: &str = "60s";
-    pub const DEFAULT_MAX_GLOBAL_DISK_USAGE_RATIO: f64 = 0;
+    pub const DEFAULT_MAX_GLOBAL_DISK_USAGE_RATIO: f64 = 0.0;
 }
 
 #[derive(Debug, Clone)]

@@ -43,8 +43,9 @@ use utils::metrics_collector::{METRICS_COLLECTION_INTERVAL, METRICS_COLLECTOR};
 use utils::sentry_init::init_sentry;
 use utils::{pid_file, project_build_tag, project_git_version, tcp_listener};
 
-use safekeeper::hadron::{self, get_filesystem_capacity};
-use safekeeper::hadron::{GLOBAL_DISK_LIMIT_EXCEEDED, get_filesystem_usage};
+use safekeeper::hadron::{
+    GLOBAL_DISK_LIMIT_EXCEEDED, get_filesystem_capacity, get_filesystem_usage,
+};
 use safekeeper::metrics::GLOBAL_DISK_UTIL_CHECK_SECONDS;
 use std::sync::atomic::Ordering;
 
