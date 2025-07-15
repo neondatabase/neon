@@ -1372,12 +1372,12 @@ mod tests {
             "gc_compaction": {
                 "last_completed_lsn": "0/16960E8"
             },
-            "marked_invisible_at": "2023-07-31T09:00:00.123",,
+            "marked_invisible_at": "2023-07-31T09:00:00.123",
             "rel_size_migrated_at": "0/16960E8"
         }"#;
 
         let expected = IndexPart {
-            version: 14,
+            version: 15,
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
                     file_size: 25600000,
