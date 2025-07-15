@@ -650,10 +650,19 @@ impl Timeline {
             return Ok(false);
         }
 
-        let v2_status = self.get_rel_size_v2_status();
+        let (v2_status, migrated_lsn) = self.get_rel_size_v2_status();
 
         match v2_status {
             RelSizeMigration::Legacy => {
+                let v1_exists = self
+                    .get_rel_exists_in_reldir_v1(tag, version, deserialized_reldir_v1, ctx)
+                    .await?;
+                Ok(v1_exists)
+            }
+            RelSizeMigration::Migrating | RelSizeMigration::Migrated
+                if version.get_lsn() < migrated_lsn.unwrap_or(Lsn(0)) =>
+            {
+                // For requests below the migrated LSN, we still use the v1 read path.
                 let v1_exists = self
                     .get_rel_exists_in_reldir_v1(tag, version, deserialized_reldir_v1, ctx)
                     .await?;
@@ -786,10 +795,17 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<HashSet<RelTag>, PageReconstructError> {
-        let v2_status = self.get_rel_size_v2_status();
+        let (v2_status, migrated_lsn) = self.get_rel_size_v2_status();
 
         match v2_status {
             RelSizeMigration::Legacy => {
+                let rels_v1 = self.list_rels_v1(spcnode, dbnode, version, ctx).await?;
+                Ok(rels_v1)
+            }
+            RelSizeMigration::Migrating | RelSizeMigration::Migrated
+                if version.get_lsn() < migrated_lsn.unwrap_or(Lsn(0)) =>
+            {
+                // For requests below the migrated LSN, we still use the v1 read path.
                 let rels_v1 = self.list_rels_v1(spcnode, dbnode, version, ctx).await?;
                 Ok(rels_v1)
             }
@@ -2015,11 +2031,14 @@ impl DatadirModification<'_> {
     }
 
     /// Returns `true` if the rel_size_v2 write path is enabled. If it is the first time that
-    /// we enable it, we also need to persist it in `index_part.json`.
+    /// we enable it, we also need to persist it in `index_part.json` (initialize is true).
+    ///
+    /// As this function is only used on the write path, we do not need to read the migrated_at
+    /// field.
     pub fn maybe_enable_rel_size_v2(&mut self, is_create: bool) -> anyhow::Result<RelDirMode> {
         // TODO: define the behavior of the tenant-level config flag and use feature flag to enable this feature
 
-        let status = self.tline.get_rel_size_v2_status();
+        let (status, _) = self.tline.get_rel_size_v2_status();
         let config = self.tline.get_rel_size_v2_enabled();
         match (config, status) {
             (false, RelSizeMigration::Legacy) => {
@@ -2238,11 +2257,12 @@ impl DatadirModification<'_> {
             }
         }
         tracing::info!(
-            "initialized rel_size_v2 keyspace: migrated {} relations",
+            "initialized rel_size_v2 keyspace at lsn {}: migrated {} relations",
+            self.lsn,
             rel_cnt
         );
         self.tline
-            .update_rel_size_v2_status(RelSizeMigration::Migrating)
+            .update_rel_size_v2_status(RelSizeMigration::Migrating, Some(self.lsn))
             .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
         Ok::<_, WalIngestError>(())
     }
@@ -2514,8 +2534,10 @@ impl DatadirModification<'_> {
         drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
         ctx: &RequestContext,
     ) -> Result<(), WalIngestError> {
-        let v2_status = self.tline.get_rel_size_v2_status();
-        match v2_status {
+        let v2_mode = self
+            .maybe_enable_rel_size_v2(false)
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
+        match v2_mode.current_status {
             RelSizeMigration::Legacy => {
                 self.put_rel_drop_v1(drop_relations, ctx).await?;
             }

@@ -1500,6 +1500,7 @@ pub struct TimelineArchivalConfigRequest {
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct TimelinePatchIndexPartRequest {
     pub rel_size_migration: Option<RelSizeMigration>,
+    pub rel_size_migrated_at: Option<Lsn>,
     pub gc_compaction_last_completed_lsn: Option<Lsn>,
     pub applied_gc_cutoff_lsn: Option<Lsn>,
     #[serde(default)]
@@ -1618,7 +1619,7 @@ pub struct TimelineInfo {
     pub is_archived: Option<bool>,
 
     /// The status of the rel_size migration.
-    pub rel_size_migration: Option<RelSizeMigration>,
+    pub rel_size_migration: Option<(RelSizeMigration, Option<Lsn>)>,
 
     /// Whether the timeline is invisible in synthetic size calculations.
     pub is_invisible: Option<bool>,

@@ -1205,6 +1205,7 @@ impl TenantShard {
             idempotency.clone(),
             index_part.gc_compaction.clone(),
             index_part.rel_size_migration.clone(),
+            index_part.rel_size_migrated_at,
             ctx,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
@@ -2584,6 +2585,7 @@ impl TenantShard {
             initdb_lsn,
             None,
             None,
+            None,
             ctx,
         )
         .await
@@ -2911,6 +2913,7 @@ impl TenantShard {
                     &new_metadata,
                     timeline_create_guard,
                     initdb_lsn,
+                    None,
                     None,
                     None,
                     ctx,
@@ -4336,6 +4339,7 @@ impl TenantShard {
         create_idempotency: CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
         rel_size_v2_status: Option<RelSizeMigration>,
+        rel_size_migrated_at: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<(Arc<Timeline>, RequestContext)> {
         let state = match cause {
@@ -4370,6 +4374,7 @@ impl TenantShard {
             create_idempotency,
             gc_compaction_state,
             rel_size_v2_status,
+            rel_size_migrated_at,
             self.cancel.child_token(),
         );
 
@@ -5079,6 +5084,7 @@ impl TenantShard {
             src_timeline.pg_version,
         );
 
+        let (rel_size_v2_status, rel_size_migrated_at) = src_timeline.get_rel_size_v2_status();
         let (uninitialized_timeline, _timeline_ctx) = self
             .prepare_new_timeline(
                 dst_id,
@@ -5086,7 +5092,8 @@ impl TenantShard {
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
-                Some(src_timeline.get_rel_size_v2_status()),
+                Some(rel_size_v2_status),
+                rel_size_migrated_at,
                 ctx,
             )
             .await?;
@@ -5373,6 +5380,7 @@ impl TenantShard {
                 pgdata_lsn,
                 None,
                 None,
+                None,
                 ctx,
             )
             .await?;
@@ -5456,14 +5464,17 @@ impl TenantShard {
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
         rel_size_v2_status: Option<RelSizeMigration>,
+        rel_size_migrated_at: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<(UninitializedTimeline<'a>, RequestContext)> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);
-        resources
-            .remote_client
-            .init_upload_queue_for_empty_remote(new_metadata, rel_size_v2_status.clone())?;
+        resources.remote_client.init_upload_queue_for_empty_remote(
+            new_metadata,
+            rel_size_v2_status.clone(),
+            rel_size_migrated_at,
+        )?;
 
         let (timeline_struct, timeline_ctx) = self
             .create_timeline_struct(
@@ -5476,6 +5487,7 @@ impl TenantShard {
                 create_guard.idempotency.clone(),
                 None,
                 rel_size_v2_status,
+                rel_size_migrated_at,
                 ctx,
             )
             .context("Failed to create timeline data structure")?;

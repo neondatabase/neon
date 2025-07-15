@@ -926,9 +926,16 @@ async fn timeline_patch_index_part_handler(
             active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
                 .await?;
 
+        if request_data.rel_size_migration.is_none() && request_data.rel_size_migrated_at.is_some()
+        {
+            return Err(ApiError::BadRequest(anyhow!(
+                "updating rel_size_migrated_at without rel_size_migration is not allowed"
+            )));
+        }
+
         if let Some(rel_size_migration) = request_data.rel_size_migration {
             timeline
-                .update_rel_size_v2_status(rel_size_migration)
+                .update_rel_size_v2_status(rel_size_migration, request_data.rel_size_migrated_at)
                 .map_err(ApiError::InternalServerError)?;
         }
 
