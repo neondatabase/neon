@@ -35,7 +35,7 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     echo -e "retry_connrefused=on\ntimeout=15\ntries=5\nretry-on-host-error=on\n" > /root/.wgetrc && \
     echo -e "--retry-connrefused\n--connect-timeout 15\n--retry 5\n--max-time 300\n" > /root/.curlrc
 
-COPY build_tools/patches/pgcopydbv017.patch /pgcopydbv017.patch
+COPY build-tools/patches/pgcopydbv017.patch /pgcopydbv017.patch
 
 RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         set -e && \
