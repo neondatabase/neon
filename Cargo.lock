@@ -1293,7 +1293,7 @@ dependencies = [
  "axum",
  "cbindgen",
  "http 1.1.0",
- "metrics",
+ "measured",
  "tokio",
  "tracing",
  "tracing-subscriber",

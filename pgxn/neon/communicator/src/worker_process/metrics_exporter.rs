@@ -13,8 +13,8 @@ use axum::response::Response;
 use http::StatusCode;
 use http::header::CONTENT_TYPE;
 
-use metrics::proto::MetricFamily;
-use metrics::{Encoder, TextEncoder};
+use measured::MetricGroup;
+use measured::text::BufferedTextEncoder;
 
 use std::path::PathBuf;
 
@@ -47,10 +47,8 @@ impl CommunicatorWorkerProcessStruct {
 
 /// Expose all Prometheus metrics.
 async fn get_metrics(State(state): State<&CommunicatorWorkerProcessStruct>) -> Response {
-    use metrics::core::Collector;
-    let metrics = state.collect();
     tracing::trace!("/metrics requested");
-    metrics_to_response(metrics).await
+    metrics_to_response(&state).await
 }
 
 /// Expose Prometheus metrics, for use by the autoscaling agent.
@@ -59,11 +57,8 @@ async fn get_metrics(State(state): State<&CommunicatorWorkerProcessStruct>) -> R
 async fn get_autoscaling_metrics(
     State(state): State<&CommunicatorWorkerProcessStruct>,
 ) -> Response {
-    use metrics::core::Collector;
-    let metrics = state.lfc_metrics.collect();
-
-    tracing::trace!("/autoscaling_metrics requested");
-    metrics_to_response(metrics).await
+    tracing::trace!("/metrics requested");
+    metrics_to_response(&state.lfc_metrics).await
 }
 
 async fn handle_debug_panic(State(_state): State<&CommunicatorWorkerProcessStruct>) -> Response {
@@ -71,29 +66,15 @@ async fn handle_debug_panic(State(_state): State<&CommunicatorWorkerProcessStruc
 }
 
 /// Helper function to convert prometheus metrics to a text response
-async fn metrics_to_response(metrics: Vec<MetricFamily>) -> Response {
-    // When we call TextEncoder::encode() below, it will immediately return an
-    // error if a metric family has no metrics, so we need to preemptively
-    // filter out metric families with no metrics.
-    let metrics = metrics
-        .into_iter()
-        .filter(|m| !m.get_metric().is_empty())
-        .collect::<Vec<MetricFamily>>();
+async fn metrics_to_response(metrics: &(dyn MetricGroup<BufferedTextEncoder> + Sync)) -> Response {
+    let mut enc = BufferedTextEncoder::new();
+    metrics
+        .collect_group_into(&mut enc)
+        .unwrap_or_else(|never| match never {});
 
-    let encoder = TextEncoder::new();
-    let mut buffer = vec![];
-
-    if let Err(e) = encoder.encode(&metrics, &mut buffer) {
-        Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header(CONTENT_TYPE, "application/text")
-            .body(Body::from(e.to_string()))
-            .unwrap()
-    } else {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, encoder.format_type())
-            .body(Body::from(buffer))
-            .unwrap()
-    }
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .header(CONTENT_TYPE, "application/text")
+        .body(Body::from(enc.finish()))
+        .unwrap()
 }

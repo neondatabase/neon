@@ -19,7 +19,7 @@ tokio = { version = "1.43.1", features = ["macros", "net", "io-util", "rt", "rt-
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-metrics.workspace = true
+measured.workspace = true
 utils.workspace = true
 workspace_hack = { version = "0.1", path = "../../../workspace_hack" }
 
