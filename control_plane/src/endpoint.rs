@@ -32,7 +32,8 @@
 //!     config.json                 - passed to `compute_ctl`
 //!     pgdata/
 //!         postgresql.conf       - copy of postgresql.conf created by `compute_ctl`
-//!         zenith.signal
+//!         neon.signal
+//!         zenith.signal         - copy of neon.signal, for backward compatibility
 //!         <other PostgreSQL files>
 //! ```
 //!
@@ -922,7 +923,8 @@ impl Endpoint {
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
-                        | ComputeStatus::TerminationPending { .. }
+                        | ComputeStatus::TerminationPendingFast
+                        | ComputeStatus::TerminationPendingImmediate
                         | ComputeStatus::Terminated => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }

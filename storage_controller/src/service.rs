@@ -32,7 +32,7 @@ use pageserver_api::controller_api::{
     ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
     SkSchedulingPolicy, TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
     TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
-    TenantShardMigrateRequest, TenantShardMigrateResponse,
+    TenantShardMigrateRequest, TenantShardMigrateResponse, TenantTimelineDescribeResponse,
 };
 use pageserver_api::models::{
     self, DetachBehavior, LocationConfig, LocationConfigListResponse, LocationConfigMode, LsnLease,
@@ -60,6 +60,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 use utils::completion::Barrier;
+use utils::env;
 use utils::generation::Generation;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -483,6 +484,9 @@ pub struct Config {
 
     /// When set, actively checks and initiates heatmap downloads/uploads.
     pub kick_secondary_downloads: bool,
+
+    /// Timeout used for HTTP client of split requests. [`Duration::MAX`] if None.
+    pub shard_split_request_timeout: Duration,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -1984,11 +1988,14 @@ impl Service {
         });
 
         // Check that there is enough safekeepers configured that we can create new timelines
-        let test_sk_res = this.safekeepers_for_new_timeline().await;
+        let test_sk_res_str = match this.safekeepers_for_new_timeline().await {
+            Ok(v) => format!("Ok({v:?})"),
+            Err(v) => format!("Err({v:})"),
+        };
         tracing::info!(
             timeline_safekeeper_count = config.timeline_safekeeper_count,
             timelines_onto_safekeepers = config.timelines_onto_safekeepers,
-            "viability test result (test timeline creation on safekeepers): {test_sk_res:?}",
+            "viability test result (test timeline creation on safekeepers): {test_sk_res_str}",
         );
 
         Ok(this)
@@ -4428,7 +4435,7 @@ impl Service {
                 .await;
 
             let mut failed = 0;
-            for (tid, result) in targeted_tenant_shards.iter().zip(results.into_iter()) {
+            for (tid, (_, result)) in targeted_tenant_shards.iter().zip(results.into_iter()) {
                 match result {
                     Ok(ok) => {
                         if tid.is_shard_zero() {
@@ -4758,6 +4765,7 @@ impl Service {
         )
         .await;
 
+        let mut retry_if_not_attached = false;
         let targets = {
             let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
@@ -4774,6 +4782,24 @@ impl Service {
                         .expect("Pageservers may not be deleted while referenced");
 
                     targets.push((*tenant_shard_id, node.clone()));
+
+                    if let Some(location) = shard.observed.locations.get(node_id) {
+                        if let Some(ref conf) = location.conf {
+                            if conf.mode != LocationConfigMode::AttachedSingle
+                                && conf.mode != LocationConfigMode::AttachedMulti
+                            {
+                                // If the shard is attached as secondary, we need to retry if 404.
+                                retry_if_not_attached = true;
+                            }
+                            // If the shard is attached as primary, we should succeed.
+                        } else {
+                            // Location conf is not available yet, retry if 404.
+                            retry_if_not_attached = true;
+                        }
+                    } else {
+                        // The shard is not attached to the intended pageserver yet, retry if 404.
+                        retry_if_not_attached = true;
+                    }
                 }
             }
             targets
@@ -4795,7 +4821,7 @@ impl Service {
             .await;
 
         let mut valid_until = None;
-        for r in res {
+        for (node, r) in res {
             match r {
                 Ok(lease) => {
                     if let Some(ref mut valid_until) = valid_until {
@@ -4804,8 +4830,20 @@ impl Service {
                         valid_until = Some(lease.valid_until);
                     }
                 }
+                Err(mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _))
+                    if retry_if_not_attached =>
+                {
+                    // This is expected if the attach is not finished yet. Return 503 so that the client can retry.
+                    return Err(ApiError::ResourceUnavailable(
+                        format!(
+                            "Timeline is not attached to the pageserver {} yet, please retry",
+                            node.get_id()
+                        )
+                        .into(),
+                    ));
+                }
                 Err(e) => {
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
+                    return Err(passthrough_api_error(&node, e));
                 }
             }
         }
@@ -4919,7 +4957,7 @@ impl Service {
         max_retries: u32,
         timeout: Duration,
         cancel: &CancellationToken,
-    ) -> Vec<mgmt_api::Result<T>>
+    ) -> Vec<(Node, mgmt_api::Result<T>)>
     where
         O: Fn(TenantShardId, PageserverClient) -> F + Copy,
         F: std::future::Future<Output = mgmt_api::Result<T>>,
@@ -4940,16 +4978,16 @@ impl Service {
                         cancel,
                     )
                     .await;
-                (idx, r)
+                (idx, node, r)
             });
         }
 
-        while let Some((idx, r)) = futs.next().await {
-            results.push((idx, r.unwrap_or(Err(mgmt_api::Error::Cancelled))));
+        while let Some((idx, node, r)) = futs.next().await {
+            results.push((idx, node, r.unwrap_or(Err(mgmt_api::Error::Cancelled))));
         }
 
-        results.sort_by_key(|(idx, _)| *idx);
-        results.into_iter().map(|(_, r)| r).collect()
+        results.sort_by_key(|(idx, _, _)| *idx);
+        results.into_iter().map(|(_, node, r)| (node, r)).collect()
     }
 
     /// Helper for safely working with the shards in a tenant remotely on pageservers, for example
@@ -5172,6 +5210,9 @@ impl Service {
                 match res {
                     Ok(ok) => Ok(ok),
                     Err(mgmt_api::Error::ApiError(StatusCode::CONFLICT, _)) => Ok(StatusCode::CONFLICT),
+                    Err(mgmt_api::Error::ApiError(StatusCode::PRECONDITION_FAILED, msg)) if msg.contains("Requested tenant is missing") => {
+                        Err(ApiError::ResourceUnavailable("Tenant migration in progress".into()))
+                    },
                     Err(mgmt_api::Error::ApiError(StatusCode::SERVICE_UNAVAILABLE, msg)) => Err(ApiError::ResourceUnavailable(msg.into())),
                     Err(e) => {
                         Err(
@@ -5451,6 +5492,92 @@ impl Service {
         )
         .ok_or_else(|| ApiError::NotFound(anyhow::anyhow!("Tenant {tenant_id} not found").into()))
     }
+
+    /* BEGIN_HADRON */
+    pub(crate) async fn tenant_timeline_describe(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<TenantTimelineDescribeResponse, ApiError> {
+        self.tenant_remote_mutation(tenant_id, |locations| async move {
+            if locations.0.is_empty() {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant not found").into(),
+                ));
+            };
+
+            let locations: Vec<(TenantShardId, Node)> = locations
+                .0
+                .iter()
+                .map(|t| (*t.0, t.1.latest.node.clone()))
+                .collect();
+            let mut futs = FuturesUnordered::new();
+
+            for (shard_id, node) in locations {
+                futs.push({
+                    async move {
+                        let result = node
+                            .with_client_retries(
+                                |client| async move {
+                                    client
+                                        .tenant_timeline_describe(&shard_id, &timeline_id)
+                                        .await
+                                },
+                                &self.http_client,
+                                &self.config.pageserver_jwt_token,
+                                3,
+                                3,
+                                Duration::from_secs(30),
+                                &self.cancel,
+                            )
+                            .await;
+                        (result, shard_id, node.get_id())
+                    }
+                });
+            }
+
+            let mut results: Vec<TimelineInfo> = Vec::new();
+            while let Some((result, tenant_shard_id, node_id)) = futs.next().await {
+                match result {
+                    Some(Ok(timeline_info)) => results.push(timeline_info),
+                    Some(Err(e)) => {
+                        tracing::warn!(
+                            "Failed to describe tenant {} timeline {} for pageserver {}: {e}",
+                            tenant_shard_id,
+                            timeline_id,
+                            node_id,
+                        );
+                        return Err(ApiError::ResourceUnavailable(format!("{e}").into()));
+                    }
+                    None => return Err(ApiError::Cancelled),
+                }
+            }
+            let mut image_consistent_lsn: Option<Lsn> = Some(Lsn::MAX);
+            for timeline_info in &results {
+                if let Some(tline_image_consistent_lsn) = timeline_info.image_consistent_lsn {
+                    image_consistent_lsn = Some(std::cmp::min(
+                        image_consistent_lsn.unwrap(),
+                        tline_image_consistent_lsn,
+                    ));
+                } else {
+                    tracing::warn!(
+                        "Timeline {} on shard {} does not have image consistent lsn",
+                        timeline_info.timeline_id,
+                        timeline_info.tenant_id
+                    );
+                    image_consistent_lsn = None;
+                    break;
+                }
+            }
+
+            Ok(TenantTimelineDescribeResponse {
+                shards: results,
+                image_consistent_lsn,
+            })
+        })
+        .await?
+    }
+    /* END_HADRON */
 
     /// limit & offset are pagination parameters. Since we are walking an in-memory HashMap, `offset` does not
     /// avoid traversing data, it just avoid returning it. This is suitable for our purposes, since our in memory
@@ -5862,7 +5989,7 @@ impl Service {
             return;
         }
 
-        for result in self
+        for (_, result) in self
             .tenant_for_shards_api(
                 attached,
                 |tenant_shard_id, client| async move {
@@ -5881,7 +6008,7 @@ impl Service {
             }
         }
 
-        for result in self
+        for (_, result) in self
             .tenant_for_shards_api(
                 secondary,
                 |tenant_shard_id, client| async move {
@@ -6283,18 +6410,39 @@ impl Service {
         // TODO: issue split calls concurrently (this only matters once we're splitting
         // N>1 shards into M shards -- initially we're usually splitting 1 shard into N).
 
+        // HADRON: set a timeout for splitting individual shards on page servers.
+        // Currently we do not perform any retry because it's not clear if page server can handle
+        // partially split shards correctly.
+        let shard_split_timeout =
+            if let Some(env::DeploymentMode::Local) = env::get_deployment_mode() {
+                Duration::from_secs(30)
+            } else {
+                self.config.shard_split_request_timeout
+            };
+        let mut http_client_builder = reqwest::ClientBuilder::new()
+            .pool_max_idle_per_host(0)
+            .timeout(shard_split_timeout);
+
+        for ssl_ca_cert in &self.config.ssl_ca_certs {
+            http_client_builder = http_client_builder.add_root_certificate(ssl_ca_cert.clone());
+        }
+        let http_client = http_client_builder
+            .build()
+            .expect("Failed to construct HTTP client");
         for target in &targets {
             let ShardSplitTarget {
                 parent_id,
                 node,
                 child_ids,
             } = target;
+
             let client = PageserverClient::new(
                 node.get_id(),
-                self.http_client.clone(),
+                http_client.clone(),
                 node.base_url(),
                 self.config.pageserver_jwt_token.as_deref(),
             );
+
             let response = client
                 .tenant_shard_split(
                     *parent_id,
@@ -8768,7 +8916,7 @@ impl Service {
             )
             .await;
 
-        for ((tenant_shard_id, node, optimization), secondary_status) in
+        for ((tenant_shard_id, node, optimization), (_, secondary_status)) in
             want_secondary_status.into_iter().zip(results.into_iter())
         {
             match secondary_status {

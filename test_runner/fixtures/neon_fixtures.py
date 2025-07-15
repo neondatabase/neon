@@ -1795,6 +1795,33 @@ def neon_env_builder(
         record_property("preserve_database_files", builder.preserve_database_files)
 
 
+@pytest.fixture(scope="function")
+def neon_env_builder_local(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+    pg_distrib_dir: Path,
+) -> NeonEnvBuilder:
+    """
+    Fixture to create a Neon environment for test with its own pg_install copy.
+
+    This allows the test to edit the list of available extensions in the
+    local instance of Postgres used for the test, and install extensions via
+    downloading them when a remote extension is tested, for instance, or
+    copying files around for local extension testing.
+    """
+    test_local_pginstall = test_output_dir / "pg_install"
+    log.info(f"copy {pg_distrib_dir} to {test_local_pginstall}")
+
+    # We can't copy only the version that we are currently testing because other
+    # binaries like the storage controller need specific Postgres versions.
+    shutil.copytree(pg_distrib_dir, test_local_pginstall)
+
+    neon_env_builder.pg_distrib_dir = test_local_pginstall
+    log.info(f"local neon_env_builder.pg_distrib_dir: {neon_env_builder.pg_distrib_dir}")
+
+    return neon_env_builder
+
+
 @dataclass
 class PageserverPort:
     pg: int
@@ -2310,6 +2337,20 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/tenant/{tenant_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    # HADRON
+    def tenant_timeline_describe(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ):
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/tenant/{tenant_id}/timeline/{timeline_id}",
             headers=self.headers(TokenScope.ADMIN),
         )
         response.raise_for_status()
@@ -5368,6 +5409,7 @@ SKIP_FILES = frozenset(
     (
         "pg_internal.init",
         "pg.log",
+        "neon.signal",
         "zenith.signal",
         "pg_hba.conf",
         "postgresql.conf",

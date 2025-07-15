@@ -23,6 +23,7 @@ use safekeeper::defaults::{
     DEFAULT_PARTIAL_BACKUP_CONCURRENCY, DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
     DEFAULT_SSL_CERT_FILE, DEFAULT_SSL_CERT_RELOAD_PERIOD, DEFAULT_SSL_KEY_FILE,
 };
+use safekeeper::hadron;
 use safekeeper::wal_backup::WalBackup;
 use safekeeper::{
     BACKGROUND_RUNTIME, BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf,
@@ -37,6 +38,7 @@ use tracing::*;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
 use utils::id::NodeId;
 use utils::logging::{self, LogFormat, SecretString};
+use utils::metrics_collector::{METRICS_COLLECTION_INTERVAL, METRICS_COLLECTOR};
 use utils::sentry_init::init_sentry;
 use utils::{pid_file, project_build_tag, project_git_version, tcp_listener};
 
@@ -243,9 +245,18 @@ struct Args {
     #[arg(long)]
     enable_tls_wal_service_api: bool,
 
+    /// Controls whether to collect all metrics on each scrape or to return potentially stale
+    /// results.
+    #[arg(long, default_value_t = true)]
+    force_metric_collection_on_scrape: bool,
+
     /// Run in development mode (disables security checks)
     #[arg(long, help = "Run in development mode (disables security checks)")]
     dev: bool,
+    /* BEGIN_HADRON */
+    #[arg(long)]
+    enable_pull_timeline_on_startup: bool,
+    /* END_HADRON */
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -428,6 +439,12 @@ async fn main() -> anyhow::Result<()> {
         ssl_ca_certs,
         use_https_safekeeper_api: args.use_https_safekeeper_api,
         enable_tls_wal_service_api: args.enable_tls_wal_service_api,
+        force_metric_collection_on_scrape: args.force_metric_collection_on_scrape,
+        /* BEGIN_HADRON */
+        advertise_pg_addr_tenant_only: None,
+        enable_pull_timeline_on_startup: args.enable_pull_timeline_on_startup,
+        hcc_base_url: None,
+        /* END_HADRON */
     });
 
     // initialize sentry if SENTRY_DSN is provided
@@ -521,6 +538,20 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
 
     // Load all timelines from disk to memory.
     global_timelines.init().await?;
+
+    /* BEGIN_HADRON */
+    if conf.enable_pull_timeline_on_startup && global_timelines.timelines_count() == 0 {
+        match hadron::hcc_pull_timelines(&conf, global_timelines.clone()).await {
+            Ok(_) => {
+                info!("Successfully pulled all timelines from peer safekeepers");
+            }
+            Err(e) => {
+                error!("Failed to pull timelines from peer safekeepers: {:?}", e);
+                return Err(e);
+            }
+        }
+    }
+    /* END_HADRON */
 
     // Run everything in current thread rt, if asked.
     if conf.current_thread_runtime {
@@ -639,6 +670,26 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         )
         .map(|res| ("broker main".to_owned(), res));
     tasks_handles.push(Box::pin(broker_task_handle));
+
+    /* BEGIN_HADRON */
+    if conf.force_metric_collection_on_scrape {
+        let metrics_handle = current_thread_rt
+            .as_ref()
+            .unwrap_or_else(|| BACKGROUND_RUNTIME.handle())
+            .spawn(async move {
+                let mut interval: tokio::time::Interval =
+                    tokio::time::interval(METRICS_COLLECTION_INTERVAL);
+                loop {
+                    interval.tick().await;
+                    tokio::task::spawn_blocking(|| {
+                        METRICS_COLLECTOR.run_once(true);
+                    });
+                }
+            })
+            .map(|res| ("broker main".to_owned(), res));
+        tasks_handles.push(Box::pin(metrics_handle));
+    }
+    /* END_HADRON */
 
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
 

@@ -956,14 +956,20 @@ impl ComputeNode {
             None
         };
 
-        let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
         state.terminate_flush_lsn = lsn;
-        if let ComputeStatus::TerminationPending { mode } = state.status {
+
+        let delay_exit = state.status == ComputeStatus::TerminationPendingFast;
+        if state.status == ComputeStatus::TerminationPendingFast
+            || state.status == ComputeStatus::TerminationPendingImmediate
+        {
+            info!(
+                "Changing compute status from {} to {}",
+                state.status,
+                ComputeStatus::Terminated
+            );
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
-            // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = mode == compute_api::responses::TerminateMode::Fast
         }
         drop(state);
 
@@ -1034,11 +1040,34 @@ impl ComputeNode {
             PageserverProtocol::Grpc => self.try_get_basebackup_grpc(spec, lsn)?,
         };
 
+        self.fix_zenith_signal_neon_signal()?;
+
         let mut state = self.state.lock().unwrap();
         state.metrics.pageserver_connect_micros =
             connected.duration_since(started).as_micros() as u64;
         state.metrics.basebackup_bytes = size as u64;
         state.metrics.basebackup_ms = started.elapsed().as_millis() as u64;
+
+        Ok(())
+    }
+
+    /// Move the Zenith signal file to Neon signal file location.
+    /// This makes Compute compatible with older PageServers that don't yet
+    /// know about the Zenith->Neon rename.
+    fn fix_zenith_signal_neon_signal(&self) -> Result<()> {
+        let datadir = Path::new(&self.params.pgdata);
+
+        let neonsig = datadir.join("neon.signal");
+
+        if neonsig.is_file() {
+            return Ok(());
+        }
+
+        let zenithsig = datadir.join("zenith.signal");
+
+        if zenithsig.is_file() {
+            fs::copy(zenithsig, neonsig)?;
+        }
 
         Ok(())
     }
@@ -1805,6 +1834,8 @@ impl ComputeNode {
             tls_config,
         )?;
 
+        self.pg_reload_conf()?;
+
         if !spec.skip_pg_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
             // Temporarily reset max_cluster_size in config
@@ -1824,9 +1855,8 @@ impl ComputeNode {
 
                 Ok(())
             })?;
+            self.pg_reload_conf()?;
         }
-
-        self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
@@ -1900,7 +1930,8 @@ impl ComputeNode {
 
                             // exit loop
                             ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending { .. }
+                            | ComputeStatus::TerminationPendingFast
+                            | ComputeStatus::TerminationPendingImmediate
                             | ComputeStatus::Terminated => break 'cert_update,
 
                             // wait
@@ -2456,7 +2487,7 @@ pub async fn installed_extensions(conf: tokio_postgres::Config) -> Result<()> {
                 serde_json::to_string(&extensions).expect("failed to serialize extensions list")
             );
         }
-        Err(err) => error!("could not get installed extensions: {err:?}"),
+        Err(err) => error!("could not get installed extensions: {err}"),
     }
     Ok(())
 }

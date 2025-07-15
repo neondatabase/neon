@@ -165,6 +165,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "gc_horizon": 23 * (1024 * 1024),
         "gc_period": "2h 13m",
         "image_creation_threshold": 7,
+        "image_layer_force_creation_period": "1m",
         "pitr_interval": "1m",
         "lagging_wal_timeout": "23m",
         "lazy_slru_download": True,

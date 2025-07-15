@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error as _;
 use std::time::Duration;
 
@@ -250,6 +250,70 @@ impl Client {
         self.request(Method::PUT, &uri, ()).await?;
         Ok(())
     }
+
+    pub async fn tenant_timeline_compact(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        force_image_layer_creation: bool,
+        must_force_image_layer_creation: bool,
+        scheduled: bool,
+        wait_until_done: bool,
+    ) -> Result<()> {
+        let mut path = reqwest::Url::parse(&format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/compact",
+            self.mgmt_api_endpoint
+        ))
+        .expect("Cannot build URL");
+
+        if force_image_layer_creation {
+            path.query_pairs_mut()
+                .append_pair("force_image_layer_creation", "true");
+        }
+
+        if must_force_image_layer_creation {
+            path.query_pairs_mut()
+                .append_pair("must_force_image_layer_creation", "true");
+        }
+
+        if scheduled {
+            path.query_pairs_mut().append_pair("scheduled", "true");
+        }
+        if wait_until_done {
+            path.query_pairs_mut()
+                .append_pair("wait_until_scheduled_compaction_done", "true");
+            path.query_pairs_mut()
+                .append_pair("wait_until_uploaded", "true");
+        }
+        self.request(Method::PUT, path, ()).await?;
+        Ok(())
+    }
+
+    /* BEGIN_HADRON */
+    pub async fn tenant_timeline_describe(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Result<TimelineInfo> {
+        let mut path = reqwest::Url::parse(&format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}",
+            self.mgmt_api_endpoint
+        ))
+        .expect("Cannot build URL");
+        path.query_pairs_mut()
+            .append_pair("include-image-consistent-lsn", "true");
+
+        let response: reqwest::Response = self.request(Method::GET, path, ()).await?;
+        let body = response.json().await.map_err(Error::ReceiveBody)?;
+        Ok(body)
+    }
+
+    pub async fn list_tenant_visible_size(&self) -> Result<BTreeMap<TenantShardId, u64>> {
+        let uri = format!("{}/v1/list_tenant_visible_size", self.mgmt_api_endpoint);
+        let resp = self.get(&uri).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+    /* END_HADRON */
 
     pub async fn tenant_scan_remote_storage(
         &self,

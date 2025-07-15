@@ -147,7 +147,11 @@ pub struct PageServerConf {
 
     pub disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
 
+    // The number of allowed failures in remote storage operations.
     pub test_remote_failures: u64,
+    // The probability of failure in remote storage operations. Only works when test_remote_failures > 1.
+    // Use 100 for 100% failure, 0 for no failure.
+    pub test_remote_failures_probability: u64,
 
     pub ondemand_download_behavior_treat_error_as_warn: bool,
 
@@ -248,6 +252,14 @@ pub struct PageServerConf {
     pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
 
     pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
+
+    /// Defines what is a big tenant for the purpose of image layer generation.
+    /// See Timeline::should_check_if_image_layers_required
+    pub image_layer_generation_large_timeline_threshold: Option<u64>,
+
+    /// Controls whether to collect all metrics on each scrape or to return potentially stale
+    /// results.
+    pub force_metric_collection_on_scrape: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -392,6 +404,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval,
             disk_usage_based_eviction,
             test_remote_failures,
+            test_remote_failures_probability,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
             control_plane_api,
@@ -427,6 +440,8 @@ impl PageServerConf {
             posthog_config,
             timeline_import_config,
             basebackup_cache_config,
+            image_layer_generation_large_timeline_threshold,
+            force_metric_collection_on_scrape,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -461,6 +476,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval,
             disk_usage_based_eviction,
             test_remote_failures,
+            test_remote_failures_probability,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
             control_plane_api: control_plane_api
@@ -484,6 +500,8 @@ impl PageServerConf {
             dev_mode,
             timeline_import_config,
             basebackup_cache_config,
+            image_layer_generation_large_timeline_threshold,
+            force_metric_collection_on_scrape,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
