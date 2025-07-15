@@ -1549,9 +1549,6 @@ impl Timeline {
     /// of the timeline and snapshot cache, which key includes LSN and so can be used by replicas to get relation size
     /// at the particular LSN (snapshot).
     pub fn get_cached_rel_size(&self, tag: &RelTag, version: Version<'_>) -> Option<BlockNumber> {
-        if cfg!(feature = "testing") {
-            return None;
-        }
         let lsn = version.get_lsn();
         {
             let rel_size_cache = self.rel_size_latest_cache.read().unwrap();
