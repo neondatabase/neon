@@ -220,7 +220,7 @@ impl WalSenders {
     fn record_standby_reply(self: &Arc<WalSenders>, id: WalSenderId, reply: &StandbyReply) {
         let mut shared = self.mutex.lock();
         let slot = shared.get_slot_mut(id);
-        debug!(
+        info!(
             "Record standby reply: ts={} apply_lsn={}",
             reply.reply_ts, reply.apply_lsn
         );
@@ -400,7 +400,10 @@ impl WalSendersShared {
             }
         }
         self.agg_standby_feedback = StandbyFeedback {
-            reply: reply_agg,
+            reply: {
+                info!(prev=%self.agg_standby_feedback.reply.apply_lsn, new=%reply_agg.apply_lsn, "updating agg_standby_feedback apply_lsn");
+                reply_agg
+            },
             hs_feedback: agg,
         };
     }
