@@ -17,21 +17,20 @@
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 
+#include "neon.h"
 #include "neon_perf_counters.h"
 #include "neon_pgversioncompat.h"
 
 neon_per_backend_counters *neon_per_backend_counters_shared;
 
-Size
-NeonPerfCountersShmemSize(void)
+void
+NeonPerfCountersShmemRequest(void)
 {
-	Size		size = 0;
-
-	size = add_size(size, mul_size(NUM_NEON_PERF_COUNTER_SLOTS,
-								   sizeof(neon_per_backend_counters)));
-
-	return size;
+	Size size = mul_size(NUM_NEON_PERF_COUNTER_SLOTS, sizeof(neon_per_backend_counters));
+	RequestAddinShmemSpace(size);
 }
+
+
 
 void
 NeonPerfCountersShmemInit(void)

@@ -71,4 +71,21 @@ extern PGDLLEXPORT void WalProposerSync(int argc, char *argv[]);
 extern PGDLLEXPORT void WalProposerMain(Datum main_arg);
 extern PGDLLEXPORT void LogicalSlotsMonitorMain(Datum main_arg);
 
+extern void LfcShmemRequest(void);
+extern void PagestoreShmemRequest(void);
+extern void RelsizeCacheShmemRequest(void);
+extern void CommunicatorShmemRequest(void);
+extern void WalproposerShmemRequest(void);
+extern void LwLsnCacheShmemRequest(void);
+extern void NeonPerfCountersShmemRequest(void);
+
+extern void LfcShmemInit(void);
+extern void PagestoreShmemInit(void);
+extern void RelsizeCacheShmemInit(void);
+extern void CommunicatorShmemInit(void);
+extern void WalproposerShmemInit(void);
+extern void LwLsnCacheShmemInit(void);
+extern void NeonPerfCountersShmemInit(void);
+
+
 #endif							/* NEON_H */

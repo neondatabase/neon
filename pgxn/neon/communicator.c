@@ -54,6 +54,7 @@
  */
 #include "postgres.h"
 
+#include "access/twophase.h"
 #include "access/xlog.h"
 #include "access/xlogdefs.h"
 #include "access/xlog_internal.h"
@@ -75,11 +76,18 @@
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
 
-#if PG_VERSION_NUM >= 150000
+#if PG_MAJORVERSION_NUM >= 17
+#include "storage/procnumber.h"
+#else
+#define MyProcNumber MyProc->pgprocno
+#endif
+
+
+#if PG_MAJORVERSION_NUM >= 15
 #include "access/xlogrecovery.h"
 #endif
 
-#if PG_VERSION_NUM < 160000
+#if PG_MAJORVERSION_NUM < 16
 typedef PGAlignedBlock PGIOAlignedBlock;
 #endif
 
@@ -293,6 +301,7 @@ static PrefetchState *MyPState;
 )
 
 static process_interrupts_callback_t prev_interrupt_cb;
+static XLogRecPtr* minPrefetchLsn;
 
 static bool compact_prefetch_buffers(void);
 static void consume_prefetch_responses(void);
@@ -315,6 +324,33 @@ pg_init_communicator(void)
 	prev_interrupt_cb = ProcessInterruptsCallback;
 	ProcessInterruptsCallback = communicator_processinterrupts;
 }
+
+static Size
+CommunicatorShmemSize(void)
+{
+	return (MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts) * sizeof(XLogRecPtr);
+}
+
+void
+CommunicatorShmemRequest(void)
+{
+	RequestAddinShmemSpace(CommunicatorShmemSize());
+}
+
+void
+CommunicatorShmemInit(void)
+{
+	bool found;
+	minPrefetchLsn = (XLogRecPtr*)ShmemInitStruct("Communicator shared state",
+												  CommunicatorShmemSize(),
+												  &found);
+	if (!found)
+	{
+		/* Fill with MAX_UINT64 */
+		memset(minPrefetchLsn, 0xFF, CommunicatorShmemSize());
+	}
+}
+
 
 static bool
 compact_prefetch_buffers(void)
@@ -478,8 +514,9 @@ communicator_prefetch_pump_state(void)
 		NeonResponse   *response;
 		PrefetchRequest *slot;
 		MemoryContext	old;
+		uint64			my_ring_index = MyPState->ring_receive;
 
-		slot = GetPrfSlot(MyPState->ring_receive);
+		slot = GetPrfSlot(my_ring_index);
 
 		old = MemoryContextSwitchTo(MyPState->errctx);
 		response = page_server->try_receive(slot->shard_no);
@@ -488,17 +525,25 @@ communicator_prefetch_pump_state(void)
 		if (response == NULL)
 			break;
 
+		/* Update min in-flight prefetch reqwuest LSN */
+		if (my_ring_index + 1 < MyPState->ring_unused)
+		{
+			PrefetchRequest* next_slot = GetPrfSlot(my_ring_index + 1);
+			Assert(minPrefetchLsn[MyProcNumber] <= next_slot->request_lsns.request_lsn);
+			minPrefetchLsn[MyProcNumber] = next_slot->request_lsns.request_lsn;
+		}
+
 		check_getpage_response(slot, response);
 
 		/* The slot should still be valid */
 		if (slot->status != PRFS_REQUESTED ||
 			slot->response != NULL ||
-			slot->my_ring_index != MyPState->ring_receive)
+			slot->my_ring_index != my_ring_index)
 		{
 			neon_shard_log(slot->shard_no, PANIC,
 						   "Incorrect prefetch slot state after receive: status=%d response=%p my=" UINT64_FORMAT " receive=" UINT64_FORMAT "",
 						   slot->status, slot->response,
-						   slot->my_ring_index, MyPState->ring_receive);
+						   slot->my_ring_index, my_ring_index);
 		}
 		/* update prefetch state */
 		MyPState->n_responses_buffered += 1;
@@ -665,6 +710,9 @@ consume_prefetch_responses(void)
 {
 	if (MyPState->ring_receive < MyPState->ring_unused)
 		prefetch_wait_for(MyPState->ring_unused - 1);
+
+	minPrefetchLsn[MyProcNumber] = InvalidXLogRecPtr; /* No more in-flight prefetch requests from this backend */
+
 	/*
 	 * We know for sure we're not working on any prefetch pages after
 	 * this.
@@ -806,6 +854,15 @@ prefetch_read(PrefetchRequest *slot)
 	old = MemoryContextSwitchTo(MyPState->errctx);
 	response = (NeonResponse *) page_server->receive(shard_no);
 	MemoryContextSwitchTo(old);
+
+	/* Update min in-flight prefetch reqwuest LSN */
+	if (my_ring_index + 1 < MyPState->ring_unused)
+	{
+		PrefetchRequest* next_slot = GetPrfSlot(my_ring_index + 1);
+		Assert(minPrefetchLsn[MyProcNumber] <= next_slot->request_lsns.request_lsn);
+		minPrefetchLsn[MyProcNumber] = next_slot->request_lsns.request_lsn;
+	}
+
 	if (response)
 	{
 		check_getpage_response(slot, response);
@@ -924,6 +981,8 @@ prefetch_on_ps_disconnect(void)
 		MyNeonCounters->getpage_prefetch_discards_total += 1;
 	}
 
+	minPrefetchLsn[MyProcNumber] = InvalidXLogRecPtr; /* No more in-flight prefetch requests from this backend */
+
 	/*
 	 * We can have gone into retry due to network error, so update stats with
 	 * the latest available
@@ -1025,6 +1084,8 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
 
+	minPrefetchLsn[MyProcNumber] = Min(request.hdr.lsn, minPrefetchLsn[MyProcNumber]);
+
 	while (!page_server->send(slot->shard_no, (NeonRequest *) &request))
 	{
 		Assert(mySlotNo == MyPState->ring_unused);
@@ -1043,6 +1104,34 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	slot->status = PRFS_REQUESTED;
 	prfh_insert(MyPState->prf_hash, slot, &found);
 	Assert(!found);
+}
+
+/*
+ * Check that pahge LSN returned by PS to replica is not beyand replay LSN.
+ * It can happen only in case of deteriorated lease.
+ */
+static bool
+check_page_lsn(NeonGetPageResponse* resp, XLogRecPtr* replay_lsn_ptr)
+{
+	if (RecoveryInProgress())
+	{
+		XLogRecPtr page_lsn = PageGetLSN((Page)resp->page);
+#if PG_VERSION_NUM >= 150000
+		XLogRecPtr replay_lsn = GetCurrentReplayRecPtr(NULL);
+#else
+		/*
+		 * PG14 doesn't have GetCurrentReplayRecPtr() function which returns end of currently applied record.
+		 * And GetXLogReplayRecPtr returns end of WAL records which was already applied.
+		 * So we have to use this hack with resp->req.lsn which is expected to contain end record ptr in this case.
+		 * But it works onlyfor v3 protocol version.
+		 */
+		XLogRecPtr replay_lsn = Max(GetXLogReplayRecPtr(NULL), resp->req.hdr.lsn);
+#endif
+		if (replay_lsn_ptr)
+			*replay_lsn_ptr = replay_lsn;
+		return replay_lsn == 0 || page_lsn <= replay_lsn;
+	}
+	return true;
 }
 
 /*
@@ -1068,7 +1157,7 @@ communicator_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumbe
 	for (int i = 0; i < nblocks; i++)
 	{
 		PrfHashEntry *entry;
-
+		NeonGetPageResponse* resp;
 		hashkey.buftag.blockNum = blocknum + i;
 		entry = prfh_lookup(MyPState->prf_hash, &hashkey);
 
@@ -1101,8 +1190,16 @@ communicator_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumbe
 				continue;
 			}
 			Assert(slot->response->tag == T_NeonGetPageResponse); /* checked by check_getpage_response when response was assigned to the slot */
-			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
+			resp = (NeonGetPageResponse*)slot->response;
 
+			/*
+			 * Ignore "in-future" responses caused by deteriorated lease
+			 */
+			if (!check_page_lsn(resp, NULL))
+			{
+				continue;
+			}
+			memcpy(buffers[i], resp->page, BLCKSZ);
 
 			/*
 			 * With lfc_store_prefetch_result=true prefetch result is stored in LFC in prefetch_pump_state when response is received
@@ -2227,6 +2324,15 @@ Retry:
 			case T_NeonGetPageResponse:
 			{
 				NeonGetPageResponse* getpage_resp = (NeonGetPageResponse *) resp;
+				XLogRecPtr replay_lsn;
+				if (!check_page_lsn(getpage_resp, &replay_lsn))
+				{
+					/* Alternative to throw error is to repeat the query with request_lsn=replay_lsn */
+					ereport(ERROR,
+							(errcode(ERRCODE_IO_ERROR),
+							 errmsg("There is no more version of page %u of relation %u/%u/%u.%u at LSN %X/%X at page server, request LSN %X/%X, latest version is at LSN %X/%X",
+									blockno, RelFileInfoFmt(rinfo), forkNum, LSN_FORMAT_ARGS(replay_lsn), LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(PageGetLSN((Page)getpage_resp->page)))));
+				}
 				memcpy(buffer, getpage_resp->page, BLCKSZ);
 
 				/*
@@ -2576,4 +2682,15 @@ communicator_processinterrupts(void)
 		return false;
 
 	return prev_interrupt_cb();
+}
+
+XLogRecPtr communicator_get_min_prefetch_lsn(void)
+{
+	XLogRecPtr min_lsn = InvalidXLogRecPtr;
+	size_t n_procs = ProcGlobal->allProcCount;
+	for (size_t i = 0; i < n_procs; i++)
+	{
+		min_lsn = Min(min_lsn, minPrefetchLsn[i]);
+	}
+	return min_lsn;
 }

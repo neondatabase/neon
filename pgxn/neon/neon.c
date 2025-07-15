@@ -22,6 +22,7 @@
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "storage/proc.h"
+#include "storage/ipc.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
 #include "utils/builtins.h"
@@ -59,11 +60,15 @@ static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static void neon_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void neon_ExecutorEnd(QueryDesc *queryDesc);
 
-#if PG_MAJORVERSION_NUM >= 16
 static shmem_startup_hook_type prev_shmem_startup_hook;
-
 static void neon_shmem_startup_hook(void);
+static void neon_shmem_request_hook(void);
+
+#if PG_MAJORVERSION_NUM >= 15
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
 #endif
+
+
 #if PG_MAJORVERSION_NUM >= 17
 uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
 uint32		WAIT_EVENT_NEON_LFC_READ;
@@ -450,15 +455,22 @@ _PG_init(void)
 	 */
 #if PG_VERSION_NUM >= 160000
 	load_file("$libdir/neon_rmgr", false);
+#endif
 
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = neon_shmem_request_hook;
+#else
+	neon_shmem_request_hook();
+#endif
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = neon_shmem_startup_hook;
-#endif
 
 	/* dummy call to a Rust function in the communicator library, to check that it works */
 	(void) communicator_dummy(123);
 
 	pg_init_libpagestore();
+	relsize_hash_init();
 	lfc_init();
 	pg_init_walproposer();
 	init_lwlsncache();
@@ -637,13 +649,39 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(dc);
 }
 
-#if PG_MAJORVERSION_NUM >= 16
+static void
+neon_shmem_request_hook(void)
+{
+#if PG_VERSION_NUM >= 150000
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+#endif
+	LfcShmemRequest();
+	NeonPerfCountersShmemRequest();
+	PagestoreShmemRequest();
+	RelsizeCacheShmemRequest();
+	CommunicatorShmemRequest();
+	WalproposerShmemRequest();
+	LwLsnCacheShmemRequest();
+}
+
+
 static void
 neon_shmem_startup_hook(void)
 {
 	/* Initialize */
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+	LfcShmemInit();
+	NeonPerfCountersShmemInit();
+	PagestoreShmemInit();
+	RelsizeCacheShmemInit();
+	CommunicatorShmemInit();
+	WalproposerShmemInit();
+	LwLsnCacheShmemInit();
 
 #if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");
@@ -657,8 +695,9 @@ neon_shmem_startup_hook(void)
 	WAIT_EVENT_NEON_PS_READ = WaitEventExtensionNew("Neon/PS_ReadIO");
 	WAIT_EVENT_NEON_WAL_DL = WaitEventExtensionNew("Neon/WAL_Download");
 #endif
+
+	LWLockRelease(AddinShmemInitLock);
 }
-#endif
 
 /*
  * ExecutorStart hook: start up tracking if needed

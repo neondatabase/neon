@@ -46,5 +46,6 @@ extern int communicator_read_slru_segment(SlruKind kind, int64 segno,
 extern void communicator_reconfigure_timeout_if_needed(void);
 extern void communicator_prefetch_pump_state(void);
 
+extern XLogRecPtr communicator_get_min_prefetch_lsn(void);
 
 #endif

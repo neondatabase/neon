@@ -219,10 +219,6 @@ static char *lfc_path;
 static uint64 lfc_generation;
 static FileCacheControl *lfc_ctl;
 static bool lfc_do_prewarm;
-static shmem_startup_hook_type prev_shmem_startup_hook;
-#if PG_VERSION_NUM>=150000
-static shmem_request_hook_type prev_shmem_request_hook;
-#endif
 
 bool lfc_store_prefetch_result;
 bool lfc_prewarm_update_ws_estimation;
@@ -342,18 +338,11 @@ lfc_ensure_opened(void)
 	return true;
 }
 
-static void
-lfc_shmem_startup(void)
+void
+LfcShmemInit(void)
 {
 	bool		found;
 	static HASHCTL info;
-
-	if (prev_shmem_startup_hook)
-	{
-		prev_shmem_startup_hook();
-	}
-
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
 	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
 	if (!found)
@@ -398,17 +387,11 @@ lfc_shmem_startup(void)
 			ConditionVariableInit(&lfc_ctl->cv[i]);
 
 	}
-	LWLockRelease(AddinShmemInitLock);
 }
 
-static void
-lfc_shmem_request(void)
+void
+LfcShmemRequest(void)
 {
-#if PG_VERSION_NUM>=150000
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-#endif
-
 	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
 	RequestNamedLWLockTranche("lfc_lock", 1);
 }
@@ -645,15 +628,6 @@ lfc_init(void)
 
 	if (lfc_max_size == 0)
 		return;
-
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = lfc_shmem_startup;
-#if PG_VERSION_NUM>=150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = lfc_shmem_request;
-#else
-	lfc_shmem_request();
-#endif
 }
 
 FileCacheState*

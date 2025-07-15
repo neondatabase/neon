@@ -250,7 +250,6 @@ extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
 extern void readahead_buffer_resize(int newsize, void *extra);
 
-
 /*
  * LSN values associated with each request to the pageserver
  */
