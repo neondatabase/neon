@@ -479,8 +479,8 @@ class NeonProject:
         self.neon_api.restore_snapshot(
             self.id,
             snapshot_id,
-            self.generate_branch_name(),
             target_branch.id,
+            self.generate_branch_name(),
         )
         return target_branch
 

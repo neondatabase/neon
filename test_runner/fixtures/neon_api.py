@@ -387,6 +387,7 @@ class NeonAPI:
         }
         if name is not None:
             data["name"] = name
+        log.info("Restore snapshot data: %s", data)
         resp = self.__request(
             "POST",
             f"/projects/{project_id}/snapshots/{snapshot_id}/restore",
