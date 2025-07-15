@@ -116,8 +116,8 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
         };
 
         let hashmap = CoreHashMap::new(buckets, dictionary);
-        let lock = RwLock::from_raw(PthreadRwLock::new(raw_lock_ptr.cast()), hashmap);
         unsafe {
+			let lock = RwLock::from_raw(PthreadRwLock::new(raw_lock_ptr.cast()), hashmap);
             std::ptr::write(shared_ptr, lock);
         }
 
@@ -286,7 +286,7 @@ where
 
     /// Remove a key given its hash. Returns the associated value if it existed.
     pub fn remove(&self, key: &K) -> Option<V> {
-        let hash = self.get_hash_value(&key);
+        let hash = self.get_hash_value(key);
         match self.entry_with_hash(key.clone(), hash) {
             Entry::Occupied(e) => Some(e.remove()),
             Entry::Vacant(_) => None,
@@ -324,7 +324,7 @@ where
             Some((key, _)) => Some(OccupiedEntry {
                 _key: key.clone(),
                 bucket_pos: pos as u32,
-                prev_pos: entry::PrevPos::Unknown(self.get_hash_value(&key)),
+                prev_pos: entry::PrevPos::Unknown(self.get_hash_value(key)),
                 map,
             }),
             _ => None,
