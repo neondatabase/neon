@@ -27,4 +27,4 @@
 !storage_controller/
 !vendor/postgres-*/
 !workspace_hack/
-!build_tools/patches
+!build-tools/patches

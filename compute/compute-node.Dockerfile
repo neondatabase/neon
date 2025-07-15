@@ -9,7 +9,7 @@
 #
 # build-tools:   This contains Rust compiler toolchain and other tools needed at compile
 #                time. This is also used for the storage builds. This image is defined in
-#                build-tools.Dockerfile.
+#                build-tools/Dockerfile.
 #
 # build-deps:    Contains C compiler, other build tools, and compile-time dependencies
 #                needed to compile PostgreSQL and most extensions. (Some extensions need
@@ -115,7 +115,7 @@ ARG EXTENSIONS=all
 FROM $BASE_IMAGE_SHA AS build-deps
 ARG DEBIAN_VERSION
 
-# Keep in sync with build-tools.Dockerfile
+# Keep in sync with build-tools/Dockerfile
 ENV PROTOC_VERSION=25.1
 
 # Use strict mode for bash to catch errors early
@@ -1790,7 +1790,7 @@ RUN set -e \
 #########################################################################################
 FROM build-deps AS exporters
 ARG TARGETARCH
-# Keep sql_exporter version same as in build-tools.Dockerfile and
+# Keep sql_exporter version same as in build-tools/Dockerfile and
 # test_runner/regress/test_compute_metrics.py
 # See comment on the top of the file regading `echo`, `-e` and `\n`
 RUN if [ "$TARGETARCH" = "amd64" ]; then\
