@@ -178,6 +178,32 @@ assign_request_id(void)
 	return result;
 }
 
+/*
+ * Returns the absolute path to the given path.
+*/
+static inline char * get_absolute_path(const char *path)
+{
+	char *abs_path = bounce_buf();
+	char cwd[PATH_MAX];
+	int size = 0;
+
+	if (path[0] == '/') {
+		strncpy(abs_path, path, strlen(path));
+		return abs_path;
+	}
+
+	getcwd(cwd, sizeof(cwd));
+
+	size = snprintf(NULL, 0, "%s/%s", cwd, path);
+
+	if (size < 0 || size >= PATH_MAX) {
+		return NULL;
+	}
+
+	snprintf(abs_path, size + 1, "%s/%s", cwd, path);
+	return abs_path;
+}
+
 /**** Initialization functions. These run in postmaster ****/
 
 void
@@ -1014,32 +1040,14 @@ communicator_new_read_slru_segment(
 			.request_lsn = request_lsns->request_lsn,
 		}
 	};
+	int nblocks = -1;
 
 	if (path == NULL) {
 		elog(ERROR, "read_slru_segment called with NULL path");
 		return -1;
 	}
 
-	// Scoping should help deallocate the absolute path buffer.
-	char *abs_path = bounce_buf();
-
-	if (path[0] != '/') {
-		char cwd[PATH_MAX];
-		getcwd(cwd, sizeof(cwd));
-
-		const int size = snprintf(NULL, 0, "%s/%s", cwd, path);
-
-		if (size < 0 || size >= PATH_MAX) {
-			elog(ERROR, "read_slru_segment failed to create an absolute path for \"%s\"", path);
-			return -1;
-		}
-
-		snprintf(abs_path, size + 1, "%s/%s", cwd, path);
-	} else {
-		strncpy(abs_path, path, sizeof(abs_path));
-	}
-
-	request.read_slru_segment.destination_file_path.ptr = abs_path;
+	request.read_slru_segment.destination_file_path.ptr = (uint8_t *) get_absolute_path(path);
 
 	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u, file_path=\"%s\"",
 		kind, segno, request.read_slru_segment.destination_file_path.ptr);
@@ -1048,8 +1056,6 @@ communicator_new_read_slru_segment(
 	XLogSetAsyncXactLSN(request_lsns->request_lsn);
 
 	perform_request(&request, &result);
-
-	int nblocks = -1;
 
 	switch (result.tag)
 	{
@@ -1381,7 +1387,7 @@ print_neon_io_request(NeonIORequest *request)
 								r->slru_kind,
 								r->segment_number,
 								LSN_FORMAT_ARGS(r->request_lsn),
-								r->destination_file_path);
+								r->destination_file_path.ptr);
 				return buf;
 			}
 		case NeonIORequest_PrefetchV:

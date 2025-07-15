@@ -2,6 +2,7 @@
 //! - async tokio communicator core, which receives requests and processes them.
 //! - Main loop and requests queues, which routes requests from backends to the core
 //! - the per-backend glue code, which submits requests
+#![warn(unused)]
 
 mod backend_comms;
 
@@ -23,5 +24,3 @@ mod global_allocator;
 
 // FIXME: get this from postgres headers somehow
 pub const BLCKSZ: usize = 8192;
-// FIXME: get this from postgres headers somehow
-pub const SLRU_PAGES_PER_SEGMENT: usize = 32;

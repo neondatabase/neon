@@ -439,7 +439,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     .await
                 {
                     Ok(slru_bytes) => {
-                        if let Err(e) = std::fs::write(&file_path, &slru_bytes) {
+                        if let Err(e) = tokio::fs::write(&file_path, &slru_bytes).await {
                             info!("could not write slru segment to file {file_path}: {e}");
                             return NeonIOResult::Error(e.raw_os_error().unwrap_or(libc::EIO));
                         }

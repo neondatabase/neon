@@ -333,13 +333,6 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         }
     }
 
-    /// Returns the last written LSN.
-    pub fn get_lsn(&'t self) -> Lsn {
-        // TODO: supposedly, this should be the last written LSN, but it is not
-        // , perhaps
-        Lsn(self.global_lw_lsn.load(Ordering::Relaxed))
-    }
-
     pub fn get_db_size(&'t self, _db_oid: u32) -> CacheResult<u64> {
         // TODO: it would be nice to cache database sizes too. Getting the database size
         // is not a very common operation, but when you do it, it's often interactive, with
