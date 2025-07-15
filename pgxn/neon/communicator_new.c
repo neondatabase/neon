@@ -1015,15 +1015,15 @@ communicator_new_read_slru_segment(
 		}
 	};
 	int nblocks = -1;
-	char *abs_path = bounce_buf();
+	char *temp_path = bounce_buf();
 
 	if (path == NULL) {
 		elog(ERROR, "read_slru_segment called with NULL path");
 		return -1;
 	}
 
-	strlcpy(abs_path, path, Min(PATH_MAX, strlen(path) + 1));
-	request.read_slru_segment.destination_file_path.ptr = (uint8_t *) abs_path;
+	strlcpy(temp_path, path, Min(PATH_MAX, strlen(path) + 1));
+	request.read_slru_segment.destination_file_path.ptr = (uint8_t *) temp_path;
 
 	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u, file_path=\"%s\"",
 		kind, segno, request.read_slru_segment.destination_file_path.ptr);

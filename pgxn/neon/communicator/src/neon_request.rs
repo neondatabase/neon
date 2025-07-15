@@ -45,8 +45,8 @@ pub enum NeonIOResult {
 
     /// the result pages are written to the shared memory addresses given in the request
     GetPageV,
-    /// The result is written to the shared memory address given in the
-    /// request. The [`u64`] value here is the number of blocks.
+    /// The result is written to the file, path to which is provided
+    /// in the request. The [`u64`] value here is the number of blocks.
     ReadSlruSegment(u64),
 
     /// A prefetch request returns as soon as the request has been received by the communicator.
@@ -194,7 +194,8 @@ pub struct CReadSlruSegmentRequest {
 }
 
 impl CReadSlruSegmentRequest {
-    /// Returns the path to the file where the segment is read into.
+    /// Returns the file path where the communicator will write the
+    /// SLRU segment.
     pub(crate) fn destination_file_path(&self) -> String {
         unsafe { CStr::from_ptr(self.destination_file_path.as_mut_ptr() as *const _) }
             .to_string_lossy()
