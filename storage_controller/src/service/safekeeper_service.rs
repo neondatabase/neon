@@ -9,7 +9,7 @@ use crate::heartbeater::SafekeeperState;
 use crate::id_lock_map::trace_shared_lock;
 use crate::metrics;
 use crate::persistence::{
-    DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
+    DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence, TimelineUpdate,
 };
 use crate::safekeeper::Safekeeper;
 use crate::safekeeper_client::SafekeeperClient;
@@ -467,36 +467,25 @@ impl Service {
             cplane_notified_generation: 1,
             deleted_at: None,
         };
-        let inserted = self.persistence.insert_timeline(persistence).await?;
+        let inserted = self.persistence.insert_timeline(persistence.clone()).await?;
         if inserted {
             tracing::info!("imported timeline into db");
             return Ok(());
         }
         tracing::info!("timeline already present in db, updating");
-        let Some(mut present) = self
-            .persistence
-            .get_timeline(req.tenant_id, req.timeline_id)
-            .await?
-        else {
-            tracing::info!("timeline removed in the meantime");
-            return Err(ApiError::ResourceUnavailable(
-                "Timeline removed in the meantime, please retry".into(),
-            ));
+
+        let update = TimelineUpdate {
+            tenant_id: persistence.tenant_id,
+            timeline_id: persistence.timeline_id,
+            start_lsn: persistence.start_lsn,
+            sk_set: persistence.sk_set,
+            new_sk_set: persistence.new_sk_set,
         };
-        present.start_lsn = req.start_lsn;
-        present.sk_set = req.sk_set.iter().map(|sk_id| sk_id.0 as i64).collect();
-        present.new_sk_set = None;
-
-        let updated = self.persistence.update_timeline(present).await?;
-
-        if updated {
-            tracing::info!("timeline update successful");
-        } else {
-            tracing::info!("timeline update not successful");
-            return Err(ApiError::ResourceUnavailable(
-                "Timeline update not successful (probably generation change due to race), please retry".into(),
-            ));
-        }
+        self
+            .persistence
+            .update_timeline_unsafe(update)
+            .await?;
+        tracing::info!("timeline updated");
 
         Ok(())
     }

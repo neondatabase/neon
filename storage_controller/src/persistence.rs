@@ -1465,19 +1465,17 @@ impl Persistence {
     }
 
     /// Update an already present timeline.
-    /// The generation values are never allowed to go down, but they can stay constant or go up.
-    pub(crate) async fn update_timeline(&self, entry: TimelinePersistence) -> DatabaseResult<bool> {
+    /// VERY UNSAFE FUNCTION: this overrides in-progress migrations. Don't use this unless neccessary.
+    pub(crate) async fn update_timeline_unsafe(&self, entry: TimelineUpdate) -> DatabaseResult<bool> {
         use crate::schema::timelines;
 
         let entry = &entry;
         self.with_measured_conn(DatabaseOperation::UpdateTimeline, move |conn| {
             Box::pin(async move {
                 let inserted_updated = diesel::update(timelines::table)
-                    .filter(timelines::tenant_id.eq(entry.tenant_id))
-                    .filter(timelines::timeline_id.eq(entry.timeline_id))
-                    .filter(timelines::generation.le(entry.generation))
-                    .filter(timelines::cplane_notified_generation.le(entry.cplane_notified_generation))
-                    .set(&entry)
+                    .filter(timelines::tenant_id.eq(&entry.tenant_id))
+                    .filter(timelines::timeline_id.eq(&entry.timeline_id))
+                    .set(entry)
                     .execute(conn)
                     .await?;
 
@@ -2531,6 +2529,18 @@ impl TimelineFromDb {
             deleted_at: self.deleted_at,
         }
     }
+}
+
+// This is separate from TimelinePersistence because we don't want to touch generation and deleted_at values for the update.
+#[derive(AsChangeset)]
+#[diesel(table_name = crate::schema::timelines)]
+#[diesel(treat_none_as_null = true)]
+pub(crate) struct TimelineUpdate {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) start_lsn: LsnWrapper,
+    pub(crate) sk_set: Vec<i64>,
+    pub(crate) new_sk_set: Option<Vec<i64>>,
 }
 
 #[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
