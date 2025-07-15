@@ -217,7 +217,7 @@ if SQL_EXPORTER is None:
             self, logs_dir: Path, config_file: Path, collector_file: Path, port: int
         ) -> None:
             # NOTE: Keep the version the same as in
-            # compute/compute-node.Dockerfile and build-tools.Dockerfile.
+            # compute/compute-node.Dockerfile and build-tools/Dockerfile.
             #
             # The "host" network mode allows sql_exporter to talk to the
             # endpoint which is running on the host.
