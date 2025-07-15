@@ -30,6 +30,11 @@ PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
 SHLIB_LINK = -lcurl
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S), Darwin)
+    SHLIB_LINK += -framework Security -framework CoreFoundation -framework SystemConfiguration
+endif
+
 EXTENSION = neon
 DATA = \
 	neon--1.0.sql \
