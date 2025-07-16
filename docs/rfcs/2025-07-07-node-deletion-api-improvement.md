@@ -25,6 +25,10 @@ live migration of all tenant shards from the node being deleted while the node i
 and continue processing all incoming requests. The node is removed only after all tenant shards
 have been safely migrated.
 
+Although live migrations can be achieved with the drain functionality, it leads to incorrect shard
+placement, such as not matching availability zones. This results in unnecessary work to optimize
+the placement that was just recently performed.
+
 If we delete a node before its tenant shards are fully moved, the new node won't have all the
 needed data (e.g. heatmaps) ready. This means user requests to the new node will be much slower at
 first. If there are many tenant shards, this slowdown affects a huge amount of users.
@@ -85,7 +89,7 @@ will happen later, but the node will eventually be removed. All operations are a
 back. The only action left is to remove its record from the database. Any attempt to register a
 node in this state will fail.
 
-This state persists across pageserver restarts.
+This state persists across storage controller restarts.
 
 **State transition**
 ```
@@ -122,7 +126,7 @@ actively started again, as triggered by the node's `NodeLifecycle::ScheduledForD
 `NodeSchedulingPolicy` transition details:
 1. When `node_delete` begins, set the policy to `NodeSchedulingPolicy::Deleting`.
 2. If `node_delete` is cancelled (for example, due to a concurrent drain operation), revert the
-policy to its previous value.
+policy to its previous value. The policy is persisted in storcon DB.
 3. After `node_delete` completes, the final value of the scheduling policy is irrelevant, since
 `NodeLifecycle::Deleted` prevents any further access to this field.
 
@@ -139,10 +143,35 @@ fill, delete) with robust concurrency control.
 Key responsibilities:
 - Orchestrates the execution of operations
 - Supports cancellation of currently running operations
-- Queues delete operations if another operation is already in progress
 - Enforces operation constraints, e.g. allowing only single drain/fill operation at a time
 - Persists deletion state, enabling recovery of pending deletions across restarts
 - Ensures thread safety across concurrent requests
+
+#### Attached tenant shard processing
+
+When deleting a node, handle each attached tenant shard as follows:
+
+1. Pick the best node to become the new attached (the candidate).
+2. If the candidate already has this shard as a secondary:
+    - Create a new secondary for the shard on another suitable node.
+   Otherwise:
+    - Create a secondary for the shard on the candidate node.
+3. Wait until all secondaries are ready and pre-warmed.
+4. Promote the candidate's secondary to attached.
+5. Remove the secondary from the node being deleted.
+
+This process safely moves all attached shards before deleting the node.
+
+#### Secondary tenant shard processing
+
+When deleting a node, handle each secondary tenant shard as follows:
+
+1. Choose the best node to become the new secondary.
+2. Create a secondary for the shard on that node.
+3. Wait until the new secondary is ready.
+4. Remove the secondary from the node being deleted.
+
+This ensures all secondary shards are safely moved before deleting the node.
 
 ### Reliability, failure modes and corner cases
 
@@ -152,8 +181,7 @@ In case of a storage controller failure and following restart, the system behavi
 - If `NodeLifecycle` is `Active`: No action is taken for this node.
 - If `NodeLifecycle` is `Deleted`: The node will not be re-added.
 - If `NodeLifecycle` is `ScheduledForDeletion`: A deletion background task will be launched for
-this node. Since only one ongoing deletion task per storage controller is allowed, if there are
-multiple nodes with `ScheduledForDeletion` state, additional deletion tasks will be queued.
+this node.
 
 In case of a pageserver node failure during deletion, the behavior depends on the `force` flag:
 - If `force` is set: The node deletion will proceed regardless of the node's availability.
@@ -163,24 +191,29 @@ becomes healthy again.
 
 ### Operations concurrency
 
-The following sections describe the behavior when different types of requests arrive at the storage controller and how they interact with ongoing operations.
+The following sections describe the behavior when different types of requests arrive at the storage
+controller and how they interact with ongoing operations.
 
 #### Delete request
 
+Handler: `PUT /control/v1/node/:node_id/delete`
+
 1. If node lifecycle is `NodeLifecycle::ScheduledForDeletion`:
-    - Return `409 Conflict`: there is already an ongoing deletion request for this node
+    - Return `200 OK`: there is already an ongoing deletion request for this node
 2. Update & persist lifecycle to `NodeLifecycle::ScheduledForDeletion`
-3. If there is no active operation (drain/fill/delete):
+3. Persist current scheduling policy
+4. If there is no active operation (drain/fill/delete):
     - Run deletion process for this node
 
 #### Cancel delete request
+
+Handler: `DELETE /control/v1/node/:node_id/delete`
 
 1. If node lifecycle is not `NodeLifecycle::ScheduledForDeletion`:
     - Return `404 Not Found`: there is no current deletion request for this node
 2. If the active operation is deleting this node, cancel it
 3. Update & persist lifecycle to `NodeLifecycle::Active`
-4. If there is no active operation (drain/fill/delete):
-    - Try to find another candidate to delete and run the deletion process for that node
+4. Restore the last scheduling policy from persistence
 
 #### Drain/fill request
 
