@@ -155,9 +155,9 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
     }
 
     /// Initialize a table for reading. Currently identical to [`HashMapInit::attach_writer`].
-	///
-	/// This is a holdover from a previous implementation and is being kept around for
-	/// backwards compatibility reasons.
+    ///
+    /// This is a holdover from a previous implementation and is being kept around for
+    /// backwards compatibility reasons.
     pub fn attach_reader(self) -> HashMapAccess<'a, K, V, S> {
         self.attach_writer()
     }
@@ -297,9 +297,9 @@ where
     }
 
     /// Get a reference to the entry containing a key.
-	///
-	/// NB: THis takes a write lock as there's no way to distinguish whether the intention
-	/// is to use the entry for reading or for writing in advance.
+    ///
+    /// NB: THis takes a write lock as there's no way to distinguish whether the intention
+    /// is to use the entry for reading or for writing in advance.
     pub fn entry(&self, key: K) -> Entry<'a, '_, K, V> {
         let hash = self.get_hash_value(&key);
         self.entry_with_hash(key, hash)

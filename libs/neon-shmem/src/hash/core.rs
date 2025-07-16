@@ -144,10 +144,10 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
             prev = PrevPos::Chained(pos);
             pos = bucket.next;
         }
-		if pos == INVALID_POS {
+        if pos == INVALID_POS {
             return Err(FullError);
         }
-        
+
         // Repair the freelist.
         match prev {
             PrevPos::First(_) => {
