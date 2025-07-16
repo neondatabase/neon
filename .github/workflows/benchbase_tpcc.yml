@@ -36,14 +36,14 @@ jobs:
             max_rate: 800
             min_cu: 0.25
             max_cu: 2
-          - warehouses: 500
-            max_rate: 2000
-            min_cu: 2
-            max_cu: 8
-          - warehouses: 1000
-            max_rate: 2900
-            min_cu: 2
-            max_cu: 16
+          # - warehouses: 500
+          #   max_rate: 2000
+          #   min_cu: 2
+          #   max_cu: 8
+          # - warehouses: 1000
+          #   max_rate: 2900
+          #   min_cu: 2
+          #   max_cu: 16
       max-parallel: 1 # we want to run each workload size sequentially to avoid noisy neighbors
     permissions:
       contents: write
@@ -124,15 +124,87 @@ jobs:
         
         echo "BENCHMARK_TPCC_CONNSTR=${BENCHMARK_TPCC_CONNSTR}" >> $GITHUB_ENV
 
-    - name: Run TPC-C benchmark using benchbase
+    - name: Generate BenchBase workload configuration
       env:
         WAREHOUSES: ${{ matrix.warehouses }}
         MAX_RATE: ${{ matrix.max_rate }}
       run: |
-        echo "Running TPC-C benchmark with warehouses: ${WAREHOUSES}, max_rate: ${MAX_RATE}"
-        echo "Connection string: ${BENCHMARK_TPCC_CONNSTR}"
-        # TODO: Implement benchbase TPC-C benchmark execution
-        echo "Placeholder for benchbase TPC-C benchmark execution"
+        echo "Generating BenchBase configs for warehouses: ${WAREHOUSES}, max_rate: ${MAX_RATE}"
+        
+        # Extract hostname and password from connection string
+        # Format: postgresql://username:password@hostname/database?params (no port for Neon)
+        HOSTNAME=$(echo "${BENCHMARK_TPCC_CONNSTR}" | sed -n 's|.*://[^:]*:[^@]*@\([^/]*\)/.*|\1|p')
+        PASSWORD=$(echo "${BENCHMARK_TPCC_CONNSTR}" | sed -n 's|.*://[^:]*:\([^@]*\)@.*|\1|p')
+        
+        echo "Extracted hostname: ${HOSTNAME}"
+        
+        # Set up working directories in runner temp (NVMe)
+        BENCHMARK_WORKDIR="${RUNNER_TEMP}/benchbase-tpcc"
+        mkdir -p "${BENCHMARK_WORKDIR}"
+        cd "${BENCHMARK_WORKDIR}"
+        
+        # Copy the generator script
+        cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/generate_workload_size.py" .
+        
+        # Generate configs and scripts
+        python3 generate_workload_size.py \
+          --warehouses ${WAREHOUSES} \
+          --max-rate ${MAX_RATE} \
+          --hostname ${HOSTNAME} \
+          --password ${PASSWORD}
+        
+        # Fix path mismatch: move generated configs and scripts to expected locations
+        mv ../configs ./configs
+        mv ../scripts ./scripts
+        
+        # Fix file permissions for Docker container access
+        chmod -R 755 ./scripts
+        chmod -R 644 ./configs
+        
+        # Save working directory for subsequent steps
+        echo "BENCHMARK_WORKDIR=${BENCHMARK_WORKDIR}" >> $GITHUB_ENV
+
+    - name: Prepare database (load data)
+      env:
+        WAREHOUSES: ${{ matrix.warehouses }}
+      run: |
+        cd "${BENCHMARK_WORKDIR}"
+        
+        echo "Loading ${WAREHOUSES} warehouses into database..."
+        
+        # Create results directory for Docker mount with proper permissions
+        mkdir -p results
+        chmod 777 results
+        
+        # Run the loader script
+        ./scripts/load_${WAREHOUSES}_warehouses.sh
+        
+        echo "Database loading completed"
+
+    - name: Run TPC-C benchmark
+      env:
+        WAREHOUSES: ${{ matrix.warehouses }}
+      run: |
+        cd "${BENCHMARK_WORKDIR}"
+        
+        echo "Running TPC-C benchmark with ${WAREHOUSES} warehouses..."
+        
+        # Run the optimal rate benchmark
+        ./scripts/execute_${WAREHOUSES}_warehouses_opt_rate.sh
+        
+        echo "Benchmark execution completed"
+
+    - name: Set date for upload
+      id: set-date
+      run: echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+    - name: Upload benchmark results
+      uses: ./.github/actions/upload
+      with:
+        name: benchbase-tpcc-results-${{ matrix.warehouses }}-warehouses-${{ github.run_id }}
+        path: ${{ env.BENCHMARK_WORKDIR }}
+        prefix: benchbase-tpc-c/${{ steps.set-date.outputs.date }}/${{ github.run_id }}/${{ matrix.warehouses }}-warehouses
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
     - name: Delete Neon Project
       if: ${{ always() }}
