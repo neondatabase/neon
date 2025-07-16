@@ -646,7 +646,7 @@ readahead_buffer_resize(int newsize, void *extra)
 	 * iteration on the dataset, and trivial compaction.
 	 */
 	for (end = MyPState->ring_unused - 1;
-		 end >= MyPState->ring_last && end != InfiniteXLogRecPtr && nfree != 0;
+		 end >= MyPState->ring_last && end != UINT64_MAX && nfree != 0;
 		 end -= 1)
 	{
 		PrefetchRequest *slot = GetPrfSlot(end);
@@ -692,7 +692,7 @@ readahead_buffer_resize(int newsize, void *extra)
 	MyNeonCounters->pageserver_open_requests =
 		MyPState->n_requests_inflight;
 
-	for (; end >= MyPState->ring_last && end != InfiniteXLogRecPtr; end -= 1)
+	for (; end >= MyPState->ring_last && end != UINT64_MAX; end -= 1)
 	{
 		PrefetchRequest *slot = GetPrfSlot(end);
 		Assert(slot->status != PRFS_REQUESTED);
@@ -1126,27 +1126,20 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 }
 
 /*
- * Check that pahge LSN returned by PS to replica is not beyand replay LSN.
- * It can happen only in case of deteriorated lease.
+ * Check that returned page LSN is consistent with request lsns
  */
-static bool
-check_page_lsn(NeonGetPageResponse* resp, XLogRecPtr* replay_lsn_ptr)
+static void
+check_page_lsn(NeonGetPageResponse* resp)
 {
-	PageHeaderData data;
-	/* move the data to a known aligned place: resp->page may not be correctly aligned */
-	memcpy(&data, resp->page, sizeof(PageHeaderData));
+	if (PageGetLSN(resp->page) > resp->req.hdr.not_modified_since)
+		neon_log(PANIC, "Invalid getpage response version: %X/%08X is higher than last modified LSN %X/%08X",
+				 LSN_FORMAT_ARGS(PageGetLSN(resp->page)),
+			 LSN_FORMAT_ARGS(resp->req.hdr.not_modified_since));
 
-	if (data.pd_lsn > resp->hdr.not_modified_since)
-		elog(PANIC, "Invalid getpage response version: %X/%08X is higher than last modified LSN %X/%08X",
-			 LSN_FORMAT_ARGS(data.pd_lsn),
-			 LSN_FORMAT_ARGS(resp->hdr.not_modified_since));
-
-	if (data.pd_lsn > resp->hdr.lsn)
-		elog(PANIC, "Invalid getpage response version: %X/%08X is higher than request LSN %X/%08X",
-			 LSN_FORMAT_ARGS(data.pd_lsn),
-			 LSN_FORMAT_ARGS(resp->hdr.lsn));
-
-	return true;
+	if (PageGetLSN(resp->page) > resp->req.hdr.lsn)
+		neon_log(PANIC, "Invalid getpage response version: %X/%08X is higher than request LSN %X/%08X",
+			 LSN_FORMAT_ARGS(PageGetLSN(resp->page)),
+			 LSN_FORMAT_ARGS(resp->req.hdr.lsn));
 }
 
 /*
@@ -1206,14 +1199,7 @@ communicator_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumbe
 			}
 			Assert(slot->response->tag == T_NeonGetPageResponse); /* checked by check_getpage_response when response was assigned to the slot */
 			resp = (NeonGetPageResponse*)slot->response;
-
-			/*
-			 * Ignore "in-future" responses caused by deteriorated lease
-			 */
-			if (!check_page_lsn(resp, NULL))
-			{
-				continue;
-			}
+			check_page_lsn(resp);
 			memcpy(buffers[i], resp->page, BLCKSZ);
 
 			/*
@@ -1300,7 +1286,7 @@ Retry:
 		MyPState->ring_unused - MyPState->ring_receive;
 	MyNeonCounters->getpage_prefetches_buffered =
 		MyPState->n_responses_buffered;
-	last_ring_index = InfiniteXLogRecPtr;
+	last_ring_index = UINT64_MAX;
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -1489,7 +1475,7 @@ Retry:
 		MyPState->ring_unused - MyPState->ring_receive;
 
 	Assert(any_hits);
-	Assert(last_ring_index != InfiniteXLogRecPtr);
+	Assert(last_ring_index != UINT64_MAX);
 
 	Assert(GetPrfSlot(last_ring_index)->status == PRFS_REQUESTED ||
 		   GetPrfSlot(last_ring_index)->status == PRFS_RECEIVED);
@@ -2304,7 +2290,7 @@ Retry:
 			if (entry == NULL)
 			{
 				ring_index = prefetch_register_bufferv(hashkey.buftag, reqlsns, 1, NULL, false);
-				Assert(ring_index != InfiniteXLogRecPtr);
+				Assert(ring_index != UINT64_MAX);
 				slot = GetPrfSlot(ring_index);
 			}
 			else
@@ -2339,15 +2325,7 @@ Retry:
 			case T_NeonGetPageResponse:
 			{
 				NeonGetPageResponse* getpage_resp = (NeonGetPageResponse *) resp;
-				XLogRecPtr replay_lsn;
-				if (!check_page_lsn(getpage_resp, &replay_lsn))
-				{
-					/* Alternative to throw error is to repeat the query with request_lsn=replay_lsn */
-					ereport(ERROR,
-							(errcode(ERRCODE_IO_ERROR),
-							 errmsg("There is no more version of page %u of relation %u/%u/%u.%u at LSN %X/%X at page server, request LSN %X/%X, latest version is at LSN %X/%X",
-									blockno, RelFileInfoFmt(rinfo), forkNum, LSN_FORMAT_ARGS(replay_lsn), LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(PageGetLSN((Page)getpage_resp->page)))));
-				}
+				check_page_lsn(getpage_resp);
 				memcpy(buffer, getpage_resp->page, BLCKSZ);
 
 				/*
