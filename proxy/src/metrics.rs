@@ -112,6 +112,9 @@ pub struct ProxyMetrics {
     /// Number of bytes sent/received between all clients and backends.
     pub io_bytes: CounterVec<StaticLabelSet<Direction>>,
 
+    /// Number of IO errors while logging.
+    pub logging_errors_count: Counter,
+
     /// Number of errors by a given classification.
     pub errors_total: CounterVec<StaticLabelSet<crate::error::ErrorKind>>,
 
