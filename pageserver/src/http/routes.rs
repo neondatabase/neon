@@ -2357,6 +2357,7 @@ async fn timeline_compact_handler(
         flags,
         sub_compaction,
         sub_compaction_max_job_size_mb,
+        gc_compaction_do_metadata_compaction: false,
     };
 
     let scheduled = compact_request
