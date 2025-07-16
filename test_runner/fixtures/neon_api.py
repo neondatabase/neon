@@ -343,6 +343,30 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
+    def update_endpoint(
+        self,
+        project_id: str,
+        endpoint_id: str,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {"endpoint": {}}
+        # otherwise we get 400 "settings must not be nil"
+        # TODO(myrrc): fix on cplane side
+        if "pg_settings" not in settings:
+            settings["pg_settings"] = {}
+        data["endpoint"]["settings"] = settings
+
+        resp = self.__request(
+            "PATCH",
+            f"/projects/{project_id}/endpoints",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+        return cast("dict[str, Any]", resp.json())
+
     def delete_endpoint(self, project_id: str, endpoint_id: str) -> dict[str, Any]:
         resp = self.__request("DELETE", f"/projects/{project_id}/endpoints/{endpoint_id}")
         return cast("dict[str,Any]", resp.json())

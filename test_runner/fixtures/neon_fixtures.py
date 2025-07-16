@@ -4952,8 +4952,8 @@ class Endpoint(PgProtocol, LogUtils):
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     def get_compute_spec(self) -> dict[str, Any]:
-        json = json.loads((Path(self.endpoint_path()) / "config.json").read_text())["spec"]
-        return cast("dict[str, Any]", json)
+        out = json.loads((Path(self.endpoint_path()) / "config.json").read_text())["spec"]
+        return cast("dict[str, Any]", out)
 
     def respec_deep(self, **kwargs: Any) -> None:
         """
