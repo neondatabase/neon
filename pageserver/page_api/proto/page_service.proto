@@ -17,11 +17,11 @@
 //    grpcurl \
 //      -plaintext \
 //      -H "neon-tenant-id: 7c4a1f9e3bd6470c8f3e21a65bd2e980" \
-//      -H "neon-shard-id: 0b10" \
+//      -H "neon-shard-id: 0000" \
 //      -H "neon-timeline-id: f08c4e9a2d5f76b1e3a7c2d8910f4b3e" \
 //      -H "authorization: Bearer $JWT" \
-//      -d '{"read_lsn": {"request_lsn": 1234567890}, "rel": {"spc_oid": 1663, "db_oid": 1234, "rel_number": 5678, "fork_number": 0}}'
-//      localhost:51051 page_api.PageService/CheckRelExists
+//      -d '{"read_lsn": {"request_lsn": 100000000, "not_modified_since_lsn": 1}, "db_oid": 1}' \
+//      localhost:51051 page_api.PageService/GetDbSize
 //    ```
 //
 // TODO: consider adding neon-compute-mode ("primary", "static", "replica").
