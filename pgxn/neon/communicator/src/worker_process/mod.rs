@@ -6,8 +6,8 @@
 //! - write results back to backends.
 
 mod callbacks;
+mod control_socket;
 mod lfc_metrics;
 mod logging;
 mod main_loop;
-mod metrics_exporter;
 mod worker_interface;

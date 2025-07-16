@@ -30,6 +30,8 @@ pub(super) fn init(
         .unwrap();
 
     let worker_struct = CommunicatorWorkerProcessStruct {
+        // Note: it's important to not drop the runtime, or all the tasks are dropped
+        // too. Including it in the returned struct is one way to keep it around.
         runtime,
 
         // metrics
@@ -37,9 +39,10 @@ pub(super) fn init(
     };
     let worker_struct = Box::leak(Box::new(worker_struct));
 
+    // Start the listener on the control socket
     worker_struct
         .runtime
-        .block_on(worker_struct.launch_metrics_exporter())
+        .block_on(worker_struct.launch_control_socket_listener())
         .map_err(|e| e.to_string())?;
 
     Ok(worker_struct)

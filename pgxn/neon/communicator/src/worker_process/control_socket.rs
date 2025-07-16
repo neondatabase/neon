@@ -1,5 +1,8 @@
-//! Export information about Postgres, the communicator process, file cache etc. as
-//! prometheus metrics.
+//! Communicator control socket.
+//!
+//! Currently, the control socket is used to provide information about the communicator
+//! process, file cache etc. as prometheus metrics. In the future, it can be used to
+//! expose more things.
 //!
 //! The exporter speaks HTTP, listens on a Unix Domain Socket under the Postgres
 //! data directory. For debugging, you can access it with curl:
@@ -24,8 +27,10 @@ use crate::NEON_COMMUNICATOR_SOCKET_NAME;
 use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 
 impl CommunicatorWorkerProcessStruct {
-    /// Launch the metrics exporter
-    pub(crate) async fn launch_metrics_exporter(&'static self) -> Result<(), std::io::Error> {
+    /// Launch the listener
+    pub(crate) async fn launch_control_socket_listener(
+        &'static self,
+    ) -> Result<(), std::io::Error> {
         use axum::routing::get;
         let app = Router::new()
             .route("/metrics", get(get_metrics))
@@ -37,11 +42,11 @@ impl CommunicatorWorkerProcessStruct {
         // lying around. Remove it first.
         match std::fs::remove_file(NEON_COMMUNICATOR_SOCKET_NAME) {
             Ok(()) => {
-                tracing::warn!("removed stale {NEON_COMMUNICATOR_SOCKET_NAME}");
+                tracing::warn!("removed stale control socket");
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => {
-                tracing::error!("could not remove stale {NEON_COMMUNICATOR_SOCKET_NAME}: {e:#}");
+                tracing::error!("could not remove stale control socket: {e:#}");
                 // Try to proceed anyway. It will likely fail below though.
             }
         };
@@ -50,7 +55,7 @@ impl CommunicatorWorkerProcessStruct {
         let listener = UnixListener::bind(NEON_COMMUNICATOR_SOCKET_NAME)?;
 
         tokio::spawn(async {
-            tracing::info!("metrics listener spawned");
+            tracing::info!("control socket listener spawned");
             axum::serve(listener, app)
                 .await
                 .expect("axum::serve never returns")

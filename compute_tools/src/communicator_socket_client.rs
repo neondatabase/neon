@@ -1,8 +1,7 @@
-//! Client for making request to a running Postgres server's metrics service
+//! Client for making request to a running Postgres server's communicator control socket.
 //!
-//! The storage communicator process that runs inside Postgres exposes
-//! an HTTP endpoint in a Unix Domain Socket in the Postgres data
-//! directory. This provides access to it.
+//! The storage communicator process that runs inside Postgres exposes an HTTP endpoint in
+//! a Unix Domain Socket in the Postgres data directory. This provides access to it.
 
 use std::path::Path;
 
@@ -14,7 +13,7 @@ use hyper_util::rt::TokioIo;
 /// `pgxn/neon/communicator/src/lib.rs`.
 const NEON_COMMUNICATOR_SOCKET_NAME: &str = "neon-communicator.socket";
 
-/// Open a connection to the metrics exporter's socket, prepare to send requests to it
+/// Open a connection to the communicator's control socket, prepare to send requests to it
 /// with hyper.
 pub async fn connect_communicator_socket<B>(pgdata: &Path) -> anyhow::Result<SendRequest<B>>
 where
@@ -81,7 +80,7 @@ where
         tokio::net::UnixStream::connect(&short_path).await
     };
 
-    let stream = connect_result.context("opening postgres metrics socket")?;
+    let stream = connect_result.context("connecting to communicator control socket")?;
 
     let io = TokioIo::new(stream);
     let (request_sender, connection) = hyper::client::conn::http1::handshake(io).await?;
