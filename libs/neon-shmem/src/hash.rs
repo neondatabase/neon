@@ -155,6 +155,9 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
     }
 
     /// Initialize a table for reading. Currently identical to [`HashMapInit::attach_writer`].
+	///
+	/// This is a holdover from a previous implementation and is being kept around for
+	/// backwards compatibility reasons.
     pub fn attach_reader(self) -> HashMapAccess<'a, K, V, S> {
         self.attach_writer()
     }
