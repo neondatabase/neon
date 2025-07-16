@@ -463,7 +463,7 @@ class NeonProject:
         Two optional arguments: lsn and timestamp are mutually exclusive
         they instruct to create a snapshot with the specific lns or timestamp
         """
-        return NeonSnapshot(
+        snapshot = NeonSnapshot(
             self,
             self.neon_api.create_snapshot(
                 self.id,
@@ -473,6 +473,8 @@ class NeonProject:
                 self.gen_snapshot_name(),
             ),
         )
+        self.wait()
+        return snapshot
 
     def delete_snapshot(self, snapshot_id: str) -> None:
         """
@@ -480,6 +482,7 @@ class NeonProject:
         """
         self.neon_api.delete_snapshot(self.id, snapshot_id)
         self.snapshots.pop(snapshot_id)
+        self.wait()
 
     def restore_snapshot(self, snapshot_id: str) -> NeonBranch | None:
         """
@@ -496,6 +499,7 @@ class NeonProject:
             self.generate_branch_name(),
         )
         target_branch.start_benchmark()
+        self.wait()
         return target_branch
 
 

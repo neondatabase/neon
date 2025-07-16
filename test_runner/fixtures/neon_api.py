@@ -66,6 +66,7 @@ class NeonAPI:
                 elif resp.status_code == 423 and resp.json()["message"] in {
                     "endpoint is in some transitive state, could not suspend",
                     "project already has running conflicting operations, scheduling of new ones is prohibited",
+                    "snapshot is in transition"
                 }:
                     retry = True
                     self.retries4xx += 1
