@@ -963,3 +963,17 @@ async fn collect_timeline_metrics(global_timelines: Arc<GlobalTimelines>) -> Vec
     }
     res
 }
+
+/* BEGIN_HADRON */
+// Metrics reporting the time spent to perform each safekeeper filesystem utilization check.
+pub static GLOBAL_DISK_UTIL_CHECK_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    // Buckets from 1ms up to 10s
+    let buckets = vec![0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0];
+    register_histogram!(
+        "safekeeper_global_disk_utilization_check_seconds",
+        "Seconds spent to perform each safekeeper filesystem utilization check",
+        buckets
+    )
+    .expect("Failed to register safekeeper_global_disk_utilization_check_seconds histogram")
+});
+/* END_HADRON */

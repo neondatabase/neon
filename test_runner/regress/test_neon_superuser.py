@@ -103,3 +103,90 @@ def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
         query = "DROP SUBSCRIPTION sub CASCADE"
         log.info(f"Dropping subscription: {query}")
         cur.execute(query)
+
+
+def test_privileged_role_override(neon_simple_env: NeonEnv, pg_version: PgVersion):
+    """
+    Test that we can override the privileged role for an endpoint and when we do it,
+    everything is correctly bootstrapped inside Postgres and we don't have neon_superuser
+    role in the database.
+    """
+    PRIVILEGED_ROLE_NAME = "my_superuser"
+
+    env = neon_simple_env
+    env.create_branch("test_privileged_role_override")
+    ep = env.endpoints.create(
+        "test_privileged_role_override",
+        privileged_role_name=PRIVILEGED_ROLE_NAME,
+        update_catalog=True,
+    )
+
+    ep.start()
+
+    ep.wait_for_migrations()
+
+    member_roles = [
+        "pg_read_all_data",
+        "pg_write_all_data",
+        "pg_monitor",
+        "pg_signal_backend",
+    ]
+
+    non_member_roles = [
+        "pg_execute_server_program",
+        "pg_read_server_files",
+        "pg_write_server_files",
+    ]
+
+    role_attributes = {
+        "rolsuper": False,
+        "rolinherit": True,
+        "rolcreaterole": True,
+        "rolcreatedb": True,
+        "rolcanlogin": False,
+        "rolreplication": True,
+        "rolconnlimit": -1,
+        "rolbypassrls": True,
+    }
+
+    if pg_version >= PgVersion.V15:
+        non_member_roles.append("pg_checkpoint")
+
+    if pg_version >= PgVersion.V16:
+        member_roles.append("pg_create_subscription")
+        non_member_roles.append("pg_use_reserved_connections")
+
+    with ep.cursor() as cur:
+        cur.execute(f"SELECT rolname FROM pg_roles WHERE rolname = '{PRIVILEGED_ROLE_NAME}'")
+        assert cur.fetchall()[0][0] == PRIVILEGED_ROLE_NAME
+
+        cur.execute("SELECT rolname FROM pg_roles WHERE rolname = 'neon_superuser'")
+        assert len(cur.fetchall()) == 0
+
+        cur.execute("SHOW neon.privileged_role_name")
+        assert cur.fetchall()[0][0] == PRIVILEGED_ROLE_NAME
+
+        # check PRIVILEGED_ROLE_NAME role is created
+        cur.execute(f"select * from pg_roles where rolname = '{PRIVILEGED_ROLE_NAME}'")
+        assert cur.fetchone() is not None
+
+        # check PRIVILEGED_ROLE_NAME role has the correct member roles
+        for role in member_roles:
+            cur.execute(f"SELECT pg_has_role('{PRIVILEGED_ROLE_NAME}', '{role}', 'member')")
+            assert cur.fetchone() == (True,), (
+                f"Role {role} should be a member of {PRIVILEGED_ROLE_NAME}"
+            )
+
+        for role in non_member_roles:
+            cur.execute(f"SELECT pg_has_role('{PRIVILEGED_ROLE_NAME}', '{role}', 'member')")
+            assert cur.fetchone() == (False,), (
+                f"Role {role} should not be a member of {PRIVILEGED_ROLE_NAME}"
+            )
+
+        # check PRIVILEGED_ROLE_NAME role has the correct role attributes
+        for attr, val in role_attributes.items():
+            cur.execute(f"SELECT {attr} FROM pg_roles WHERE rolname = '{PRIVILEGED_ROLE_NAME}'")
+            curr_val = cur.fetchone()
+            assert curr_val == (val,), (
+                f"Role attribute {attr} should be {val} instead of {curr_val}"
+            )
