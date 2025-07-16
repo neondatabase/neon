@@ -38,6 +38,9 @@ package page_api;
 import "google/protobuf/timestamp.proto";
 
 service PageService {
+  // NB: unlike libpq, there is no CheckRelExists in gRPC, at the compute team's request. Instead,
+  // use GetRelSize with allow_missing=true to check existence.
+
   // Fetches a base backup.
   rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
 
