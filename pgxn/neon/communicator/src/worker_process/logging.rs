@@ -83,11 +83,11 @@ pub extern "C" fn communicator_worker_poll_logging(
     };
 
     let src: &[u8] = &msg.message;
-    let dst = errbuf;
+    let dst: *mut u8 = errbuf.cast();
     let len = std::cmp::min(src.len(), errbuf_len as usize - 1);
     unsafe {
         std::ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
-        *(errbuf.add(len)) = b'\0'; // NULL terminator
+        *(dst.add(len)) = b'\0'; // NULL terminator
     }
 
     // Map the tracing Level to PostgreSQL elevel.
