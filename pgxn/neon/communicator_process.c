@@ -27,6 +27,7 @@
 #include "storage/pmsignal.h"
 #include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
+#include "utils/timestamp.h"
 
 #include "communicator_process.h"
 #include "file_cache.h"
@@ -123,18 +124,46 @@ communicator_new_bgworker_main(Datum main_arg)
 
 	/*
 	 * The Rust tokio runtime has been launched, and it's running in the
-	 * background now. This process is now multi-threaded! The Rust threads do
-	 * not call into any Postgres functions.
+	 * background now. This loop in the main thread handles any interactions
+	 * we need with the rest of PostgreSQL.
 	 *
-	 * This loop in the main thread handles any interactions we need with the
-	 * rest of PostgreSQL.
+	 * NB: This process is now multi-threaded! The Rust threads do not call
+	 * into any Postgres functions, but it's not entirely clear which Postgres
+	 * functions are safe to call from this main thread either. Be very
+	 * careful about adding anything non-trivial here.
+	 *
+	 * Also note that we try to react quickly to any log messages arriving
+	 * from the Rust thread. Be careful to not do anything too expensive here
+	 * that might cause delays.
 	 */
 	elog(LOG, "communicator threads started");
 	for (;;)
 	{
+		TimestampTz before;
+		long		duration;
+
+		ResetLatch(MyLatch);
+
+		/*
+		 * Forward any log messages from the Rust threads into the normal
+		 * Postgres logging facility.
+		 */
+		pump_logging(logging);
+
 		/*
 		 * Check interrupts like system shutdown or config reload
+		 *
+		 * We mustn't block for too long within this loop, or we risk blocking
+		 * threads that are sending log messages to us, or having confusingly
+		 * long skew in the printed timestamps.
+		 *
+		 * We expect processing interrupts to happen fast enough that it's OK,
+		 * but measure it just in case, and print a warning if it takes longer
+		 * than 100 ms.
 		 */
+#define LOG_SKEW_WARNING_MS			100
+		before = GetCurrentTimestamp();
+
 		CHECK_FOR_INTERRUPTS();
 		if (ConfigReloadPending)
 		{
@@ -142,11 +171,9 @@ communicator_new_bgworker_main(Datum main_arg)
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
-		/*
-		 * Forward any log messages from the Rust threads into the normal Postgres
-		 * logging facility.
-		 */
-		pump_logging(logging);
+		duration = TimestampDifferenceMilliseconds(before, GetCurrentTimestamp());
+		if (duration > LOG_SKEW_WARNING_MS)
+			elog(WARNING, "handling interrupts took %ld ms, communicator log timestamps might be skewed", duration);
 
 		/*
 		 * Wait until we are woken up. The rust threads will set the latch if
@@ -156,7 +183,6 @@ communicator_new_bgworker_main(Datum main_arg)
 						 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
 						 0,
 						 PG_WAIT_EXTENSION);
-		ResetLatch(MyLatch);
 	}
 }
 
