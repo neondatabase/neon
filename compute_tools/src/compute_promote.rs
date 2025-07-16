@@ -14,6 +14,7 @@ impl ComputeNode {
     /// and http client disconnects, this does not stop promotion, and subsequent
     /// calls block until promote finishes.
     /// Called by control plane on secondary after primary endpoint is terminated
+    /// Has a failpoint "compute-promotion"
     pub async fn promote(self: &Arc<Self>, cfg: PromoteConfig) -> PromoteState {
         let cloned = self.clone();
         let promote_fn = async move || {
@@ -105,6 +106,13 @@ impl ComputeNode {
             .query("SELECT pg_reload_conf()", &[])
             .await
             .context("reloading postgres config")?;
+
+        if cfg!(feature = "testing") {
+            fail::fail_point!("compute-promotion", |_| {
+                bail!("promotion configured to fail because of a failpoint")
+            });
+        }
+
         let row = client
             .query_one("SELECT * FROM pg_promote()", &[])
             .await
