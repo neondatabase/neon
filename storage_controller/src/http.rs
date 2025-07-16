@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -785,13 +786,27 @@ async fn handle_tenant_timeline_passthrough(
         error_counter.inc(labels);
     }
 
+    let resp_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
     // Transform 404 into 503 if we raced with a migration
     if resp.status() == reqwest::StatusCode::NOT_FOUND && !consistent {
-        // Rather than retry here, send the client a 503 to prompt a retry: this matches
-        // the pageserver's use of 503, and all clients calling this API should retry on 503.
-        return Err(ApiError::ResourceUnavailable(
-            format!("Pageserver {node} returned 404 due to ongoing migration, retry later").into(),
-        ));
+        let resp_str = std::str::from_utf8(&resp_bytes)
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+        // We only handle "tenant not found" errors; other 404s like timeline not found should
+        // be forwarded as-is.
+        if resp_str.contains(&format!("tenant {tenant_or_shard_id}")) {
+            // Rather than retry here, send the client a 503 to prompt a retry: this matches
+            // the pageserver's use of 503, and all clients calling this API should retry on 503.
+            return Err(ApiError::ResourceUnavailable(
+                format!(
+                    "Pageserver {node} returned tenant 404 due to ongoing migration, retry later"
+                )
+                .into(),
+            ));
+        }
     }
 
     // We have a reqest::Response, would like a http::Response
@@ -801,7 +816,7 @@ async fn handle_tenant_timeline_passthrough(
     }
 
     let response = builder
-        .body(Body::wrap_stream(resp.bytes_stream()))
+        .body(resp_bytes)
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
     Ok(response)
