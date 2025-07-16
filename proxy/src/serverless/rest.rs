@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use hyper::http::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use indexmap::IndexMap;
 use ouroboros::self_referencing;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value as JsonValue;
 use serde_json::value::RawValue;
@@ -57,7 +59,9 @@ use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::read_body_with_limit;
 use crate::metrics::Metrics;
+use crate::serverless::sql_over_http::HEADER_VALUE_TRUE;
 use crate::types::EndpointCacheKey;
+use crate::util::deserialize_json_string;
 
 static EMPTY_JSON_SCHEMA: &str = r#"{"schemas":[]}"#;
 const INTROSPECTION_SQL: &str = POSTGRESQL_INTROSPECTION_SQL;
@@ -68,7 +72,18 @@ pub struct DbSchemaOwned {
     schema_string: String,
     #[covariant]
     #[borrows(schema_string)]
-    schema: Result<DbSchema<'this>, SubzeroCoreError>,
+    schema: DbSchema<'this>,
+}
+
+impl<'de> Deserialize<'de> for DbSchemaOwned {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        DbSchemaOwned::try_new(s, |s| serde_json::from_str(s))
+            .map_err(<D::Error as serde::de::Error>::custom)
+    }
 }
 
 fn split_comma_separated(s: &str) -> Vec<String> {
@@ -143,13 +158,12 @@ impl DbSchemaCache {
                     .await;
                 let (api_config, schema_owned) = match remote_value {
                     Ok((api_config, schema_owned)) => (api_config, schema_owned),
-                    Err(e @ RestError::SchemaTooLarge { .. }) => {
+                    Err(e @ RestError::SchemaTooLarge) => {
                         // for the case where the schema is too large, we cache an empty dummy value
                         // all the other requests will fail without triggering the introspection query
-                        let schema_owned = DbSchemaOwned::new(EMPTY_JSON_SCHEMA.to_string(), |s| {
-                            serde_json::from_str::<DbSchema>(s.as_str())
-                                .map_err(|e| JsonDeserialize { source: e })
-                        });
+                        let schema_owned = serde_json::from_str::<DbSchemaOwned>(EMPTY_JSON_SCHEMA)
+                            .map_err(|e| JsonDeserialize { source: e })?;
+
                         let api_config = ApiConfig {
                             db_schemas: vec![],
                             db_anon_role: None,
@@ -180,135 +194,86 @@ impl DbSchemaCache {
         ctx: &RequestContext,
         config: &'static ProxyConfig,
     ) -> Result<(ApiConfig, DbSchemaOwned), RestError> {
+        #[derive(Deserialize)]
+        struct SingleRow<Row> {
+            rows: [Row; 1],
+        }
+
+        #[derive(Deserialize)]
+        struct ConfigRow {
+            #[serde(deserialize_with = "deserialize_json_string")]
+            config: ApiConfig,
+        }
+
+        #[derive(Deserialize)]
+        struct SchemaRow {
+            json_schema: DbSchemaOwned,
+        }
+
         let headers = vec![
             (&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id())),
             (
                 &CONN_STRING,
-                HeaderValue::from_str(connection_string).expect("invalid connection string"),
-            ),
-            (
-                &TXN_ISOLATION_LEVEL,
-                HeaderValue::from_str("ReadCommitted")
-                    .expect("invalid transaction isolation level"),
+                HeaderValue::from_str(connection_string).expect(
+                    "connection string came from a header, so it must be a valid headervalue",
+                ),
             ),
             (&AUTHORIZATION, auth_header.clone()),
-            (
-                &RAW_TEXT_OUTPUT,
-                HeaderValue::from_str("true").expect("invalid raw text output"),
-            ),
+            (&RAW_TEXT_OUTPUT, HEADER_VALUE_TRUE),
         ];
 
         let query = get_postgresql_configuration_query(Some("pgrst.pre_config"));
-        let body = serde_json::json!({"query": query});
-        let (response_status, mut response_json) =
-            make_local_proxy_request(client, headers, body).await?;
-
-        if response_status != StatusCode::OK {
-            return Err(RestError::SubzeroCore(InternalError {
-                message: "Failed to get endpoint configuration".to_string(),
-            }));
-        }
-
-        let rows = response_json["rows"].as_array_mut().ok_or_else(|| {
-            RestError::SubzeroCore(InternalError {
-                message: "Missing 'rows' array in second result".to_string(),
-            })
+        let SingleRow {
+            rows: [ConfigRow { config: api_config }],
+        } = make_local_proxy_request(
+            client,
+            headers.iter().cloned(),
+            QueryData {
+                query: Cow::Owned(query),
+                params: vec![],
+            },
+            config.rest_config.max_schema_size,
+        )
+        .await
+        .map_err(|e| match e {
+            RestError::ReadPayload(ReadPayloadError::BodyTooLarge { .. }) => {
+                RestError::SchemaTooLarge
+            }
+            e => e,
         })?;
-
-        if rows.is_empty() {
-            return Err(RestError::SubzeroCore(InternalError {
-                message: "No rows in second result".to_string(),
-            }));
-        }
-
-        // Extract columns from the first (and only) row
-        let row = &mut rows[0];
-        let config_string = extract_string(row, "config").unwrap_or_default();
-
-        // Parse the configuration response
-        let api_config: ApiConfig = serde_json::from_str(&config_string)
-            .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
 
         // now that we have the api_config let's run the second INTROSPECTION_SQL query
-        let headers = vec![
-            (&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id())),
-            (
-                &CONN_STRING,
-                HeaderValue::from_str(connection_string).expect("invalid connection string"),
-            ),
-            (
-                &TXN_ISOLATION_LEVEL,
-                HeaderValue::from_str("ReadCommitted")
-                    .expect("invalid transaction isolation level"),
-            ),
-            (&AUTHORIZATION, auth_header.clone()),
-            (
-                &RAW_TEXT_OUTPUT,
-                HeaderValue::from_str("true").expect("invalid raw text output"),
-            ),
-        ];
-
-        let body = serde_json::json!({
-            "query": INTROSPECTION_SQL,
-            "params": [
-                &api_config.db_schemas,
-                false, // include_roles_with_login
-                false, // use_internal_permissions
-            ]
-        });
-        let (response_status, mut response_json) =
-            make_local_proxy_request(client, headers, body).await?;
-
-        if response_status != StatusCode::OK {
-            return Err(RestError::SubzeroCore(InternalError {
-                message: "Failed to get endpoint schema".to_string(),
-            }));
-        }
-
-        let rows = response_json["rows"].as_array_mut().ok_or_else(|| {
-            RestError::SubzeroCore(InternalError {
-                message: "Missing 'rows' array in second result".to_string(),
-            })
+        let SingleRow {
+            rows: [SchemaRow { json_schema }],
+        } = make_local_proxy_request(
+            client,
+            headers,
+            QueryData {
+                query: INTROSPECTION_SQL.into(),
+                params: vec![
+                    serde_json::to_value(&api_config.db_schemas)
+                        .expect("Vec<String> is always valid to encode as JSON"),
+                    JsonValue::Bool(false), // include_roles_with_login
+                    JsonValue::Bool(false), // use_internal_permissions
+                ],
+            },
+            config.rest_config.max_schema_size,
+        )
+        .await
+        .map_err(|e| match e {
+            RestError::ReadPayload(ReadPayloadError::BodyTooLarge { .. }) => {
+                RestError::SchemaTooLarge
+            }
+            e => e,
         })?;
 
-        if rows.is_empty() {
-            return Err(RestError::SubzeroCore(InternalError {
-                message: "No rows in second result".to_string(),
-            }));
-        }
-
-        // Extract columns from the first (and only) row
-        let row = &mut rows[0];
-        let json_schema = extract_string(row, "json_schema").unwrap_or_default();
-        let string_size = json_schema.len();
-
-        if string_size > config.rest_config.max_schema_size {
-            return Err(RestError::SchemaTooLarge {
-                max: config.rest_config.max_schema_size,
-                current: string_size,
-            });
-        }
-
-        let schema_owned = DbSchemaOwned::new(json_schema, |s| {
-            serde_json::from_str::<DbSchema>(s.as_str()).map_err(|e| JsonDeserialize { source: e })
-        });
-
-        // check if schema is an ok result
-        let schema = schema_owned.borrow_schema();
-        if schema.is_ok() {
-            Ok((api_config, schema_owned))
-        } else {
-            //
-            Err(RestError::SubzeroCore(SubzeroCoreError::InternalError {
-                message: "Failed to get schema".to_string(),
-            }))
-        }
+        Ok((api_config, json_schema))
     }
 }
 
 // A type to represent a postgresql errors
 // we use our own type (instead of postgres_client::Error) because we get the error from the json response
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Deserialize)]
 pub(crate) struct PostgresError {
     pub code: String,
     pub message: String,
@@ -356,8 +321,8 @@ pub(crate) enum RestError {
     JsonConversion(#[from] JsonConversionError),
     #[error(transparent)]
     SubzeroCore(#[from] SubzeroCoreError),
-    #[error("schema is too large (max is {max} bytes, current is {current} bytes)")]
-    SchemaTooLarge { max: usize, current: usize },
+    #[error("schema is too large")]
+    SchemaTooLarge,
 }
 impl ReportableError for RestError {
     fn get_error_kind(&self) -> ErrorKind {
@@ -368,7 +333,7 @@ impl ReportableError for RestError {
             RestError::Postgres(_) => ErrorKind::Postgres,
             RestError::JsonConversion(_) => ErrorKind::Postgres,
             RestError::SubzeroCore(_) => ErrorKind::User,
-            RestError::SchemaTooLarge { .. } => ErrorKind::User,
+            RestError::SchemaTooLarge => ErrorKind::User,
         }
     }
 }
@@ -378,7 +343,7 @@ impl UserFacingError for RestError {
             RestError::ReadPayload(p) => p.to_string(),
             RestError::ConnectCompute(c) => c.to_string_client(),
             RestError::ConnInfo(c) => c.to_string_client(),
-            RestError::SchemaTooLarge { .. } => self.to_string(),
+            RestError::SchemaTooLarge => self.to_string(),
             RestError::Postgres(p) => p.to_string_client(),
             RestError::JsonConversion(_) => "could not parse postgres response".to_string(),
             RestError::SubzeroCore(s) => {
@@ -406,7 +371,7 @@ impl HttpCodeError for RestError {
             RestError::ConnInfo(_) => StatusCode::BAD_REQUEST,
             RestError::Postgres(e) => e.get_http_status_code(),
             RestError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            RestError::SchemaTooLarge { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            RestError::SchemaTooLarge => StatusCode::INTERNAL_SERVER_ERROR,
             RestError::SubzeroCore(e) => {
                 let status = e.status_code();
                 StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -453,28 +418,57 @@ fn to_sql_param(p: &Param) -> JsonValue {
     }
 }
 
-fn extract_string(json: &mut serde_json::Value, key: &str) -> Option<String> {
-    match json[key].take() {
-        JsonValue::String(s) => Some(s),
-        _ => None,
-    }
+#[derive(serde::Serialize)]
+struct QueryData<'a> {
+    query: Cow<'a, str>,
+    params: Vec<JsonValue>,
 }
 
-async fn make_local_proxy_request(
+async fn make_local_proxy_request<S: DeserializeOwned>(
     client: &mut http_conn_pool::Client<Send>,
-    headers: Vec<(&HeaderName, HeaderValue)>,
-    body: JsonValue,
-) -> Result<(StatusCode, JsonValue), RestError> {
+    headers: impl IntoIterator<Item = (&HeaderName, HeaderValue)>,
+    body: QueryData<'_>,
+    max_len: usize,
+) -> Result<S, RestError> {
+    let body_string = serde_json::to_string(&body)
+        .map_err(|e| RestError::JsonConversion(JsonConversionError::ParseJsonError(e)))?;
+
+    let response = make_raw_local_proxy_request(client, headers, body_string).await?;
+
+    let response_status = response.status();
+
+    if response_status != StatusCode::OK {
+        return Err(RestError::SubzeroCore(InternalError {
+            message: "Failed to get endpoint schema".to_string(),
+        }));
+    }
+
+    // Capture the response body
+    let response_body = crate::http::read_body_with_limit(response.into_body(), max_len)
+        .await
+        .map_err(ReadPayloadError::from)?;
+
+    // Parse the JSON response
+    let response_json: S = serde_json::from_slice(&response_body)
+        .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
+
+    Ok(response_json)
+}
+
+async fn make_raw_local_proxy_request(
+    client: &mut http_conn_pool::Client<Send>,
+    headers: impl IntoIterator<Item = (&HeaderName, HeaderValue)>,
+    body: String,
+) -> Result<Response<Incoming>, RestError> {
     let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
     let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
     let req_headers = req.headers_mut().expect("failed to get headers");
     // Add all provided headers to the request
     for (header_name, header_value) in headers {
-        req_headers.insert(header_name, header_value);
+        req_headers.insert(header_name, header_value.clone());
     }
 
-    let body_string = body.to_string();
-    let body_boxed = Full::new(Bytes::from(body_string))
+    let body_boxed = Full::new(Bytes::from(body))
         .map_err(|never| match never {}) // Convert Infallible to hyper::Error
         .boxed();
 
@@ -485,28 +479,14 @@ async fn make_local_proxy_request(
     })?;
 
     // Send the request to the local proxy
-    let response = client
+    client
         .inner
         .inner
         .send_request(req)
         .await
         .map_err(LocalProxyConnError::from)
-        .map_err(HttpConnError::from)?;
-
-    let response_status = response.status();
-
-    // Capture the response body
-    let response_body = response
-        .collect()
-        .await
-        .map_err(ReadPayloadError::from)?
-        .to_bytes();
-
-    // Parse the JSON response
-    let response_json: serde_json::Value = serde_json::from_slice(&response_body)
-        .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
-
-    Ok((response_status, response_json))
+        .map_err(HttpConnError::from)
+        .map_err(RestError::from)
 }
 
 pub(crate) async fn handle(
@@ -760,11 +740,7 @@ async fn handle_rest_inner(
         )
         .await?;
     let (api_config, db_schema_owned) = entry.as_ref();
-    let db_schema = db_schema_owned.borrow_schema().as_ref().map_err(|_| {
-        RestError::SubzeroCore(InternalError {
-            message: "Failed to get schema".to_string(),
-        })
-    })?;
+    let db_schema = db_schema_owned.borrow_schema();
 
     let db_schemas = &api_config.db_schemas; // list of schemas available for the api
     let db_extra_search_path = &api_config.db_extra_search_path;
@@ -957,19 +933,13 @@ async fn handle_rest_inner(
         (&AUTHORIZATION, auth_header.clone()),
         (
             &TXN_ISOLATION_LEVEL,
-            HeaderValue::from_str("ReadCommitted").expect("invalid transaction isolation level"),
+            HeaderValue::from_static("ReadCommitted"),
         ),
-        (
-            &ALLOW_POOL,
-            HeaderValue::from_str("true").expect("invalid allow pool"),
-        ),
+        (&ALLOW_POOL, HEADER_VALUE_TRUE),
     ];
 
     if api_request.read_only {
-        headers.push((
-            &TXN_READ_ONLY,
-            HeaderValue::from_str("true").expect("invalid read only"),
-        ));
+        headers.push((&TXN_READ_ONLY, HEADER_VALUE_TRUE));
     }
 
     // convert the parameters from subzero core representation to a Vec<JsonValue>
@@ -998,67 +968,64 @@ async fn handle_rest_inner(
     let _metrics = client.metrics(ctx); // FIXME: is everything in the context set correctly?
 
     // send the request to the local proxy
-    let (response_status, mut response_json) =
-        make_local_proxy_request(&mut client, headers, body).await?;
+    let response = make_raw_local_proxy_request(&mut client, headers, body.to_string()).await?;
+    let (parts, body) = response.into_parts();
+
+    let max_response = config.http_config.max_response_size_bytes;
+    let bytes = read_body_with_limit(body, max_response)
+        .await
+        .map_err(ReadPayloadError::from)?;
 
     // if the response status is greater than 399, then it is an error
     // FIXME: check if there are other error codes or shapes of the response
-    if response_status.as_u16() > 399 {
+    if parts.status.as_u16() > 399 {
         // turn this postgres error from the json into PostgresError
-        let postgres_error = PostgresError {
-            message: extract_string(&mut response_json, "message").unwrap_or_default(),
-            code: extract_string(&mut response_json, "code").unwrap_or_default(),
-            detail: extract_string(&mut response_json, "detail"),
-            hint: extract_string(&mut response_json, "hint"),
-        };
+        let postgres_error = serde_json::from_slice(&bytes)
+            .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
 
         return Err(RestError::Postgres(postgres_error));
     }
 
-    // Extract the second query result (main query)
-    let results = response_json["results"].as_array_mut().ok_or_else(|| {
-        RestError::SubzeroCore(InternalError {
-            message: "Missing 'results' array".to_string(),
-        })
-    })?;
-
-    if results.len() < 2 {
-        return Err(RestError::SubzeroCore(InternalError {
-            message: "Expected at least 2 results".to_string(),
-        }));
+    #[derive(Deserialize)]
+    struct QueryResults {
+        /// we run two queries, so we want only two results.
+        results: (EnvRows, MainRows),
     }
 
-    let second_result = &mut results[1];
-    let rows = second_result["rows"].as_array_mut().ok_or_else(|| {
-        RestError::SubzeroCore(InternalError {
-            message: "Missing 'rows' array in second result".to_string(),
-        })
-    })?;
+    /// `env_statement` returns nothing of interest to us
+    #[derive(Deserialize)]
+    struct EnvRows {}
 
-    if rows.is_empty() {
-        return Err(RestError::SubzeroCore(InternalError {
-            message: "No rows in second result".to_string(),
-        }));
+    #[derive(Deserialize)]
+    struct MainRows {
+        /// `main_statement` only returns a single row.
+        rows: [MainRow; 1],
     }
 
-    // Extract columns from the first (and only) row
-    let row = &mut rows[0];
-    let body_string = extract_string(row, "body").unwrap_or_default();
-    let page_total = extract_string(row, "page_total");
-    let total_result_set = extract_string(row, "total_result_set");
-    // constraints_satisfied is relevant only when using internal permissions
-    // let constraints_satisfied = extract_string(&mut row, "constraints_satisfied");
-    let response_headers_json = extract_string(row, "response_headers");
-    let response_status = extract_string(row, "response_status");
+    #[derive(Deserialize)]
+    struct MainRow {
+        body: String,
+        page_total: Option<String>,
+        total_result_set: Option<String>,
+        response_headers: Option<String>,
+        response_status: Option<String>,
+    }
+
+    let results: QueryResults = serde_json::from_slice(&bytes)
+        .map_err(|e| RestError::SubzeroCore(JsonDeserialize { source: e }))?;
+
+    let QueryResults {
+        results: (_, MainRows { rows: [row] }),
+    } = results;
 
     // build the intermediate response object
     let api_response = ApiResponse {
-        page_total: page_total.map_or(0, |v| v.parse::<u64>().unwrap_or(0)),
-        total_result_set: total_result_set.map(|v| v.parse::<u64>().unwrap_or(0)),
+        page_total: row.page_total.map_or(0, |v| v.parse::<u64>().unwrap_or(0)),
+        total_result_set: row.total_result_set.map(|v| v.parse::<u64>().unwrap_or(0)),
         top_level_offset: 0, // FIXME: check why this is 0
-        response_headers: response_headers_json,
-        response_status,
-        body: body_string,
+        response_headers: row.response_headers,
+        response_status: row.response_status,
+        body: row.body,
     };
 
     // TODO: rollback the transaction if the page_total is not 1 and the accept_content_type is SingularJSON
