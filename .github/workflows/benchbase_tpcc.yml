@@ -194,12 +194,10 @@ jobs:
         S3_BUCKET: neon-public-benchmark-results
         S3_PREFIX: benchbase-tpc-c/${{ steps.set-date.outputs.date }}/${{ github.run_id }}/${{ matrix.warehouses }}-warehouses
       run: |
-        cd "${BENCHMARK_WORKDIR}"
-        
         echo "Uploading benchmark results to s3://${S3_BUCKET}/${S3_PREFIX}/"
         
-        # Upload all files in the results directory individually
-        find . -type f -exec aws s3 cp --only-show-errors {} s3://${S3_BUCKET}/${S3_PREFIX}/{} \;
+        # Upload the entire benchmark directory recursively
+        aws s3 cp --only-show-errors --recursive "${BENCHMARK_WORKDIR}" s3://${S3_BUCKET}/${S3_PREFIX}/
         
         echo "Upload completed"
 
