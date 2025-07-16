@@ -200,6 +200,8 @@ def test_create_snapshot(
         ignore=shutil.ignore_patterns("pg_dynshmem"),
     )
 
+    log.info(f"Copied new compatibility snapshot dir to: {compatibility_snapshot_dir}")
+
 
 # check_neon_works does recovery from WAL => the compatibility snapshot's WAL is old => will log this warning
 ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_lsn_timeout.*"
@@ -218,6 +220,10 @@ def test_backward_compatibility(
     """
     Test that the new binaries can read old data
     """
+
+    snapshot_dir_stat = os.stat(compatibility_snapshot_dir)
+    log.info(f"Snapshot dir at {compatibility_snapshot_dir} stat: {snapshot_dir_stat}")
+
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
     env.pageserver.allowed_errors.append(ingest_lag_log_line)
@@ -248,6 +254,9 @@ def test_forward_compatibility(
     """
     Test that the old binaries can read new data
     """
+
+    snapshot_dir_stat = os.stat(compatibility_snapshot_dir)
+    log.info(f"Snapshot dir at {compatibility_snapshot_dir} stat: {snapshot_dir_stat}")
 
     neon_env_builder.control_plane_hooks_api = compute_reconfigure_listener.control_plane_hooks_api
     neon_env_builder.test_may_use_compatibility_snapshot_binaries = True
