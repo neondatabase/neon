@@ -20,9 +20,8 @@ use std::io::ErrorKind;
 
 use tokio::net::UnixListener;
 
+use crate::NEON_COMMUNICATOR_SOCKET_NAME;
 use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
-
-const NEON_COMMUNICATOR_SOCKET_NAME: &str = "neon-communicator.socket";
 
 impl CommunicatorWorkerProcessStruct {
     /// Launch the metrics exporter
@@ -39,8 +38,8 @@ impl CommunicatorWorkerProcessStruct {
         match std::fs::remove_file(NEON_COMMUNICATOR_SOCKET_NAME) {
             Ok(()) => {
                 tracing::warn!("removed stale {NEON_COMMUNICATOR_SOCKET_NAME}");
-            },
-            Err(e) if e.kind() == ErrorKind::NotFound => {},
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => {
                 tracing::error!("could not remove stale {NEON_COMMUNICATOR_SOCKET_NAME}: {e:#}");
                 // Try to proceed anyway. It will likely fail below though.

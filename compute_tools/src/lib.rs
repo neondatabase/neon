@@ -4,6 +4,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod checker;
+pub mod communicator_socket_client;
 pub mod config;
 pub mod configurator;
 pub mod http;
@@ -24,7 +25,6 @@ pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
 pub mod pgbouncer;
-pub mod postgres_metrics_client;
 pub mod rsyslog;
 pub mod spec;
 mod spec_apply;

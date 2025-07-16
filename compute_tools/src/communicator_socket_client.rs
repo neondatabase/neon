@@ -11,12 +11,12 @@ use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 
 /// Name of the socket within the Postgres data directory. This better match that in
-/// `pgxn/neon/communicator/src/worker_process/metrics_exporter.rs`.
+/// `pgxn/neon/communicator/src/lib.rs`.
 const NEON_COMMUNICATOR_SOCKET_NAME: &str = "neon-communicator.socket";
 
 /// Open a connection to the metrics exporter's socket, prepare to send requests to it
 /// with hyper.
-pub async fn connect_postgres_metrics_socket<B>(pgdata: &Path) -> anyhow::Result<SendRequest<B>>
+pub async fn connect_communicator_socket<B>(pgdata: &Path) -> anyhow::Result<SendRequest<B>>
 where
     B: hyper::body::Body + 'static + Send,
     B::Data: Send,
@@ -84,7 +84,7 @@ where
     let stream = connect_result.context("opening postgres metrics socket")?;
 
     let io = TokioIo::new(stream);
-    let (request_sender, connection) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    let (request_sender, connection) = hyper::client::conn::http1::handshake(io).await?;
 
     // spawn a task to poll the connection and drive the HTTP state
     tokio::spawn(async move {

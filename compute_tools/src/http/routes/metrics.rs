@@ -11,10 +11,10 @@ use hyper::{Request, StatusCode};
 use metrics::proto::MetricFamily;
 use metrics::{Encoder, TextEncoder};
 
+use crate::communicator_socket_client::connect_communicator_socket;
 use crate::compute::ComputeNode;
 use crate::http::JsonResponse;
 use crate::metrics::collect;
-use crate::postgres_metrics_client::connect_postgres_metrics_socket;
 
 /// Expose Prometheus metrics.
 pub(in crate::http) async fn get_metrics() -> Response {
@@ -52,7 +52,7 @@ pub(in crate::http) async fn get_autoscaling_metrics(
     let pgdata = Path::new(&compute.params.pgdata);
 
     // Connect to the communicator process's metrics socket
-    let mut metrics_client = connect_postgres_metrics_socket(pgdata)
+    let mut metrics_client = connect_communicator_socket(pgdata)
         .await
         .map_err(|e| JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
 

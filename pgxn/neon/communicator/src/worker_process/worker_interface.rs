@@ -32,15 +32,17 @@ pub extern "C" fn communicator_worker_launch(
     let tenant_id = if tenant_id.is_null() {
         None
     } else {
-        Some(unsafe { CStr::from_ptr(tenant_id) }.to_str().unwrap())
+        let cstr = unsafe { CStr::from_ptr(tenant_id) };
+        Some(cstr.to_str().expect("assume UTF-8"))
     };
     let timeline_id = if timeline_id.is_null() {
         None
     } else {
-        Some(unsafe { CStr::from_ptr(timeline_id) }.to_str().unwrap())
+        let cstr = unsafe { CStr::from_ptr(timeline_id) };
+        Some(cstr.to_str().expect("assume UTF-8"))
     };
 
-    // Call the `init` function which does all the work.
+    // The `init` function does all the work.
     let result = main_loop::init(tenant_id, timeline_id);
 
     // On failure, return the error message to the C caller in *error_p.
