@@ -36,14 +36,14 @@ jobs:
             max_rate: 800
             min_cu: 0.25
             max_cu: 2
-          # - warehouses: 500
-          #   max_rate: 2000
-          #   min_cu: 2
-          #   max_cu: 8
-          # - warehouses: 1000
-          #   max_rate: 2900
-          #   min_cu: 2
-          #   max_cu: 16
+          - warehouses: 500
+            max_rate: 2000
+            min_cu: 2
+            max_cu: 8
+          - warehouses: 1000
+            max_rate: 2900
+            min_cu: 2
+            max_cu: 16
       max-parallel: 1 # we want to run each workload size sequentially to avoid noisy neighbors
     permissions:
       contents: write
@@ -189,7 +189,7 @@ jobs:
       id: set-date
       run: echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
 
-    - name: Configure AWS credentials # necessary to upload restuls
+    - name: Configure AWS credentials # necessary to upload results
       uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
       with:
         aws-region: us-east-2
