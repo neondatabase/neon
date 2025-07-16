@@ -527,7 +527,7 @@ impl Timeline {
     /// Get size of a relation file. If `allow_missing` is true, returns None for missing relations,
     /// otherwise errors.
     ///
-    /// INVARIANT: never returns Ok(None) if `allow_missing=false`.
+    /// INVARIANT: never returns None if `allow_missing=false`.
     ///
     /// See [`Self::get_rel_exists_in_reldir`] on why we need `deserialized_reldir_v1`.
     pub(crate) async fn get_rel_size_in_reldir(

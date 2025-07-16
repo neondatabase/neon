@@ -2304,9 +2304,9 @@ impl PageServerHandler {
         Ok(PagestreamExistsResponse { req: *req, exists })
     }
 
-    /// If allow_missing is true, returns Ok(None) instead of Err on missing relations. Otherwise,
-    /// always returns Ok(Some) or Err. It is only supported by the gRPC protocol, so we pass it
-    /// separately to avoid changing the libpq protocol types.
+    /// If `allow_missing` is true, returns None instead of Err on missing relations. Otherwise,
+    /// never returns None. It is only supported by the gRPC protocol, so we pass it separately to
+    /// avoid changing the libpq protocol types.
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_nblocks_request(
         timeline: &Timeline,
@@ -3746,8 +3746,8 @@ impl proto::PageService for GrpcPageServiceHandler {
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
         Self::ensure_shard_zero(&timeline)?;
-        let allow_missing = req.get_ref().allow_missing;
         let req: page_api::GetRelSizeRequest = req.into_inner().try_into()?;
+        let allow_missing = req.allow_missing;
 
         span_record!(rel=%req.rel, lsn=%req.read_lsn, allow_missing=%allow_missing);
 
