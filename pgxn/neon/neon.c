@@ -457,15 +457,6 @@ _PG_init(void)
 	load_file("$libdir/neon_rmgr", false);
 #endif
 
-#if PG_VERSION_NUM >= 150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = neon_shmem_request_hook;
-#else
-	neon_shmem_request_hook();
-#endif
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = neon_shmem_startup_hook;
-
 	/* dummy call to a Rust function in the communicator library, to check that it works */
 	(void) communicator_dummy(123);
 
@@ -564,6 +555,16 @@ _PG_init(void)
 
 	ReportSearchPath();
 
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = neon_shmem_request_hook;
+#else
+	neon_shmem_request_hook();
+#endif
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = neon_shmem_startup_hook;
+
+
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = neon_ExecutorStart;
 	prev_ExecutorEnd = ExecutorEnd_hook;
@@ -656,6 +657,7 @@ neon_shmem_request_hook(void)
 	if (prev_shmem_request_hook)
 		prev_shmem_request_hook();
 #endif
+
 	LfcShmemRequest();
 	NeonPerfCountersShmemRequest();
 	PagestoreShmemRequest();

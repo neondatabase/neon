@@ -50,16 +50,16 @@ typedef struct
 								 * algorithm */
 } RelSizeHashControl;
 
-static HTAB *relsize_hash;
-static LWLockId relsize_lock;
-static int	relsize_hash_size;
-static RelSizeHashControl* relsize_ctl;
-
 /*
  * Size of a cache entry is 36 bytes. So this default will take about 2.3 MB,
  * which seems reasonable.
  */
 #define DEFAULT_RELSIZE_HASH_SIZE (64 * 1024)
+
+static HTAB *relsize_hash;
+static LWLockId relsize_lock;
+static int	relsize_hash_size = DEFAULT_RELSIZE_HASH_SIZE;
+static RelSizeHashControl* relsize_ctl;
 
 void
 RelsizeCacheShmemInit(void)

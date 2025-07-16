@@ -65,6 +65,7 @@
 #include "miscadmin.h"
 #include "port/pg_iovec.h"
 #include "postmaster/interrupt.h"
+#include "postmaster/postmaster.h"
 #include "replication/walsender.h"
 #include "storage/ipc.h"
 #include "utils/timeout.h"
@@ -328,7 +329,7 @@ pg_init_communicator(void)
 static Size
 CommunicatorShmemSize(void)
 {
-	return (MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts) * sizeof(XLogRecPtr);
+	return (MAX_BACKENDS + NUM_AUXILIARY_PROCS + max_prepared_xacts) * sizeof(XLogRecPtr);
 }
 
 void
@@ -2686,7 +2687,7 @@ communicator_processinterrupts(void)
 
 XLogRecPtr communicator_get_min_prefetch_lsn(void)
 {
-	XLogRecPtr min_lsn = InvalidXLogRecPtr;
+	XLogRecPtr min_lsn = GetXLogReplayRecPtr(NULL);
 	size_t n_procs = ProcGlobal->allProcCount;
 	for (size_t i = 0; i < n_procs; i++)
 	{

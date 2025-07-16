@@ -625,9 +625,6 @@ lfc_init(void)
 							NULL,
 							NULL,
 							NULL);
-
-	if (lfc_max_size == 0)
-		return;
 }
 
 FileCacheState*
