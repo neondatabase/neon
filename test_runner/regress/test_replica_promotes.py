@@ -208,3 +208,40 @@ def test_replica_promote_handler_disconnects(neon_simple_env: NeonEnv):
         cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload")
         cur.execute("select count(*) from t")
         assert cur.fetchone() == (200,)
+
+
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+def test_replica_promote_fails(neon_simple_env: NeonEnv):
+    """
+    Test that if a /promote route fails, we can safely start primary back
+    """
+    env: NeonEnv = neon_simple_env
+    primary: Endpoint = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
+    secondary: Endpoint = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
+    secondary.stop()
+    secondary.start(env={"FAILPOINTS": "compute-promotion=return(0)"})
+
+    with primary.connect() as conn, conn.cursor() as cur:
+        cur.execute("create schema neon;create extension neon with schema neon")
+        cur.execute("create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)")
+        cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
+
+    primary.http_client().offload_lfc()
+    primary_spec = primary.get_compute_spec()
+    primary_endpoint_id = primary.endpoint_id
+    primary.stop(mode="immediate-terminate")
+    assert (lsn := primary.terminate_flush_lsn)
+
+    client = secondary.http_client()
+    client.prewarm_lfc(primary_endpoint_id)
+    primary_spec["wal_flush_lsn"] = str(lsn)
+    assert client.promote(primary_spec)["status"] == "failed"
+    secondary.stop()
+
+    primary.start()
+    with primary.connect() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (100,)
+        cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload")
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (200,)

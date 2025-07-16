@@ -117,7 +117,6 @@ class EndpointHttpClient(requests.Session):
             except ReadTimeout:
                 pass  # wait on second request which returns on promotion finish
         res = self.post(url, json=promote_spec)
-        res.raise_for_status()
         json: dict[str, str] = res.json()
         return json
 
