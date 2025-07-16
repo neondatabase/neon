@@ -96,7 +96,7 @@ paths:
         content:
           application/json:
             schema:
-                $ref: "#/components/schemas/SafekeepersLsn"
+              $ref: "#/components/schemas/ComputeSchema"
       responses:
         200:
           description: Promote succeeded or wasn't started
@@ -297,14 +297,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - spec
-              properties:
-                spec:
-                  # XXX: I don't want to explain current spec in the OpenAPI format,
-                  # as it could be changed really soon. Consider doing it later.
-                  type: object
+              $ref: "#/components/schemas/ComputeSchema"
       responses:
         200:
           description: Compute configuration finished.
@@ -591,18 +584,15 @@ components:
           type: string
           example: "1.0.0"
 
-    SafekeepersLsn:
+    ComputeSchema:
       type: object
       required:
-        - safekeepers
-        - wal_flush_lsn
+        - spec
       properties:
-        safekeepers:
-          description: Primary replica safekeepers
-          type: string
-        wal_flush_lsn:
-          description: Primary last WAL flush LSN
-          type: string
+        spec:
+          # TODO(myrrc,mtyazici): I don't want to explain current spec in the OpenAPI format,
+          # as it could be changed really soon. Consider doing it later.
+          type: object
 
     LfcPrewarmState:
       type: object
