@@ -40,7 +40,8 @@ pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingState> {
             .with_ansi(false)
             .event_format(SimpleFormatter::new())
             .with_writer(maker)
-            // TODO: derive this from log_min_messages?
+            // TODO: derive this from log_min_messages? Currently the code in
+            // communicator_process.c forces log_min_messages='INFO'.
             .with_filter(LevelFilter::from_level(Level::INFO)),
     );
     r.init();
@@ -61,6 +62,13 @@ pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingState> {
 ///
 /// The error level is returned *elevel_p. It's one of the PostgreSQL error levels, see
 /// elog.h
+///
+/// Returns:
+///
+///   0 if there were no messages
+///   1 if there was a message. The message and its level are returned in
+///     *errbuf and *elevel_p
+///  -1 on error, i.e the other end of the queue was disconnected
 #[unsafe(no_mangle)]
 pub extern "C" fn communicator_worker_poll_logging(
     state: &mut LoggingState,
@@ -82,7 +90,9 @@ pub extern "C" fn communicator_worker_poll_logging(
         *(errbuf.add(len)) = b'\0'; // NULL terminator
     }
 
-    // XXX: these levels are copied from PostgreSQL's elog.h. Introduce another enum to
+    // Map the tracing Level to PostgreSQL elevel.
+    //
+    // XXX: These levels are copied from PostgreSQL's elog.h. Introduce another enum to
     // hide these?
     *elevel_p = match msg.level {
         Level::TRACE => 10, // DEBUG5

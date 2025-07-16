@@ -91,6 +91,18 @@ communicator_new_bgworker_main(Datum main_arg)
 
 	BackgroundWorkerUnblockSignals();
 
+	/*
+	 * By default, INFO messages are not printed to the log. We want
+	 * `tracing::info!` messages emitted from the communicator to be printed,
+	 * however, so increase the log level.
+	 *
+	 * XXX: This overrides any user-set value from the config file. That's not
+	 * great, but on the other hand, there should be little reason for user to
+	 * control the verbosity of the communicator. It's not too verbose by
+	 * default.
+	 */
+	SetConfigOption("log_min_messages", "INFO", PGC_SUSET, PGC_S_OVERRIDE);
+
 	logging = communicator_worker_configure_logging();
 
 	proc_handle = communicator_worker_launch(
@@ -169,11 +181,26 @@ pump_logging(struct LoggingState *logging)
 		else if (rc == 1)
 		{
 			/* Because we don't want to exit on error */
-			if (elevel == ERROR)
-				elevel = LOG;
-			if (elevel == INFO)
-				elevel = LOG;
-			elog(elevel, "[COMMUNICATOR] %s", errbuf);
+
+			if (message_level_is_interesting(elevel))
+			{
+				/*
+				 * Prevent interrupts while cleaning up.
+				 *
+				 * (Not sure if this is required, but all the error handlers
+				 * in Postgres that are installed as sigsetjmp() targets do
+				 * this, so let's follow the example)
+				 */
+				HOLD_INTERRUPTS();
+
+				errstart(elevel, TEXTDOMAIN);
+				errmsg_internal("[COMMUNICATOR] %s", errbuf);
+				EmitErrorReport();
+				FlushErrorState();
+
+				/* Now we can allow interrupts again */
+				RESUME_INTERRUPTS();
+			}
 		}
 		else if (rc == -1)
 		{
