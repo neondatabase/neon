@@ -344,6 +344,9 @@ LfcShmemInit(void)
 	bool		found;
 	static HASHCTL info;
 
+	if (lfc_max_size <= 0)
+		return;
+
 	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
 	if (!found)
 	{
@@ -392,8 +395,11 @@ LfcShmemInit(void)
 void
 LfcShmemRequest(void)
 {
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
-	RequestNamedLWLockTranche("lfc_lock", 1);
+	if (lfc_max_size > 0)
+	{
+		RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
+		RequestNamedLWLockTranche("lfc_lock", 1);
+	}
 }
 
 static bool

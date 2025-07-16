@@ -58,6 +58,7 @@ extern uint32		WAIT_EVENT_NEON_WAL_DL;
 														(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
 														 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
 
+#define InfiniteXLogRecPtr UINT64_MAX
 
 extern void pg_init_libpagestore(void);
 extern void pg_init_walproposer(void);

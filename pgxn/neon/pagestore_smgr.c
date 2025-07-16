@@ -675,7 +675,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			 * always have that problem as the can always lag behind the
 			 * primary, but for the primary we can avoid it by always
 			 * requesting the latest page, by setting request LSN to
-			 * UINT64_MAX.
+			 * InfiniteXLogRecPtr.
 			 *
 			 * effective_request_lsn is used to check that received response is still valid.
 			 * In case of primary node it is last written LSN. Originally we used flush_lsn here,
@@ -703,7 +703,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			 * The problem can be fixed by callingGetFlushRecPtr() before checking if the page is in the buffer cache.
 			 * But you can't do that within smgrprefetch(), would need to modify the caller.
 			 */
-			result->request_lsn = UINT64_MAX;
+			result->request_lsn = InfiniteXLogRecPtr;
 			result->not_modified_since = last_written_lsn;
 			result->effective_request_lsn = last_written_lsn;
 		}
@@ -2158,7 +2158,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 		request_lsn = nm_adjust_lsn(request_lsn);
 	}
 	else
-		request_lsn = UINT64_MAX;
+		request_lsn = InfiniteXLogRecPtr;
 
 	/*
 	 * GetRedoStartLsn() returns LSN of the basebackup. We know that the SLRU
