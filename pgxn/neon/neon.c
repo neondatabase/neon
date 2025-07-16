@@ -52,7 +52,6 @@ PG_MODULE_MAGIC;
 void		_PG_init(void);
 
 
-bool neon_enable_new_communicator;
 static int  running_xacts_overflow_policy;
 static bool monitor_query_exec_time = false;
 
@@ -468,10 +467,10 @@ _PG_init(void)
 #endif
 
 	DefineCustomBoolVariable(
-							"neon.enable_new_communicator",
-							"Enables new communicator implementation",
+							"neon.use_communicator_worker",
+							"Uses the communicator worker implementation",
 							NULL,
-							&neon_enable_new_communicator,
+							&neon_use_communicator_worker,
 							true,
 							PGC_POSTMASTER,
 							0,
@@ -483,7 +482,7 @@ _PG_init(void)
 	init_lwlsncache();
 
 	pg_init_communicator();
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 		pg_init_communicator_new();
 
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
@@ -639,7 +638,7 @@ approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
 
 	duration = PG_ARGISNULL(0) ? (time_t) -1 : PG_GETARG_INT32(0);
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 		dc = communicator_new_approximate_working_set_size_seconds(duration, false);
 	else
 		dc = lfc_approximate_working_set_size_seconds(duration, false);
@@ -655,7 +654,7 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 	int32		dc;
 	bool		reset = PG_GETARG_BOOL(0);
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 		dc = communicator_new_approximate_working_set_size_seconds(-1, reset);
 	else
 		dc = lfc_approximate_working_set_size_seconds(-1, reset);

@@ -230,7 +230,7 @@ lfc_switch_off(void)
 {
 	int			fd;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (LFC_ENABLED())
 	{
@@ -297,7 +297,7 @@ lfc_maybe_disabled(void)
 static bool
 lfc_ensure_opened(void)
 {
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_generation != lfc_ctl->generation)
 	{
@@ -324,7 +324,7 @@ lfc_shmem_startup(void)
 	bool		found;
 	static HASHCTL info;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (prev_shmem_startup_hook)
 	{
@@ -624,7 +624,7 @@ lfc_init(void)
 	if (lfc_max_size == 0)
 		return;
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 		return;
 
 	prev_shmem_startup_hook = shmem_startup_hook;
@@ -702,7 +702,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 	dsm_segment *seg;
 	BackgroundWorkerHandle* bgw_handle[MAX_PREWARM_WORKERS];
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (!lfc_ensure_opened())
 		return;
@@ -857,7 +857,7 @@ lfc_prewarm_main(Datum main_arg)
 	PrewarmWorkerState* ws;
 	uint32 worker_id = DatumGetInt32(main_arg);
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	AmPrewarmWorker = true;
 
@@ -959,7 +959,7 @@ lfc_invalidate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks)
 	FileCacheEntry *entry;
 	uint32		hash;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return;
@@ -1006,7 +1006,7 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	bool		found = false;
 	uint32		hash;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return false;
@@ -1043,7 +1043,7 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	uint32		hash;
 	int			i = 0;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return 0;
@@ -1152,7 +1152,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	int			blocks_read = 0;
 	int			buf_offset = 0;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return -1;
@@ -1520,7 +1520,7 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	int		chunk_offs = BLOCK_TO_CHUNK_OFF(blkno);
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return false;
@@ -1667,7 +1667,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	uint32		entry_offset;
 	int			buf_offset = 0;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return;
@@ -2184,7 +2184,7 @@ get_local_cache_state(PG_FUNCTION_ARGS)
 	size_t max_entries = PG_ARGISNULL(0) ? lfc_prewarm_limit : PG_GETARG_INT32(0);
 	FileCacheState* fcs;
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 		elog(ERROR, "TODO: not implemented");
 
 	fcs = lfc_get_state(max_entries);
@@ -2204,7 +2204,7 @@ prewarm_local_cache(PG_FUNCTION_ARGS)
 	uint32 n_workers =  PG_GETARG_INT32(1);
 	FileCacheState* fcs;
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 		elog(ERROR, "TODO: not implemented");
 
 	fcs = (FileCacheState*)state;
@@ -2227,7 +2227,7 @@ get_prewarm_info(PG_FUNCTION_ARGS)
 	uint32 total_pages;
 	size_t n_workers;
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 		elog(ERROR, "TODO: not implemented");
 
 	if (lfc_size_limit == 0)
