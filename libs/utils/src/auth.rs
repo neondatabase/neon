@@ -62,6 +62,7 @@ pub enum Scope {
 pub struct Claims {
     #[serde(default)]
     pub tenant_id: Option<TenantId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint_id: Option<Uuid>,
     pub scope: Scope,
 }
