@@ -102,7 +102,25 @@ jobs:
       run: |
         echo "Initializing Neon project with project_id: ${PROJECT_ID}"
         export LD_LIBRARY_PATH=${PG_17_LIB_PATH}
-        ${PSQL} "${BENCHMARK_TPCC_CONNSTR}" -c "CREATE EXTENSION IF NOT EXISTS neon; CREATE EXTENSION IF NOT EXISTS neon_utils;"
+        
+        # Retry logic for psql connection with 1 minute sleep between attempts
+        for attempt in {1..3}; do
+          echo "Attempt ${attempt}/3: Creating extensions in Neon project"
+          if ${PSQL} "${BENCHMARK_TPCC_CONNSTR}" -c "CREATE EXTENSION IF NOT EXISTS neon; CREATE EXTENSION IF NOT EXISTS neon_utils;"; then
+            echo "Successfully created extensions"
+            break
+          else
+            echo "Failed to create extensions on attempt ${attempt}"
+            if [ ${attempt} -lt 3 ]; then
+              echo "Waiting 60 seconds before retry..."
+              sleep 60
+            else
+              echo "All attempts failed, exiting"
+              exit 1
+            fi
+          fi
+        done
+        
         echo "BENCHMARK_TPCC_CONNSTR=${BENCHMARK_TPCC_CONNSTR}" >> $GITHUB_ENV
 
     - name: Run TPC-C benchmark using benchbase
