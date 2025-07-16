@@ -424,6 +424,11 @@ struct QueryData<'a> {
     params: Vec<JsonValue>,
 }
 
+#[derive(serde::Serialize)]
+struct BatchQueryData<'a> {
+    queries: Vec<QueryData<'a>>,
+}
+
 async fn make_local_proxy_request<S: DeserializeOwned>(
     client: &mut http_conn_pool::Client<Send>,
     headers: impl IntoIterator<Item = (&HeaderName, HeaderValue)>,
@@ -722,13 +727,16 @@ async fn handle_rest_inner(
         }))?;
 
     let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
+
     let (parts, originial_body) = request.into_parts();
-    let headers_map = parts.headers;
-    let auth_header = headers_map
+
+    let auth_header = parts
+        .headers
         .get(AUTHORIZATION)
         .ok_or(RestError::SubzeroCore(InternalError {
             message: "Authorization header is required".to_string(),
         }))?;
+
     let entry = db_schema_cache
         .get_cached_or_remote(
             &endpoint_cache_key,
@@ -798,7 +806,7 @@ async fn handle_rest_inner(
     }?;
 
     // pick the current schema from the headers (or the first one from config)
-    let schema_name = &DbSchema::pick_current_schema(db_schemas, method_str, &headers_map)?;
+    let schema_name = &DbSchema::pick_current_schema(db_schemas, method_str, &parts.headers)?;
 
     // add the content-profile header to the response
     let mut response_headers = vec![];
@@ -814,7 +822,8 @@ async fn handle_rest_inner(
     let get: Vec<(&str, &str)> = query.iter().map(|(k, v)| (&**k, &**v)).collect();
 
     // convert the headers map to a HashMap<&str, &str>
-    let headers: HashMap<&str, &str> = headers_map
+    let headers: HashMap<&str, &str> = parts
+        .headers
         .iter()
         .map(|(k, v)| (k.as_str(), v.to_str().unwrap_or("__BAD_HEADER__")))
         .collect();
@@ -942,33 +951,32 @@ async fn handle_rest_inner(
         headers.push((&TXN_READ_ONLY, HEADER_VALUE_TRUE));
     }
 
-    // convert the parameters from subzero core representation to a Vec<JsonValue>
-    let env_parameters_json = env_parameters
-        .iter()
-        .map(|p| to_sql_param(&p.to_param()))
-        .collect::<Vec<_>>();
-    let main_parameters_json = main_parameters
-        .iter()
-        .map(|p| to_sql_param(&p.to_param()))
-        .collect::<Vec<_>>();
-    let body = serde_json::json!({
-        "queries": [
-            {
-                "query": env_statement,
-                "params": env_parameters_json,
+    // convert the parameters from subzero core representation to the local proxy repr.
+    let req_body = serde_json::to_string(&BatchQueryData {
+        queries: vec![
+            QueryData {
+                query: env_statement.into(),
+                params: env_parameters
+                    .iter()
+                    .map(|p| to_sql_param(&p.to_param()))
+                    .collect(),
             },
-            {
-                "query": main_statement,
-                "params": main_parameters_json,
-            }
-        ]
-    });
+            QueryData {
+                query: main_statement.into(),
+                params: main_parameters
+                    .iter()
+                    .map(|p| to_sql_param(&p.to_param()))
+                    .collect(),
+            },
+        ],
+    })
+    .map_err(|e| RestError::JsonConversion(JsonConversionError::ParseJsonError(e)))?;
 
     // todo: map body to count egress
     let _metrics = client.metrics(ctx); // FIXME: is everything in the context set correctly?
 
     // send the request to the local proxy
-    let response = make_raw_local_proxy_request(&mut client, headers, body.to_string()).await?;
+    let response = make_raw_local_proxy_request(&mut client, headers, req_body).await?;
     let (parts, body) = response.into_parts();
 
     let max_response = config.http_config.max_response_size_bytes;
@@ -1070,29 +1078,13 @@ async fn handle_rest_inner(
 
     // check if the SQL env set some response headers (happens when we called a rpc function)
     if let Some(response_headers_str) = api_response.response_headers {
-        match serde_json::from_str(response_headers_str.as_str()) {
-            Ok(JsonValue::Array(headers_json)) => {
-                for h in headers_json {
-                    match h {
-                        JsonValue::Object(o) => {
-                            for (k, v) in o {
-                                match v {
-                                    JsonValue::String(s) => {
-                                        response_headers.push((k, s));
-                                        Ok(())
-                                    }
-                                    _ => Err(RestError::SubzeroCore(GucHeadersError)),
-                                }?;
-                            }
-                            Ok(())
-                        }
-                        _ => Err(RestError::SubzeroCore(GucHeadersError)),
-                    }?;
-                }
-                Ok(())
-            }
-            _ => Err(RestError::SubzeroCore(GucHeadersError)),
-        }?;
+        let Ok(headers_json) =
+            serde_json::from_str::<Vec<Vec<(String, String)>>>(response_headers_str.as_str())
+        else {
+            return Err(RestError::SubzeroCore(GucHeadersError));
+        };
+
+        response_headers.extend(headers_json.into_iter().flatten());
     }
 
     // calculate and set the content range header
