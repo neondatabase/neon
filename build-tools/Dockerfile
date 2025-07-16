@@ -188,6 +188,12 @@ RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
+# Install node
+ENV NODE_VERSION=24
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
+    && apt install -y nodejs \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
 # Install docker
 RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION} stable" > /etc/apt/sources.list.d/docker.list \
@@ -311,14 +317,14 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
     rustup component add llvm-tools rustfmt clippy && \
-    cargo install rustfilt            --version ${RUSTFILT_VERSION} --locked && \
-    cargo install cargo-hakari        --version ${CARGO_HAKARI_VERSION} --locked && \
-    cargo install cargo-deny          --version ${CARGO_DENY_VERSION} --locked && \
-    cargo install cargo-hack          --version ${CARGO_HACK_VERSION} --locked && \
-    cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} --locked && \
-    cargo install cargo-chef          --version ${CARGO_CHEF_VERSION} --locked && \
-    cargo install diesel_cli          --version ${CARGO_DIESEL_CLI_VERSION} --locked \
-                                      --features postgres-bundled --no-default-features && \
+    cargo install rustfilt      --locked --version ${RUSTFILT_VERSION} && \
+    cargo install cargo-hakari  --locked --version ${CARGO_HAKARI_VERSION} && \
+    cargo install cargo-deny    --locked --version ${CARGO_DENY_VERSION} && \
+    cargo install cargo-hack    --locked --version ${CARGO_HACK_VERSION} && \
+    cargo install cargo-nextest --locked --version ${CARGO_NEXTEST_VERSION} && \
+    cargo install cargo-chef    --locked --version ${CARGO_CHEF_VERSION} && \
+    cargo install diesel_cli    --locked --version ${CARGO_DIESEL_CLI_VERSION} \
+                                --features postgres-bundled --no-default-features && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 
