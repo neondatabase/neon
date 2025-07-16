@@ -6,6 +6,7 @@
 //! ereport()s it. This ensures that only one thread, the main thread, calls the
 //! PostgreSQL logging routines at any time.
 
+use std::ffi::c_char;
 use std::sync::mpsc::sync_channel;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::mpsc::{TryRecvError, TrySendError};
@@ -63,7 +64,7 @@ pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingState> {
 #[unsafe(no_mangle)]
 pub extern "C" fn communicator_worker_poll_logging(
     state: &mut LoggingState,
-    errbuf: *mut u8,
+    errbuf: *mut c_char,
     errbuf_len: u32,
     elevel_p: &mut i32,
 ) -> i32 {

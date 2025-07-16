@@ -158,7 +158,7 @@ pump_logging(struct LoggingState *logging)
 	for (;;)
 	{
 		rc = communicator_worker_poll_logging(logging,
-											  (uint8 *) errbuf,
+											  errbuf,
 											  sizeof(errbuf),
 											  &elevel);
 		if (rc == 0)
