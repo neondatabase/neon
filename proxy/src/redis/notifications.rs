@@ -265,10 +265,7 @@ async fn handle_messages<C: ProjectInfoCache + Send + Sync + 'static>(
             return Ok(());
         }
         let mut conn = match try_connect(&redis).await {
-            Ok(conn) => {
-                handler.cache.increment_active_listeners().await;
-                conn
-            }
+            Ok(conn) => conn,
             Err(e) => {
                 tracing::error!(
                     "failed to connect to redis: {e}, will try to reconnect in {RECONNECT_TIMEOUT:#?}"
@@ -287,11 +284,9 @@ async fn handle_messages<C: ProjectInfoCache + Send + Sync + 'static>(
                 }
             }
             if cancellation_token.is_cancelled() {
-                handler.cache.decrement_active_listeners().await;
                 return Ok(());
             }
         }
-        handler.cache.decrement_active_listeners().await;
     }
 }
 
