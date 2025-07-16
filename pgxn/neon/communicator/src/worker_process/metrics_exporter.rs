@@ -88,7 +88,7 @@ async fn metrics_to_response(metrics: &(dyn MetricGroup<BufferedTextEncoder> + S
         .unwrap_or_else(|never| match never {});
 
     Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .status(StatusCode::OK)
         .header(CONTENT_TYPE, "application/text")
         .body(Body::from(enc.finish()))
         .unwrap()

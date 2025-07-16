@@ -29,7 +29,7 @@ def test_communicator_metrics(neon_simple_env: NeonEnv):
     os.chdir(str(endpoint.pgdata_dir))
     session = requests_unixsocket.Session()
     r = session.get(f"http+unix://{NEON_COMMUNICATOR_SOCKET_NAME}/metrics")
-    assert r.status_code == 200
+    assert r.status_code == 200, f"got response {r.status_code}: {r.text}"
 
     # quick test that the endpoint returned something expected. (We don't validate
     # that the metrics returned are sensible.)
@@ -48,7 +48,7 @@ def test_communicator_metrics(neon_simple_env: NeonEnv):
 
     # Test that subsequent requests after the panic still work.
     r = session.get(f"http+unix://{NEON_COMMUNICATOR_SOCKET_NAME}/metrics")
-    assert r.status_code == 200
+    assert r.status_code == 200, f"got response {r.status_code}: {r.text}"
     m = parse_metrics(r.text)
     m.query_one("lfc_hits")
     m.query_one("lfc_misses")
