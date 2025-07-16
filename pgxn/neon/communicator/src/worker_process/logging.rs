@@ -26,7 +26,7 @@ pub struct LoggingState {
 /// Called once, at worker process startup. The returned LoggingState is passed back
 /// in the subsequent calls to `pump_logging`. It is opaque to the C code.
 #[unsafe(no_mangle)]
-pub extern "C" fn configure_logging() -> Box<LoggingState> {
+pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingState> {
     let (sender, receiver) = sync_channel(1000);
 
     let maker = Maker { channel: sender };
@@ -61,7 +61,7 @@ pub extern "C" fn configure_logging() -> Box<LoggingState> {
 /// The error level is returned *elevel_p. It's one of the PostgreSQL error levels, see
 /// elog.h
 #[unsafe(no_mangle)]
-pub extern "C" fn pump_logging(
+pub extern "C" fn communicator_worker_poll_logging(
     state: &mut LoggingState,
     errbuf: *mut u8,
     errbuf_len: u32,

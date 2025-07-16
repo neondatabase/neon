@@ -16,7 +16,7 @@ use http::header::CONTENT_TYPE;
 use measured::MetricGroup;
 use measured::text::BufferedTextEncoder;
 
-use std::path::PathBuf;
+use std::io::ErrorKind;
 
 use tokio::net::UnixListener;
 
@@ -26,7 +26,7 @@ const NEON_COMMUNICATOR_SOCKET_NAME: &str = "neon-communicator.socket";
 
 impl CommunicatorWorkerProcessStruct {
     /// Launch the metrics exporter
-    pub(crate) async fn launch_metrics_exporter(&'static self) {
+    pub(crate) async fn launch_metrics_exporter(&'static self) -> Result<(), std::io::Error> {
         use axum::routing::get;
         let app = Router::new()
             .route("/metrics", get(get_metrics))
@@ -34,14 +34,30 @@ impl CommunicatorWorkerProcessStruct {
             .route("/debug/panic", get(handle_debug_panic))
             .with_state(self);
 
-        // Listen on unix domain socket, in the data directory. That should be unique.
-        let path = PathBuf::from(NEON_COMMUNICATOR_SOCKET_NAME);
-        let listener = UnixListener::bind(path.clone()).unwrap();
+        // If the server is restarted, there might be an old socket still
+        // lying around. Remove it first.
+        match std::fs::remove_file(NEON_COMMUNICATOR_SOCKET_NAME) {
+            Ok(()) => {
+                tracing::warn!("removed stale {NEON_COMMUNICATOR_SOCKET_NAME}");
+            },
+            Err(e) if e.kind() == ErrorKind::NotFound => {},
+            Err(e) => {
+                tracing::error!("could not remove stale {NEON_COMMUNICATOR_SOCKET_NAME}: {e:#}");
+                // Try to proceed anyway. It will likely fail below though.
+            }
+        };
+
+        // Create the unix domain socket and start listening on it
+        let listener = UnixListener::bind(NEON_COMMUNICATOR_SOCKET_NAME)?;
 
         tokio::spawn(async {
             tracing::info!("metrics listener spawned");
-            axum::serve(listener, app).await.unwrap()
+            axum::serve(listener, app)
+                .await
+                .expect("axum::serve never returns")
         });
+
+        Ok(())
     }
 }
 

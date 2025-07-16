@@ -1,6 +1,6 @@
 //! Functions called from the C code in the worker process
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, CString, c_char};
 
 use crate::worker_process::main_loop;
 use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
@@ -9,11 +9,25 @@ use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 ///
 /// The caller has initialized the process as a regular PostgreSQL background worker
 /// process.
+///
+/// Inputs:
+///   `tenant_id` and `timeline_id` can be NULL, if we're been launched in "non-Neon" mode,
+///   where we use local storage instead of connecting to remote neon storage. That's
+///   currently only used in some unit tests.
+///
+/// Result:
+///   Returns pointer to CommunicatorWorkerProcessStruct, which is a handle to running
+///   Rust tasks. The C code can use it to interact with the Rust parts. On failure, returns
+///   None/NULL, and an error message is returned in *error_p
+///
+/// This is called only once in the process, so the returned struct, and error message in
+/// case of failure, are simply leaked.
 #[unsafe(no_mangle)]
-pub extern "C" fn communicator_worker_process_launch(
+pub extern "C" fn communicator_worker_launch(
     tenant_id: *const c_char,
     timeline_id: *const c_char,
-) -> &'static CommunicatorWorkerProcessStruct {
+    error_p: *mut *const c_char,
+) -> Option<&'static CommunicatorWorkerProcessStruct> {
     // Convert the arguments into more convenient Rust types
     let tenant_id = if tenant_id.is_null() {
         None
@@ -26,19 +40,19 @@ pub extern "C" fn communicator_worker_process_launch(
         Some(unsafe { CStr::from_ptr(timeline_id) }.to_str().unwrap())
     };
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("communicator thread")
-        .build()
-        .unwrap();
+    // Call the `init` function which does all the work.
+    let result = main_loop::init(tenant_id, timeline_id);
 
-    let worker_struct = runtime.block_on(main_loop::init(tenant_id, timeline_id));
-    let worker_struct = Box::leak(Box::new(worker_struct));
+    // On failure, return the error message to the C caller in *error_p.
+    match result {
+        Ok(worker_struct) => Some(worker_struct),
+        Err(errmsg) => {
+            let errmsg = CString::new(errmsg).expect("no nuls within error message");
+            let errmsg = Box::leak(errmsg.into_boxed_c_str());
+            let p: *const c_char = errmsg.as_ptr();
 
-    runtime.block_on(worker_struct.launch_metrics_exporter());
-
-    // keep the runtime running after we exit this function
-    Box::leak(Box::new(runtime));
-
-    worker_struct
+            unsafe { *error_p = p };
+            None
+        }
+    }
 }
