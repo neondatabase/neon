@@ -58,7 +58,7 @@ where
 }
 
 /// This stores the values in range 0..60,
-/// encodes them as seconds (0, 60, 120, 180, ..., 3540)
+/// encodes them as seconds (60, 120, 180, ..., 3600)
 #[derive(Clone, Copy)]
 struct MinuteAsSeconds(usize);
 
@@ -78,7 +78,7 @@ impl FixedCardinalityLabel for MinuteAsSeconds {
 
 impl LabelValue for MinuteAsSeconds {
     fn visit<V: measured::label::LabelVisitor>(&self, v: V) -> V::Output {
-        v.write_int(self.0 as i64 * 60)
+        v.write_int((self.0 + 1) as i64 * 60)
     }
 }
 
