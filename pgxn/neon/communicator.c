@@ -1132,24 +1132,20 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 static bool
 check_page_lsn(NeonGetPageResponse* resp, XLogRecPtr* replay_lsn_ptr)
 {
-	if (RecoveryInProgress())
-	{
-		XLogRecPtr page_lsn = PageGetLSN((Page)resp->page);
-#if PG_MAJORVERSION_NUM >= 15
-		XLogRecPtr replay_lsn = GetCurrentReplayRecPtr(NULL);
-#else
-		/*
-		 * PG14 doesn't have GetCurrentReplayRecPtr() function which returns end of currently applied record.
-		 * And GetXLogReplayRecPtr returns end of WAL records which was already applied.
-		 * So we have to use this hack with resp->req.lsn which is expected to contain end record ptr in this case.
-		 * But it works onlyfor v3 protocol version.
-		 */
-		XLogRecPtr replay_lsn = Max(GetXLogReplayRecPtr(NULL), resp->req.hdr.lsn);
-#endif
-		if (replay_lsn_ptr)
-			*replay_lsn_ptr = replay_lsn;
-		return replay_lsn == 0 || page_lsn <= replay_lsn;
-	}
+	PageHeaderData data;
+	/* move the data to a known aligned place: resp->page may not be correctly aligned */
+	memcpy(&data, resp->page, sizeof(PageHeaderData));
+
+	if (data.pd_lsn > resp->hdr.not_modified_since)
+		elog(PANIC, "Invalid getpage response version: %X/%08X is higher than last modified LSN %X/%08X",
+			 LSN_FORMAT_ARGS(data.pd_lsn),
+			 LSN_FORMAT_ARGS(resp->hdr.not_modified_since));
+
+	if (data.pd_lsn > resp->hdr.lsn)
+		elog(PANIC, "Invalid getpage response version: %X/%08X is higher than request LSN %X/%08X",
+			 LSN_FORMAT_ARGS(data.pd_lsn),
+			 LSN_FORMAT_ARGS(resp->hdr.lsn));
+
 	return true;
 }
 
