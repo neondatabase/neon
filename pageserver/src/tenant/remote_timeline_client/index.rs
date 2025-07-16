@@ -114,6 +114,12 @@ pub struct IndexPart {
     /// The timestamp when the timeline was marked invisible in synthetic size calculations.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) marked_invisible_at: Option<NaiveDateTime>,
+
+    /// Whether the timeline is read only or not.
+    ///
+    /// The property is non-recursive, so child timelines can be non-read-only,
+    /// but it can't be changed for an individual timeline once the timeline has been created.
+    pub(crate) read_only: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -142,6 +148,7 @@ impl IndexPart {
     /// - 12: +l2_lsn
     /// - 13: +gc_compaction
     /// - 14: +marked_invisible_at
+    /// - 15: +read_only
     const LATEST_VERSION: usize = 14;
 
     // Versions we may see when reading from a bucket.
@@ -165,6 +172,7 @@ impl IndexPart {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         }
     }
 
@@ -475,6 +483,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -524,6 +533,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -574,6 +584,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -675,6 +686,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -726,6 +738,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -782,6 +795,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -843,6 +857,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -905,6 +920,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -972,6 +988,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1052,6 +1069,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1133,6 +1151,7 @@ mod tests {
             l2_lsn: None,
             gc_compaction: None,
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1220,6 +1239,7 @@ mod tests {
                 last_completed_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             }),
             marked_invisible_at: None,
+            read_only: None,
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
@@ -1308,6 +1328,97 @@ mod tests {
                 last_completed_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             }),
             marked_invisible_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
+            read_only: None,
+        };
+
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
+        assert_eq!(part, expected);
+    }
+
+    #[test]
+    fn v15_read_only_is_parsed() {
+        let example = r#"{
+            "version": 14,
+            "layer_metadata":{
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000 },
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001 }
+            },
+            "disk_consistent_lsn":"0/16960E8",
+            "metadata": {
+                "disk_consistent_lsn": "0/16960E8",
+                "prev_record_lsn": "0/1696070",
+                "ancestor_timeline": "e45a7f37d3ee2ff17dc14bf4f4e3f52e",
+                "ancestor_lsn": "0/0",
+                "latest_gc_cutoff_lsn": "0/1696070",
+                "initdb_lsn": "0/1696070",
+                "pg_version": 14
+            },
+            "gc_blocking": {
+                "started_at": "2024-07-19T09:00:00.123",
+                "reasons": ["DetachAncestor"]
+            },
+            "import_pgdata": {
+                "V1": {
+                    "Done": {
+                        "idempotency_key": "specified-by-client-218a5213-5044-4562-a28d-d024c5f057f5",
+                        "started_at": "2024-11-13T09:23:42.123",
+                        "finished_at": "2024-11-13T09:42:23.123"
+                    }
+                }
+            },
+            "rel_size_migration": "legacy",
+            "l2_lsn": "0/16960E8",
+            "gc_compaction": {
+                "last_completed_lsn": "0/16960E8"
+            },
+            "marked_invisible_at": "2023-07-31T09:00:00.123",
+            "read_only": true,
+        }"#;
+
+        let expected = IndexPart {
+            version: 14,
+            layer_metadata: HashMap::from([
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
+                    file_size: 25600000,
+                    generation: Generation::none(),
+                    shard: ShardIndex::unsharded()
+                }),
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
+                    file_size: 9007199254741001,
+                    generation: Generation::none(),
+                    shard: ShardIndex::unsharded()
+                })
+            ]),
+            disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
+            metadata: TimelineMetadata::new(
+                Lsn::from_str("0/16960E8").unwrap(),
+                Some(Lsn::from_str("0/1696070").unwrap()),
+                Some(TimelineId::from_str("e45a7f37d3ee2ff17dc14bf4f4e3f52e").unwrap()),
+                Lsn::INVALID,
+                Lsn::from_str("0/1696070").unwrap(),
+                Lsn::from_str("0/1696070").unwrap(),
+                PgMajorVersion::PG14,
+            ).with_recalculated_checksum().unwrap(),
+            deleted_at: None,
+            lineage: Default::default(),
+            gc_blocking: Some(GcBlocking {
+                started_at: parse_naive_datetime("2024-07-19T09:00:00.123000000"),
+                reasons: enumset::EnumSet::from_iter([GcBlockingReason::DetachAncestor]),
+            }),
+            last_aux_file_policy: Default::default(),
+            archived_at: None,
+            import_pgdata: Some(import_pgdata::index_part_format::Root::V1(import_pgdata::index_part_format::V1::Done(import_pgdata::index_part_format::Done{
+                started_at: parse_naive_datetime("2024-11-13T09:23:42.123000000"),
+                finished_at: parse_naive_datetime("2024-11-13T09:42:23.123000000"),
+                idempotency_key: import_pgdata::index_part_format::IdempotencyKey::new("specified-by-client-218a5213-5044-4562-a28d-d024c5f057f5".to_string()),
+            }))),
+            rel_size_migration: Some(RelSizeMigration::Legacy),
+            l2_lsn: Some("0/16960E8".parse::<Lsn>().unwrap()),
+            gc_compaction: Some(GcCompactionState {
+                last_completed_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
+            }),
+            marked_invisible_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
+            read_only: Some(true),
         };
 
         let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
