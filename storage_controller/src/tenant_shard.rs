@@ -1272,13 +1272,24 @@ impl TenantShard {
     }
 
     /// Return true if the optimization was really applied: it will not be applied if the optimization's
-    /// sequence is behind this tenant shard's
+    /// sequence is behind this tenant shard's or if the intent state proposed by the optimization
+    /// is not compatible with the current intent state. The later may happen when the background
+    /// reconcile loops runs concurrently with HTTP driven optimisations.
     pub(crate) fn apply_optimization(
         &mut self,
         scheduler: &mut Scheduler,
         optimization: ScheduleOptimization,
     ) -> bool {
         if optimization.sequence != self.sequence {
+            return false;
+        }
+
+        if !self.validate_optimization(&optimization) {
+            tracing::info!(
+                "Skipping optimization for {} because it does not match current intent: {:?}",
+                self.tenant_shard_id,
+                optimization,
+            );
             return false;
         }
 
@@ -1320,6 +1331,34 @@ impl TenantShard {
         }
 
         true
+    }
+
+    /// Check that the desired modifications to the intent state are compatible with
+    /// the current intent state
+    fn validate_optimization(&self, optimization: &ScheduleOptimization) -> bool {
+        match optimization.action {
+            ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                old_attached_node_id,
+                new_attached_node_id,
+            }) => {
+                self.intent.attached == Some(old_attached_node_id)
+                    && self.intent.secondary.contains(&new_attached_node_id)
+            }
+            ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
+                old_node_id: _,
+                new_node_id,
+            }) => {
+                // It's legal to remove a secondary that is not present in the intent state
+                !self.intent.secondary.contains(&new_node_id)
+            }
+            ScheduleOptimizationAction::CreateSecondary(new_node_id) => {
+                !self.intent.secondary.contains(&new_node_id)
+            }
+            ScheduleOptimizationAction::RemoveSecondary(_) => {
+                // It's legal to remove a secondary that is not present in the intent state
+                true
+            }
+        }
     }
 
     /// When a shard has several secondary locations, we need to pick one in situations where
