@@ -13,6 +13,8 @@
 //! This map is resizable (if initialized on top of a [`ShmemHandle`]). Both growing and shrinking happen
 //! in-place and are at a high level achieved by expanding/reducing the bucket array and rebuilding the
 //! dictionary by rehashing all keys.
+//!
+//! Concurrency is managed very simply: the entire map is guarded by one shared-memory RwLock.
 
 use std::hash::{BuildHasher, Hash};
 use std::mem::MaybeUninit;
@@ -292,6 +294,9 @@ where
     }
 
     /// Get a reference to the entry containing a key.
+	///
+	/// NB: THis takes a write lock as there's no way to distinguish whether the intention
+	/// is to use the entry for reading or for writing in advance.
     pub fn entry(&self, key: K) -> Entry<'a, '_, K, V> {
         let hash = self.get_hash_value(&key);
         self.entry_with_hash(key, hash)

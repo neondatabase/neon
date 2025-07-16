@@ -120,9 +120,6 @@ impl<'b, K: Clone + Hash + Eq, V> VacantEntry<'_, 'b, K, V> {
     /// Will return [`FullError`] if there are no unoccupied buckets in the map.
     pub fn insert(mut self, value: V) -> Result<ValueWriteGuard<'b, V>, FullError> {
         let pos = self.map.alloc_bucket(self.key, value)?;
-        if pos == INVALID_POS {
-            return Err(FullError());
-        }
         self.map.buckets[pos as usize].next = self.map.dictionary[self.dict_pos as usize];
         self.map.dictionary[self.dict_pos as usize] = pos;
 

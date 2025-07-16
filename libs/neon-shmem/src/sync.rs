@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use nix::errno::Errno;
 
 pub type RwLock<T> = lock_api::RwLock<PthreadRwLock, T>;
-pub(crate) type RwLockReadGuard<'a, T> = lock_api::RwLockReadGuard<'a, PthreadRwLock, T>;
+pub type RwLockReadGuard<'a, T> = lock_api::RwLockReadGuard<'a, PthreadRwLock, T>;
 pub type RwLockWriteGuard<'a, T> = lock_api::RwLockWriteGuard<'a, PthreadRwLock, T>;
 pub type ValueReadGuard<'a, T> = lock_api::MappedRwLockReadGuard<'a, PthreadRwLock, T>;
 pub type ValueWriteGuard<'a, T> = lock_api::MappedRwLockWriteGuard<'a, PthreadRwLock, T>;
@@ -49,7 +49,7 @@ impl PthreadRwLock {
     fn inner(&self) -> NonNull<libc::pthread_rwlock_t> {
         match self.0 {
             None => {
-                panic!("PthreadRwLock constructed badly - something likely used RawMutex::INIT")
+                panic!("PthreadRwLock constructed badly - something likely used RawRwLock::INIT")
             }
             Some(x) => x,
         }
