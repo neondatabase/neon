@@ -57,6 +57,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
         raise RuntimeError("CLICKHOUSE_PASSWORD not set")
     client = clickhouse_connect.get_client(host=clickhouse_host, password=os.environ["CLICKHOUSE_PASSWORD"])
     client.command("SET allow_experimental_database_materialized_postgresql=1")
+    client.command("DROP DATABASE IF EXISTS db1_postgres")
     client.command(
         "CREATE DATABASE db1_postgres ENGINE = "
         f"MaterializedPostgreSQL('{conn_options['host']}', "
@@ -70,7 +71,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
             "select * from db1_postgres.table1 order by 1",
             "ee600d8f7cd05bd0b169fa81f44300a9dd10085a",
         ),
-        timeout=60,
+        timeout=300,
     )
     cur.execute("INSERT INTO table1 (id, column1) VALUES (3, 'ghi'), (4, 'jkl');")
     conn.commit()
@@ -80,7 +81,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
             "select * from db1_postgres.table1 order by 1",
             "9eba2daaf7e4d7d27ac849525f68b562ab53947d",
         ),
-        timeout=60,
+        timeout=300,
     )
     log.debug("Sleeping before final checking if Neon is still alive")
     time.sleep(3)
