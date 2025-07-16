@@ -17,6 +17,8 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 
+use crate::metrics::Metrics;
+
 /// Initialize logging and OpenTelemetry tracing and exporter.
 ///
 /// Logging can be configured using `RUST_LOG` environment variable.
@@ -266,8 +268,10 @@ where
                 self.extract_fields,
             );
 
-            // nothing we can do with IO errors here.
-            self.writer.make_writer().write_all(formatter.buffer()).ok();
+            let mut writer = self.writer.make_writer();
+            if writer.write_all(formatter.buffer()).is_err() {
+                Metrics::get().proxy.logging_errors_count.inc();
+            }
         });
     }
 
