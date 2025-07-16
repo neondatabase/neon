@@ -4778,23 +4778,13 @@ impl Service {
         shard: &TenantShard,
         intent_node_id: NodeId,
     ) -> bool {
-        if let Some(location) = shard.observed.locations.get(&intent_node_id) {
-            if let Some(ref conf) = location.conf {
-                if conf.mode != LocationConfigMode::AttachedSingle
-                    && conf.mode != LocationConfigMode::AttachedMulti
-                {
-                    // If the shard is attached as secondary, we need to retry if 404.
-                    false
-                } else {
-                    // If the shard is attached as primary, we should succeed.
-                    true
-                }
-            } else {
-                // Location conf is not available yet, retry if 404.
-                false
-            }
+        if let Some(location) = shard.observed.locations.get(&intent_node_id)
+            && let Some(ref conf) = location.conf
+            && (conf.mode == LocationConfigMode::AttachedSingle
+                || conf.mode == LocationConfigMode::AttachedMulti)
+        {
+            true
         } else {
-            // The shard is not attached to the intended pageserver yet, retry if 404.
             false
         }
     }
