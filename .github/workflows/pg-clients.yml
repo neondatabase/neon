@@ -61,6 +61,8 @@ jobs:
     services:
       clickhouse:
         image: clickhouse/clickhouse-server:25.6
+        env:
+          CLICKHOUSE_PASSWORD: "4yXDXt4fu2zZTv"
         ports:
           - 9000:9000
           - 8123:8123
@@ -127,6 +129,7 @@ jobs:
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
+          CLICKHOUSE_PASSWORD: "4yXDXt4fu2zZTv"
 
       - name: Delete Neon Project
         if: always()
