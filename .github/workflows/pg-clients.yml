@@ -60,16 +60,18 @@ jobs:
       options: --init --user root
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:24.6.3.64
+        image: clickhouse/clickhouse-server:25.6
         ports:
           - 9000:9000
           - 8123:8123
       zookeeper:
-        image: quay.io/debezium/zookeeper:2.7
+        image: quay.io/debezium/zookeeper:3.2
         ports:
           - 2181:2181
+          - 2888:2888
+          - 3888:3888
       kafka:
-        image: quay.io/debezium/kafka:2.7
+        image: quay.io/debezium/kafka:3.2
         env:
           ZOOKEEPER_CONNECT: "zookeeper:2181"
           KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
@@ -79,7 +81,7 @@ jobs:
         ports:
           - 9092:9092
       debezium:
-        image: quay.io/debezium/connect:2.7
+        image: quay.io/debezium/connect:3.2
         env:
           BOOTSTRAP_SERVERS: kafka:9092
           GROUP_ID: 1
