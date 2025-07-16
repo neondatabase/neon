@@ -381,21 +381,6 @@ def test_tx_abort_with_many_relations(
         ],
     )
 
-    if reldir_type == "v1":
-        assert (
-            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
-                "rel_size_migration"
-            ]
-            == "legacy"
-        )
-    else:
-        assert (
-            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
-                "rel_size_migration"
-            ]
-            != "legacy"
-        )
-
     # How many relations: this number is tuned to be long enough to take tens of seconds
     # if the rollback code path is buggy, tripping the test's timeout.
     n = 5000
@@ -480,3 +465,19 @@ def test_tx_abort_with_many_relations(
         except:
             exec.shutdown(wait=False, cancel_futures=True)
             raise
+
+    # Do the check after everything is done, because the reldirv2 transition won't happen until create table.
+    if reldir_type == "v1":
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            == "legacy"
+        )
+    else:
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            != "legacy"
+        )
