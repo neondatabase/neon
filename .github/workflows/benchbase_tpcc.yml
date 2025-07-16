@@ -55,12 +55,6 @@ jobs:
       PG_17_LIB_PATH: /tmp/neon/pg_install/v17/lib
       POSTGRES_VERSION: 17
     runs-on: [ self-hosted, us-east-2, x64 ]
-    container:
-      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --init
     timeout-minutes: 1440
 
     steps:
