@@ -190,18 +190,17 @@ def test_replica_promote_handler_disconnects(neon_simple_env: NeonEnv):
         cur.execute("create schema neon;create extension neon with schema neon")
         cur.execute("create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)")
         cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
-        cur.execute("show neon.safekeepers")
-        safekeepers = cur.fetchall()[0][0]
 
     primary.http_client().offload_lfc()
+    primary_spec = primary.get_compute_spec()
     primary_endpoint_id = primary.endpoint_id
     primary.stop(mode="immediate-terminate")
     assert (lsn := primary.terminate_flush_lsn)
 
     client = secondary.http_client()
     client.prewarm_lfc(primary_endpoint_id)
-    safekeepers_lsn = {"safekeepers": safekeepers, "wal_flush_lsn": lsn}
-    assert client.promote(safekeepers_lsn, disconnect=True)["status"] == "completed"
+    primary_spec["wal_flush_lsn"] = str(lsn)
+    assert client.promote(primary_spec, disconnect=True)["status"] == "completed"
 
     with secondary.connect() as conn, conn.cursor() as cur:
         cur.execute("select count(*) from t")
