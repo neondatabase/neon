@@ -191,6 +191,11 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         use_https_safekeeper_api: false,
         enable_tls_wal_service_api: false,
         force_metric_collection_on_scrape: true,
+        /* BEGIN_HADRON */
+        enable_pull_timeline_on_startup: false,
+        advertise_pg_addr_tenant_only: None,
+        hcc_base_url: None,
+        /* END_HADRON */
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;

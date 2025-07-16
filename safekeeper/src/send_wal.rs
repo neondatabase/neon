@@ -12,7 +12,8 @@ use futures::FutureExt;
 use itertools::Itertools;
 use parking_lot::Mutex;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackend, PostgresBackendReader, QueryError};
-use postgres_ffi::{MAX_SEND_SIZE, PgMajorVersion, TimestampTz, get_current_timestamp};
+use postgres_ffi::{MAX_SEND_SIZE, PgMajorVersion, get_current_timestamp};
+use postgres_ffi_types::TimestampTz;
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use safekeeper_api::Term;
 use safekeeper_api::models::{

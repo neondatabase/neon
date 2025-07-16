@@ -476,6 +476,7 @@ async fn main() -> anyhow::Result<()> {
                         listen_http_port,
                         listen_https_port,
                         availability_zone_id: AvailabilityZone(availability_zone_id),
+                        node_ip_addr: None,
                     }),
                 )
                 .await?;

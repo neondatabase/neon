@@ -4296,6 +4296,7 @@ dependencies = [
  "pageserver_client",
  "pageserver_client_grpc",
  "pageserver_page_api",
+ "pprof",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -6210,6 +6211,7 @@ dependencies = [
  "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
+ "postgres_ffi_types",
  "postgres_versioninfo",
  "pprof",
  "pq_proto",
@@ -6254,7 +6256,7 @@ dependencies = [
  "anyhow",
  "const_format",
  "pageserver_api",
- "postgres_ffi",
+ "postgres_ffi_types",
  "postgres_versioninfo",
  "pq_proto",
  "serde",
@@ -7563,6 +7565,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

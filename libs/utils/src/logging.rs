@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -7,7 +8,7 @@ use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, VariantNames};
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Logs a critical error, similarly to `tracing::error!`. This will:
 ///
@@ -377,10 +378,11 @@ impl std::fmt::Debug for SecretString {
 ///
 /// TODO: consider upgrading this to a warning, but currently it fires too often.
 #[inline]
-pub async fn log_slow<F, O>(name: &str, threshold: Duration, f: std::pin::Pin<&mut F>) -> O
-where
-    F: Future<Output = O>,
-{
+pub async fn log_slow<O>(
+    name: &str,
+    threshold: Duration,
+    f: Pin<&mut impl Future<Output = O>>,
+) -> O {
     monitor_slow_future(
         threshold,
         threshold, // period = threshold
@@ -394,16 +396,42 @@ where
             if !is_slow {
                 return;
             }
+            let elapsed = elapsed_total.as_secs_f64();
             if ready {
-                info!(
-                    "slow {name} completed after {:.3}s",
-                    elapsed_total.as_secs_f64()
-                );
+                info!("slow {name} completed after {elapsed:.3}s");
             } else {
-                info!(
-                    "slow {name} still running after {:.3}s",
-                    elapsed_total.as_secs_f64()
-                );
+                info!("slow {name} still running after {elapsed:.3}s");
+            }
+        },
+    )
+    .await
+}
+
+/// Logs a periodic warning if a future is slow to complete.
+#[inline]
+pub async fn warn_slow<O>(
+    name: &str,
+    threshold: Duration,
+    f: Pin<&mut impl Future<Output = O>>,
+) -> O {
+    monitor_slow_future(
+        threshold,
+        threshold, // period = threshold
+        f,
+        |MonitorSlowFutureCallback {
+             ready,
+             is_slow,
+             elapsed_total,
+             elapsed_since_last_callback: _,
+         }| {
+            if !is_slow {
+                return;
+            }
+            let elapsed = elapsed_total.as_secs_f64();
+            if ready {
+                warn!("slow {name} completed after {elapsed:.3}s");
+            } else {
+                warn!("slow {name} still running after {elapsed:.3}s");
             }
         },
     )
@@ -416,7 +444,7 @@ where
 pub async fn monitor_slow_future<F, O>(
     threshold: Duration,
     period: Duration,
-    mut fut: std::pin::Pin<&mut F>,
+    mut fut: Pin<&mut F>,
     mut cb: impl FnMut(MonitorSlowFutureCallback),
 ) -> O
 where

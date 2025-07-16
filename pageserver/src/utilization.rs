@@ -1,6 +1,6 @@
 //! An utilization metric which is used to decide on which pageserver to put next tenant.
 //!
-//! The metric is exposed via `GET /v1/utilization`. Refer and maintain it's openapi spec as the
+//! The metric is exposed via `GET /v1/utilization`. Refer and maintain its openapi spec as the
 //! truth.
 
 use std::path::Path;
