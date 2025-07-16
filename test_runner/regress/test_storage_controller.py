@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
-from fixtures.common_types import TenantId, TenantShardId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_AZ_ID,
@@ -47,6 +47,7 @@ from fixtures.utils import (
     wait_until,
 )
 from fixtures.workload import Workload
+from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 from werkzeug.wrappers.response import Response
 
@@ -4814,3 +4815,104 @@ def test_storage_controller_migrate_with_pageserver_restart(
         "shards": [{"node_id": int(secondary.id), "shard_number": 0}],
         "preferred_az": DEFAULT_AZ_ID,
     }
+
+
+@run_only_on_default_postgres("PG version is not important for this test")
+def test_storage_controller_forward_404(neon_env_builder: NeonEnvBuilder):
+    """
+    Ensures that the storage controller correctly forwards 404s and converts some of them
+    into 503s before forwarding to the client.
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.num_azs = 2
+
+    env = neon_env_builder.init_start()
+    env.storage_controller.allowed_errors.append(".*Reconcile error.*")
+    env.storage_controller.allowed_errors.append(".*Timed out.*")
+
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
+    env.storage_controller.reconcile_until_idle()
+
+    # 404s on tenants and timelines are forwarded as-is when reconciler is not running.
+
+    # Access a non-existing timeline -> 404
+    with pytest.raises(PageserverApiException) as e:
+        env.storage_controller.pageserver_api().timeline_detail(
+            env.initial_tenant, TimelineId.generate()
+        )
+    assert e.value.status_code == 404
+    with pytest.raises(PageserverApiException) as e:
+        env.storage_controller.pageserver_api().timeline_lsn_lease(
+            env.initial_tenant, TimelineId.generate(), Lsn(0)
+        )
+    assert e.value.status_code == 404
+
+    # Access a non-existing tenant when reconciler is not running -> 404
+    with pytest.raises(PageserverApiException) as e:
+        env.storage_controller.pageserver_api().timeline_detail(
+            TenantId.generate(), env.initial_timeline
+        )
+    assert e.value.status_code == 404
+    with pytest.raises(PageserverApiException) as e:
+        env.storage_controller.pageserver_api().timeline_lsn_lease(
+            TenantId.generate(), env.initial_timeline, Lsn(0)
+        )
+    assert e.value.status_code == 404
+
+    # Normal requests should succeed
+    detail = env.storage_controller.pageserver_api().timeline_detail(
+        env.initial_tenant, env.initial_timeline
+    )
+    last_record_lsn = Lsn(detail["last_record_lsn"])
+    env.storage_controller.pageserver_api().timeline_lsn_lease(
+        env.initial_tenant, env.initial_timeline, last_record_lsn
+    )
+
+    # Get into a situation where the intent state is not the same as the observed state.
+    describe = env.storage_controller.tenant_describe(env.initial_tenant)["shards"][0]
+    current_primary = describe["node_attached"]
+    current_secondary = describe["node_secondary"][0]
+    assert current_primary != current_secondary
+
+    # Do a shard migration to force switch the primary; but do not wait for it to complete.
+
+    # Disable attach operations on the pageservers. Configure `upsert-location` to error
+    # so that pageserver won't attach.
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints(("upsert-location", "return"))
+
+    # Do the migration in another thread; the request will be dropped as we don't wait.
+    shard_zero = TenantShardId(env.initial_tenant, 0, 0)
+    concurrent.futures.ThreadPoolExecutor(max_workers=1).submit(
+        env.storage_controller.tenant_shard_migrate,
+        shard_zero,
+        current_secondary,
+        StorageControllerMigrationConfig(override_scheduler=True),
+    )
+    # Not the best way to do this, we should wait until the migration gets started.
+    time.sleep(1)
+    placement = env.storage_controller.get_tenants_placement()[str(shard_zero)]
+    assert placement["observed"] != placement["intent"]
+    assert placement["observed"]["attached"] == current_primary
+    assert placement["intent"]["attached"] == current_secondary
+
+    # Now we issue requests that would cause 404 again
+
+    retry_strategy = Retry(total=0)
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+
+    no_retry_api = env.storage_controller.pageserver_api()
+    no_retry_api.mount("http://", adapter)
+    no_retry_api.mount("https://", adapter)
+
+    # As intent state != observed state, tenant not found error should return 503
+    with pytest.raises(PageserverApiException) as e:
+        no_retry_api.timeline_detail(env.initial_tenant, TimelineId.generate())
+    assert e.value.status_code == 503, f"unexpected status code and error: {e.value}"
+    with pytest.raises(PageserverApiException) as e:
+        no_retry_api.timeline_lsn_lease(env.initial_tenant, TimelineId.generate(), Lsn(0))
+    assert e.value.status_code == 503, f"unexpected status code and error: {e.value}"
+
+    # Unblock attach operations
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints(("upsert-location", "off"))
