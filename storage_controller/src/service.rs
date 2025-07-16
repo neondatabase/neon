@@ -4815,6 +4815,12 @@ impl Service {
             }
         }
 
+        if targets.is_empty() {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+            ));
+        }
+
         Ok(TenantShardAttachState {
             targets,
             by_node_id,
