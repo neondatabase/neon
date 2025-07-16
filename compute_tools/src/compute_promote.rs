@@ -2,8 +2,11 @@ use crate::compute::ComputeNode;
 use anyhow::{Context, Result, bail};
 use compute_api::responses::{LfcPrewarmState, PromoteConfig, PromoteState};
 use compute_api::spec::ComputeMode;
+use itertools::Itertools;
+use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
+use tracing::info;
 use utils::lsn::Lsn;
 
 impl ComputeNode {
@@ -82,7 +85,7 @@ impl ComputeNode {
             if last_wal_replay_lsn >= primary_lsn {
                 break;
             }
-            tracing::info!("Try {i}, replica lsn {last_wal_replay_lsn}, primary lsn {primary_lsn}");
+            info!("Try {i}, replica lsn {last_wal_replay_lsn}, primary lsn {primary_lsn}");
             sleep(Duration::from_secs(1)).await;
         }
         if last_wal_replay_lsn < primary_lsn {
@@ -123,16 +126,30 @@ impl ComputeNode {
 
         {
             let mut state = self.state.lock().unwrap();
-            let spec_old = &mut state.pspec.as_mut().unwrap().spec;
-            // TODO(myrrc) Applying primary's postgresql_conf causes promoted endpoint to freeze
-            // E.g. listen_addresses / port are different
-            std::mem::swap(
-                &mut spec_old.cluster.postgresql_conf,
-                &mut cfg.compute_spec.cluster.postgresql_conf,
-            );
-            *spec_old = cfg.compute_spec;
+            let spec = &mut state.pspec.as_mut().unwrap().spec;
+            spec.mode = ComputeMode::Primary;
+            let new_conf = cfg.compute_spec.cluster.postgresql_conf.as_mut().unwrap();
+            let existing_conf = spec.cluster.postgresql_conf.as_ref().unwrap();
+            Self::merge_spec(new_conf, existing_conf);
         }
-        tracing::info!("applied new spec, reconfiguring as primary");
+        info!("applied new spec, reconfiguring as primary");
         self.reconfigure()
+    }
+
+    fn merge_spec(new_conf: &mut String, existing_conf: &str) {
+        let mut new_conf_set: HashMap<&str, &str> = new_conf
+            .split_terminator('\n')
+            .map(|e| e.split_once("=").expect("invalid item"))
+            .collect();
+        let existing_conf_set: HashMap<&str, &str> = existing_conf
+            .split_terminator('\n')
+            .map(|e| e.split_once("=").expect("invalid item"))
+            .collect();
+        new_conf_set.insert("port", existing_conf_set["port"]);
+        new_conf_set.remove("neon.safekeepers");
+        *new_conf = new_conf_set
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .join("\n");
     }
 }
