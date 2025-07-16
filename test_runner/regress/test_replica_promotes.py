@@ -131,7 +131,7 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
 
         lsn_triple = get_lsn_triple(new_primary_cur)
         log.info(f"Secondary: LSN after workload is {lsn_triple}")
-        expected_promoted_lsn = Lsn(lsn_triple[2])
+        expected_lsn = Lsn(lsn_triple[2])
 
     with secondary.connect() as conn, conn.cursor() as new_primary_cur:
         new_primary_cur.execute("select payload from t")
@@ -139,10 +139,26 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
 
     if method == PromoteMethod.COMPUTE_CTL:
         # compute_ctl's /promote switches replica type to Primary so it syncs safekeepers on finish
-        stop_and_check_lsn(secondary, expected_promoted_lsn)
+        stop_and_check_lsn(secondary, expected_lsn)
     else:
         # on testing postgres, we don't update replica type, secondaries don't sync so lsn should be None
         stop_and_check_lsn(secondary, None)
+
+    if method == PromoteMethod.COMPUTE_CTL:
+        secondary.stop()
+        # In production, compute ultimately receives new compute spec from cplane.
+        secondary.respec(mode="Primary")
+        secondary.start()
+
+        with secondary.connect() as conn, conn.cursor() as new_primary_cur:
+            new_primary_cur.execute(
+                "INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload"
+            )
+            assert new_primary_cur.fetchall() == [(it,) for it in range(101, 201)]
+            lsn_triple = get_lsn_triple(new_primary_cur)
+            log.info(f"Secondary: LSN after restart and workload is {lsn_triple}")
+            expected_lsn = Lsn(lsn_triple[2])
+        stop_and_check_lsn(secondary, expected_lsn)
 
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary2")
 
@@ -152,10 +168,11 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
         log.info(f"New primary: Boot LSN is {lsn_triple}")
 
         new_primary_cur.execute("select count(*) from t")
-        assert new_primary_cur.fetchone() == (200,)
+        compute_ctl_count = 100 * (method == PromoteMethod.COMPUTE_CTL)
+        assert new_primary_cur.fetchone() == (200 + compute_ctl_count,)
         new_primary_cur.execute("INSERT INTO t (payload) SELECT generate_series(201, 300)")
         new_primary_cur.execute("select count(*) from t")
-        assert new_primary_cur.fetchone() == (300,)
+        assert new_primary_cur.fetchone() == (300 + compute_ctl_count,)
     stop_and_check_lsn(primary, expected_primary_lsn)
 
 
