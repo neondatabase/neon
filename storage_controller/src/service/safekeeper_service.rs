@@ -9,7 +9,8 @@ use crate::heartbeater::SafekeeperState;
 use crate::id_lock_map::trace_shared_lock;
 use crate::metrics;
 use crate::persistence::{
-    DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence, TimelineUpdate,
+    DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
+    TimelineUpdate,
 };
 use crate::safekeeper::Safekeeper;
 use crate::safekeeper_client::SafekeeperClient;
@@ -467,7 +468,10 @@ impl Service {
             cplane_notified_generation: 1,
             deleted_at: None,
         };
-        let inserted = self.persistence.insert_timeline(persistence.clone()).await?;
+        let inserted = self
+            .persistence
+            .insert_timeline(persistence.clone())
+            .await?;
         if inserted {
             tracing::info!("imported timeline into db");
             return Ok(());
@@ -481,10 +485,7 @@ impl Service {
             sk_set: persistence.sk_set,
             new_sk_set: persistence.new_sk_set,
         };
-        self
-            .persistence
-            .update_timeline_unsafe(update)
-            .await?;
+        self.persistence.update_timeline_unsafe(update).await?;
         tracing::info!("timeline updated");
 
         Ok(())

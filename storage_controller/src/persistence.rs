@@ -1466,7 +1466,10 @@ impl Persistence {
 
     /// Update an already present timeline.
     /// VERY UNSAFE FUNCTION: this overrides in-progress migrations. Don't use this unless neccessary.
-    pub(crate) async fn update_timeline_unsafe(&self, entry: TimelineUpdate) -> DatabaseResult<bool> {
+    pub(crate) async fn update_timeline_unsafe(
+        &self,
+        entry: TimelineUpdate,
+    ) -> DatabaseResult<bool> {
         use crate::schema::timelines;
 
         let entry = &entry;
