@@ -157,10 +157,6 @@ jobs:
         mv ../configs ./configs
         mv ../scripts ./scripts
         
-        # Fix file permissions for Docker container access
-        chmod -R 755 ./scripts
-        chmod -R 644 ./configs
-        
         # Save working directory for subsequent steps
         echo "BENCHMARK_WORKDIR=${BENCHMARK_WORKDIR}" >> $GITHUB_ENV
 
