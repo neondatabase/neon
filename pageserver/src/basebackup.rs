@@ -11,6 +11,7 @@
 //! from data stored in object storage.
 //!
 use std::fmt::Write as FmtWrite;
+use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, anyhow};
@@ -420,12 +421,16 @@ where
         }
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
+
+        let mut dbdir_cnt = 0;
+        let mut rel_cnt = 0;
+
         // Create tablespace directories
         for ((spcnode, dbnode), has_relmap_file) in
             self.timeline.list_dbdirs(self.lsn, self.ctx).await?
         {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
-
+            dbdir_cnt += 1;
             // If full backup is requested, include all relation files.
             // Otherwise only include init forks of unlogged relations.
             let rels = self
@@ -433,6 +438,7 @@ where
                 .list_rels(spcnode, dbnode, Version::at(self.lsn), self.ctx)
                 .await?;
             for &rel in rels.iter() {
+                rel_cnt += 1;
                 // Send init fork as main fork to provide well formed empty
                 // contents of UNLOGGED relations. Postgres copies it in
                 // `reinit.c` during recovery.
@@ -454,6 +460,10 @@ where
                 }
             }
         }
+
+        self.timeline
+            .db_rel_count
+            .store(Arc::new(Some((dbdir_cnt, rel_cnt))));
 
         let start_time = Instant::now();
         let aux_files = self
