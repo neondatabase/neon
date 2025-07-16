@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -786,13 +785,21 @@ async fn handle_tenant_timeline_passthrough(
         error_counter.inc(labels);
     }
 
+    let resp_staus = resp.status();
+
+    // We have a reqest::Response, would like a http::Response
+    let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp_staus)?);
+    for (k, v) in resp.headers() {
+        builder = builder.header(k.as_str(), v.as_bytes());
+    }
+
     let resp_bytes = resp
         .bytes()
         .await
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
     // Transform 404 into 503 if we raced with a migration
-    if resp.status() == reqwest::StatusCode::NOT_FOUND && !consistent {
+    if resp_staus == reqwest::StatusCode::NOT_FOUND && !consistent {
         let resp_str = std::str::from_utf8(&resp_bytes)
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
         // We only handle "tenant not found" errors; other 404s like timeline not found should
@@ -809,14 +816,8 @@ async fn handle_tenant_timeline_passthrough(
         }
     }
 
-    // We have a reqest::Response, would like a http::Response
-    let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp.status())?);
-    for (k, v) in resp.headers() {
-        builder = builder.header(k.as_str(), v.as_bytes());
-    }
-
     let response = builder
-        .body(resp_bytes)
+        .body(Body::from(resp_bytes))
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
     Ok(response)
