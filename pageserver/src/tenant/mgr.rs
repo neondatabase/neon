@@ -834,6 +834,10 @@ impl TenantManager {
         mut spawn_mode: SpawnMode,
         ctx: &RequestContext,
     ) -> Result<Option<Arc<TenantShard>>, UpsertLocationError> {
+        fail::fail_point!("upsert-location", |_| {
+            return Ok(None);
+        });
+
         debug_assert_current_span_has_tenant_id();
         info!("configuring tenant location to state {new_location_config:?}");
 
