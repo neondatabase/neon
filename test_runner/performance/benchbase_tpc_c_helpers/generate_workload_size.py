@@ -149,7 +149,7 @@ WORK_TEMPLATE = f'''        <work>\n            <time>{RAMP_STEP_TIME_SECONDS}</
 EXECUTE_SCRIPT = '''docker run --network=host --rm \
   -v $(pwd)/configs:/configs \
   -v $(pwd)/results:/results \
-    ghcr.io/neondatabase-labs/benchbase-postgres:latest-arm64\
+    {docker_image}\
   -b tpcc \
   -c /configs/execute_{warehouses}_warehouses_warmup.xml \
   -d /results \
@@ -157,7 +157,7 @@ EXECUTE_SCRIPT = '''docker run --network=host --rm \
 docker run --network=host --rm \
   -v $(pwd)/configs:/configs \
   -v $(pwd)/results:/results \
-    ghcr.io/neondatabase-labs/benchbase-postgres:latest-arm64\
+    {docker_image}\
   -b tpcc \
   -c /configs/execute_{warehouses}_warehouses_{suffix}.xml \
   -d /results \
@@ -181,7 +181,7 @@ LOAD_XML = '''<?xml version="1.0"?>
 LOAD_SCRIPT = '''docker run --network=host --rm \
   -v $(pwd)/configs:/configs \
   -v $(pwd)/results:/results \
-    ghcr.io/neondatabase-labs/benchbase-postgres:latest-arm64\
+    {docker_image}\
   -b tpcc \
   -c /configs/load_{warehouses}_warehouses.xml \
   -d /results \
@@ -199,18 +199,33 @@ def write_file(path, content):
     if str(path).endswith('.sh'):
         os.chmod(path, 0o755)
 
+def get_docker_arch_tag(runner_arch):
+    """Map GitHub Actions runner.arch to Docker image architecture tag."""
+    arch_mapping = {
+        'X64': 'amd64',
+        'ARM64': 'arm64'
+    }
+    return arch_mapping.get(runner_arch, 'amd64')  # Default to amd64
+
 def main():
     parser = argparse.ArgumentParser(description="Generate BenchBase workload configs and scripts.")
     parser.add_argument('--warehouses', type=int, required=True, help='Number of warehouses')
     parser.add_argument('--max-rate', type=int, required=True, help='Max rate (TPS)')
     parser.add_argument('--hostname', type=str, required=True, help='Database hostname')
     parser.add_argument('--password', type=str, required=True, help='Database password')
+    parser.add_argument('--runner-arch', type=str, required=True, help='GitHub Actions runner architecture')
     args = parser.parse_args()
 
     warehouses = args.warehouses
     max_rate = args.max_rate
     hostname = args.hostname
     password = args.password
+    runner_arch = args.runner_arch
+    
+    # Get the appropriate Docker architecture tag
+    docker_arch = get_docker_arch_tag(runner_arch)
+    docker_image = f"ghcr.io/neondatabase-labs/benchbase-postgres:latest-{docker_arch}"
+    
     opt_rate = math.ceil(max_rate * OPTIMAL_RATE_FACTOR)
     # Calculate terminals as next rounded integer of 40% of warehouses
     terminals = math.ceil(BASE_TERMINALS + warehouses * TERMINALS_PER_WAREHOUSE)
@@ -229,11 +244,11 @@ def main():
 
     # Write scripts
     for suffix in ["max_rate", "opt_rate", "ramp_up"]:
-        script = EXECUTE_SCRIPT.format(warehouses=warehouses, suffix=suffix)
+        script = EXECUTE_SCRIPT.format(warehouses=warehouses, suffix=suffix, docker_image=docker_image)
         write_file(SCRIPTS_DIR / f"execute_{warehouses}_warehouses_{suffix}.sh", script)
 
     # Loader script
-    write_file(SCRIPTS_DIR / f"load_{warehouses}_warehouses.sh", LOAD_SCRIPT.format(warehouses=warehouses))
+    write_file(SCRIPTS_DIR / f"load_{warehouses}_warehouses.sh", LOAD_SCRIPT.format(warehouses=warehouses, docker_image=docker_image))
 
     print(f"Generated configs and scripts for {warehouses} warehouses and max rate {max_rate}.")
 

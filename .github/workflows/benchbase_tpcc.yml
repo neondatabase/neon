@@ -145,7 +145,8 @@ jobs:
           --warehouses ${WAREHOUSES} \
           --max-rate ${MAX_RATE} \
           --hostname ${HOSTNAME} \
-          --password ${PASSWORD}
+          --password ${PASSWORD} \
+          --runner-arch ${{ runner.arch }}
         
         # Fix path mismatch: move generated configs and scripts to expected locations
         mv ../configs ./configs
