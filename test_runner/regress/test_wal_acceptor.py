@@ -2830,10 +2830,10 @@ def test_global_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
     Similar to `test_timeline_disk_usage_limit`, but test that the global disk usage circuit breaker
     also works as expected. The test scenario:
     1. Create a timeline and endpoint.
-    2. Start safekeeper with a very small global disk usage limit (1KB).
+    2. Mock high disk usage via failpoint
     3. Write data to the timeline so that disk usage exceeds the limit.
     4. Verify that the writes hang and the expected error message appears in the compute log.
-    5. Restart the safekeeper to clear the disk usage limit.
+    5. Mock low disk usage via failpoint
     6. Verify that the hanging writes unblock and we can continue to write as normal.
     """
     neon_env_builder.num_safekeepers = 1
