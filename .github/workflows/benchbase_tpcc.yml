@@ -189,13 +189,19 @@ jobs:
       id: set-date
       run: echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
 
-    - name: Upload benchmark results
-      uses: ./.github/actions/upload
-      with:
-        name: benchbase-tpcc-results-${{ matrix.warehouses }}-warehouses-${{ github.run_id }}
-        path: ${{ env.BENCHMARK_WORKDIR }}
-        prefix: benchbase-tpc-c/${{ steps.set-date.outputs.date }}/${{ github.run_id }}/${{ matrix.warehouses }}-warehouses
-        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+    - name: Upload benchmark results to S3
+      env:
+        S3_BUCKET: neon-public-benchmark-results
+        S3_PREFIX: benchbase-tpc-c/${{ steps.set-date.outputs.date }}/${{ github.run_id }}/${{ matrix.warehouses }}-warehouses
+      run: |
+        cd "${BENCHMARK_WORKDIR}"
+        
+        echo "Uploading benchmark results to s3://${S3_BUCKET}/${S3_PREFIX}/"
+        
+        # Upload all files in the results directory individually
+        find . -type f -exec aws s3 cp --only-show-errors {} s3://${S3_BUCKET}/${S3_PREFIX}/{} \;
+        
+        echo "Upload completed"
 
     - name: Delete Neon Project
       if: ${{ always() }}
