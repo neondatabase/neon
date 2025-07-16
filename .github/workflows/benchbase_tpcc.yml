@@ -189,6 +189,13 @@ jobs:
       id: set-date
       run: echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
 
+    - name: Configure AWS credentials # necessary to upload restuls
+      uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 600 
+        
     - name: Upload benchmark results to S3
       env:
         S3_BUCKET: neon-public-benchmark-results
