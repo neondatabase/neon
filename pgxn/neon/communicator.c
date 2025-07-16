@@ -1551,6 +1551,7 @@ page_server_request(void const *req)
 	PG_TRY();
 	{
 		before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+		minPrefetchLsn[MyProcNumber] = ((NeonRequest *)req)->lsn;
 		do
 		{
 			while (!page_server->send(shard_no, (NeonRequest *) req)
@@ -1562,10 +1563,12 @@ page_server_request(void const *req)
 			resp = page_server->receive(shard_no);
 			MyNeonCounters->pageserver_open_requests--;
 		} while (resp == NULL);
+		minPrefetchLsn[MyProcNumber] = InfiniteXLogRecPtr;
 		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 	}
 	PG_CATCH();
 	{
+		minPrefetchLsn[MyProcNumber] = InfiniteXLogRecPtr;
 		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 		/* Nothing should cancel disconnect: we should not leave connection in opaque state */
 		HOLD_INTERRUPTS();
@@ -2523,15 +2526,18 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 	PG_TRY();
 	{
 		before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+		minPrefetchLsn[MyProcNumber] = request_lsns->request_lsn;
 		do
 		{
 			while (!page_server->send(shard_no, &request.hdr) || !page_server->flush(shard_no));
 			resp = page_server->receive(shard_no);
 		} while (resp == NULL);
+		minPrefetchLsn[MyProcNumber] = InfiniteXLogRecPtr;
 		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 	}
 	PG_CATCH();
 	{
+		minPrefetchLsn[MyProcNumber] = InfiniteXLogRecPtr;
 		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
 		/* Nothing should cancel disconnect: we should not leave connection in opaque state */
 		HOLD_INTERRUPTS();
