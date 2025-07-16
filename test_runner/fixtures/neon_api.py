@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import TYPE_CHECKING, cast, final
 
@@ -11,6 +12,19 @@ if TYPE_CHECKING:
     from typing import Any, Literal
 
     from fixtures.pg_version import PgVersion
+
+
+def connstr_to_env(connstr: str) -> dict[str, str]:
+    # postgresql://neondb_owner:npg_kuv6Rqi1cB@ep-old-silence-w26pxsvz-pooler.us-east-2.aws.neon.build/neondb?sslmode=require'
+    parts = re.split(
+        ":|@|/", connstr.removeprefix("postgresql://").removesuffix("?sslmode=require")
+    )
+    return {
+        "PGUSER": parts[0],
+        "PGPASSWORD": parts[1],
+        "PGHOST": parts[2],
+        "PGDATABASE": parts[3],
+    }
 
 
 def connection_parameters_to_env(params: dict[str, str]) -> dict[str, str]:
@@ -358,7 +372,7 @@ class NeonAPI:
 
         resp = self.__request(
             "PATCH",
-            f"/projects/{project_id}/endpoints",
+            f"/projects/{project_id}/endpoints/{endpoint_id}",
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/json",
@@ -407,6 +421,14 @@ class NeonAPI:
         )
 
         return cast("dict[str, Any]", resp.json())
+
+    def get_endpoint(self, project_id: str, endpoint_id) -> dict[str, Any]:
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/endpoints/{endpoint_id}",
+            headers={"Accept": "application/json"},
+        )
+        return cast("dict[str,Any]", resp.json())
 
     def get_endpoints(self, project_id: str) -> dict[str, Any]:
         resp = self.__request(
