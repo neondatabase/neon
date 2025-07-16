@@ -8809,7 +8809,6 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
- "uuid",
  "zeroize",
  "zstd",
  "zstd-safe",
