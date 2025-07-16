@@ -121,7 +121,12 @@ def benchmark_impl(
 
     def bench(endpoint_name, endpoint_id, env):
         pg_bin.run(["pgbench", "-i", "-I", "dtGvp", f"-s{pgbench_size}"], env)
-        sleep(offload_secs * 2)  # ensure LFC is offloaded after pgbench finishes
+
+        if endpoint_name == "prewarmed":
+            sleep(offload_secs * 2)  # ensure LFC is offloaded after pgbench finishes
+            # omitting offload_lfc_interval_seconds makes endpoint not offload
+            neon_api.update_endpoint(project_id, endpoint_id, {"autoprewarm": True})
+
         neon_api.restart_endpoint(project_id, endpoint_id)
         sleep(prewarmed_sleep_secs)
 
