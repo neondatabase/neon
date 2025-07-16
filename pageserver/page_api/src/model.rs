@@ -664,7 +664,7 @@ pub struct GetRelSizeRequest {
     pub read_lsn: ReadLsn,
     pub rel: RelTag,
     /// If true, return missing=true for missing relations instead of a NotFound error.
-    allow_missing: bool,
+    pub allow_missing: bool,
 }
 
 impl TryFrom<proto::GetRelSizeRequest> for GetRelSizeRequest {
