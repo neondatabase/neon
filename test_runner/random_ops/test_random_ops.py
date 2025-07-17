@@ -654,7 +654,8 @@ def test_api_random(
             "psql",
             "-c",
             "CREATE TABLE IF NOT EXISTS sanity_check (name VARCHAR NOT NULL PRIMARY KEY, value VARCHAR)",
-        ]
+        ],
+        env=project.main_branch.connect_env,
     )
     # To not go to the past where pgbench tables do not exist
     time.sleep(1)
