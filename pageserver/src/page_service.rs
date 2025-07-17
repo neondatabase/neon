@@ -3525,8 +3525,8 @@ impl GrpcPageServiceHandler {
 
 /// Implements the gRPC page service.
 ///
-/// Tonic will drop the request handler futures if the client goes away (e.g. due to a timeout or
-/// cancellation), so the read path must be cancellation-safe. On shutdown, Tonic will wait for
+/// On client disconnect (e.g. timeout or client shutdown), Tonic will drop the request handler
+/// futures, so the read path must be cancellation-safe. On server shutdown, Tonic will wait for
 /// in-flight requests to complete.
 ///
 /// TODO: when the libpq impl is removed, remove the Pagestream types and inline the handler code.
