@@ -3,9 +3,11 @@ import signal
 import time
 
 import requests
+from fixtures.utils import skip_if_proxy_lacks_rest_broker
 from jwcrypto import jwt
 
 
+@skip_if_proxy_lacks_rest_broker()
 def test_rest_broker_happy(
     local_proxy_fixed_port, rest_broker_proxy, vanilla_pg, neon_authorize_jwk, httpserver
 ):
