@@ -1,4 +1,5 @@
 pub mod cplane_proxy_v1;
+pub mod lakebase_v1;
 #[cfg(any(test, feature = "testing"))]
 pub mod mock;
 

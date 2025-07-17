@@ -175,12 +175,14 @@ impl MockControlPlane {
         let conn_info = match self.endpoint.host_str() {
             None => ConnectInfo {
                 host_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                server_name: "localhost".into(),
                 host: "localhost".into(),
                 port,
                 ssl_mode: SslMode::Disable,
             },
             Some(host) => ConnectInfo {
                 host_addr: IpAddr::from_str(host).ok(),
+                server_name: host.into(),
                 host: host.into(),
                 port,
                 ssl_mode: SslMode::Disable,

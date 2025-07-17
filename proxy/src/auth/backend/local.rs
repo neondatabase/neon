@@ -33,6 +33,7 @@ impl LocalBackend {
                 conn_info: ConnectInfo {
                     host_addr: Some(postgres_addr.ip()),
                     host: postgres_addr.ip().to_string().into(),
+                    server_name: postgres_addr.ip().to_string(),
                     port: postgres_addr.port(),
                     ssl_mode: SslMode::Disable,
                 },
