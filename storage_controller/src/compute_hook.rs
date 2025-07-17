@@ -556,7 +556,7 @@ impl ApiMethod for ComputeHookTenant {
                 }
 
                 let pageserver_conninfo = PageserverConnectionInfo {
-                    shard_count: ShardCount::unsharded(),
+                    shard_count,
                     stripe_size: stripe_size.map(|val| val.0),
                     shards: shard_infos,
                     prefer_protocol,
