@@ -32,7 +32,7 @@ use subzero_core::formatter::Param::{LV, PL, SV, Str, StrOwned};
 use subzero_core::formatter::postgresql::{fmt_main_query, generate};
 use subzero_core::formatter::{Param, Snippet, SqlParam};
 use subzero_core::parser::postgrest::parse;
-use subzero_core::permissions::check_safe_functions;
+use subzero_core::permissions::{check_safe_functions, replace_select_star};
 use subzero_core::schema::{
     DbSchema, POSTGRESQL_INTROSPECTION_SQL, get_postgresql_configuration_query,
 };
@@ -846,7 +846,7 @@ async fn handle_rest_inner(
     };
 
     // parse the request into an ApiRequest struct
-    let api_request = parse(
+    let mut api_request = parse(
         schema_name,
         root,
         db_schema,
@@ -860,17 +860,12 @@ async fn handle_rest_inner(
     )
     .map_err(RestError::SubzeroCore)?;
 
-    // TODO: this is nice to have but not critical (we can do this in the context of DBX)
-    // we chose to not do this to reduce the schema size returned by the introspection query
-    // replace "*" with the list of columns the user has access to
-    // so that he does not encounter permission errors
-    // this only works if the schema intropsection includes the database permissions (which for now it does not)
-    // replace_select_star(db_schema, schema_name, role, &mut api_request.query)?;
-
     let role_str = match role {
         Some(r) => r,
         None => "",
     };
+
+    replace_select_star(db_schema, schema_name, role_str, &mut api_request.query)?;
 
     // TODO: this is not relevant when acting as PostgREST but will be useful
     // in the context of DBX where they need internal permissions

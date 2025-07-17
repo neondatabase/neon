@@ -106,7 +106,7 @@ uuid.workspace = true
 x509-cert.workspace = true
 redis.workspace = true
 zerocopy.workspace = true
-subzero-core = { git = "https://github.com/neondatabase/subzero", rev = "4b87b463515f3f0cc408f592b3c0e55f23fc22dd", features = ["postgresql"], optional = true }
+subzero-core = { git = "https://github.com/neondatabase/subzero", rev = "396264617e78e8be428682f87469bb25429af88a", features = ["postgresql"], optional = true }
 ouroboros = { version = "0.18", optional = true }
 
 # jwt stuff
