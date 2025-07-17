@@ -812,7 +812,7 @@ async fn handle_tenant_timeline_passthrough(
         // Inspect 404 errors: at this point, we know that the tenant exists, but the pageserver we route
         // the request to might not yet be ready. Therefore, if it is a _tenant_ not found error, we can
         // convert it into a 503. TODO: we should make this part of the check in `tenant_shard_remote_mutation`.
-        // However, `tenant_shard_remote_mutation` currently cannot inspect the error HTTP response body,
+        // However, `tenant_shard_remote_mutation` currently cannot inspect the HTTP error response body,
         // so we have to do it here instead.
         if resp_staus == reqwest::StatusCode::NOT_FOUND {
             let resp_str = std::str::from_utf8(&resp_bytes)
