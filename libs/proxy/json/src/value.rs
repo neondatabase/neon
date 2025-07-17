@@ -84,6 +84,7 @@ impl<T: ValueEncoder> ValueEncoder for Option<T> {
 }
 
 /// Represents the JSON null value.
+#[derive(Clone, Copy)]
 pub struct Null;
 
 impl ValueEncoder for Null {

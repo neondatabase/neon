@@ -18,6 +18,9 @@ struct Bar {
 
 pub fn escape(c: &mut Criterion) {
     c.bench_function("small", |b| bench_json_encode_inner(b, "object_key"));
+    c.bench_function("small_static", |b| {
+        bench_json_encode_inner(b, &json::EscapedStr::from_static("object_key"));
+    });
     c.bench_function("large_fmt", |b| {
         let value = Foo {
             some_field: Bar {

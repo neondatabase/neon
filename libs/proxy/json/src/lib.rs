@@ -81,6 +81,7 @@ mod macros;
 mod str;
 mod value;
 
+pub use str::EscapedStr;
 pub use value::{KeyEncoder, Null, ValueEncoder};
 
 #[must_use]

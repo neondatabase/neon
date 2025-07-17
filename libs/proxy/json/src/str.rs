@@ -8,9 +8,62 @@
 //!
 //! With modifications by Conrad Ludgate on behalf of Databricks.
 
-use std::fmt::{self, Write};
+use std::{
+    borrow::Cow,
+    fmt::{self, Write},
+};
 
 use crate::{KeyEncoder, ValueEncoder, ValueSer};
+
+pub struct EscapedStr(Cow<'static, [u8]>);
+
+impl EscapedStr {
+    /// Assumes the string does not need escaping.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the string does need escaping.
+    pub const fn from_static(s: &'static str) -> Self {
+        let bytes = s.as_bytes();
+
+        let mut i = 0;
+        while i < bytes.len() {
+            let byte = bytes[i];
+            let escape = ESCAPE[byte as usize];
+
+            assert!(escape == 0, "a character in the string needed escaping");
+
+            i += 1;
+        }
+
+        Self(Cow::Borrowed(bytes))
+    }
+
+    /// Escapes the string eagerly.
+    pub fn escape(s: &str) -> Self {
+        let mut writer = Vec::with_capacity(s.len());
+
+        Collect { buf: &mut writer }
+            .write_str(s)
+            .expect("formatting should not error");
+
+        Self(Cow::Owned(writer))
+    }
+}
+
+impl KeyEncoder for &EscapedStr {}
+impl ValueEncoder for &EscapedStr {
+    fn encode(self, v: crate::ValueSer<'_>) {
+        let buf = &mut *v.buf;
+        buf.reserve(2 + self.0.len());
+
+        buf.push(b'"');
+        buf.extend_from_slice(&self.0);
+        buf.push(b'"');
+
+        v.finish();
+    }
+}
 
 impl KeyEncoder for &str {}
 impl ValueEncoder for &str {
