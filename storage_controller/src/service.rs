@@ -719,19 +719,19 @@ pub(crate) enum ReconcileResultRequest {
 }
 
 #[derive(Clone)]
-struct MutationLocation {
-    node: Node,
-    generation: Generation,
+pub(crate) struct MutationLocation {
+    pub(crate) node: Node,
+    pub(crate) generation: Generation,
 }
 
 #[derive(Clone)]
-struct ShardMutationLocations {
-    latest: MutationLocation,
-    other: Vec<MutationLocation>,
+pub(crate) struct ShardMutationLocations {
+    pub(crate) latest: MutationLocation,
+    pub(crate) other: Vec<MutationLocation>,
 }
 
 #[derive(Default, Clone)]
-struct TenantMutationLocations(BTreeMap<TenantShardId, ShardMutationLocations>);
+pub(crate) struct TenantMutationLocations(pub BTreeMap<TenantShardId, ShardMutationLocations>);
 
 struct ReconcileAllResult {
     spawned_reconciles: usize,
@@ -760,6 +760,29 @@ impl ReconcileAllResult {
     /// all spawned reconciles are also stuck reconciles.
     fn can_run_optimizations(&self) -> bool {
         !self.has_delayed_reconciles && self.spawned_reconciles == self.stuck_reconciles
+    }
+}
+
+enum TenantIdOrShardId {
+    TenantId(TenantId),
+    TenantShardId(TenantShardId),
+}
+
+impl TenantIdOrShardId {
+    fn tenant_id(&self) -> TenantId {
+        match self {
+            TenantIdOrShardId::TenantId(tenant_id) => *tenant_id,
+            TenantIdOrShardId::TenantShardId(tenant_shard_id) => tenant_shard_id.tenant_id,
+        }
+    }
+
+    fn matches(&self, tenant_shard_id: &TenantShardId) -> bool {
+        match self {
+            TenantIdOrShardId::TenantId(tenant_id) => tenant_shard_id.tenant_id == *tenant_id,
+            TenantIdOrShardId::TenantShardId(this_tenant_shard_id) => {
+                this_tenant_shard_id == tenant_shard_id
+            }
+        }
     }
 }
 
@@ -4814,6 +4837,12 @@ impl Service {
             }
         }
 
+        if targets.is_empty() {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+            ));
+        }
+
         Ok(TenantShardAttachState {
             targets,
             by_node_id,
@@ -5040,9 +5069,35 @@ impl Service {
     /// - Looks up the shards and the nodes where they were most recently attached
     /// - Guarantees that after the inner function returns, the shards' generations haven't moved on: this
     ///   ensures that the remote operation acted on the most recent generation, and is therefore durable.
-    async fn tenant_remote_mutation<R, O, F>(
+    pub(crate) async fn tenant_remote_mutation<R, O, F>(
         &self,
         tenant_id: TenantId,
+        op: O,
+    ) -> Result<R, ApiError>
+    where
+        O: FnOnce(TenantMutationLocations) -> F,
+        F: std::future::Future<Output = R>,
+    {
+        self.tenant_remote_mutation_inner(TenantIdOrShardId::TenantId(tenant_id), op)
+            .await
+    }
+
+    pub(crate) async fn tenant_shard_remote_mutation<R, O, F>(
+        &self,
+        tenant_shard_id: TenantShardId,
+        op: O,
+    ) -> Result<R, ApiError>
+    where
+        O: FnOnce(TenantMutationLocations) -> F,
+        F: std::future::Future<Output = R>,
+    {
+        self.tenant_remote_mutation_inner(TenantIdOrShardId::TenantShardId(tenant_shard_id), op)
+            .await
+    }
+
+    async fn tenant_remote_mutation_inner<R, O, F>(
+        &self,
+        tenant_id_or_shard_id: TenantIdOrShardId,
         op: O,
     ) -> Result<R, ApiError>
     where
@@ -5056,7 +5111,13 @@ impl Service {
             // run concurrently with reconciliations, and it is not guaranteed that the node we find here
             // will still be the latest when we're done: we will check generations again at the end of
             // this function to handle that.
-            let generations = self.persistence.tenant_generations(tenant_id).await?;
+            let generations = self
+                .persistence
+                .tenant_generations(tenant_id_or_shard_id.tenant_id())
+                .await?
+                .into_iter()
+                .filter(|i| tenant_id_or_shard_id.matches(&i.tenant_shard_id))
+                .collect::<Vec<_>>();
 
             if generations
                 .iter()
@@ -5070,9 +5131,14 @@ impl Service {
                 // One or more shards has not been attached to a pageserver.  Check if this is because it's configured
                 // to be detached (409: caller should give up), or because it's meant to be attached but isn't yet (503: caller should retry)
                 let locked = self.inner.read().unwrap();
-                for (shard_id, shard) in
-                    locked.tenants.range(TenantShardId::tenant_range(tenant_id))
-                {
+                let tenant_shards = locked
+                    .tenants
+                    .range(TenantShardId::tenant_range(
+                        tenant_id_or_shard_id.tenant_id(),
+                    ))
+                    .filter(|(shard_id, _)| tenant_id_or_shard_id.matches(shard_id))
+                    .collect::<Vec<_>>();
+                for (shard_id, shard) in tenant_shards {
                     match shard.policy {
                         PlacementPolicy::Attached(_) => {
                             // This shard is meant to be attached: the caller is not wrong to try and
@@ -5182,7 +5248,14 @@ impl Service {
         // Post-check: are all the generations of all the shards the same as they were initially?  This proves that
         // our remote operation executed on the latest generation and is therefore persistent.
         {
-            let latest_generations = self.persistence.tenant_generations(tenant_id).await?;
+            let latest_generations = self
+                .persistence
+                .tenant_generations(tenant_id_or_shard_id.tenant_id())
+                .await?
+                .into_iter()
+                .filter(|i| tenant_id_or_shard_id.matches(&i.tenant_shard_id))
+                .collect::<Vec<_>>();
+
             if latest_generations
                 .into_iter()
                 .map(
@@ -5316,7 +5389,7 @@ impl Service {
     pub(crate) async fn tenant_shard0_node(
         &self,
         tenant_id: TenantId,
-    ) -> Result<(Node, TenantShardId, bool), ApiError> {
+    ) -> Result<(Node, TenantShardId), ApiError> {
         let tenant_shard_id = {
             let locked = self.inner.read().unwrap();
             let Some((tenant_shard_id, _shard)) = locked
@@ -5334,7 +5407,7 @@ impl Service {
 
         self.tenant_shard_node(tenant_shard_id)
             .await
-            .map(|(node, consistent)| (node, tenant_shard_id, consistent))
+            .map(|node| (node, tenant_shard_id))
     }
 
     /// When you need to send an HTTP request to the pageserver that holds a shard of a tenant, this
@@ -5344,7 +5417,7 @@ impl Service {
     pub(crate) async fn tenant_shard_node(
         &self,
         tenant_shard_id: TenantShardId,
-    ) -> Result<(Node, bool), ApiError> {
+    ) -> Result<Node, ApiError> {
         // Look up in-memory state and maybe use the node from there.
         {
             let locked = self.inner.read().unwrap();
@@ -5374,8 +5447,7 @@ impl Service {
                         "Shard refers to nonexistent node"
                     )));
                 };
-                let consistent = self.is_observed_consistent_with_intent(shard, *intent_node_id);
-                return Ok((node.clone(), consistent));
+                return Ok(node.clone());
             }
         };
 
@@ -5410,7 +5482,7 @@ impl Service {
             )));
         };
         // As a reconciliation is in flight, we do not have the observed state yet, and therefore we assume it is always inconsistent.
-        Ok((node.clone(), false))
+        Ok(node.clone())
     }
 
     pub(crate) fn tenant_locate(
