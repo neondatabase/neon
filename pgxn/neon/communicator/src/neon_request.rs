@@ -1,4 +1,15 @@
-pub type CLsn = u64;
+
+// Definitions of some core PostgreSQL datatypes.
+
+/// XLogRecPtr is defined in "access/xlogdefs.h" as:
+///
+/// ```
+/// typedef uint64 XLogRecPtr;
+/// ```
+/// cbindgen:no-export
+pub type XLogRecPtr = u64;
+
+pub type CLsn = XLogRecPtr;
 pub type COid = u32;
 
 // This conveniently matches PG_IOV_MAX
