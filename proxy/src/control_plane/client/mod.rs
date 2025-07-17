@@ -29,6 +29,8 @@ use crate::types::EndpointId;
 pub enum ControlPlaneClient {
     /// Proxy V1 control plane API
     ProxyV1(cplane_proxy_v1::NeonControlPlaneClient),
+    /// Lakebase V1 mocked API.
+    LakebaseV1(lakebase_v1::LakebaseClient),
     /// Local mock control plane.
     #[cfg(any(test, feature = "testing"))]
     PostgresMock(mock::MockControlPlane),
@@ -47,6 +49,7 @@ impl ControlPlaneApi for ControlPlaneClient {
     ) -> Result<RoleAccessControl, errors::GetAuthInfoError> {
         match self {
             Self::ProxyV1(api) => api.get_role_access_control(ctx, endpoint, role).await,
+            Self::LakebaseV1(api) => api.get_role_access_control(ctx, endpoint, role).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.get_role_access_control(ctx, endpoint, role).await,
             #[cfg(test)]
@@ -64,6 +67,7 @@ impl ControlPlaneApi for ControlPlaneClient {
     ) -> Result<EndpointAccessControl, errors::GetAuthInfoError> {
         match self {
             Self::ProxyV1(api) => api.get_endpoint_access_control(ctx, endpoint, role).await,
+            Self::LakebaseV1(api) => api.get_endpoint_access_control(ctx, endpoint, role).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.get_endpoint_access_control(ctx, endpoint, role).await,
             #[cfg(test)]
@@ -78,6 +82,7 @@ impl ControlPlaneApi for ControlPlaneClient {
     ) -> Result<Vec<AuthRule>, errors::GetEndpointJwksError> {
         match self {
             Self::ProxyV1(api) => api.get_endpoint_jwks(ctx, endpoint).await,
+            Self::LakebaseV1(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(test)]
@@ -92,6 +97,7 @@ impl ControlPlaneApi for ControlPlaneClient {
     ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
         match self {
             Self::ProxyV1(api) => api.wake_compute(ctx, user_info).await,
+            Self::LakebaseV1(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(test)]
