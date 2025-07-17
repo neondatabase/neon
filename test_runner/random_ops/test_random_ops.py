@@ -482,6 +482,9 @@ class NeonProject:
                     ),
                 )
                 self.wait()
+                # XXX do not merge, debug only
+                cur.execute("SELECT * FROM sanity_check WHERE name = 'snapsot_name'")
+                log.info("sanity: %s", cur.fetchone())
                 cur.execute("UPDATE sanity_check SET value = 'tainted' || value")
         return snapshot
 
