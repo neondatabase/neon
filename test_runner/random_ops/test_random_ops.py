@@ -509,7 +509,12 @@ class NeonProject:
         )
         if not target_branch.connection_parameters:
             raise RuntimeError(f"The branch {target_branch.id} does not have connection parameters")
-        with psycopg2.connect(**target_branch.connection_parameters) as conn:
+        with psycopg2.connect(
+            host=target_branch.connection_parameters["host"],
+            port=5432,
+            user=target_branch.connection_parameters["role"],
+            password=target_branch.connection_parameters["password"],
+        ) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT value FROM sanity_check WHERE name = 'snapsot_name'")
                 snapshot_name = None
@@ -632,7 +637,7 @@ def test_api_random(
     random.seed(seed)
     pg_bin, project = setup_class
     # Here we can assign weights
-    #XXX do not merge, debug only
+    # XXX do not merge, debug only
     ACTIONS = (
         ("create_snapshot", 0.15),
         ("restore_snapshot", 0.1),
