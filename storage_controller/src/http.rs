@@ -735,15 +735,13 @@ async fn handle_tenant_timeline_passthrough(
     );
 
     // Find the node that holds shard zero
-    let (node, tenant_shard_id) = if tenant_or_shard_id.is_unsharded() {
+    let (node, tenant_shard_id, consistent) = if tenant_or_shard_id.is_unsharded() {
         service
             .tenant_shard0_node(tenant_or_shard_id.tenant_id)
             .await?
     } else {
-        (
-            service.tenant_shard_node(tenant_or_shard_id).await?,
-            tenant_or_shard_id,
-        )
+        let (node, consistent) = service.tenant_shard_node(tenant_or_shard_id).await?;
+        (node, tenant_or_shard_id, consistent)
     };
 
     // Callers will always pass an unsharded tenant ID.  Before proxying, we must
@@ -788,16 +786,12 @@ async fn handle_tenant_timeline_passthrough(
     }
 
     // Transform 404 into 503 if we raced with a migration
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        // Look up node again: if we migrated it will be different
-        let new_node = service.tenant_shard_node(tenant_shard_id).await?;
-        if new_node.get_id() != node.get_id() {
-            // Rather than retry here, send the client a 503 to prompt a retry: this matches
-            // the pageserver's use of 503, and all clients calling this API should retry on 503.
-            return Err(ApiError::ResourceUnavailable(
-                format!("Pageserver {node} returned 404, was migrated to {new_node}").into(),
-            ));
-        }
+    if resp.status() == reqwest::StatusCode::NOT_FOUND && !consistent {
+        // Rather than retry here, send the client a 503 to prompt a retry: this matches
+        // the pageserver's use of 503, and all clients calling this API should retry on 503.
+        return Err(ApiError::ResourceUnavailable(
+            format!("Pageserver {node} returned 404 due to ongoing migration, retry later").into(),
+        ));
     }
 
     // We have a reqest::Response, would like a http::Response
@@ -1091,9 +1085,10 @@ async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiErr
 
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    let force: bool = parse_query_param(&req, "force")?.unwrap_or(false);
     json_response(
         StatusCode::OK,
-        state.service.start_node_delete(node_id).await?,
+        state.service.start_node_delete(node_id, force).await?,
     )
 }
 
@@ -2597,6 +2592,17 @@ pub fn make_router(
                 )
             },
         )
+        // Tenant timeline mark_invisible passthrough to shard zero
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/mark_invisible",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_passthrough,
+                    RequestName("v1_tenant_timeline_mark_invisible_passthrough"),
+                )
+            },
+        )
         // Tenant detail GET passthrough to shard zero:
         .get("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(
@@ -2615,17 +2621,6 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
-        // Tenant timeline mark_invisible passthrough to shard zero
-        .put(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/mark_invisible",
-            |r| {
-                tenant_service_handler(
-                    r,
-                    handle_tenant_timeline_passthrough,
-                    RequestName("v1_tenant_timeline_mark_invisible_passthrough"),
-                )
-            },
-        )
 }
 
 #[cfg(test)]

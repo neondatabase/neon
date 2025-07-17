@@ -1872,6 +1872,7 @@ dependencies = [
  "diesel_derives",
  "itoa",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -6933,6 +6934,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "utils",
+ "uuid",
  "workspace_hack",
 ]
 
@@ -8206,6 +8208,7 @@ dependencies = [
  "tracing-error",
  "tracing-subscriber",
  "tracing-utils",
+ "uuid",
  "walkdir",
 ]
 
@@ -8807,7 +8810,6 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
- "uuid",
  "zeroize",
  "zstd",
  "zstd-safe",
