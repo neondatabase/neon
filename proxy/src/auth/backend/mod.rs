@@ -74,6 +74,11 @@ impl std::fmt::Display for Backend<'_, ()> {
                     .debug_tuple("ControlPlane::ProxyV1")
                     .field(&endpoint.url())
                     .finish(),
+                ControlPlaneClient::LakebaseV1(lb) => fmt
+                    .debug_tuple("ControlPlane::LakebaseV1")
+                    .field(&lb.namespace)
+                    .field(&lb.port)
+                    .finish(),
                 #[cfg(any(test, feature = "testing"))]
                 ControlPlaneClient::PostgresMock(endpoint) => {
                     let url = endpoint.url();
