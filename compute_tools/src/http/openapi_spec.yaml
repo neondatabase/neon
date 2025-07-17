@@ -613,11 +613,11 @@ components:
         - skipped
       properties:
         status:
-          description: Lfc prewarm status
-          enum: [not_prewarmed, prewarming, completed, failed]
+          description: LFC prewarm status
+          enum: [not_prewarmed, prewarming, completed, failed, skipped]
           type: string
         error:
-          description: Lfc prewarm error, if any
+          description: LFC prewarm error, if any
           type: string
         total:
           description: Total pages processed
@@ -635,11 +635,11 @@ components:
         - status
       properties:
         status:
-          description: Lfc offload status
+          description: LFC offload status
           enum: [not_offloaded, offloading, completed, failed]
           type: string
         error:
-          description: Lfc offload error, if any
+          description: LFC offload error, if any
           type: string
 
     PromoteState:
