@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import os
 import timeit
-import traceback
 from concurrent.futures import ThreadPoolExecutor as Exec
 from pathlib import Path
 from time import sleep
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from fixtures.benchmark_fixture import NeonBenchmarker, PgBenchRunResult
 from fixtures.log_helper import log
-from fixtures.neon_api import NeonAPI, connection_parameters_to_env
+from fixtures.neon_api import NeonAPI, connstr_to_env
 
 if TYPE_CHECKING:
     from fixtures.compare_fixtures import NeonCompare
@@ -60,74 +59,72 @@ def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
 
 
 @pytest.mark.remote_cluster
-@pytest.mark.timeout(2 * 60 * 60)
+@pytest.mark.timeout(20 * 60)
 def test_compare_prewarmed_pgbench_perf_benchmark(
     pg_bin: PgBin,
     neon_api: NeonAPI,
     pg_version: PgVersion,
     zenbenchmark: NeonBenchmarker,
 ):
-    name = f"Test prewarmed pgbench performance, GITHUB_RUN_ID={os.getenv('GITHUB_RUN_ID')}"
-    project = neon_api.create_project(pg_version, name)
-    project_id = project["project"]["id"]
-    neon_api.wait_for_operation_to_finish(project_id)
-    err = False
-    try:
-        benchmark_impl(pg_bin, neon_api, project, zenbenchmark)
-    except Exception as e:
-        err = True
-        log.error(f"Caught exception: {e}")
-        log.error(traceback.format_exc())
-    finally:
-        assert not err
-        neon_api.delete_project(project_id)
+    """
+    Prewarm API is not public, so this test relies on a pre-created project
+    with pgbench size of 3424, pgbench -i -IdtGvp -s3424. Sleeping and
+    offloading constants are hardcoded to this size as well
+    """
+    project_id = os.getenv("PROJECT_ID")
+    assert project_id
 
+    ordinary_branch_id = ""
+    prewarmed_branch_id = ""
+    for branch in neon_api.get_branches(project_id)["branches"]:
+        if branch["name"] == "ordinary":
+            ordinary_branch_id = branch["id"]
+        if branch["name"] == "prewarmed":
+            prewarmed_branch_id = branch["id"]
+    assert len(ordinary_branch_id) > 0
+    assert len(prewarmed_branch_id) > 0
 
-def benchmark_impl(
-    pg_bin: PgBin, neon_api: NeonAPI, project: dict[str, Any], zenbenchmark: NeonBenchmarker
-):
-    pgbench_size = int(os.getenv("PGBENCH_SIZE") or "3424")  # 50GB
+    ep_ordinary = None
+    ep_prewarmed = None
+    for ep in neon_api.get_endpoints(project_id)["endpoints"]:
+        if ep["branch_id"] == ordinary_branch_id:
+            ep_ordinary = ep
+        if ep["branch_id"] == prewarmed_branch_id:
+            ep_prewarmed = ep
+    assert ep_ordinary
+    assert ep_prewarmed
+    ordinary_id = ep_ordinary["id"]
+    prewarmed_id = ep_prewarmed["id"]
+
     offload_secs = 20
     test_duration_min = 5
     pgbench_duration = f"-T{test_duration_min * 60}"
-    # prewarm API is not publicly exposed. In order to test performance of a
-    # fully prewarmed endpoint, wait after it restarts.
-    # The number here is empirical, based on manual runs on staging
     prewarmed_sleep_secs = 180
 
-    branch_id = project["branch"]["id"]
-    project_id = project["project"]["id"]
-    normal_env = connection_parameters_to_env(
-        project["connection_uris"][0]["connection_parameters"]
-    )
-    normal_id = project["endpoints"][0]["id"]
-
-    prewarmed_branch_id = neon_api.create_branch(
-        project_id, "prewarmed", parent_id=branch_id, add_endpoint=False
-    )["branch"]["id"]
-    neon_api.wait_for_operation_to_finish(project_id)
-
-    ep_prewarmed = neon_api.create_endpoint(
-        project_id,
-        prewarmed_branch_id,
-        endpoint_type="read_write",
-        settings={"autoprewarm": True, "offload_lfc_interval_seconds": offload_secs},
-    )
-    neon_api.wait_for_operation_to_finish(project_id)
-
-    prewarmed_env = normal_env.copy()
-    prewarmed_env["PGHOST"] = ep_prewarmed["endpoint"]["host"]
-    prewarmed_id = ep_prewarmed["endpoint"]["id"]
+    ordinary_uri = neon_api.get_connection_uri(project_id, ordinary_branch_id, ordinary_id)["uri"]
+    prewarmed_uri = neon_api.get_connection_uri(project_id, prewarmed_branch_id, prewarmed_id)[
+        "uri"
+    ]
 
     def bench(endpoint_name, endpoint_id, env):
-        pg_bin.run(["pgbench", "-i", "-I", "dtGvp", f"-s{pgbench_size}"], env)
-        sleep(offload_secs * 2)  # ensure LFC is offloaded after pgbench finishes
-        neon_api.restart_endpoint(project_id, endpoint_id)
-        sleep(prewarmed_sleep_secs)
+        log.info(f"Running pgbench for {pgbench_duration}s to warm up the cache")
+        cmd = ["pgbench", "-c10", pgbench_duration, "-Mprepared"]
+        pg_bin.run(cmd, env)
 
+        log.info(f"Initialized {endpoint_name}")
+        if endpoint_name == "prewarmed":
+            log.info(f"sleeping {offload_secs * 2} to ensure LFC is offloaded")
+            sleep(offload_secs * 2)
+            neon_api.restart_endpoint(project_id, endpoint_id)
+            log.info(f"sleeping {prewarmed_sleep_secs} to ensure LFC is prewarmed")
+            sleep(prewarmed_sleep_secs)
+        else:
+            neon_api.restart_endpoint(project_id, endpoint_id)
+
+        log.info(f"Starting benchmark for {endpoint_name}")
         run_start_timestamp = utc_now_timestamp()
         t0 = timeit.default_timer()
-        out = pg_bin.run_capture(["pgbench", "-c10", pgbench_duration, "-Mprepared"], env)
+        out = pg_bin.run_capture(cmd, env)
         run_duration = timeit.default_timer() - t0
         run_end_timestamp = utc_now_timestamp()
 
@@ -141,8 +138,8 @@ def benchmark_impl(
         zenbenchmark.record_pg_bench_result(endpoint_name, res)
 
     with Exec(max_workers=2) as exe:
-        exe.submit(bench, "normal", normal_id, normal_env)
-        exe.submit(bench, "prewarmed", prewarmed_id, prewarmed_env)
+        exe.submit(bench, "ordinary", ordinary_id, connstr_to_env(ordinary_uri))
+        exe.submit(bench, "prewarmed", prewarmed_id, connstr_to_env(prewarmed_uri))
 
 
 def test_compare_prewarmed_read_perf(neon_compare: NeonCompare):
