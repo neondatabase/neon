@@ -181,6 +181,43 @@ jobs:
         
         echo "Benchmark execution completed"
 
+    - name: Generate performance diagrams
+      env:
+        WAREHOUSES: ${{ matrix.warehouses }}
+      run: |
+        cd "${BENCHMARK_WORKDIR}"
+        
+        echo "Generating performance diagrams..."
+        
+        # Copy the diagram generator script
+        cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/generate_diagrams.py" .
+        
+        # Find and generate diagrams for warmup results
+        WARMUP_CSV=$(find results_warmup -name "*.results.csv" -type f | head -1)
+        if [ -n "$WARMUP_CSV" ]; then
+          echo "Generating warmup diagram from: $WARMUP_CSV"
+          python3 generate_diagrams.py \
+            --input-csv "$WARMUP_CSV" \
+            --output-svg "warmup_${WAREHOUSES}_warehouses_performance.svg" \
+            --title-suffix "Warmup at max TPS"
+        else
+          echo "Warning: No warmup results CSV found in results_warmup/"
+        fi
+        
+        # Find and generate diagrams for optimal rate results  
+        OPTRATE_CSV=$(find results_opt_rate -name "*.results.csv" -type f | head -1)
+        if [ -n "$OPTRATE_CSV" ]; then
+          echo "Generating optimal rate diagram from: $OPTRATE_CSV"
+          python3 generate_diagrams.py \
+            --input-csv "$OPTRATE_CSV" \
+            --output-svg "benchmark_${WAREHOUSES}_warehouses_performance.svg" \
+            --title-suffix "70% of max TPS"
+        else
+          echo "Warning: No optimal rate results CSV found in results_opt_rate/"
+        fi
+        
+        echo "Diagram generation completed"
+
     - name: Set date for upload
       id: set-date
       run: echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
