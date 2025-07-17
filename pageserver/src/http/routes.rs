@@ -2181,8 +2181,29 @@ async fn handle_tenant_break(
     json_response(StatusCode::OK, ())
 }
 
+async fn get_lsn_leases_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let leases = timeline.gc_info.read().unwrap().leases.clone();
+
+    json_response(StatusCode::OK, leases)
+}
+
 // Obtains an lsn lease on the given timeline.
-async fn lsn_lease_handler(
+async fn post_lsn_lease_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
@@ -4002,9 +4023,14 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/patch_index_part",
             |r| api_handler(r, timeline_patch_index_part_handler),
         )
+        .get(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/lsn_lease",
+
+            |r| api_handler(r, get_lsn_leases_handler)
+        )
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/lsn_lease",
-            |r| api_handler(r, lsn_lease_handler),
+            |r| api_handler(r, post_lsn_lease_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/do_gc",

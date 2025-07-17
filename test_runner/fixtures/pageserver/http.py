@@ -839,6 +839,17 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         return res_json
 
+    def timeline_lsn_lease_dump(
+        self, tenant_shard_id: TenantShardId, timeline_id: TimelineId
+    ):
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/lsn_lease",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
+
     def timeline_lsn_lease(
         self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn
     ):
