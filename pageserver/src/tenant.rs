@@ -1908,16 +1908,20 @@ impl TenantShard {
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
 
-        // Stash the preloaded tenant manifest, and upload a new manifest if changed.
+        // Upload the tenant manifest.
+        //
+        // This is uploaded unconditionally on every attach. This prevents races where a stale,
+        // still-alive tenant may modify a past manifest, and a future tenant loads it after this
+        // tenant has acted on it. Uploading a new manifest effectively hands over ownership of the
+        // manifest state. See: <https://databricks.atlassian.net/browse/LKB-165>.
         //
         // NB: this must happen after the tenant is fully populated above. In particular the
         // offloaded timelines, which are included in the manifest.
-        {
-            let mut guard = self.remote_tenant_manifest.lock().await;
-            assert!(guard.is_none(), "tenant manifest set before preload"); // first populated here
-            *guard = preload.tenant_manifest;
-        }
-        self.maybe_upload_tenant_manifest().await?;
+        assert!(
+            self.remote_tenant_manifest.lock().await.is_none(),
+            "tenant manifest set before attach"
+        );
+        self.maybe_upload_tenant_manifest().await?; // always uploads, remote_tenant_manifest is None
 
         // The local filesystem contents are a cache of what's in the remote IndexPart;
         // IndexPart is the source of truth.
