@@ -493,6 +493,8 @@ impl ComputeNode {
 
         launch_lsn_lease_bg_task_for_static(&this);
 
+        ro_replica::spawn_bg_task(Arc::clone(&this));
+
         // We have a spec, start the compute
         let mut delay_exit = false;
         let mut vm_monitor = None;

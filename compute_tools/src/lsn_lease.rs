@@ -13,7 +13,8 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::shard::{ShardCount, ShardNumber, TenantShardId};
 
-use crate::compute::ComputeNode;
+use crate::compute::{ComputeNode, ParsedSpec};
+use crate::pageserver_client::{ConnectInfo, pageserver_connstrings_for_connect};
 
 /// Spawns a background thread to periodically renew LSN leases for static compute.
 /// Do nothing if the compute is not in static mode.
@@ -78,17 +79,13 @@ fn acquire_lsn_lease_with_retry(
 
     loop {
         // Note: List of pageservers is dynamic, need to re-read configs before each attempt.
-        let (connstrings, auth) = {
+        let shards = {
             let state = compute.state.lock().unwrap();
-            let spec = state.pspec.as_ref().expect("spec must be set");
-            (
-                spec.pageserver_connstr.clone(),
-                spec.storage_auth_token.clone(),
-            )
+            let pspec = state.pspec.as_ref().expect("spec must be set");
+            pageserver_connstrings_for_connect(pspec)
         };
 
-        let result =
-            try_acquire_lsn_lease(&connstrings, auth.as_deref(), tenant_id, timeline_id, lsn);
+        let result = try_acquire_lsn_lease(shards, timeline_id, lsn);
         match result {
             Ok(Some(res)) => {
                 return Ok(res);
@@ -112,33 +109,32 @@ fn acquire_lsn_lease_with_retry(
 
 /// Tries to acquire LSN leases on all Pageserver shards.
 fn try_acquire_lsn_lease(
-    connstrings: &str,
-    auth: Option<&str>,
-    tenant_id: TenantId,
+    shards: Vec<ConnectInfo>,
     timeline_id: TimelineId,
     lsn: Lsn,
 ) -> Result<Option<SystemTime>> {
-    let connstrings = connstrings.split(',').collect_vec();
-    let shard_count = connstrings.len();
     let mut leases = Vec::new();
-
-    for (shard_number, &connstring) in connstrings.iter().enumerate() {
-        let tenant_shard_id = match shard_count {
-            0 | 1 => TenantShardId::unsharded(tenant_id),
-            shard_count => TenantShardId {
-                tenant_id,
-                shard_number: ShardNumber(shard_number as u8),
-                shard_count: ShardCount::new(shard_count as u8),
-            },
-        };
-
-        let lease = match PageserverProtocol::from_connstring(connstring)? {
-            PageserverProtocol::Libpq => {
-                acquire_lsn_lease_libpq(connstring, auth, tenant_shard_id, timeline_id, lsn)?
-            }
-            PageserverProtocol::Grpc => {
-                acquire_lsn_lease_grpc(connstring, auth, tenant_shard_id, timeline_id, lsn)?
-            }
+    for ConnectInfo {
+        tenant_shard_id,
+        connstring,
+        auth,
+    } in shards
+    {
+        let lease = match PageserverProtocol::from_connstring(&connstring)? {
+            PageserverProtocol::Libpq => acquire_lsn_lease_libpq(
+                &connstring,
+                auth.as_deref(),
+                tenant_shard_id,
+                timeline_id,
+                lsn,
+            )?,
+            PageserverProtocol::Grpc => acquire_lsn_lease_grpc(
+                &connstring,
+                auth.as_deref(),
+                tenant_shard_id,
+                timeline_id,
+                lsn,
+            )?,
         };
         leases.push(lease);
     }
