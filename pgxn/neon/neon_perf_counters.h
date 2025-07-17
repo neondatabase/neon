@@ -154,6 +154,11 @@ typedef struct
 	 * Histogram of query execution time.
 	 */
 	QTHistogramData query_time_hist;
+
+	/*
+	 * Minimal LSBN of infligth prefetch requests
+	 */
+	XLogRecPtr min_prefetch_lsn;
 } neon_per_backend_counters;
 
 /* Pointer to the shared memory array of neon_per_backend_counters structs */

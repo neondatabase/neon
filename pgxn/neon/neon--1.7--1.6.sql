@@ -1,0 +1,1 @@
+drop function neon_communicator_min_inflight_request_lsn();
