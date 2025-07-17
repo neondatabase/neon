@@ -7,6 +7,7 @@
 //! PostgreSQL logging routines at any time.
 
 use std::ffi::c_char;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::mpsc::{TryRecvError, TrySendError};
@@ -20,17 +21,26 @@ use tracing_subscriber::registry::LookupSpan;
 
 use crate::worker_process::callbacks::callback_set_my_latch;
 
-pub struct LoggingState {
+/// This handle is passed to the C code, and used by [`communicator_worker_poll_logging`]
+pub struct LoggingReceiver {
     receiver: Receiver<FormattedEventWithMeta>,
 }
+
+/// This is passed to `tracing`
+struct LoggingSender {
+    sender: SyncSender<FormattedEventWithMeta>,
+}
+
+static DROPPED_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Called once, at worker process startup. The returned LoggingState is passed back
 /// in the subsequent calls to `pump_logging`. It is opaque to the C code.
 #[unsafe(no_mangle)]
-pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingState> {
+pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingReceiver> {
     let (sender, receiver) = sync_channel(1000);
 
-    let maker = Maker { channel: sender };
+    let receiver = LoggingReceiver { receiver };
+    let sender = LoggingSender { sender };
 
     use tracing_subscriber::prelude::*;
     let r = tracing_subscriber::registry();
@@ -39,7 +49,7 @@ pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingState> {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .event_format(SimpleFormatter::new())
-            .with_writer(maker)
+            .with_writer(sender)
             // TODO: derive this from log_min_messages? Currently the code in
             // communicator_process.c forces log_min_messages='INFO'.
             .with_filter(LevelFilter::from_level(Level::INFO)),
@@ -48,9 +58,7 @@ pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingState> {
 
     info!("communicator process logging started");
 
-    let state = LoggingState { receiver };
-
-    Box::new(state)
+    Box::new(receiver)
 }
 
 /// Read one message from the logging queue. This is essentially a wrapper to Receiver,
@@ -63,18 +71,23 @@ pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingState> {
 /// The error level is returned *elevel_p. It's one of the PostgreSQL error levels, see
 /// elog.h
 ///
+/// If there was a message, *dropped_event_count_p is also updated with a counter of how
+/// many log messages in total has been dropped. By comparing that with the value from
+/// previous call, you can tell how many were dropped since last call.
+///
 /// Returns:
 ///
 ///   0 if there were no messages
 ///   1 if there was a message. The message and its level are returned in
-///     *errbuf and *elevel_p
+///     *errbuf and *elevel_p. *dropped_event_count_p is also updated.
 ///  -1 on error, i.e the other end of the queue was disconnected
 #[unsafe(no_mangle)]
 pub extern "C" fn communicator_worker_poll_logging(
-    state: &mut LoggingState,
+    state: &mut LoggingReceiver,
     errbuf: *mut c_char,
     errbuf_len: u32,
     elevel_p: &mut i32,
+    dropped_event_count_p: &mut u64,
 ) -> i32 {
     let msg = match state.receiver.try_recv() {
         Err(TryRecvError::Empty) => return 0,
@@ -102,6 +115,8 @@ pub extern "C" fn communicator_worker_poll_logging(
         Level::ERROR => 21, // ERROR
     };
 
+    *dropped_event_count_p = DROPPED_EVENT_COUNT.load(Ordering::Relaxed);
+
     1
 }
 
@@ -125,7 +140,7 @@ impl Default for FormattedEventWithMeta {
 struct EventBuilder<'a> {
     event: FormattedEventWithMeta,
 
-    maker: &'a Maker,
+    sender: &'a LoggingSender,
 }
 
 impl std::io::Write for EventBuilder<'_> {
@@ -133,25 +148,21 @@ impl std::io::Write for EventBuilder<'_> {
         self.event.message.write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.maker.send_event(self.event.clone());
+        self.sender.send_event(self.event.clone());
         Ok(())
     }
 }
 
 impl Drop for EventBuilder<'_> {
     fn drop(&mut self) {
-        let maker = self.maker;
+        let sender = self.sender;
         let event = std::mem::take(&mut self.event);
 
-        maker.send_event(event);
+        sender.send_event(event);
     }
 }
 
-struct Maker {
-    channel: SyncSender<FormattedEventWithMeta>,
-}
-
-impl<'a> MakeWriter<'a> for Maker {
+impl<'a> MakeWriter<'a> for LoggingSender {
     type Writer = EventBuilder<'a>;
 
     fn make_writer(&'a self) -> Self::Writer {
@@ -164,21 +175,27 @@ impl<'a> MakeWriter<'a> for Maker {
                 message: Vec::new(),
                 level: *meta.level(),
             },
-            maker: self,
+            sender: self,
         }
     }
 }
 
-impl Maker {
+impl LoggingSender {
     fn send_event(&self, e: FormattedEventWithMeta) {
-        match self.channel.try_send(e) {
+        match self.sender.try_send(e) {
             Ok(()) => {
                 // notify the main thread
                 callback_set_my_latch();
             }
             Err(TrySendError::Disconnected(_)) => {}
             Err(TrySendError::Full(_)) => {
-                // TODO: record that some messages were lost
+                // The queue is full, cannot send any more. To avoid blocking the tokio
+                // thread, simply drop the message. Better to lose some logs than get
+                // stuck if there's a problem with the logging.
+                //
+                // Record the fact that was a message was dropped by incrementing the
+                // counter.
+                DROPPED_EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
