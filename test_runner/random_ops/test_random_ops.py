@@ -632,14 +632,8 @@ def test_api_random(
     random.seed(seed)
     pg_bin, project = setup_class
     # Here we can assign weights
+    #XXX do not merge, debug only
     ACTIONS = (
-        ("new_branch", 1.2),
-        ("new_branch_random_time", 0.5),
-        ("new_ro_endpoint", 1.4),
-        ("delete_ro_endpoint", 0.8),
-        ("delete_branch", 1.2),
-        ("restore_random_time", 0.9),
-        ("reset_to_parent", 0.3),
         ("create_snapshot", 0.15),
         ("restore_snapshot", 0.1),
         ("delete_snapshot", 0.1),
