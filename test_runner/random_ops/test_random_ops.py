@@ -531,7 +531,8 @@ class NeonProject:
                 if ep.type == "read_write":
                     new_branch.connection_parameters["host"] = ep.host
                     break
-
+        # XXX do not merge
+        log.info("%s", new_branch.connection_parameters)
         with psycopg2.connect(
             host=new_branch.connection_parameters["host"],
             port=5432,
