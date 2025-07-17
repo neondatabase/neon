@@ -91,6 +91,7 @@ pub fn write_postgres_conf(
             }
         }
         if let Some(libpq_urls) = libpq_urls {
+            writeln!(file, "# derived from compute spec's pageserver_conninfo field")?;
             writeln!(
                 file,
                 "neon.pageserver_connstring={}",
@@ -99,11 +100,23 @@ pub fn write_postgres_conf(
         } else {
             writeln!(file, "# no neon.pageserver_connstring")?;
         }
+
+        if let Some(stripe_size) = conninfo.stripe_size {
+            writeln!(file, "# from compute spec's pageserver_conninfo.stripe_size field")?;
+            writeln!(file, "neon.stripe_size={stripe_size}")?;
+        }
+    } else {
+        if let Some(s) = &spec.pageserver_connstring {
+            writeln!(file, "# from compute spec's pageserver_connstring field")?;
+            writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
+        }
+
+        if let Some(stripe_size) = spec.shard_stripe_size {
+            writeln!(file, "# from compute spec's shard_stripe_size field")?;
+            writeln!(file, "neon.stripe_size={stripe_size}")?;
+        }
     }
 
-    if let Some(stripe_size) = spec.shard_stripe_size {
-        writeln!(file, "neon.stripe_size={stripe_size}")?;
-    }
     if !spec.safekeeper_connstrings.is_empty() {
         let mut neon_safekeepers_value = String::new();
         tracing::info!(
