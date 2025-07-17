@@ -31,7 +31,7 @@ use crate::control_plane::{
 use crate::metrics::Metrics;
 use crate::proxy::retry::CouldRetry;
 use crate::rate_limiter::WakeComputeRateLimiter;
-use crate::types::{EndpointCacheKey, EndpointId, RoleName};
+use crate::types::{EndpointCacheKey, EndpointId, Host, RoleName};
 use crate::{compute, http, scram};
 
 pub(crate) const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
@@ -313,7 +313,7 @@ impl NeonControlPlaneClient {
                 Some(_) => SslMode::Require,
                 None => SslMode::Disable,
             };
-            let host = match body.server_name {
+            let host: Host = match body.server_name {
                 Some(host) => host.into(),
                 None => host.into(),
             };
@@ -321,6 +321,7 @@ impl NeonControlPlaneClient {
             let node = NodeInfo {
                 conn_info: compute::ConnectInfo {
                     host_addr,
+                    server_name: host.to_string(),
                     host,
                     port,
                     ssl_mode,

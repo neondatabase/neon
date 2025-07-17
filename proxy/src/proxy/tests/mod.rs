@@ -531,6 +531,7 @@ fn helper_create_uncached_node_info() -> NodeInfo {
     NodeInfo {
         conn_info: compute::ConnectInfo {
             host: "test".into(),
+            server_name: "test".into(),
             port: 5432,
             ssl_mode: SslMode::Disable,
             host_addr: None,

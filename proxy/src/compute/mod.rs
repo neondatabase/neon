@@ -151,6 +151,7 @@ pub(crate) struct AuthInfo {
 pub struct ConnectInfo {
     pub host_addr: Option<IpAddr>,
     pub host: Host,
+    pub server_name: String,
     pub port: u16,
     pub ssl_mode: SslMode,
 }
@@ -303,6 +304,7 @@ impl ConnectInfo {
         // require for our business.
         let port = self.port;
         let host = &*self.host;
+        let server_name = &*self.server_name;
 
         let addrs = match self.host_addr {
             Some(addr) => vec![SocketAddr::new(addr, port)],
@@ -312,7 +314,7 @@ impl ConnectInfo {
         match connect_once(&*addrs).await {
             Ok((sockaddr, stream)) => Ok((
                 sockaddr,
-                tls::connect_tls(stream, self.ssl_mode, config, host, tls).await?,
+                tls::connect_tls(stream, self.ssl_mode, config, server_name, tls).await?,
             )),
             Err(err) => {
                 warn!("couldn't connect to compute node at {host}:{port}: {err}");
