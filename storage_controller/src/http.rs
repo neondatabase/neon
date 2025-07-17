@@ -48,7 +48,10 @@ use crate::metrics::{
 };
 use crate::persistence::SafekeeperUpsert;
 use crate::reconciler::ReconcileError;
-use crate::service::{LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service};
+use crate::service::{
+    LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service,
+    TenantMutationLocations,
+};
 
 /// State available to HTTP request handlers
 pub struct HttpState {
@@ -734,93 +737,80 @@ async fn handle_tenant_timeline_passthrough(
         path
     );
 
-    // Find the node that holds shard zero
-    let (node, tenant_shard_id, consistent) = if tenant_or_shard_id.is_unsharded() {
-        service
+    let tenant_shard_id = if tenant_or_shard_id.is_unsharded() {
+        // If the request contains only tenant ID, find the node that holds shard zero
+        let (_, shard_id) = service
             .tenant_shard0_node(tenant_or_shard_id.tenant_id)
-            .await?
+            .await?;
+        shard_id
     } else {
-        let (node, consistent) = service.tenant_shard_node(tenant_or_shard_id).await?;
-        (node, tenant_or_shard_id, consistent)
+        tenant_or_shard_id
     };
 
-    // Callers will always pass an unsharded tenant ID.  Before proxying, we must
-    // rewrite this to a shard-aware shard zero ID.
-    let path = format!("{path}");
-    let tenant_str = tenant_or_shard_id.tenant_id.to_string();
-    let tenant_shard_str = format!("{tenant_shard_id}");
-    let path = path.replace(&tenant_str, &tenant_shard_str);
+    let service_inner = service.clone();
 
-    let latency = &METRICS_REGISTRY
-        .metrics_group
-        .storage_controller_passthrough_request_latency;
-
-    let path_label = path_without_ids(&path)
-        .split('/')
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>()
-        .join("_");
-    let labels = PageserverRequestLabelGroup {
-        pageserver_id: &node.get_id().to_string(),
-        path: &path_label,
-        method: crate::metrics::Method::Get,
-    };
-
-    let _timer = latency.start_timer(labels.clone());
-
-    let client = mgmt_api::Client::new(
-        service.get_http_client().clone(),
-        node.base_url(),
-        service.get_config().pageserver_jwt_token.as_deref(),
-    );
-    let resp = client.op_raw(method, path).await.map_err(|e|
-        // We return 503 here because if we can't successfully send a request to the pageserver,
-        // either we aren't available or the pageserver is unavailable.
-        ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {node}: {e}").into()))?;
-
-    if !resp.status().is_success() {
-        let error_counter = &METRICS_REGISTRY
-            .metrics_group
-            .storage_controller_passthrough_request_error;
-        error_counter.inc(labels);
-    }
-
-    let resp_staus = resp.status();
-
-    // We have a reqest::Response, would like a http::Response
-    let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp_staus)?);
-    for (k, v) in resp.headers() {
-        builder = builder.header(k.as_str(), v.as_bytes());
-    }
-
-    let resp_bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| ApiError::InternalServerError(e.into()))?;
-
-    // Transform 404 into 503 if we raced with a migration
-    if resp_staus == reqwest::StatusCode::NOT_FOUND && !consistent {
-        let resp_str = std::str::from_utf8(&resp_bytes)
-            .map_err(|e| ApiError::InternalServerError(e.into()))?;
-        // We only handle "tenant not found" errors; other 404s like timeline not found should
-        // be forwarded as-is.
-        if resp_str.contains(&format!("tenant {tenant_or_shard_id}")) {
-            // Rather than retry here, send the client a 503 to prompt a retry: this matches
-            // the pageserver's use of 503, and all clients calling this API should retry on 503.
-            return Err(ApiError::ResourceUnavailable(
-                format!(
-                    "Pageserver {node} returned tenant 404 due to ongoing migration, retry later"
-                )
-                .into(),
-            ));
+    service.tenant_shard_remote_mutation(tenant_shard_id, |locations| async move {
+        let TenantMutationLocations(locations) = locations;
+        if locations.is_empty() {
+            return Err(ApiError::NotFound(anyhow::anyhow!("Tenant {} not found", tenant_or_shard_id.tenant_id).into()));
         }
-    }
 
-    let response = builder
-        .body(Body::from(resp_bytes))
-        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+        let (tenant_or_shard_id, locations) = locations.into_iter().next().unwrap();
+        let node = locations.latest.node;
 
-    Ok(response)
+        // Callers will always pass an unsharded tenant ID.  Before proxying, we must
+        // rewrite this to a shard-aware shard zero ID.
+        let path = format!("{path}");
+        let tenant_str = tenant_or_shard_id.tenant_id.to_string();
+        let tenant_shard_str = format!("{tenant_shard_id}");
+        let path = path.replace(&tenant_str, &tenant_shard_str);
+
+        let latency = &METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_passthrough_request_latency;
+
+        let path_label = path_without_ids(&path)
+            .split('/')
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>()
+            .join("_");
+        let labels = PageserverRequestLabelGroup {
+            pageserver_id: &node.get_id().to_string(),
+            path: &path_label,
+            method: crate::metrics::Method::Get,
+        };
+
+        let _timer = latency.start_timer(labels.clone());
+
+        let client = mgmt_api::Client::new(
+            service_inner.get_http_client().clone(),
+            node.base_url(),
+            service_inner.get_config().pageserver_jwt_token.as_deref(),
+        );
+        let resp = client.op_raw(method, path).await.map_err(|e|
+            // We return 503 here because if we can't successfully send a request to the pageserver,
+            // either we aren't available or the pageserver is unavailable.
+            ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {node}: {e}").into()))?;
+
+        if !resp.status().is_success() {
+            let error_counter = &METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_passthrough_request_error;
+            error_counter.inc(labels);
+        }
+
+        // We have a reqest::Response, would like a http::Response
+        let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp.status())?);
+        for (k, v) in resp.headers() {
+            builder = builder.header(k.as_str(), v.as_bytes());
+        }
+
+        let response = builder
+            .body(Body::wrap_stream(resp.bytes_stream()))
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+        Ok(response)
+    }).await?
 }
 
 async fn handle_tenant_locate(
