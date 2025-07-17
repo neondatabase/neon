@@ -126,15 +126,13 @@ def test_2_replicas_start(neon_simple_env: NeonEnv):
 #
 # When pause_apply is True we model standby lagging behind primary (e.g. due to
 # high max_standby_streaming_delay). To prevent pageserver from removing data
-# still needed by the standby, the standby compute_ctl maintains a lease
-# at apply_lsn.
+# still needed by the standby apply LSN is propagated in standby -> safekeepers
+# -> broker -> pageserver flow so that pageserver could hold off gc for it.
 @pytest.mark.parametrize("pause_apply", [False, True])
 def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
     tenant_conf = {
         # set PITR interval to be small, so we can do GC
         "pitr_interval": "0 s",
-        # secondaries use leases, override test suite default of "0s"
-        "lsn_lease_length": "5s",
     }
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
     timeline_id = env.initial_timeline
