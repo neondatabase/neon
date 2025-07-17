@@ -481,8 +481,8 @@ class NeonProject:
                         snapshot_name,
                     ),
                 )
+                self.wait()
                 cur.execute("UPDATE sanity_check SET value = 'tainted' || value")
-        self.wait()
         return snapshot
 
     def delete_snapshot(self, snapshot_id: str) -> None:
