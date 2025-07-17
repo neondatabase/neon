@@ -88,7 +88,7 @@ impl PageserverClient {
         )
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) async fn tenant_timeline_compact(
         &self,
         tenant_shard_id: TenantShardId,
@@ -129,7 +129,7 @@ impl PageserverClient {
         )
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) async fn list_tenant_visible_size(&self) -> Result<TenantShardSizeMap> {
         measured_request!(
             "list_tenant_visible_size",
@@ -403,7 +403,7 @@ impl PageserverClient {
         )
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) async fn reset_alert_gauges(&self) -> Result<()> {
         measured_request!(
             "reset_alert_gauges",

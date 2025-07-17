@@ -18,7 +18,7 @@ pub fn generate_random_password(length: usize) -> String {
 }
 
 pub(crate) struct TenantShardSizeMap {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub map: BTreeMap<TenantShardId, u64>,
 }
 
