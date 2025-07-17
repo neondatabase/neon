@@ -53,7 +53,7 @@ use super::http_util::{
 };
 use super::json::JsonConversionError;
 use crate::auth::backend::ComputeCredentialKeys;
-use crate::cache::TimedLru;
+use crate::cache::{Cached, TimedLru};
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
@@ -149,8 +149,8 @@ impl DbSchemaCache {
         ctx: &RequestContext,
         config: &'static ProxyConfig,
     ) -> Result<Arc<(ApiConfig, DbSchemaOwned)>, RestError> {
-        match self.get(endpoint_id) {
-            Some(entry) => Ok(entry.value),
+        match self.get_with_created_at(endpoint_id) {
+            Some(Cached { value: (v, _), .. }) => Ok(v),
             None => {
                 info!("db_schema cache miss for endpoint: {:?}", endpoint_id);
                 let remote_value = self
