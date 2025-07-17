@@ -34,53 +34,12 @@ impl ValueEncoder for fmt::Arguments<'_> {
     }
 }
 
-/// Represents a character escape code in a type-safe manner.
-pub enum CharEscape {
-    /// An escaped quote `"`
-    Quote,
-    /// An escaped reverse solidus `\`
-    ReverseSolidus,
-    // /// An escaped solidus `/`
-    // Solidus,
-    /// An escaped backspace character (usually escaped as `\b`)
-    Backspace,
-    /// An escaped form feed character (usually escaped as `\f`)
-    FormFeed,
-    /// An escaped line feed character (usually escaped as `\n`)
-    LineFeed,
-    /// An escaped carriage return character (usually escaped as `\r`)
-    CarriageReturn,
-    /// An escaped tab character (usually escaped as `\t`)
-    Tab,
-    /// An escaped ASCII plane control character (usually escaped as
-    /// `\u00XX` where `XX` are two hex characters)
-    AsciiControl(u8),
-}
-
-impl CharEscape {
-    #[inline]
-    fn from_escape_table(escape: u8, byte: u8) -> CharEscape {
-        match escape {
-            self::BB => CharEscape::Backspace,
-            self::TT => CharEscape::Tab,
-            self::NN => CharEscape::LineFeed,
-            self::FF => CharEscape::FormFeed,
-            self::RR => CharEscape::CarriageReturn,
-            self::QU => CharEscape::Quote,
-            self::BS => CharEscape::ReverseSolidus,
-            self::UU => CharEscape::AsciiControl(byte),
-            _ => unreachable!(),
-        }
-    }
-}
-
 fn format_escaped_str(writer: &mut Vec<u8>, value: &str) {
     writer.reserve(2 + value.len());
 
     writer.push(b'"');
 
-    let rest = format_escaped_str_contents(writer, value);
-    writer.extend_from_slice(rest);
+    format_escaped_str_contents(writer, value);
 
     writer.push(b'"');
 }
@@ -101,14 +60,13 @@ struct Collect<'buf> {
 
 impl fmt::Write for Collect<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let last = format_escaped_str_contents(self.buf, s);
-        self.buf.extend(last);
+        format_escaped_str_contents(self.buf, s);
         Ok(())
     }
 }
 
 // writes any escape sequences, and returns the suffix still needed to be written.
-fn format_escaped_str_contents<'a>(writer: &mut Vec<u8>, value: &'a str) -> &'a [u8] {
+fn format_escaped_str_contents(writer: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
 
     let mut start = 0;
@@ -119,15 +77,12 @@ fn format_escaped_str_contents<'a>(writer: &mut Vec<u8>, value: &'a str) -> &'a 
             continue;
         }
 
-        writer.extend_from_slice(&bytes[start..i]);
-
-        let char_escape = CharEscape::from_escape_table(escape, byte);
-        write_char_escape(writer, char_escape);
-
-        start = i + 1;
+        let next = i + 1;
+        write_char_escape(writer, &bytes[start..next]);
+        start = next;
     }
 
-    &bytes[start..]
+    writer.extend_from_slice(&bytes[start..]);
 }
 
 const BB: u8 = b'b'; // \x08
@@ -162,29 +117,29 @@ static ESCAPE: [u8; 256] = [
     __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // F
 ];
 
-fn write_char_escape(writer: &mut Vec<u8>, char_escape: CharEscape) {
-    let s = match char_escape {
-        CharEscape::Quote => b"\\\"",
-        CharEscape::ReverseSolidus => b"\\\\",
-        // CharEscape::Solidus => b"\\/",
-        CharEscape::Backspace => b"\\b",
-        CharEscape::FormFeed => b"\\f",
-        CharEscape::LineFeed => b"\\n",
-        CharEscape::CarriageReturn => b"\\r",
-        CharEscape::Tab => b"\\t",
-        CharEscape::AsciiControl(byte) => {
+#[cold]
+fn write_char_escape(writer: &mut Vec<u8>, bytes: &[u8]) {
+    let (&byte, string_run) = bytes.split_last().expect("bytes will not be empty");
+
+    let escape = ESCAPE[byte as usize];
+    debug_assert_ne!(escape, 0);
+
+    // the escape char from the escape table is the correct replacement
+    // character.
+    let mut bytes = [b'\\', escape, b'0', b'0', b'0', b'0'];
+
+    let s = match escape {
+        // if the replacement character is 'u', then we need
+        // to write the utf16 encoding
+        UU => {
             static HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
-            let bytes = &[
-                b'\\',
-                b'u',
-                b'0',
-                b'0',
-                HEX_DIGITS[(byte >> 4) as usize],
-                HEX_DIGITS[(byte & 0xF) as usize],
-            ];
-            return writer.extend_from_slice(bytes);
+            bytes[4] = HEX_DIGITS[(byte >> 4) as usize];
+            bytes[5] = HEX_DIGITS[(byte & 0xF) as usize];
+            &bytes
         }
+        _ => &bytes[0..2],
     };
 
+    writer.extend_from_slice(string_run);
     writer.extend_from_slice(s);
 }
