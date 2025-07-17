@@ -514,6 +514,7 @@ class NeonProject:
             port=5432,
             user=target_branch.connection_parameters["role"],
             password=target_branch.connection_parameters["password"],
+            database=target_branch.connection_parameters["database"],
         ) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT value FROM sanity_check WHERE name = 'snapsot_name'")
