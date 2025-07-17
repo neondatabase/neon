@@ -523,7 +523,7 @@ class NeonProject:
             self, self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
         )
         if new_branch.connection_parameters is None:
-            raise RuntimeError(f"Neon branch {new_branch.id} does not have connection parameters")
+            raise RuntimeError(f"Neon branch {new_branch.id} does not have connection parameters {new_branch.endpoints}")
         with psycopg2.connect(
             host=new_branch.connection_parameters["host"],
             port=5432,
