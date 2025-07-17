@@ -84,3 +84,11 @@ macro_rules! value_as_list {
         res
     }};
 }
+
+/// A helper macro that ensures the provided string literal does not need escaping.
+#[macro_export]
+macro_rules! esc {
+    ($str:literal) => {
+        const { $crate::EscapedStr::from_static($str) }
+    };
+}

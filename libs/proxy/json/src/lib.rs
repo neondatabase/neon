@@ -278,14 +278,14 @@ impl<'buf> ListSer<'buf> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Null, ValueSer};
+    use crate::{Null, ValueSer, esc};
 
     #[test]
     fn object() {
         let mut buf = vec![];
         let mut object = ValueSer::new(&mut buf).object();
-        object.entry("foo", "bar");
-        object.entry("baz", Null);
+        object.entry(esc!("foo"), "bar");
+        object.entry(esc!("baz"), Null);
         object.finish();
 
         assert_eq!(buf, br#"{"foo":"bar","baz":null}"#);
@@ -306,8 +306,8 @@ mod tests {
     fn object_macro() {
         let res = crate::value_to_string!(|obj| {
             crate::value_as_object!(|obj| {
-                obj.entry("foo", "bar");
-                obj.entry("baz", Null);
+                obj.entry(esc!("foo"), "bar");
+                obj.entry(esc!("baz"), Null);
             })
         });
 
@@ -363,7 +363,7 @@ mod tests {
                 let entry = obj.key("2");
                 let entry = {
                     let mut nested_obj = entry.object();
-                    nested_obj.entry("foo", "bar");
+                    nested_obj.entry(esc!("foo"), "bar");
                     nested_obj.rollback()
                 };
 

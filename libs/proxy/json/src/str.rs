@@ -8,14 +8,12 @@
 //!
 //! With modifications by Conrad Ludgate on behalf of Databricks.
 
-use std::{
-    borrow::Cow,
-    fmt::{self, Write},
-};
+use std::fmt::{self, Write};
 
 use crate::{KeyEncoder, ValueEncoder, ValueSer};
 
-pub struct EscapedStr(Cow<'static, [u8]>);
+#[repr(transparent)]
+pub struct EscapedStr([u8]);
 
 impl EscapedStr {
     /// Assumes the string does not need escaping.
@@ -23,31 +21,37 @@ impl EscapedStr {
     /// # Panics
     ///
     /// This will panic if the string does need escaping.
-    pub const fn from_static(s: &'static str) -> Self {
+    #[inline(always)]
+    pub const fn from_static(s: &'static str) -> &'static Self {
         let bytes = s.as_bytes();
 
         let mut i = 0;
         while i < bytes.len() {
             let byte = bytes[i];
-            let escape = ESCAPE[byte as usize];
 
-            assert!(escape == 0, "a character in the string needed escaping");
+            if byte < 0x20 || byte == b'"' || byte == b'\\' {
+                panic!("the string needs escaping");
+            }
 
             i += 1;
         }
 
-        Self(Cow::Borrowed(bytes))
+        // safety: this EscapedStr is transparent over [u8].
+        unsafe { std::mem::transmute::<&[u8], &EscapedStr>(bytes) }
     }
 
     /// Escapes the string eagerly.
-    pub fn escape(s: &str) -> Self {
+    pub fn escape(s: &str) -> Box<Self> {
         let mut writer = Vec::with_capacity(s.len());
 
         Collect { buf: &mut writer }
             .write_str(s)
             .expect("formatting should not error");
 
-        Self(Cow::Owned(writer))
+        let bytes = writer.into_boxed_slice();
+
+        // safety: this EscapedStr is transparent over [u8].
+        unsafe { std::mem::transmute::<Box<[u8]>, Box<EscapedStr>>(bytes) }
     }
 }
 
