@@ -247,7 +247,8 @@ pump_logging(struct LoggingReceiver *logging)
 	dropped_now = dropped_event_count - last_dropped_event_count;
 	if (dropped_now != 0)
 	{
-		elog(WARNING, UINT64_FORMAT " communicator log messages were dropped because the log buffer was full", dropped_now);
+		elog(WARNING, "%ul communicator log messages were dropped because the log buffer was full",
+			 (unsigned long) dropped_now);
 		last_dropped_event_count = dropped_event_count;
 	}
 }
