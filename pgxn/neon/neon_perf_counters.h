@@ -156,7 +156,7 @@ typedef struct
 	QTHistogramData query_time_hist;
 
 	/*
-	 * Minimal LSBN of infligth prefetch requests
+	 * Minimal LSN of infligth prefetch requests
 	 */
 	XLogRecPtr min_prefetch_lsn;
 } neon_per_backend_counters;
