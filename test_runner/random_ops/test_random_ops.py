@@ -124,6 +124,7 @@ class NeonBranch:
             if "parent_timestamp" in branch["branch"]
             else datetime.fromtimestamp(0, tz=UTC)
         )
+        self.connection_uri: str | None = branch["connection_uris"][0]["connection_uri"] if "connection_uris" in branch["branch"] else None
         self.connect_env: dict[str, str] | None = None
         if self.connection_parameters:
             self.connect_env = {
@@ -507,7 +508,9 @@ class NeonProject:
             target_branch.id,
             self.generate_branch_name(),
         )
-        with psycopg2.connect(self.connection_uri) as conn:
+        if target_branch.connection_uri is None:
+            raise RuntimeError(f"The branch {target_branch.id} does not have connection URI")
+        with psycopg2.connect(target_branch.connection_uri) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT value FROM sanity_check WHERE name = 'snapsot_name'")
                 snapshot_name = None
