@@ -939,6 +939,20 @@ pub(crate) struct CompactOptions {
     /// Set job size for the GC compaction.
     /// This option is only used by GC compaction.
     pub sub_compaction_max_job_size_mb: Option<u64>,
+    /// Only for GC compaction.
+    /// If set, the compaction will compact the metadata layers. Should be only set to true in unit tests
+    /// because metadata compaction is not fully supported yet.
+    pub gc_compaction_do_metadata_compaction: bool,
+}
+
+impl CompactOptions {
+    #[cfg(test)]
+    pub fn default_for_gc_compaction_unit_tests() -> Self {
+        Self {
+            gc_compaction_do_metadata_compaction: true,
+            ..Default::default()
+        }
+    }
 }
 
 impl std::fmt::Debug for Timeline {
@@ -2185,6 +2199,7 @@ impl Timeline {
                     compact_lsn_range: None,
                     sub_compaction: false,
                     sub_compaction_max_job_size_mb: None,
+                    gc_compaction_do_metadata_compaction: false,
                 },
                 ctx,
             )
