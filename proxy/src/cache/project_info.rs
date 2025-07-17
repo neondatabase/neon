@@ -190,7 +190,7 @@ impl ProjectInfoCacheImpl {
     pub(crate) fn insert_endpoint_access(
         &self,
         account_id: Option<AccountIdInt>,
-        project_id: ProjectIdInt,
+        project_id: Option<ProjectIdInt>,
         endpoint_id: EndpointIdInt,
         role_name: RoleNameInt,
         controls: EndpointAccessControl,
@@ -199,12 +199,19 @@ impl ProjectInfoCacheImpl {
         if let Some(account_id) = account_id {
             self.insert_account2endpoint(account_id, endpoint_id);
         }
-        self.insert_project2endpoint(project_id, endpoint_id);
+        if let Some(project_id) = project_id {
+            self.insert_project2endpoint(project_id, endpoint_id);
+        }
 
         if self.cache.len() >= self.config.size {
             // If there are too many entries, wait until the next gc cycle.
             return;
         }
+
+        debug!(
+            key = &*endpoint_id,
+            "created a cache entry for endpoint access"
+        );
 
         let controls = Some(Entry::new(Ok(controls), self.config.ttl));
         let role_controls = Entry::new(Ok(role_controls), self.config.ttl);
@@ -237,6 +244,11 @@ impl ProjectInfoCacheImpl {
             // If there are too many entries, wait until the next gc cycle.
             return;
         }
+
+        debug!(
+            key = &*endpoint_id,
+            "created a cache entry for an endpoint access error"
+        );
 
         let ttl = ttl.unwrap_or(self.config.ttl);
 
@@ -355,7 +367,6 @@ mod tests {
     use crate::control_plane::messages::{Details, EndpointRateLimitConfig, ErrorInfo, Status};
     use crate::control_plane::{AccessBlockerFlags, AuthSecret};
     use crate::scram::ServerSecret;
-    use crate::types::ProjectId;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -367,9 +378,9 @@ mod tests {
             ttl: Duration::from_secs(1),
             gc_interval: Duration::from_secs(600),
         });
-        let project_id: ProjectId = "project".into();
+        let project_id: Option<ProjectIdInt> = Some(ProjectIdInt::from(&"project".into()));
         let endpoint_id: EndpointId = "endpoint".into();
-        let account_id: Option<AccountIdInt> = None;
+        let account_id = None;
 
         let user1: RoleName = "user1".into();
         let user2: RoleName = "user2".into();
@@ -382,7 +393,7 @@ mod tests {
 
         cache.insert_endpoint_access(
             account_id,
-            (&project_id).into(),
+            project_id,
             (&endpoint_id).into(),
             (&user1).into(),
             EndpointAccessControl {
@@ -398,7 +409,7 @@ mod tests {
 
         cache.insert_endpoint_access(
             account_id,
-            (&project_id).into(),
+            project_id,
             (&endpoint_id).into(),
             (&user2).into(),
             EndpointAccessControl {
@@ -430,7 +441,7 @@ mod tests {
 
         cache.insert_endpoint_access(
             account_id,
-            (&project_id).into(),
+            project_id,
             (&endpoint_id).into(),
             (&user3).into(),
             EndpointAccessControl {
@@ -474,9 +485,9 @@ mod tests {
             ttl: Duration::from_secs(1),
             gc_interval: Duration::from_secs(600),
         });
-        let project_id: ProjectId = "project".into();
+        let project_id = Some(ProjectIdInt::from(&"project".into()));
         let endpoint_id: EndpointId = "endpoint".into();
-        let account_id: Option<AccountIdInt> = None;
+        let account_id = None;
 
         let user1: RoleName = "user1".into();
         let user2: RoleName = "user2".into();
@@ -556,7 +567,7 @@ mod tests {
         // success for a role does not overwrite errors for other roles
         cache.insert_endpoint_access(
             account_id,
-            (&project_id).into(),
+            project_id,
             (&endpoint_id).into(),
             (&user2).into(),
             EndpointAccessControl {

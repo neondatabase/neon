@@ -89,15 +89,16 @@ impl NeonControlPlaneClient {
                 };
                 let res = extract(&control, &role_control);
 
+                self.caches.project_info.insert_endpoint_access(
+                    auth_info.account_id,
+                    auth_info.project_id,
+                    cache_key.into(),
+                    role.into(),
+                    control,
+                    role_control,
+                );
+
                 if let Some(project_id) = auth_info.project_id {
-                    self.caches.project_info.insert_endpoint_access(
-                        auth_info.account_id,
-                        project_id,
-                        cache_key.into(),
-                        role.into(),
-                        control,
-                        role_control,
-                    );
                     ctx.set_project_id(project_id);
                 }
 
@@ -361,8 +362,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                     Err(GetAuthInfoError::ApiError(ControlPlaneError::Message(msg)))
                 }
                 Ok(role_control) => {
-                    info!(key = &*key, "found cached role access control");
-
+                    debug!(key = &*key, "found cached role access control");
                     Ok(role_control)
                 }
             };
@@ -397,8 +397,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                     Err(GetAuthInfoError::ApiError(ControlPlaneError::Message(msg)))
                 }
                 Ok(control) => {
-                    info!(key = &*key, "found cached endpoint access control");
-
+                    debug!(key = &*key, "found cached endpoint access control");
                     Ok(control)
                 }
             };
