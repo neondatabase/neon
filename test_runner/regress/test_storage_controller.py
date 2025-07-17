@@ -4895,7 +4895,6 @@ def test_storage_controller_forward_404(neon_env_builder: NeonEnvBuilder):
     assert placement["intent"]["attached"] == current_secondary
 
     # Now we issue requests that would cause 404 again
-
     retry_strategy = Retry(total=0)
     adapter = HTTPAdapter(max_retries=retry_strategy)
 

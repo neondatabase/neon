@@ -779,7 +779,9 @@ impl TenantIdOrShardId {
     fn contains(&self, tenant_shard_id: &TenantShardId) -> bool {
         match self {
             TenantIdOrShardId::TenantId(tenant_id) => tenant_shard_id.tenant_id == *tenant_id,
-            TenantIdOrShardId::TenantShardId(this_tenant_shard_id) => this_tenant_shard_id == tenant_shard_id,
+            TenantIdOrShardId::TenantShardId(this_tenant_shard_id) => {
+                this_tenant_shard_id == tenant_shard_id
+            }
         }
     }
 }

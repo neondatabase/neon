@@ -798,17 +798,41 @@ async fn handle_tenant_timeline_passthrough(
                 .storage_controller_passthrough_request_error;
             error_counter.inc(labels);
         }
+        let resp_staus = resp.status();
 
         // We have a reqest::Response, would like a http::Response
-        let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp.status())?);
+        let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp_staus)?);
         for (k, v) in resp.headers() {
             builder = builder.header(k.as_str(), v.as_bytes());
         }
-
-        let response = builder
-            .body(Body::wrap_stream(resp.bytes_stream()))
+        let resp_bytes = resp
+            .bytes()
+            .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
-
+        // Inspect 404 errors: at this point, we know that the tenant exists, but the pageserver we route
+        // the request to might not yet be ready. Therefore, if it is a _tenant_ not found error, we can
+        // convert it into a 503. TODO: we should make this part of the check in `tenant_shard_remote_mutation`.
+        // However, `tenant_shard_remote_mutation` currently cannot inspect the error HTTP response body,
+        // so we have to do it here instead.
+        if resp_staus == reqwest::StatusCode::NOT_FOUND {
+            let resp_str = std::str::from_utf8(&resp_bytes)
+                .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            // We only handle "tenant not found" errors; other 404s like timeline not found should
+            // be forwarded as-is.
+            if resp_str.contains(&format!("tenant {tenant_or_shard_id}")) {
+                // Rather than retry here, send the client a 503 to prompt a retry: this matches
+                // the pageserver's use of 503, and all clients calling this API should retry on 503.
+                return Err(ApiError::ResourceUnavailable(
+                    format!(
+                        "Pageserver {node} returned tenant 404 due to ongoing migration, retry later"
+                    )
+                    .into(),
+                ));
+            }
+        }
+        let response = builder
+            .body(Body::from(resp_bytes))
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
         Ok(response)
     }).await?
 }
