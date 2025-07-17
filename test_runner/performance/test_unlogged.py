@@ -9,6 +9,10 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
 
+# This test checks that the is no race between end of unlogged build and backends evicting pages of this index.
+# We need to create quite large  index (more than one gigabyte segment) to reproduce write error caused by this race condition
+# (backend completed unlogged build removes local files while backend evicting page tries to write to the file).
+# If index size is smaller than segment size, the problem is avoided by file descriptor cache which prevents file deletion.
 @pytest.mark.timeout(10000)
 def test_unlogged(neon_env_builder: NeonEnvBuilder):
     n_tables = 20
