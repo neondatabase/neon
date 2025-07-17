@@ -504,17 +504,24 @@ class NeonProject:
         Creates a new Neon branch for the current project, then restores the snapshot
         with the given id
         """
-        target_branch = self.create_branch(is_reset=True)
+        target_branch = self.create_branch()
         if not target_branch:
             return None
-        new_branch_id = self.neon_api.restore_snapshot(
+        new_branch_def = self.neon_api.restore_snapshot(
             self.id,
             snapshot_id,
             target_branch.id,
             self.generate_branch_name(),
-        )["branch"]["id"]
+        )
         self.wait()
-        new_branch = NeonBranch(self, self.neon_api.get_branch_details(self.id, new_branch_id))
+        NeonBranch(
+            self,
+            self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["parent_id"]),
+            is_reset=True,
+        )
+        new_branch = NeonBranch(
+            self, self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
+        )
         if new_branch.connection_parameters is None:
             raise RuntimeError(f"Neon branch {new_branch.id} does not have connection parameters")
         with psycopg2.connect(
@@ -531,7 +538,9 @@ class NeonProject:
                     snapshot_name = row[0]
                 assert snapshot_name == self.snapshots[snapshot_id].name
         self.wait()
-        return target_branch
+        target_branch.start_benchmark()
+        new_branch.start_benchmark()
+        return new_branch
 
 
 @pytest.fixture()
