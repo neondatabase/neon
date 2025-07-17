@@ -201,6 +201,11 @@ jobs:
         S3_BUCKET: neon-public-benchmark-results
         S3_PREFIX: benchbase-tpc-c/${{ steps.set-date.outputs.date }}/${{ github.run_id }}/${{ matrix.warehouses }}-warehouses
       run: |
+        echo "Redacting passwords from configuration files before upload..."
+        
+        # Mask all passwords in XML config files
+        find "${BENCHMARK_WORKDIR}/configs" -name "*.xml" -type f -exec sed -i 's|<password>[^<]*</password>|<password>redacted</password>|g' {} \;
+        
         echo "Uploading benchmark results to s3://${S3_BUCKET}/${S3_PREFIX}/"
         
         # Upload the entire benchmark directory recursively
