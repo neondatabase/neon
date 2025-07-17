@@ -11,6 +11,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import psycopg2
 import pytest
 from fixtures.log_helper import log
 
@@ -463,16 +464,24 @@ class NeonProject:
         Two optional arguments: lsn and timestamp are mutually exclusive
         they instruct to create a snapshot with the specific lns or timestamp
         """
-        snapshot = NeonSnapshot(
-            self,
-            self.neon_api.create_snapshot(
-                self.id,
-                self.main_branch.id,
-                lsn,
-                timestamp.isoformat().replace("+00:00", "Z") if timestamp else None,
-                self.gen_snapshot_name(),
-            ),
-        )
+        snapshot_name = self.gen_snapshot_name()
+        with psycopg2.connect(self.connection_uri) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO sanity_check (name, value) VALUES "
+                    f"('snapsot_name', '{snapshot_name}') ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
+                )
+                snapshot = NeonSnapshot(
+                    self,
+                    self.neon_api.create_snapshot(
+                        self.id,
+                        self.main_branch.id,
+                        lsn,
+                        timestamp.isoformat().replace("+00:00", "Z") if timestamp else None,
+                        snapshot_name,
+                    ),
+                )
+                cur.execute("UPDATE sanity_check SET value = 'tainted' || value")
         self.wait()
         return snapshot
 
@@ -498,6 +507,13 @@ class NeonProject:
             target_branch.id,
             self.generate_branch_name(),
         )
+        with psycopg2.connect(self.connection_uri) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM sanity_check WHERE name = 'snapsot_name'")
+                snapshot_name = None
+                if row := cur.fetchone():
+                    snapshot_name = row[0]
+                assert snapshot_name == self.snapshots[snapshot_id].name
         target_branch.start_benchmark()
         self.wait()
         return target_branch
@@ -631,6 +647,15 @@ def test_api_random(
     else:
         num_operations = 250
     pg_bin.run(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env)
+    # Create a table for sanity check
+    # We are going to leve some control values there to check, e.g., after restoring a snapshot
+    pg_bin.run(
+        [
+            "psql",
+            "-c",
+            "CREATE TABLE IF NOT EXISTS sanity_check (name VARCHAR NOT NULL PRIMARY KEY, value VARCHAR)",
+        ]
+    )
     # To not go to the past where pgbench tables do not exist
     time.sleep(1)
     project.min_time = datetime.now(UTC)
