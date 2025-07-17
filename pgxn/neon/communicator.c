@@ -1080,6 +1080,8 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 static void
 check_page_lsn(NeonGetPageResponse* resp)
 {
+	if (neon_protocol_version < 3) /* no information to check */
+		return;
 	if (PageGetLSN(resp->page) > resp->req.hdr.not_modified_since)
 		neon_log(PANIC, "Invalid getpage response version: %X/%08X is higher than last modified LSN %X/%08X",
 				 LSN_FORMAT_ARGS(PageGetLSN(resp->page)),
