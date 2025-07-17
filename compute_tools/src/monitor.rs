@@ -4,10 +4,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use compute_api::responses::ComputeStatus;
-use compute_api::spec::{ComputeFeature, ComputeMode};
+use compute_api::spec::ComputeFeature;
 use postgres::{Client, NoTls};
 use tracing::{Level, error, info, instrument, span};
-use utils::lsn::Lsn;
 
 use crate::compute::ComputeNode;
 use crate::metrics::{PG_CURR_DOWNTIME_MS, PG_TOTAL_DOWNTIME_MS};
@@ -342,41 +341,6 @@ impl ComputeMonitor {
                     "failed to get list of autovacuum workers: {}",
                     e
                 ));
-            }
-        }
-
-        let mode: ComputeMode = self
-            .compute
-            .state
-            .lock()
-            .unwrap()
-            .pspec
-            .as_ref()
-            .expect("we launch ComputeMonitor only after we received a spec")
-            .spec
-            .mode;
-        match mode {
-            // TODO: can the .spec.mode ever change? if it can (e.g. secondary promote to primary)
-            // then we should make sure that lsn_lease_state transitions back to None so we stop renewing it.
-            ComputeMode::Primary => (),
-            ComputeMode::Static(lsn) => {
-                self.compute.lsn_lease_state.update_desired_lease_lsn(lsn);
-            }
-            ComputeMode::Replica => {
-                match cli.query_one("SELECT pg_last_wal_replay_lsn() as apply_lsn", &[]) {
-                    Ok(r) => match r.try_get::<&str, postgres_types::PgLsn>("apply_lsn") {
-                        Ok(apply_lsn) => {
-                            let apply_lsn = Lsn(apply_lsn.into());
-                            self.compute.lsn_lease_state.update_desired_lease_lsn(apply_lsn);
-                        }
-                        Err(e) => {
-                            anyhow::bail!("parse apply_lsn: {e}");
-                        }
-                    },
-                    Err(e) => {
-                        anyhow::bail!("query apply_lsn: {e}");
-                    }
-                }
             }
         }
 

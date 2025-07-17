@@ -43,7 +43,7 @@ use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
 use crate::logger::startup_context_from_env;
-use crate::lsn_lease::{self, launch_lsn_lease_bg_task_for_static};
+use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
@@ -130,8 +130,6 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub compute_ctl_config: ComputeCtlConfig,
-
-    pub(crate) lsn_lease_state: Arc<lsn_lease::State>,
 
     /// Handle to the extension stats collection task
     extension_stats_task: TaskHandle,
@@ -440,7 +438,6 @@ impl ComputeNode {
             compute_ctl_config: config.compute_ctl_config,
             extension_stats_task: Mutex::new(None),
             lfc_offload_task: Mutex::new(None),
-            lsn_lease_state: Arc::new(lsn_lease::State::default()),
         })
     }
 
