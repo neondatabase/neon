@@ -4774,22 +4774,6 @@ impl Service {
         Ok(())
     }
 
-    fn is_observed_consistent_with_intent(
-        &self,
-        shard: &TenantShard,
-        intent_node_id: NodeId,
-    ) -> bool {
-        if let Some(location) = shard.observed.locations.get(&intent_node_id)
-            && let Some(ref conf) = location.conf
-            && (conf.mode == LocationConfigMode::AttachedSingle
-                || conf.mode == LocationConfigMode::AttachedMulti)
-        {
-            true
-        } else {
-            false
-        }
-    }
-
     pub(crate) fn is_tenant_not_found_error(body: &str, tenant_id: TenantId) -> bool {
         body.contains(&format!("tenant {tenant_id}"))
     }
