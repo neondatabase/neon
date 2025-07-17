@@ -91,9 +91,9 @@ relkind_cache_startup(void)
 		/*
 		 * In the worst case, the hash needs to be large enough for the case that all backends are performing an unlogged index build at the same time.
 		 * Or actually twice that, because while performing an unlogged index build, each backend can also be trying to write out a page for another
-		 * relation and hence hold one more entry in the cache pinned.
+		 * relation and hence hold one more entry in the cache pinned. Use MaxConnections instead of MaxBackends because only normal backends can perform unlogged build.
 		 */
-		size_t hash_size = Max(2 * MaxBackends, relkind_hash_size);
+		size_t hash_size = Max(2 * MaxConnections, relkind_hash_size);
 		relkind_hash_lock = (LWLockId) GetNamedLWLockTranche("neon_relkind");
 		finish_unlogged_build_lock = (LWLockId)(GetNamedLWLockTranche("neon_relkind") + 1);
 		info.keysize = sizeof(NRelFileInfo);
