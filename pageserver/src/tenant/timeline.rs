@@ -1835,11 +1835,14 @@ impl Timeline {
                     // of GC blocking.
                     let validate = {
                         let conf = self.tenant_conf.load();
-                        !conf.is_gc_blocked_by_lsn_lease_deadline()
+                        //!conf.is_gc_blocked_by_lsn_lease_deadline()
+                        !within_deadline
                     };
 
                     // Do not allow initial lease creation to be below the planned gc cutoff. The client (compute_ctl) determines
                     // whether it is a initial lease creation or a renewal.
+                    if !(is_renew && within_deadline) && lsn < planned_cutoff
+                    if (!is_renew || !within_deadline) && lsn < planned_cutoff {
                     if (init || validate) && lsn < planned_cutoff {
                         bail!(
                             "tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}",
