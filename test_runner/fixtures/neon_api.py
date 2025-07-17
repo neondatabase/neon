@@ -441,6 +441,14 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
+    def get_branch_endpoints(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/endpoints",
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
+        return cast("dict[str, Any]", resp.json())
+
     def get_endpoints(self, project_id: str) -> dict[str, Any]:
         resp = self.__request(
             "GET",

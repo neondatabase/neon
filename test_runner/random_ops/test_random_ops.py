@@ -309,7 +309,10 @@ class NeonProject:
         return False
 
     def create_branch(
-        self, parent_id: str | None = None, parent_timestamp: datetime | None = None
+        self,
+        parent_id: str | None = None,
+        parent_timestamp: datetime | None = None,
+        is_reset: bool = False,
     ) -> NeonBranch | None:
         self.wait()
         if not self.check_limit_branches():
@@ -322,7 +325,7 @@ class NeonProject:
         branch_def = self.neon_api.create_branch(
             self.id, parent_id=parent_id, parent_timestamp=parent_timestamp_str
         )
-        new_branch = NeonBranch(self, branch_def)
+        new_branch = NeonBranch(self, branch_def, is_reset)
         self.wait()
         return new_branch
 
@@ -501,23 +504,25 @@ class NeonProject:
         Creates a new Neon branch for the current project, then restores the snapshot
         with the given id
         """
-        target_branch = self.create_branch()
+        target_branch = self.create_branch(is_reset=True)
         if not target_branch:
             return None
-        self.neon_api.restore_snapshot(
+        new_branch_id = self.neon_api.restore_snapshot(
             self.id,
             snapshot_id,
             target_branch.id,
             self.generate_branch_name(),
-        )
-        if not target_branch.connection_parameters:
-            raise RuntimeError(f"The branch {target_branch.id} does not have connection parameters")
+        )["branch"]["id"]
+        self.wait()
+        new_branch = NeonBranch(self, self.neon_api.get_branch_details(self.id, new_branch_id))
+        if new_branch.connection_parameters is None:
+            raise RuntimeError(f"Neon branch {new_branch.id} does not have connection parameters")
         with psycopg2.connect(
-            host=target_branch.connection_parameters["host"],
+            host=new_branch.connection_parameters["host"],
             port=5432,
-            user=target_branch.connection_parameters["role"],
-            password=target_branch.connection_parameters["password"],
-            database=target_branch.connection_parameters["database"],
+            user=new_branch.connection_parameters["role"],
+            password=new_branch.connection_parameters["password"],
+            database=new_branch.connection_parameters["database"],
         ) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT value FROM sanity_check WHERE name = 'snapsot_name'")
@@ -525,7 +530,6 @@ class NeonProject:
                 if row := cur.fetchone():
                     snapshot_name = row[0]
                 assert snapshot_name == self.snapshots[snapshot_id].name
-        target_branch.start_benchmark()
         self.wait()
         return target_branch
 
