@@ -4876,7 +4876,7 @@ def test_storage_controller_forward_404(neon_env_builder: NeonEnvBuilder):
 
     # Do a shard migration to force switch the primary; but do not wait for it to complete.
 
-    # Disable attach operations on the pageservers. Configure `upsert-location` to error
+    # Disable attach operations on the pageservers. Configure `upsert-location` to noop
     # so that pageserver won't attach.
     for ps in env.pageservers:
         ps.http_client().configure_failpoints(("upsert-location", "return"))
@@ -4905,7 +4905,8 @@ def test_storage_controller_forward_404(neon_env_builder: NeonEnvBuilder):
     no_retry_api.mount("http://", adapter)
     no_retry_api.mount("https://", adapter)
 
-    # As intent state != observed state, tenant not found error should return 503
+    # As intent state != observed state, tenant not found error should return 503,
+    # so that the client can retry once we've successfully migrated.
     with pytest.raises(PageserverApiException) as e:
         no_retry_api.timeline_detail(env.initial_tenant, TimelineId.generate())
     assert e.value.status_code == 503, f"unexpected status code and error: {e.value}"
