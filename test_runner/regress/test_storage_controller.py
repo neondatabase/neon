@@ -4874,12 +4874,10 @@ def test_storage_controller_forward_404(neon_env_builder: NeonEnvBuilder):
     current_secondary = describe["node_secondary"][0]
     assert current_primary != current_secondary
 
-    # Do a shard migration to force switch the primary; but do not wait for it to complete.
-
-    # Disable attach operations on the pageservers. Configure `upsert-location` to noop
-    # so that pageserver won't attach.
-    for ps in env.pageservers:
-        ps.http_client().configure_failpoints(("upsert-location", "return"))
+    # Pause the reconciler so that the generation number won't be updated.
+    env.storage_controller.configure_failpoints(
+        ("reconciler-live-migrate-post-generation-inc", "pause")
+    )
 
     # Do the migration in another thread; the request will be dropped as we don't wait.
     shard_zero = TenantShardId(env.initial_tenant, 0, 0)
@@ -4914,6 +4912,7 @@ def test_storage_controller_forward_404(neon_env_builder: NeonEnvBuilder):
         no_retry_api.timeline_lsn_lease(env.initial_tenant, TimelineId.generate(), Lsn(0))
     assert e.value.status_code == 503, f"unexpected status code and error: {e.value}"
 
-    # Unblock attach operations
-    for ps in env.pageservers:
-        ps.http_client().configure_failpoints(("upsert-location", "off"))
+    # Unblock reconcile operations
+    env.storage_controller.configure_failpoints(
+        ("reconciler-live-migrate-post-generation-inc", "off")
+    )
