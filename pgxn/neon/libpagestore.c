@@ -111,6 +111,11 @@ typedef struct
  * has changed since last access, and to detect and retry copying the value if
  * the postmaster changes the value concurrently. (Postmaster doesn't have a
  * PGPROC entry and therefore cannot use LWLocks.)
+ *
+ * stripe_size is now also part of ShardMap, although it is defined by separate GUC.
+ * Postgres doesn't provide any mechanism to enforce dependencies between GUCs,
+ * that it we we have to rely on order of GUC definition in config file.
+ * "neon.stripe_size" should be defined prior to "neon.pageserver_connstring"
  */
 typedef struct
 {
