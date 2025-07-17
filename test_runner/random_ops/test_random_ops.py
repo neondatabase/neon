@@ -522,9 +522,16 @@ class NeonProject:
         new_branch = NeonBranch(
             self, self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
         )
-        new_branch.start_benchmark()
         if new_branch.connection_parameters is None:
-            raise RuntimeError(f"Neon branch {new_branch.id} does not have connection parameters {new_branch.endpoints}")
+            if not new_branch.endpoints:
+                for ep in self.neon_api.get_endpoints(self.id)["endpoints"]:
+                    NeonEndpoint(self, ep)
+            new_branch.connection_parameters = self.connection_parameters.copy()
+            for ep in new_branch.endpoints.values():
+                if ep.type == "read_write":
+                    new_branch.connection_parameters["host"] = ep.host
+                    break
+
         with psycopg2.connect(
             host=new_branch.connection_parameters["host"],
             port=5432,
