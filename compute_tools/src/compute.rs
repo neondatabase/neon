@@ -43,7 +43,7 @@ use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
 use crate::installed_extensions::get_installed_extensions;
 use crate::logger::startup_context_from_env;
-use crate::lsn_lease::{self, launch_lsn_lease_bg_task};
+use crate::lsn_lease::{self, launch_lsn_lease_bg_task_for_static};
 use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
@@ -491,7 +491,7 @@ impl ComputeNode {
             this.wait_spec()?
         };
 
-        launch_lsn_lease_bg_task(&this);
+        launch_lsn_lease_bg_task_for_static(&this);
 
         // We have a spec, start the compute
         let mut delay_exit = false;
