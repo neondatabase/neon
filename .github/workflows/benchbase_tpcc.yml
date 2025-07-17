@@ -36,14 +36,14 @@ jobs:
             max_rate: 800
             min_cu: 0.25
             max_cu: 2
-        #   - warehouses: 500
-        #     max_rate: 2000
-        #     min_cu: 2
-        #     max_cu: 8
-        #   - warehouses: 1000
-        #     max_rate: 2900
-        #     min_cu: 2
-        #     max_cu: 16
+          - warehouses: 500
+            max_rate: 2000
+            min_cu: 2
+            max_cu: 8
+          - warehouses: 1000
+            max_rate: 2900
+            min_cu: 2
+            max_cu: 16
       max-parallel: 1 # we want to run each workload size sequentially to avoid noisy neighbors
     permissions:
       contents: write
