@@ -159,7 +159,7 @@ log_newpages_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 					 page_std);
 	}
 
-	return ProcLastRecPtr;
+	return GetXLogInsertRecPtr();
 }
 #endif /* PG_MAJORVERSION_NUM >= 17 */
 
