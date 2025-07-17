@@ -49,7 +49,6 @@ typedef struct
 	uint64		hits;
 	uint64		misses;
 	uint64		pinned;
-	slock_t		mutex;
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 } RelKindHashControl;
@@ -64,6 +63,7 @@ static void relkind_shmem_request(void);
 #endif
 
 LWLockId finish_unlogged_build_lock;
+LWLockId relkind_hash_lock;
 
 /*
  * Size of a cache entry is 32 bytes. So this default will take about 2 MB,
@@ -94,14 +94,14 @@ relkind_cache_startup(void)
 		 * relation and hence hold one more entry in the cache pinned.
 		 */
 		size_t hash_size = Max(2 * MaxBackends, relkind_hash_size);
-		finish_unlogged_build_lock = (LWLockId) GetNamedLWLockTranche("neon_relkind");
+		relkind_hash_lock = (LWLockId) GetNamedLWLockTranche("neon_relkind");
+		finish_unlogged_build_lock = (LWLockId)(GetNamedLWLockTranche("neon_relkind") + 1);
 		info.keysize = sizeof(NRelFileInfo);
 		info.entrysize = sizeof(RelKindEntry);
 		relkind_hash = ShmemInitHash("neon_relkind",
 									 hash_size, hash_size,
 									 &info,
 									 HASH_ELEM | HASH_BLOBS);
-		SpinLockInit(&relkind_ctl->mutex);
 		relkind_ctl->size = 0;
 		relkind_ctl->hits = 0;
 		relkind_ctl->misses = 0;
@@ -181,11 +181,12 @@ pin_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
 {
 	RelKindEntry *entry;
 
-	/* Use spinlock to prevent concurrent hash modifitcation */
-	SpinLockAcquire(&relkind_ctl->mutex);
+	LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
+
 	entry = get_pinned_entry(rinfo);
 	entry->relkind = relkind;
-	SpinLockRelease(&relkind_ctl->mutex);
+
+	LWLockRelease(relkind_hash_lock);
 	return entry;
 }
 
@@ -202,7 +203,8 @@ get_cached_relkind(NRelFileInfo rinfo)
 	RelKindEntry *entry;
 	RelKind relkind = RELKIND_UNKNOWN;
 
-	SpinLockAcquire(&relkind_ctl->mutex);
+	LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
+
 	entry = hash_search(relkind_hash, &rinfo, HASH_FIND, NULL);
 	if (entry != NULL)
 	{
@@ -215,7 +217,7 @@ get_cached_relkind(NRelFileInfo rinfo)
 		relkind = entry->relkind;
 		unpin_entry(entry);
 	}
-	SpinLockRelease(&relkind_ctl->mutex);
+	LWLockRelease(relkind_hash_lock);
 	return relkind;
 }
 
@@ -228,13 +230,15 @@ set_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
 {
 	RelKindEntry *entry;
 
-	SpinLockAcquire(&relkind_ctl->mutex);
+	LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
+
 	/* Do pin+unpin entry to move it to the end of LRU list */
 	entry = get_pinned_entry(rinfo);
 	Assert(entry->relkind == RELKIND_UNKNOWN || entry->relkind == relkind);
 	entry->relkind = relkind;
 	unpin_entry(entry);
-	SpinLockRelease(&relkind_ctl->mutex);
+
+	LWLockRelease(relkind_hash_lock);
 }
 
 void
@@ -242,9 +246,9 @@ unpin_cached_relkind(RelKindEntry* entry)
 {
 	if (entry)
 	{
-		SpinLockAcquire(&relkind_ctl->mutex);
+		LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
 		unpin_entry(entry);
-		SpinLockRelease(&relkind_ctl->mutex);
+		LWLockRelease(relkind_hash_lock);
 	}
 }
 
@@ -252,7 +256,9 @@ void
 forget_cached_relkind(NRelFileInfo rinfo)
 {
 	RelKindEntry *entry;
-	SpinLockAcquire(&relkind_ctl->mutex);
+
+	LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
+
 	entry = hash_search(relkind_hash, &rinfo, HASH_REMOVE, NULL);
 	if (entry)
 	{
@@ -260,7 +266,8 @@ forget_cached_relkind(NRelFileInfo rinfo)
 		dlist_delete(&entry->lru_node);
 		relkind_ctl->size -= 1;
 	}
-	SpinLockRelease(&relkind_ctl->mutex);
+
+	LWLockRelease(relkind_hash_lock);
 }
 
 
@@ -285,7 +292,7 @@ relkind_hash_init(void)
 	shmem_request_hook = relkind_shmem_request;
 #else
 	RequestAddinShmemSpace(hash_estimate_size(relkind_hash_size, sizeof(RelKindEntry)));
-	RequestNamedLWLockTranche("neon_relkind", 1);
+	RequestNamedLWLockTranche("neon_relkind", 2);
 #endif
 
 	prev_shmem_startup_hook = shmem_startup_hook;
@@ -304,6 +311,6 @@ relkind_shmem_request(void)
 		prev_shmem_request_hook();
 
 	RequestAddinShmemSpace(sizeof(RelKindHashControl) + hash_estimate_size(relkind_hash_size, sizeof(RelKindEntry)));
-	RequestNamedLWLockTranche("neon_relkind", 1);
+	RequestNamedLWLockTranche("neon_relkind", 2);
 }
 #endif

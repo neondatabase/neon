@@ -1615,6 +1615,11 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			{
 				/* We do not know relation persistence: let's determine it */
 				relkind = mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? RELKIND_UNLOGGED : RELKIND_PERMANENT;
+				/*
+				 * There is no lock hold between get_cached_relkind and set_cached_relkind.
+				 * We assume that multiple backends can repeat this check and get the same result (there is assert in set_cached_relkind).
+				 * And concurrent setting UNLOGGED_BUILD is not possible because only one relation can perform unlogged build.
+				 */
 				set_cached_relkind(rinfo, relkind);
 			}
 			if (relkind == RELKIND_UNLOGGED_BUILD)
