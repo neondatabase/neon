@@ -67,22 +67,26 @@ impl fmt::Write for Collect<'_> {
 
 // writes any escape sequences, and returns the suffix still needed to be written.
 fn format_escaped_str_contents(writer: &mut Vec<u8>, value: &str) {
-    let bytes = value.as_bytes();
+    let mut bytes = value.as_bytes();
 
-    let mut start = 0;
-
-    for (i, &byte) in bytes.iter().enumerate() {
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
         let escape = ESCAPE[byte as usize];
+
+        i += 1;
         if escape == 0 {
             continue;
         }
 
-        let next = i + 1;
-        write_char_escape(writer, &bytes[start..next]);
-        start = next;
+        let string_run;
+        (string_run, bytes) = bytes.split_at(i);
+        i = 0;
+
+        write_char_escape(writer, string_run);
     }
 
-    writer.extend_from_slice(&bytes[start..]);
+    writer.extend_from_slice(bytes);
 }
 
 const BB: u8 = b'b'; // \x08
