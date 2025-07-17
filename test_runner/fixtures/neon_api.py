@@ -471,6 +471,8 @@ class NeonAPI:
             operations = self.get_operations(project_id)["operations"]
             for op in operations:
                 if op["status"] in {"scheduling", "running", "cancelling"}:
+                    # XXX debug only, do not merge
+                    log.info("Waiting for operation: %s", op)
                     has_running = True
             time.sleep(0.5)
 
