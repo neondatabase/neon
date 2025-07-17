@@ -10,6 +10,7 @@ use crate::id_lock_map::trace_shared_lock;
 use crate::metrics;
 use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
+    TimelineUpdate,
 };
 use crate::safekeeper::Safekeeper;
 use crate::safekeeper_client::SafekeeperClient;
@@ -454,19 +455,33 @@ impl Service {
         let persistence = TimelinePersistence {
             tenant_id: req.tenant_id.to_string(),
             timeline_id: req.timeline_id.to_string(),
-            start_lsn: Lsn::INVALID.into(),
+            start_lsn: req.start_lsn.into(),
             generation: 1,
             sk_set: req.sk_set.iter().map(|sk_id| sk_id.0 as i64).collect(),
             new_sk_set: None,
             cplane_notified_generation: 1,
             deleted_at: None,
         };
-        let inserted = self.persistence.insert_timeline(persistence).await?;
+        let inserted = self
+            .persistence
+            .insert_timeline(persistence.clone())
+            .await?;
         if inserted {
             tracing::info!("imported timeline into db");
-        } else {
-            tracing::info!("didn't import timeline into db, as it is already present in db");
+            return Ok(());
         }
+        tracing::info!("timeline already present in db, updating");
+
+        let update = TimelineUpdate {
+            tenant_id: persistence.tenant_id,
+            timeline_id: persistence.timeline_id,
+            start_lsn: persistence.start_lsn,
+            sk_set: persistence.sk_set,
+            new_sk_set: persistence.new_sk_set,
+        };
+        self.persistence.update_timeline_unsafe(update).await?;
+        tracing::info!("timeline updated");
+
         Ok(())
     }
 

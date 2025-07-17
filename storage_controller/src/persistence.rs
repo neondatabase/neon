@@ -129,6 +129,7 @@ pub(crate) enum DatabaseOperation {
     UpdateLeader,
     SetPreferredAzs,
     InsertTimeline,
+    UpdateTimeline,
     UpdateTimelineMembership,
     GetTimeline,
     InsertTimelineReconcile,
@@ -1463,6 +1464,36 @@ impl Persistence {
         .await
     }
 
+    /// Update an already present timeline.
+    /// VERY UNSAFE FUNCTION: this overrides in-progress migrations. Don't use this unless neccessary.
+    pub(crate) async fn update_timeline_unsafe(
+        &self,
+        entry: TimelineUpdate,
+    ) -> DatabaseResult<bool> {
+        use crate::schema::timelines;
+
+        let entry = &entry;
+        self.with_measured_conn(DatabaseOperation::UpdateTimeline, move |conn| {
+            Box::pin(async move {
+                let inserted_updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(&entry.tenant_id))
+                    .filter(timelines::timeline_id.eq(&entry.timeline_id))
+                    .set(entry)
+                    .execute(conn)
+                    .await?;
+
+                match inserted_updated {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({inserted_updated})"
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
     /// Update timeline membership configuration in the database.
     /// Perform a compare-and-swap (CAS) operation on the timeline's generation.
     /// The `new_generation` must be the next (+1) generation after the one in the database.
@@ -2501,6 +2532,18 @@ impl TimelineFromDb {
             deleted_at: self.deleted_at,
         }
     }
+}
+
+// This is separate from TimelinePersistence because we don't want to touch generation and deleted_at values for the update.
+#[derive(AsChangeset)]
+#[diesel(table_name = crate::schema::timelines)]
+#[diesel(treat_none_as_null = true)]
+pub(crate) struct TimelineUpdate {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) start_lsn: LsnWrapper,
+    pub(crate) sk_set: Vec<i64>,
+    pub(crate) new_sk_set: Option<Vec<i64>>,
 }
 
 #[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]
