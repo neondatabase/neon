@@ -380,7 +380,7 @@ class NeonAPI:
         snapshot_id: str,
         target_branch_id: str,
         name: str | None = None,
-        finalize_restore: bool = False,
+        finalize_restore: bool = True,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "target_branch_id": target_branch_id,
