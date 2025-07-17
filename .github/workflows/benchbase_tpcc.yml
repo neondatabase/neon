@@ -163,11 +163,7 @@ jobs:
         
         echo "Loading ${WAREHOUSES} warehouses into database..."
         
-        # Create results directory for Docker mount with proper permissions
-        mkdir -p results
-        chmod 777 results
-        
-        # Run the loader script
+        # Run the loader script (creates its own results_load directory)
         ./scripts/load_${WAREHOUSES}_warehouses.sh
         
         echo "Database loading completed"

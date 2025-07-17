@@ -146,17 +146,25 @@ RAMP_UP_XML = '''<?xml version="1.0"?>
 WORK_TEMPLATE = f'''        <work>\n            <time>{RAMP_STEP_TIME_SECONDS}</time>\n            <rate>{{rate}}</rate>\n            <weights>{TRANSACTION_WEIGHTS}</weights>\n            <arrival>POISSON</arrival>\n            <distribution>ZIPFIAN</distribution>\n        </work>\n'''
 
 # Templates for shell scripts
-EXECUTE_SCRIPT = '''docker run --network=host --rm \
+EXECUTE_SCRIPT = '''# Create results directories
+mkdir -p results_warmup
+mkdir -p results_{suffix}
+chmod 777 results_warmup results_{suffix}
+
+# Run warmup phase
+docker run --network=host --rm \
   -v $(pwd)/configs:/configs \
-  -v $(pwd)/results:/results \
+  -v $(pwd)/results_warmup:/results \
     {docker_image}\
   -b tpcc \
   -c /configs/execute_{warehouses}_warehouses_warmup.xml \
   -d /results \
   --create=false --load=false --execute=true
+
+# Run benchmark phase  
 docker run --network=host --rm \
   -v $(pwd)/configs:/configs \
-  -v $(pwd)/results:/results \
+  -v $(pwd)/results_{suffix}:/results \
     {docker_image}\
   -b tpcc \
   -c /configs/execute_{warehouses}_warehouses_{suffix}.xml \
@@ -178,9 +186,13 @@ LOAD_XML = '''<?xml version="1.0"?>
 </parameters>
 '''
 
-LOAD_SCRIPT = '''docker run --network=host --rm \
+LOAD_SCRIPT = '''# Create results directory for loading
+mkdir -p results_load
+chmod 777 results_load
+
+docker run --network=host --rm \
   -v $(pwd)/configs:/configs \
-  -v $(pwd)/results:/results \
+  -v $(pwd)/results_load:/results \
     {docker_image}\
   -b tpcc \
   -c /configs/load_{warehouses}_warehouses.xml \
