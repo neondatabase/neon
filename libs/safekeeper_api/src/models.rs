@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::TimestampTz;
+use postgres_ffi_types::TimestampTz;
 use postgres_versioninfo::PgVersionId;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;

@@ -176,7 +176,13 @@ runs:
         fi
 
         if [[ $BUILD_TYPE == "debug" && $RUNNER_ARCH == 'X64' ]]; then
-          cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
+          # We don't use code coverage for regression tests (the step is disabled),
+          # so there's no need to collect it.
+          # Ref https://github.com/neondatabase/neon/issues/4540
+          # cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
+          cov_prefix=()
+          # Explicitly set LLVM_PROFILE_FILE to /dev/null to avoid writing *.profraw files
+          export LLVM_PROFILE_FILE=/dev/null
         else
           cov_prefix=()
         fi

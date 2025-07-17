@@ -565,6 +565,15 @@ _PG_init(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomStringVariable(
+							"neon.privileged_role_name",
+							"Name of the 'weak' superuser role, which we give to the users",
+							NULL,
+							&privileged_role_name,
+							"neon_superuser",
+							PGC_POSTMASTER, 0, NULL, NULL, NULL);
+
 	/*
 	 * Important: This must happen after other parts of the extension are
 	 * loaded, otherwise any settings to GUCs that were set before the

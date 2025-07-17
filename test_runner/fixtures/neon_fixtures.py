@@ -728,7 +728,7 @@ class NeonEnvBuilder:
         # NB: neon_local rewrites postgresql.conf on each start based on neon_local config. No need to patch it.
         # However, in this new NeonEnv, the pageservers and safekeepers listen on different ports, and the storage
         # controller will currently reject re-attach requests from them because the NodeMetadata isn't identical.
-        # So, from_repo_dir patches up the the storcon database.
+        # So, from_repo_dir patches up the storcon database.
         patch_script_path = self.repo_dir / "storage_controller_db.startup.sql"
         assert not patch_script_path.exists()
         patch_script = ""
@@ -4324,6 +4324,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
     ) -> Self:
         """
         Create a new Postgres endpoint.
@@ -4351,6 +4352,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             update_catalog=update_catalog,
+            privileged_role_name=privileged_role_name,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = self.env.repo_dir / path
@@ -4811,6 +4813,7 @@ class EndpointFactory:
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4834,6 +4837,7 @@ class EndpointFactory:
             config_lines=config_lines,
             pageserver_id=pageserver_id,
             update_catalog=update_catalog,
+            privileged_role_name=privileged_role_name,
         )
 
     def stop_all(self, fail_on_error=True) -> Self:

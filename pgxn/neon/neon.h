@@ -17,7 +17,6 @@ extern bool neon_enable_new_communicator;
 extern char *neon_auth_token;
 extern char *neon_timeline;
 extern char *neon_tenant;
-
 extern char *wal_acceptors_list;
 extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;
