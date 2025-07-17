@@ -60,10 +60,16 @@ pub fn write_postgres_conf(
 
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
+    writeln!(file)?;
     if let Some(conninfo) = &spec.pageserver_connection_info {
         let mut libpq_urls: Option<Vec<String>> = Some(Vec::new());
+        let num_shards = if conninfo.shard_count.0 == 0 {
+            1 // unsharded, treat it as a single shard
+        } else {
+            conninfo.shard_count.0
+        };
 
-        for shard_number in 0..conninfo.shard_count.0 {
+        for shard_number in 0..num_shards {
             let shard_index = ShardIndex {
                 shard_number: ShardNumber(shard_number),
                 shard_count: conninfo.shard_count,
