@@ -187,6 +187,15 @@ jobs:
       run: |
         cd "${BENCHMARK_WORKDIR}"
         
+        echo "Creating temporary Python environment for diagram generation..."
+        
+        # Create temporary virtual environment
+        python3 -m venv temp_diagram_env
+        source temp_diagram_env/bin/activate
+        
+        # Install required packages in virtual environment
+        pip install matplotlib pandas
+        
         echo "Generating performance diagrams..."
         
         # Copy the diagram generator script
@@ -196,7 +205,7 @@ jobs:
         WARMUP_CSV=$(find results_warmup -name "*.results.csv" -type f | head -1)
         if [ -n "$WARMUP_CSV" ]; then
           echo "Generating warmup diagram from: $WARMUP_CSV"
-          python3 generate_diagrams.py \
+          python generate_diagrams.py \
             --input-csv "$WARMUP_CSV" \
             --output-svg "warmup_${WAREHOUSES}_warehouses_performance.svg" \
             --title-suffix "Warmup at max TPS"
@@ -208,7 +217,7 @@ jobs:
         OPTRATE_CSV=$(find results_opt_rate -name "*.results.csv" -type f | head -1)
         if [ -n "$OPTRATE_CSV" ]; then
           echo "Generating optimal rate diagram from: $OPTRATE_CSV"
-          python3 generate_diagrams.py \
+          python generate_diagrams.py \
             --input-csv "$OPTRATE_CSV" \
             --output-svg "benchmark_${WAREHOUSES}_warehouses_performance.svg" \
             --title-suffix "70% of max TPS"
@@ -216,7 +225,11 @@ jobs:
           echo "Warning: No optimal rate results CSV found in results_opt_rate/"
         fi
         
-        echo "Diagram generation completed"
+        # Deactivate and clean up virtual environment
+        deactivate
+        rm -rf temp_diagram_env
+        
+        echo "Diagram generation completed and environment cleaned up"
 
     - name: Set date for upload
       id: set-date
