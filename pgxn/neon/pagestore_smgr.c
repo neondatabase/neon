@@ -1614,6 +1614,10 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
+			if (forknum == INIT_FORKNUM)
+			{
+				break; /* init fork is always permanent */
+			}
 			relkind = get_cached_relkind(rinfo);
 			if (relkind == RELKIND_UNKNOWN)
 			{
@@ -1719,6 +1723,10 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
+			if (forknum == INIT_FORKNUM)
+			{
+				break; /* init fork is always permanent */
+			}
 			relkind = get_cached_relkind(rinfo);
 			if (relkind == RELKIND_UNKNOWN)
 			{
