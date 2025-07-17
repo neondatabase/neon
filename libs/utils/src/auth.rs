@@ -12,7 +12,7 @@ use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode,
 };
 use pem::Pem;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::id::TenantId;
@@ -57,12 +57,32 @@ pub enum Scope {
     ControllerPeer,
 }
 
+fn deserialize_empty_string_as_none_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    match opt.as_deref() {
+        Some("") => Ok(None),
+        Some(s) => Uuid::parse_str(s)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
 /// JWT payload. See docs/authentication.md for the format
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Claims {
     #[serde(default)]
     pub tenant_id: Option<TenantId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        // Neon control plane includes this field as empty in the claims.
+        // Consider it None in those cases.
+        deserialize_with = "deserialize_empty_string_as_none_uuid"
+    )]
     pub endpoint_id: Option<Uuid>,
     pub scope: Scope,
 }
