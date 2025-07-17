@@ -130,7 +130,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         let res = auth_info.authenticate(ctx, &mut node, user_info).await;
         match res {
             Ok(pg_settings) => break pg_settings,
-            Err(e) if attempt < 2 && e.should_retry_wake_compute() => {
+            // we don't need to retry for now. we use service name to connect, not IP address.
+            Err(e) if attempt < 1 && e.should_retry_wake_compute() => {
                 tracing::warn!(error = ?e, "retrying wake compute");
 
                 #[allow(irrefutable_let_patterns)]
