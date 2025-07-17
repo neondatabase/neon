@@ -46,7 +46,6 @@ use crate::logger::startup_context_from_env;
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
-use crate::pg_helpers::*;
 use crate::pgbouncer::*;
 use crate::rsyslog::{
     PostgresLogsRsyslogConfig, configure_audit_rsyslog, configure_postgres_logs_export,
@@ -57,6 +56,7 @@ use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::tls::watch_cert_for_changes;
 use crate::{config, extension_server, local_proxy};
+use crate::{pg_helpers::*, ro_replica};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
 pub static PG_PID: AtomicU32 = AtomicU32::new(0);
@@ -130,6 +130,8 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub compute_ctl_config: ComputeCtlConfig,
+
+    pub(crate) ro_replica: Arc<ro_replica::GlobalState>,
 
     /// Handle to the extension stats collection task
     extension_stats_task: TaskHandle,
@@ -438,6 +440,7 @@ impl ComputeNode {
             compute_ctl_config: config.compute_ctl_config,
             extension_stats_task: Mutex::new(None),
             lfc_offload_task: Mutex::new(None),
+            ro_replica: Arc::new(ro_replica::GlobalState::default()),
         })
     }
 
