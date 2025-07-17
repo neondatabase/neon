@@ -8,6 +8,7 @@ use anyhow::anyhow;
 use arc_swap::ArcSwap;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
+use pageserver_api::shard::DEFAULT_STRIPE_SIZE;
 use tonic::codec::CompressionEncoding;
 use tracing::{debug, instrument};
 use utils::logging::warn_slow;
@@ -16,10 +17,9 @@ use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool}
 use crate::retry::Retry;
 use crate::split::GetPageSplitter;
 use compute_api::spec::PageserverProtocol;
-use pageserver_api::shard::ShardStripeSize;
 use pageserver_page_api as page_api;
 use utils::id::{TenantId, TimelineId};
-use utils::shard::{ShardCount, ShardIndex, ShardNumber};
+use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
 
 /// Max number of concurrent clients per channel (i.e. TCP connection). New channels will be spun up
 /// when full.
@@ -418,7 +418,7 @@ impl ShardSpec {
         if stripe_size.is_none() && !count.is_unsharded() {
             return Err(anyhow!("stripe size must be given for sharded tenants"));
         }
-        let stripe_size = stripe_size.unwrap_or_default();
+        let stripe_size = stripe_size.unwrap_or(DEFAULT_STRIPE_SIZE);
 
         // Validate the shard spec.
         for (shard_id, url) in &urls {

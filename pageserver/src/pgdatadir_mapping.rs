@@ -2907,9 +2907,8 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 mod tests {
     use hex_literal::hex;
     use pageserver_api::models::ShardParameters;
-    use pageserver_api::shard::ShardStripeSize;
     use utils::id::TimelineId;
-    use utils::shard::{ShardCount, ShardNumber};
+    use utils::shard::{ShardCount, ShardNumber, ShardStripeSize};
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
