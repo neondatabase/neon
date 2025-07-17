@@ -79,6 +79,9 @@ fn format_escaped_str_contents(writer: &mut Vec<u8>, value: &str) {
             continue;
         }
 
+        // hitting an escape character is unlikely.
+        cold();
+
         let string_run;
         (string_run, bytes) = bytes.split_at(i);
         i = 0;
@@ -122,27 +125,36 @@ static ESCAPE: [u8; 256] = [
 ];
 
 #[cold]
+fn cold() {}
+
 fn write_char_escape(writer: &mut Vec<u8>, bytes: &[u8]) {
-    let (&byte, string_run) = bytes.split_last().expect("bytes will not be empty");
+    debug_assert!(
+        !bytes.is_empty(),
+        "caller guarantees that bytes is non empty"
+    );
+
+    let (&byte, string_run) = bytes.split_last().unwrap_or((&0, b""));
 
     let escape = ESCAPE[byte as usize];
-    debug_assert_ne!(escape, 0);
+    debug_assert_ne!(escape, 0, "caller guarantees that escape will be non-zero");
 
     // the escape char from the escape table is the correct replacement
     // character.
     let mut bytes = [b'\\', escape, b'0', b'0', b'0', b'0'];
+    let mut s = &bytes[0..2];
 
-    let s = match escape {
-        // if the replacement character is 'u', then we need
-        // to write the utf16 encoding
-        UU => {
-            static HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
-            bytes[4] = HEX_DIGITS[(byte >> 4) as usize];
-            bytes[5] = HEX_DIGITS[(byte & 0xF) as usize];
-            &bytes
-        }
-        _ => &bytes[0..2],
-    };
+    // if the replacement character is 'u', then we need
+    // to write the unicode encoding
+    if escape == UU {
+        static HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
+
+        // we rarely encounter characters that must be escaped as unicode.
+        cold();
+
+        bytes[4] = HEX_DIGITS[(byte >> 4) as usize];
+        bytes[5] = HEX_DIGITS[(byte & 0xF) as usize];
+        s = &bytes;
+    }
 
     writer.extend_from_slice(string_run);
     writer.extend_from_slice(s);
