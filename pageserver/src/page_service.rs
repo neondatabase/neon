@@ -3766,12 +3766,14 @@ impl proto::PageService for GrpcPageServiceHandler {
                 // NB: Tonic considers the entire stream to be an in-flight request and will wait
                 // for it to complete before shutting down. React to cancellation between requests.
                 let req = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(tonic::Status::unavailable("shutting down")),
+
                     result = reqs.message() => match result {
                         Ok(Some(req)) => Ok(req),
                         Ok(None) => break, // client closed the stream
                         Err(err) => Err(err),
                     },
-                    _ = cancel.cancelled() => Err(tonic::Status::unavailable("shutting down")),
                 }?;
                 let req_id = req.request_id.map(page_api::RequestID::from).unwrap_or_default();
                 let result = Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
