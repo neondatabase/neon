@@ -90,6 +90,7 @@ typedef struct
 {
 	char		connstring[MAX_SHARDS][MAX_PAGESERVER_CONNSTRING_SIZE];
 	size_t		num_shards;
+	size_t		stripe_size;
 } ShardMap;
 
 /*
@@ -110,6 +111,11 @@ typedef struct
  * has changed since last access, and to detect and retry copying the value if
  * the postmaster changes the value concurrently. (Postmaster doesn't have a
  * PGPROC entry and therefore cannot use LWLocks.)
+ *
+ * stripe_size is now also part of ShardMap, although it is defined by separate GUC.
+ * Postgres doesn't provide any mechanism to enforce dependencies between GUCs,
+ * that it we we have to rely on order of GUC definition in config file.
+ * "neon.stripe_size" should be defined prior to "neon.pageserver_connstring"
  */
 typedef struct
 {
@@ -230,7 +236,10 @@ ParseShardMap(const char *connstr, ShardMap *result)
 		p = sep + 1;
 	}
 	if (result)
+	{
 		result->num_shards = nshards;
+		result->stripe_size = stripe_size;
+	}
 
 	return true;
 }
@@ -291,12 +300,13 @@ AssignPageserverConnstring(const char *newval, void *extra)
  * last call, terminates all existing connections to all pageservers.
  */
 static void
-load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
+load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p, size_t* stripe_size_p)
 {
 	uint64		begin_update_counter;
 	uint64		end_update_counter;
 	ShardMap   *shard_map = &pagestore_shared->shard_map;
 	shardno_t	num_shards;
+	size_t		stripe_size;
 
 	/*
 	 * Postmaster can update the shared memory values concurrently, in which
@@ -311,6 +321,7 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
 
 		num_shards = shard_map->num_shards;
+		stripe_size = shard_map->stripe_size;
 		if (connstr_p && shard_no < MAX_SHARDS)
 			strlcpy(connstr_p, shard_map->connstring[shard_no], MAX_PAGESERVER_CONNSTRING_SIZE);
 		pg_memory_barrier();
@@ -345,6 +356,8 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 
 	if (num_shards_p)
 		*num_shards_p = num_shards;
+	if (stripe_size_p)
+		*stripe_size_p = stripe_size;
 }
 
 #define MB (1024*1024)
@@ -353,9 +366,10 @@ shardno_t
 get_shard_number(BufferTag *tag)
 {
 	shardno_t	n_shards;
+	size_t		stripe_size;
 	uint32		hash;
 
-	load_shard_map(0, NULL, &n_shards);
+	load_shard_map(0, NULL, &n_shards, &stripe_size);
 
 #if PG_MAJORVERSION_NUM < 16
 	hash = murmurhash32(tag->rnode.relNode);
@@ -408,7 +422,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	 * Note that connstr is used both during connection start, and when we
 	 * log the successful connection.
 	 */
-	load_shard_map(shard_no, connstr, NULL);
+	load_shard_map(shard_no, connstr, NULL, NULL);
 
 	switch (shard->state)
 	{
