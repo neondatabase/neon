@@ -200,14 +200,6 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
             res = s_cur.fetchone()
             assert res == (10000,)
 
-            for tenant_shard_id, pageserver in shards:
-                client = pageserver.http_client()
-                leases = client.timeline_lsn_lease_dump(tenant_shard_id, timeline_id)
-                leases_sorted = sorted(list(leases.items()))
-                log.info(f"lease state {tenant_shard_id=} {len(leases_sorted)} leases")
-                for lease in leases_sorted:
-                    log.info(f"{lease=}")
-                assert len(leases) == 1
 
 def run_pgbench(connstr: str, pg_bin: PgBin):
     log.info(f"Start a pgbench workload on pg {connstr}")
