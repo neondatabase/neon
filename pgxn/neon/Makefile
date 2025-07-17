@@ -9,6 +9,7 @@ OBJS = \
 	extension_server.o \
 	file_cache.o \
 	hll.o \
+	lfc_prewarm.o \
 	libpagestore.o \
 	logical_replication_monitor.o \
 	neon.o \

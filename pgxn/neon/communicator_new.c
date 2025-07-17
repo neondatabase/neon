@@ -40,6 +40,7 @@
 #include "storage/spin.h"
 #include "tcop/tcopprot.h"
 
+#include "bitmap.h"
 #include "communicator_new.h"
 #include "hll.h"
 #include "neon.h"
@@ -668,6 +669,45 @@ communicator_new_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
 								NInfoGetRelNumber(rinfo),
 								forkNum,
 								blockno);
+}
+
+/* Dump a list of blocks in the LFC, for use in prewarming later */
+FileCacheState *
+communicator_new_get_lfc_state(size_t max_entries)
+{
+	struct FileCacheIterator iter;
+	FileCacheState* fcs;
+	uint8	   *bitmap;
+	/* TODO: Max(max_entries, <current # of entries in cache>) */
+	size_t		n_entries = max_entries;
+	size_t		state_size = FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_entries, 1);
+	size_t		n_pages = 0;
+
+	fcs = (FileCacheState *) palloc0(state_size);
+	SET_VARSIZE(fcs, state_size);
+	fcs->magic = FILE_CACHE_STATE_MAGIC;
+	fcs->chunk_size_log = 0;
+	fcs->n_chunks = n_entries;
+	bitmap = FILE_CACHE_STATE_BITMAP(fcs);
+
+	bcomm_cache_iterate_begin(my_bs, &iter);
+	while (n_pages < max_entries && bcomm_cache_iterate_next(my_bs, &iter))
+	{
+		BufferTag tag;
+
+		BufTagInit(tag, iter.rel_number, iter.fork_number, iter.block_number, iter.spc_oid, iter.db_oid);
+		fcs->chunks[n_pages] = tag;
+		n_pages++;
+	}
+
+	/* fill bitmap. TODO: memset would be more efficient, but this is a silly format anyway */
+	for (size_t i = 0; i < n_pages; i++)
+	{
+		BITMAP_SET(bitmap, i);
+	}
+	fcs->n_pages = n_pages;
+
+	return fcs;
 }
 
 /*

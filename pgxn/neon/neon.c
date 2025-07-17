@@ -503,6 +503,7 @@ _PG_init(void)
 	pg_init_libpagestore();
 	relsize_hash_init();
 	lfc_init();
+	pg_init_prewarm();
 	pg_init_walproposer();
 	init_lwlsncache();
 
@@ -728,6 +729,7 @@ neon_shmem_request_hook(void)
 #endif
 
 	LfcShmemRequest();
+	PrewarmShmemRequest();
 	NeonPerfCountersShmemRequest();
 	PagestoreShmemRequest();
 	RelsizeCacheShmemRequest();
@@ -752,6 +754,7 @@ neon_shmem_startup_hook(void)
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
 	LfcShmemInit();
+	PrewarmShmemInit();
 	NeonPerfCountersShmemInit();
 	PagestoreShmemInit();
 	RelsizeCacheShmemInit();

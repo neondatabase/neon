@@ -201,6 +201,54 @@ pub extern "C" fn bcomm_cache_contains(
     )
 }
 
+#[repr(C)]
+#[derive(Clone, Debug)]
+pub struct FileCacheIterator {
+    next_bucket: u64,
+
+    pub spc_oid: COid,
+    pub db_oid: COid,
+    pub rel_number: u32,
+    pub fork_number: u8,
+    pub block_number: u32,
+}
+
+/// Iterate over LFC contents
+#[unsafe(no_mangle)]
+pub extern "C" fn bcomm_cache_iterate_begin(_bs: &mut CommunicatorBackendStruct, iter: *mut FileCacheIterator) {
+    unsafe { (*iter).next_bucket = 0 };
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bcomm_cache_iterate_next(bs: &mut CommunicatorBackendStruct, iter: *mut FileCacheIterator) -> bool {
+    use crate::integrated_cache::GetBucketResult;
+    loop {
+        let next_bucket = unsafe { (*iter).next_bucket } as usize;
+        match bs.integrated_cache.get_bucket(next_bucket) {
+            GetBucketResult::Occupied(rel, blk) => {
+                unsafe {
+                    (*iter).spc_oid = rel.spcnode;
+                    (*iter).db_oid = rel.dbnode;
+                    (*iter).rel_number = rel.relnode;
+                    (*iter).fork_number = rel.forknum;
+                    (*iter).block_number = blk;
+
+                    (*iter).next_bucket += 1;
+                }
+                break true;
+            },
+            GetBucketResult::Vacant => {
+                unsafe {
+                    (*iter).next_bucket += 1;
+                }
+                continue;
+            }
+            GetBucketResult::OutOfBounds => {
+                break false;
+            }
+        }
+    }
+}
+
 impl<'t> CommunicatorBackendStruct<'t> {
     /// The slot must be free, or this panics.
     pub(crate) fn start_neon_io_request(&mut self, request_slot_idx: i32, request: &NeonIORequest) {

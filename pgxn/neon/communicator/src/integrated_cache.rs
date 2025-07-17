@@ -717,6 +717,12 @@ fn get_rel_size(
     }
 }
 
+pub enum GetBucketResult {
+    Occupied(RelTag, u32),
+    Vacant,
+    OutOfBounds,
+}
+
 /// Accessor for other backends
 ///
 /// This allows backends to read pages from the cache directly, on their own, without making a
@@ -739,6 +745,21 @@ impl<'t> IntegratedCacheReadAccess<'t> {
             .get(&BlockKey::from((rel, block_number)))
             .is_some()
     }
+
+    pub fn get_bucket(&self, bucket_no: usize) -> GetBucketResult {
+        match self.block_map.get_at_bucket(bucket_no).as_deref() {
+            None => {
+                // free bucket, or out of bounds
+                if bucket_no >= self.block_map.get_num_buckets() {
+                    GetBucketResult::OutOfBounds
+                } else {
+                    GetBucketResult::Vacant
+                }
+            }
+            Some((key, _)) => GetBucketResult::Occupied(key.rel, key.block_number),
+        }
+    }
+
 }
 
 pub struct BackendCacheReadOp<'t> {
