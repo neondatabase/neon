@@ -226,7 +226,6 @@ pub enum ComputeFeature {
     UnknownFeature,
 }
 
-/// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct PageserverConnectionInfo {
     /// NB: 0 for unsharded tenants, 1 for sharded tenants with 1 shard, following storage
