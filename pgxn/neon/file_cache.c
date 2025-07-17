@@ -869,7 +869,7 @@ lfc_prewarm_main(Datum main_arg)
 	size_t prewarm_batch;
 	size_t n_workers;
 	dsm_segment *seg;
-	bool continue_sleep;
+	volatile bool continue_sleep;
 	FileCacheState* fcs;
 	uint8* bitmap;
 	BufferTag tag;
