@@ -322,7 +322,11 @@ typedef enum
 	RELKIND_UNLOGGED_BUILD
 } RelKind;
 
-/* entry type stored in relkind_hash */
+/*
+ * Entry type stored in relkind_hash. We have just one entry for the whole relation, i.e. we don't have separate entries for the individual forks.
+ * It gets a little complicated with unlogged relations. The main fork of an unlogged relation is considered UNLOGGED, but its init-fork is
+ * treated as PERMANENT. It is specially checked in neon_write.
+ */
 typedef struct
 {
 	NRelFileInfo rel;
