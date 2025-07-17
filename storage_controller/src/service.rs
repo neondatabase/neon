@@ -776,7 +776,7 @@ impl TenantIdOrShardId {
         }
     }
 
-    fn contains(&self, tenant_shard_id: &TenantShardId) -> bool {
+    fn matches(&self, tenant_shard_id: &TenantShardId) -> bool {
         match self {
             TenantIdOrShardId::TenantId(tenant_id) => tenant_shard_id.tenant_id == *tenant_id,
             TenantIdOrShardId::TenantShardId(this_tenant_shard_id) => {
@@ -5117,7 +5117,7 @@ impl Service {
                 .tenant_generations(tenant_id_or_shard_id.tenant_id())
                 .await?
                 .into_iter()
-                .filter(|i| tenant_id_or_shard_id.contains(&i.tenant_shard_id))
+                .filter(|i| tenant_id_or_shard_id.matches(&i.tenant_shard_id))
                 .collect::<Vec<_>>();
 
             if generations
@@ -5137,7 +5137,7 @@ impl Service {
                     .range(TenantShardId::tenant_range(
                         tenant_id_or_shard_id.tenant_id(),
                     ))
-                    .filter(|(shard_id, _)| tenant_id_or_shard_id.contains(shard_id))
+                    .filter(|(shard_id, _)| tenant_id_or_shard_id.matches(shard_id))
                     .collect::<Vec<_>>();
                 for (shard_id, shard) in tenant_shards {
                     match shard.policy {
@@ -5254,7 +5254,7 @@ impl Service {
                 .tenant_generations(tenant_id_or_shard_id.tenant_id())
                 .await?
                 .into_iter()
-                .filter(|i| tenant_id_or_shard_id.contains(&i.tenant_shard_id))
+                .filter(|i| tenant_id_or_shard_id.matches(&i.tenant_shard_id))
                 .collect::<Vec<_>>();
 
             if latest_generations
