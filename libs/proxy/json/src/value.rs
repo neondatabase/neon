@@ -32,6 +32,13 @@ impl ValueEncoder for &str {
     }
 }
 
+impl ValueEncoder for String {
+    #[inline]
+    fn encode(self, v: ValueSer<'_>) {
+        self.as_str().encode(v);
+    }
+}
+
 impl ValueEncoder for fmt::Arguments<'_> {
     #[inline]
     fn encode(self, v: ValueSer<'_>) {
@@ -99,6 +106,13 @@ impl KeyEncoder for &str {
     fn write_key<'a>(self, obj: &'a mut ObjectSer) -> ValueSer<'a> {
         let obj = &mut *obj;
         obj.entry_inner(|b| format_escaped_str(b, self))
+    }
+}
+
+impl KeyEncoder for String {
+    #[inline]
+    fn write_key<'a>(self, obj: &'a mut ObjectSer) -> ValueSer<'a> {
+        self.as_str().write_key(obj)
     }
 }
 
