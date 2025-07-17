@@ -7385,6 +7385,7 @@ impl Service {
         self: &Arc<Self>,
         node_id: NodeId,
         policy_on_start: NodeSchedulingPolicy,
+        force: bool,
         cancel: CancellationToken,
     ) -> Result<(), OperationError> {
         let reconciler_config = ReconcilerConfigBuilder::new(ReconcilerPriority::Normal).build();
@@ -7392,23 +7393,27 @@ impl Service {
         let mut waiters: Vec<ReconcilerWaiter> = Vec::new();
         let mut tid_iter = create_shared_shard_iterator(self.clone());
 
+        let reset_node_policy_on_cancel = || async {
+            match self
+                .node_configure(node_id, None, Some(policy_on_start))
+                .await
+            {
+                Ok(()) => OperationError::Cancelled,
+                Err(err) => {
+                    OperationError::FinalizeError(
+                        format!(
+                            "Failed to finalise delete cancel of {} by setting scheduling policy to {}: {}",
+                            node_id, String::from(policy_on_start), err
+                        )
+                        .into(),
+                    )
+                }
+            }
+        };
+
         while !tid_iter.finished() {
             if cancel.is_cancelled() {
-                match self
-                    .node_configure(node_id, None, Some(policy_on_start))
-                    .await
-                {
-                    Ok(()) => return Err(OperationError::Cancelled),
-                    Err(err) => {
-                        return Err(OperationError::FinalizeError(
-                            format!(
-                                "Failed to finalise delete cancel of {} by setting scheduling policy to {}: {}",
-                                node_id, String::from(policy_on_start), err
-                            )
-                            .into(),
-                        ));
-                    }
-                }
+                return Err(reset_node_policy_on_cancel().await);
             }
 
             operation_utils::validate_node_state(
@@ -7477,8 +7482,18 @@ impl Service {
                         nodes,
                         reconciler_config,
                     );
-                    if let Some(some) = waiter {
-                        waiters.push(some);
+
+                    if force {
+                        // Here we remove an existing observed location for the node we're removing, and it will
+                        // not be re-added by a reconciler's completion because we filter out removed nodes in
+                        // process_result.
+                        //
+                        // Note that we update the shard's observed state _after_ calling maybe_configured_reconcile_shard:
+                        // that means any reconciles we spawned will know about the node we're deleting,
+                        // enabling them to do live migrations if it's still online.
+                        tenant_shard.observed.locations.remove(&node_id);
+                    } else if let Some(waiter) = waiter {
+                        waiters.push(waiter);
                     }
                 }
             }
@@ -7492,21 +7507,7 @@ impl Service {
 
         while !waiters.is_empty() {
             if cancel.is_cancelled() {
-                match self
-                    .node_configure(node_id, None, Some(policy_on_start))
-                    .await
-                {
-                    Ok(()) => return Err(OperationError::Cancelled),
-                    Err(err) => {
-                        return Err(OperationError::FinalizeError(
-                            format!(
-                                "Failed to finalise drain cancel of {} by setting scheduling policy to {}: {}",
-                                node_id, String::from(policy_on_start), err
-                            )
-                            .into(),
-                        ));
-                    }
-                }
+                return Err(reset_node_policy_on_cancel().await);
             }
 
             tracing::info!("Awaiting {} pending delete reconciliations", waiters.len());
@@ -7514,6 +7515,12 @@ impl Service {
             waiters = self
                 .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
                 .await;
+        }
+
+        let pf = pausable_failpoint!("delete-node-after-reconciles-spawned", &cancel);
+        if pf.is_err() {
+            // An error from pausable_failpoint indicates the cancel token was triggered.
+            return Err(reset_node_policy_on_cancel().await);
         }
 
         self.persistence
@@ -8111,6 +8118,7 @@ impl Service {
     pub(crate) async fn start_node_delete(
         self: &Arc<Self>,
         node_id: NodeId,
+        force: bool,
     ) -> Result<(), ApiError> {
         let (ongoing_op, node_policy, schedulable_nodes_count) = {
             let locked = self.inner.read().unwrap();
@@ -8180,7 +8188,7 @@ impl Service {
 
                             tracing::info!("Delete background operation starting");
                             let res = service
-                                .delete_node(node_id, policy_on_start, cancel)
+                                .delete_node(node_id, policy_on_start, force, cancel)
                                 .await;
                             match res {
                                 Ok(()) => {

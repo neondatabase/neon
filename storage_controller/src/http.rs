@@ -1085,9 +1085,10 @@ async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiErr
 
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    let force: bool = parse_query_param(&req, "force")?.unwrap_or(false);
     json_response(
         StatusCode::OK,
-        state.service.start_node_delete(node_id).await?,
+        state.service.start_node_delete(node_id, force).await?,
     )
 }
 
