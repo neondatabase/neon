@@ -2199,7 +2199,7 @@ impl PageServerHandler {
         set_tracing_field_shard_id(&timeline);
 
         let lease = timeline
-            .renew_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)
+            .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), false, ctx)
             .inspect_err(|e| {
                 warn!("{e}");
             })
@@ -3787,7 +3787,7 @@ impl proto::PageService for GrpcPageServiceHandler {
 
         // Attempt to acquire a lease. Return FailedPrecondition if the lease could not be granted.
         let lease_length = timeline.get_lsn_lease_length();
-        let expires = match timeline.renew_lsn_lease(req.lsn, lease_length, &ctx) {
+        let expires = match timeline.make_lsn_lease(req.lsn, lease_length, false, &ctx) {
             Ok(lease) => lease.valid_until,
             Err(err) => return Err(tonic::Status::failed_precondition(format!("{err}"))),
         };

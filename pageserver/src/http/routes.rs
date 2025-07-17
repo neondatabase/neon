@@ -1050,7 +1050,7 @@ async fn get_lsn_by_timestamp_handler(
 
     let lease = if with_lease {
         timeline
-            .init_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), true, &ctx)
             .inspect_err(|_| {
                 warn!("fail to grant a lease to {}", lsn);
             })
@@ -2222,7 +2222,7 @@ async fn post_lsn_lease_handler(
 
     let result = async {
         timeline
-            .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
+            .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), true, &ctx)
             .map_err(|e| {
                 ApiError::InternalServerError(
                     e.context(format!("invalid lsn lease request at {lsn}")),
