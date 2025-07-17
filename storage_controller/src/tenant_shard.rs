@@ -131,10 +131,10 @@ pub(crate) struct TenantShard {
     #[serde(serialize_with = "read_last_error")]
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<Option<Arc<ReconcileError>>>>,
 
-    /// Number of times in a row this shard has been reconciled after last
-    /// [`crate::service::Service::reconcile_all`] without invoked reconciliations for this shard.
+    /// Amount of consecutive [`crate::service::Service::reconcile_all`] iterations that have been
+    /// scheduled a reconciliation for this shard.
     ///
-    /// If this reaches `MAX_CONSECUTIVE_RECONCILES`, the shard is considered "flapping" and will be
+    /// If this reaches `MAX_CONSECUTIVE_RECONCILES`, the shard is considered "stuck" and will be
     /// ignored when deciding whether optimizations can run. This includes both successful and failed
     /// reconciliations.
     ///
