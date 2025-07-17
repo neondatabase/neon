@@ -8,7 +8,6 @@ mod heatmap_layers_downloader;
 pub(crate) mod import_pgdata;
 mod init;
 pub mod layer_manager;
-mod leases;
 pub(crate) mod logical_size;
 pub mod offload;
 pub mod span;
@@ -482,7 +481,8 @@ pub(crate) struct GcInfo {
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
 
-    pub(crate) leases: leases::Leases,
+    /// Leases granted to particular LSNs.
+    pub(crate) leases: BTreeMap<Lsn, LsnLease>,
 
     /// Whether our branch point is within our ancestor's PITR interval (for cost estimation)
     pub(crate) within_ancestor_pitr: bool,
@@ -530,7 +530,7 @@ impl GcInfo {
         self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
     pub(crate) fn lsn_covered_by_lease(&self, lsn: Lsn) -> bool {
-        self.leases.has_lease_at_exactly_this_lsn(lsn)
+        self.leases.contains_key(&lsn)
     }
 }
 
@@ -1760,63 +1760,76 @@ impl Timeline {
         Ok(())
     }
 
-    /// Upsert a temporary lease to inhibit garbage collection for the given LSN.
-    ///
-    /// renewal of an existing lease always works
-    /// page_service/compute can create new leases above applied cutoff
-    /// management API/cplane can create new leases above planned cutoff
-    ///
-    pub fn make_lsn_lease(
+    /// Initializes an LSN lease. The function will return an error if the requested LSN is less than the `latest_gc_cutoff_lsn`.
+    pub(crate) fn init_lsn_lease(
         &self,
         lsn: Lsn,
         length: Duration,
-        is_management_api: bool,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<LsnLease> {
+        self.make_lsn_lease(lsn, length, true, ctx)
+    }
+
+    /// Renews a lease at a particular LSN. The requested LSN is not validated against the `latest_gc_cutoff_lsn` when we are in the grace period.
+    pub(crate) fn renew_lsn_lease(
+        &self,
+        lsn: Lsn,
+        length: Duration,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<LsnLease> {
+        self.make_lsn_lease(lsn, length, false, ctx)
+    }
+
+    /// Obtains a temporary lease blocking garbage collection for the given LSN.
+    ///
+    /// If we are in `AttachedSingle` mode and is not blocked by the lsn lease deadline, this function will error
+    /// if the requesting LSN is less than the `latest_gc_cutoff_lsn` and there is no existing request present.
+    ///
+    /// If there is an existing lease in the map, the lease will be renewed only if the request extends the lease.
+    /// The returned lease is therefore the maximum between the existing lease and the requesting lease.
+    fn make_lsn_lease(
+        &self,
+        lsn: Lsn,
+        length: Duration,
+        init: bool,
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
-        // Normalize the requested LSN to be aligned, and move to the first record
-        // if it points to the beginning of the page (header).
-        let lsn = xlog_utils::normalize_lsn(lsn, WAL_SEGMENT_SIZE);
+        let lease = {
+            // Normalize the requested LSN to be aligned, and move to the first record
+            // if it points to the beginning of the page (header).
+            let lsn = xlog_utils::normalize_lsn(lsn, WAL_SEGMENT_SIZE);
 
-        let mut gc_info = self.gc_info.write().unwrap();
-        let planned_cutoff = gc_info.min_cutoff();
+            let mut gc_info = self.gc_info.write().unwrap();
+            let planned_cutoff = gc_info.min_cutoff();
 
-        let valid_until = SystemTime::now() + length;
+            let valid_until = SystemTime::now() + length;
 
-        let pending = match gc_info.leases.begin_upsert_unnamed(lsn) {
-            Ok(pending) => pending,
-            Err(leases::BeginUpsertError::ExistingLeaseWithHigherLsn {
-                holder,
-                existing,
-                update,
-            }) => {
-                return Err(anyhow::anyhow!(
-                    "tried to move named lsn lease to an older LSN: existing={existing:?} update={update:?} holder={holder}"
-                ));
-            }
-            Err(leases::BeginUpsertError::ExistingLeaseWithLaterExpirationTime {
-                existing,
-                update,
-            }) => {
-                info!("existing lease covers greater length, valid until {}", dt);
-            }
-        };
+            let entry = gc_info.leases.entry(lsn);
 
-        // Policy checks for lease renewal.
-        //
-        // Note that we avoid persisting leases and instead inhibit GC for the max lease duration after tenant restart/migration.
-        // This period is called `lsn_lease_deadline`.
-        // So, just an insert into runtime data structure can in fact be a renewal from the caller's point of view.
+            match entry {
+                Entry::Occupied(mut occupied) => {
+                    let existing_lease = occupied.get_mut();
+                    if valid_until > existing_lease.valid_until {
+                        existing_lease.valid_until = valid_until;
+                        let dt: DateTime<Utc> = valid_until.into();
+                        info!("lease extended to {}", dt);
+                    } else {
+                        let dt: DateTime<Utc> = existing_lease.valid_until.into();
+                        info!("existing lease covers greater length, valid until {}", dt);
+                    }
 
-        // Rule #1: never allow a lease to exist below applied GC cutoff.
-        // 
-        let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
-        if lsn < *latest_gc_cutoff_lsn {
-            bail!(
-                "tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}",
-                lsn,
-                *latest_gc_cutoff_lsn
-            );
-        }
+                    existing_lease.clone()
+                }
+                Entry::Vacant(vacant) => {
+                    // Never allow a lease to be requested for an LSN below the applied GC cutoff. The data could have been deleted.
+                    let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
+                    if lsn < *latest_gc_cutoff_lsn {
+                        bail!(
+                            "tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}",
+                            lsn,
+                            *latest_gc_cutoff_lsn
+                        );
+                    }
 
                     // We allow create lease for those below the planned gc cutoff if we are still within the grace period
                     // of GC blocking.
@@ -1838,56 +1851,10 @@ impl Timeline {
                     let dt: DateTime<Utc> = valid_until.into();
                     info!("lease created, valid until {}", dt);
                     vacant.insert(LsnLease { valid_until }).clone()
-
-        if gc_info.leases.has_lease_at_exactly_this_lsn(lsn) {
-            // It's a renewal.
-        } else {
-            self.feature_resolver
-                .evaluate_boolean("lease-renewal-allow-");
-
-            // Never allow a lease to be requested for an LSN below the applied GC cutoff. The data could have been deleted.
-            let latest_gc_cutoff_lsn = self.get_applied_gc_cutoff_lsn();
-            if lsn < *latest_gc_cutoff_lsn {
-                bail!(
-                    "tried to request an lsn lease for an lsn below the latest gc cutoff. requested at {} gc cutoff {}",
-                    lsn,
-                    *latest_gc_cutoff_lsn
-                );
+                }
             }
+        };
 
-            // We avoid persisting leases and instead inhibit GC for the max lease duration after tenant restart.
-            //
-            let validate = {
-                let conf = self.tenant_conf.load();
-                !conf.is_gc_blocked_by_lsn_lease_deadline()
-            };
-            if !(is_compute_request && conf.is_gc_blocked_by_lsn_lease_deadline())
-                && lsn < planned_cutoff
-            {
-                bail!(
-                    "tried to request an lsn lease for an lsn below the planned gc cutoff. requested at {} planned gc cutoff {}",
-                    lsn,
-                    planned_cutoff
-                );
-            }
-        }
-
-        let (lease, result) = gc_info
-            .leases
-            .begin_upsert_unnamed(leases::UpsertUnnamed { lsn, valid_until });
-
-        let dt: DateTime<Utc> = lease.valid_until.into();
-        match result {
-            leases::UpsertUnnamedResult::Created => {
-                info!("lease created, valid until {}", dt);
-            }
-            leases::UpsertUnnamedResult::ExtendedExisting => {
-                info!("lease extended to {}", dt);
-            }
-            leases::UpsertUnnamedResult::ExistingIsLonger { valid_until } => {
-                info!("existing lease covers greater length, valid until {}", dt);
-            }
-        }
         Ok(lease)
     }
 
@@ -6536,8 +6503,11 @@ impl Timeline {
                 .map(|(lsn, _child_id, _is_offloaded)| *lsn)
                 .collect();
 
-            // NB: We already culled stale leases in `refresh_gc_info`.
-            let max_lsn_with_valid_lease = gc_info.leases.max_lsn();
+            // Gets the maximum LSN that holds the valid lease.
+            //
+            // Caveat: `refresh_gc_info` is in charged of updating the lease map.
+            // Here, we do not check for stale leases again.
+            let max_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
 
             (
                 space_cutoff,

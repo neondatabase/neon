@@ -3267,9 +3267,9 @@ impl Timeline {
                     retain_lsns_below_horizon.push(*lsn);
                 }
             }
-            for lsn in gc_info.leases.iter_leased_lsns() {
-                if lsn < gc_cutoff {
-                    retain_lsns_below_horizon.push(lsn);
+            for lsn in gc_info.leases.keys() {
+                if lsn < &gc_cutoff {
+                    retain_lsns_below_horizon.push(*lsn);
                 }
             }
             let mut selected_layers: Vec<Layer> = Vec::new();

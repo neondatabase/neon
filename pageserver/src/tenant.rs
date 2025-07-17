@@ -4829,12 +4829,12 @@ impl TenantShard {
 
                 // Cull any expired leases
                 let now = SystemTime::now();
-                let leases_info = target.leases.cull(now);
+                target.leases.retain(|_, lease| !lease.is_expired(&now));
 
                 timeline
                     .metrics
                     .valid_lsn_lease_count_gauge
-                    .set(leases_info.num_unique_lsns as u64);
+                    .set(target.leases.len() as u64);
 
                 // Look up parent's PITR cutoff to update the child's knowledge of whether it is within parent's PITR
                 if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
@@ -9439,7 +9439,7 @@ mod tests {
         });
 
         let updated_lease_0 = timeline
-            .lease_lsn2(Lsn(leased_lsns[0]), Duration::from_secs(0), &ctx)
+            .renew_lsn_lease(Lsn(leased_lsns[0]), Duration::from_secs(0), &ctx)
             .expect("lease renewal should succeed");
         assert_eq!(
             updated_lease_0.valid_until, leases[0].valid_until,
@@ -9447,7 +9447,7 @@ mod tests {
         );
 
         let updated_lease_1 = timeline
-            .lease_lsn2(
+            .renew_lsn_lease(
                 Lsn(leased_lsns[1]),
                 timeline.get_lsn_lease_length() * 2,
                 &ctx,

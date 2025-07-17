@@ -252,8 +252,9 @@ pub(super) async fn gather_inputs(
 
         let lease_points = gc_info
             .leases
-            .iter_leased_lsns()
-            .filter(|lsn| *lsn > ancestor_lsn)
+            .keys()
+            .filter(|&&lsn| lsn > ancestor_lsn)
+            .copied()
             .collect::<Vec<_>>();
 
         // next_pitr_cutoff in parent branch are not of interest (right now at least), nor do we
