@@ -118,10 +118,6 @@ typedef struct
 	ShardMap	shard_map;
 } PagestoreShmemState;
 
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook = NULL;
-#endif
-static shmem_startup_hook_type prev_shmem_startup_hook;
 static PagestoreShmemState *pagestore_shared;
 static uint64 pagestore_local_counter = 0;
 
@@ -1284,18 +1280,12 @@ check_neon_id(char **newval, void **extra, GucSource source)
 	return **newval == '\0' || HexDecodeString(id, *newval, 16);
 }
 
-static Size
-PagestoreShmemSize(void)
-{
-	return add_size(sizeof(PagestoreShmemState), NeonPerfCountersShmemSize());
-}
 
-static bool
+void
 PagestoreShmemInit(void)
 {
 	bool		found;
 
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	pagestore_shared = ShmemInitStruct("libpagestore shared state",
 									   sizeof(PagestoreShmemState),
 									   &found);
@@ -1306,44 +1296,12 @@ PagestoreShmemInit(void)
 		memset(&pagestore_shared->shard_map, 0, sizeof(ShardMap));
 		AssignPageserverConnstring(page_server_connstring, NULL);
 	}
-
-	NeonPerfCountersShmemInit();
-
-	LWLockRelease(AddinShmemInitLock);
-	return found;
 }
 
-static void
-pagestore_shmem_startup_hook(void)
+void
+PagestoreShmemRequest(void)
 {
-	if (prev_shmem_startup_hook)
-		prev_shmem_startup_hook();
-
-	PagestoreShmemInit();
-}
-
-static void
-pagestore_shmem_request(void)
-{
-#if PG_VERSION_NUM >= 150000
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-#endif
-
-	RequestAddinShmemSpace(PagestoreShmemSize());
-}
-
-static void
-pagestore_prepare_shmem(void)
-{
-#if PG_VERSION_NUM >= 150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = pagestore_shmem_request;
-#else
-	pagestore_shmem_request();
-#endif
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = pagestore_shmem_startup_hook;
+	RequestAddinShmemSpace(sizeof(PagestoreShmemState));
 }
 
 /*
@@ -1352,8 +1310,6 @@ pagestore_prepare_shmem(void)
 void
 pg_init_libpagestore(void)
 {
-	pagestore_prepare_shmem();
-
 	DefineCustomStringVariable("neon.pageserver_connstring",
 							   "connection string to the page server",
 							   NULL,
@@ -1503,8 +1459,6 @@ pg_init_libpagestore(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
-
-	relsize_hash_init();
 
 	if (page_server != NULL)
 		neon_log(ERROR, "libpagestore already loaded");
