@@ -6,6 +6,7 @@ extern crate hyper0 as hyper;
 mod auth;
 mod background_node_operations;
 mod compute_hook;
+pub mod hadron_utils;
 mod heartbeater;
 pub mod http;
 mod id_lock_map;
