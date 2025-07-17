@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("grpc", [True, False])
+def test_basebackup_cache(neon_env_builder: NeonEnvBuilder, grpc: bool):
     """
     Simple test for basebackup cache.
     1. Check that we always hit the cache after compute restart.
@@ -22,7 +24,7 @@ def test_basebackup_cache(neon_env_builder: NeonEnvBuilder):
     """
 
     env = neon_env_builder.init_start()
-    ep = env.endpoints.create("main")
+    ep = env.endpoints.create("main", grpc=grpc)
     ps = env.pageserver
     ps_http = ps.http_client()
 
