@@ -576,7 +576,6 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         backup_lsn: sk_info.backup_lsn.0,
         local_start_lsn: sk_info.local_start_lsn.0,
         availability_zone: None,
-        standby_horizon: sk_info.standby_horizon.0,
     };
 
     let global_timelines = get_global_timelines(&request);
