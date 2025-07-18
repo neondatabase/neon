@@ -588,6 +588,9 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		/* Request the page at the end of the last fully replayed LSN. */
 		XLogRecPtr replay_lsn = GetXLogReplayRecPtr(NULL);
 
+		if (MIN_BACKEND_PREFETCH_LSN == InvalidXLogRecPtr)
+			MIN_BACKEND_PREFETCH_LSN = replay_lsn;
+
 		for (int i = 0; i < nblocks; i++)
 		{
 			neon_request_lsns *result = &output[i];

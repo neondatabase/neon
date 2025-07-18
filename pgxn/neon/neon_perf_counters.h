@@ -174,6 +174,12 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
 
 #define MyNeonCounters (&neon_per_backend_counters_shared[MyProcNumber])
 
+/*
+ * Backend-local minimal in-flight prefetch LSN.
+ * We store it in neon_per_backend_counters_shared and not in separate array to minimize false cache sharing
+ */
+#define MIN_BACKEND_PREFETCH_LSN MyNeonCounters->min_prefetch_lsn
+
 extern void inc_getpage_wait(uint64 latency);
 extern void inc_page_cache_read_wait(uint64 latency);
 extern void inc_page_cache_write_wait(uint64 latency);
