@@ -4820,6 +4820,12 @@ impl Service {
         .await;
 
         self.tenant_remote_mutation(tenant_id, |locations| async move {
+            if locations.0.is_empty() {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant not found").into(),
+                ));
+            }
+
             let results = self
                 .tenant_for_shards_api(
                     locations
