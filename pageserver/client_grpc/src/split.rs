@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use bytes::Bytes;
 
 use pageserver_api::key::rel_block_to_key;
-use pageserver_api::shard::{ShardStripeSize, key_to_shard_number};
+use pageserver_api::shard::key_to_shard_number;
 use pageserver_page_api as page_api;
-use utils::shard::{ShardCount, ShardIndex, ShardNumber};
+use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
 
 /// Splits GetPageRequests that straddle shard boundaries and assembles the responses.
 /// TODO: add tests for this.
