@@ -37,6 +37,7 @@ class NeonSnapshot:
         self.created_at: datetime = datetime.fromisoformat(snapshot["created_at"])
         self.source_branch: NeonBranch = project.branches[snapshot["source_branch_id"]]
         project.snapshots[self.id] = self
+        self.restored: bool = False
 
     def __str__(self) -> str:
         return f"id: {self.id}, name: {self.name}, created_at: {self.created_at}"
@@ -371,8 +372,9 @@ class NeonProject:
 
     def get_random_snapshot(self) -> NeonSnapshot | None:
         snapshot: NeonSnapshot | None = None
-        if self.snapshots:
-            snapshot = random.choice(list(self.snapshots.values()))
+        avail_snapshots = [sn for sn in self.snapshots.values() if not sn.restored]
+        if avail_snapshots:
+            snapshot = random.choice(avail_snapshots)
         else:
             log.info("No snapshots found")
         return snapshot
@@ -510,6 +512,7 @@ class NeonProject:
         target_branch = self.create_branch()
         if not target_branch:
             return None
+        self.snapshots[snapshot_id].restored = True
         new_branch_def = self.neon_api.restore_snapshot(
             self.id,
             snapshot_id,
