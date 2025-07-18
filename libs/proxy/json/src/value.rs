@@ -2,10 +2,13 @@ use core::fmt;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::str::{format_escaped_fmt, format_escaped_str};
-use crate::{KeyEncoder, ObjectSer, ValueSer, value_as_list, value_as_object};
+use crate::{ValueSer, value_as_list, value_as_object};
+
+/// Marker trait for values that are valid keys
+pub trait KeyEncoder: ValueEncoder {}
 
 /// Write a value to the underlying json representation.
-pub trait ValueEncoder {
+pub trait ValueEncoder: Sized {
     fn encode(self, v: ValueSer<'_>);
 }
 
@@ -24,6 +27,7 @@ impl<T: Copy + ValueEncoder> ValueEncoder for &T {
     }
 }
 
+impl KeyEncoder for &str {}
 impl ValueEncoder for &str {
     #[inline]
     fn encode(self, v: ValueSer<'_>) {
@@ -32,6 +36,7 @@ impl ValueEncoder for &str {
     }
 }
 
+impl KeyEncoder for String {}
 impl ValueEncoder for String {
     #[inline]
     fn encode(self, v: ValueSer<'_>) {
@@ -39,6 +44,7 @@ impl ValueEncoder for String {
     }
 }
 
+impl KeyEncoder for fmt::Arguments<'_> {}
 impl ValueEncoder for fmt::Arguments<'_> {
     #[inline]
     fn encode(self, v: ValueSer<'_>) {
@@ -97,32 +103,6 @@ impl<T: ValueEncoder> ValueEncoder for Option<T> {
         match self {
             Some(value) => value.encode(v),
             None => Null.encode(v),
-        }
-    }
-}
-
-impl KeyEncoder for &str {
-    #[inline]
-    fn write_key<'a>(self, obj: &'a mut ObjectSer) -> ValueSer<'a> {
-        let obj = &mut *obj;
-        obj.entry_inner(|b| format_escaped_str(b, self))
-    }
-}
-
-impl KeyEncoder for String {
-    #[inline]
-    fn write_key<'a>(self, obj: &'a mut ObjectSer) -> ValueSer<'a> {
-        self.as_str().write_key(obj)
-    }
-}
-
-impl KeyEncoder for fmt::Arguments<'_> {
-    #[inline]
-    fn write_key<'a>(self, obj: &'a mut ObjectSer) -> ValueSer<'a> {
-        if let Some(key) = self.as_str() {
-            obj.entry_inner(|b| format_escaped_str(b, key))
-        } else {
-            obj.entry_inner(|b| format_escaped_fmt(b, self))
         }
     }
 }

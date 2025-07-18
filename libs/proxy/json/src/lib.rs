@@ -81,7 +81,7 @@ mod macros;
 mod str;
 mod value;
 
-pub use value::{Null, ValueEncoder};
+pub use value::{KeyEncoder, Null, ValueEncoder};
 
 #[must_use]
 /// Serialize a single json value.
@@ -164,7 +164,9 @@ impl<'buf> ObjectSer<'buf> {
     /// Start a new object entry with the given string key, returning a [`ValueSer`] for the associated value.
     #[inline]
     pub fn key(&mut self, key: impl KeyEncoder) -> ValueSer<'_> {
-        key.write_key(self)
+        // we create a psuedo value to write the key into.
+        let start = self.start;
+        self.entry_inner(|buf| key.encode(ValueSer { buf, start }))
     }
 
     /// Write an entry (key-value pair) to the object.
@@ -209,10 +211,6 @@ impl<'buf> ObjectSer<'buf> {
         self.value.buf.push(b'}');
         self.value.finish();
     }
-}
-
-pub trait KeyEncoder {
-    fn write_key<'a>(self, obj: &'a mut ObjectSer) -> ValueSer<'a>;
 }
 
 #[must_use]
