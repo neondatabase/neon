@@ -310,7 +310,9 @@ def test_replica_promote_old_primary_starts(neon_simple_env: NeonEnv):
     assert client.promote(promote_spec)["status"] == "completed"
 
     # TODO(myrrc) if we launch old primary here, without any additional writes on
-    # secondary, it starts without errors, we should prevent this
+    # secondary, it starts without errors. However, this is an issue of a
+    # local setup only -- in prod, compute would get terminated while requesting
+    # its spec from cplane
 
     with secondary.connect() as conn, conn.cursor() as cur:
         cur.execute("select count(*) from t")
