@@ -568,8 +568,8 @@ def setup_class(
         print(f"::warning::Retried on 524 error {neon_api.retries524} times")
     if neon_api.retries4xx > 0:
         print(f"::warning::Retried on 4xx error {neon_api.retries4xx} times")
-    log.info("Removing the project %s", project.id)
     # XXX Do not merge !!!
+    #log.info("Removing the project %s", project.id)
     #project.delete()
 
 
