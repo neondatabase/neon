@@ -528,13 +528,13 @@ communicator_prefetch_pump_state(void)
 		/*
 		 * Update backend's min in-flight prefetch LSN.
 		 */
-		XLogRecPtr min_prefetch_lsn = GetXLogReplayRecPtr(NULL);
+		XLogRecPtr min_backend_prefetch_lsn = GetXLogReplayRecPtr(NULL);
 		for (uint64_t ring_index = MyPState->ring_receive; ring_index < MyPState->ring_unused; ring_index++)
 		{
 			PrefetchRequest* slot = GetPrfSlot(ring_index);
-			min_prefetch_lsn = Min(slot->request_lsns.request_lsn, min_prefetch_lsn);
+			min_backend_prefetch_lsn = Min(slot->request_lsns.request_lsn, min_backend_prefetch_lsn);
 		}
-		MIN_BACKEND_PREFETCH_LSN = min_prefetch_lsn;
+		MIN_BACKEND_PREFETCH_LSN = min_backend_prefetch_lsn;
 	}
 	communicator_reconfigure_timeout_if_needed();
 }
@@ -2532,7 +2532,10 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 void
 communicator_reconfigure_timeout_if_needed(void)
 {
-	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused &&
+	bool	needs_set = (MyPState->ring_receive != MyPState->ring_unused ||
+						 (RecoveryInProgress() &&
+						  MIN_BACKEND_PREFETCH_LSN != InvalidXLogRecPtr &&
+						  MIN_BACKEND_PREFETCH_LSN != GetXLogReplayRecPtr(NULL))) &&
 						!AmPrewarmWorker && /* do not pump prefetch state in prewarm worker */
 						readahead_getpage_pull_timeout_ms > 0;
 
