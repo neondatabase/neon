@@ -9,7 +9,7 @@ to a PostgreSQL database table for performance tracking and analysis.
 import argparse
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -122,11 +122,11 @@ def build_suit_name(scalefactor, terminals, run_type, min_cu, max_cu):
 def convert_timestamp_to_utc(timestamp_ms):
     """Convert millisecond timestamp to PostgreSQL-compatible UTC timestamp."""
     try:
-        dt = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=UTC)
+        dt = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
         return dt.isoformat()
     except (ValueError, TypeError) as e:
         print(f"Warning: Could not convert timestamp {timestamp_ms}: {e}")
-        return datetime.now(UTC).isoformat()
+        return datetime.now(timezone.utc).isoformat()
 
 
 def insert_metrics(conn, metrics_data):
@@ -230,7 +230,7 @@ def process_csv_results(csv_file_path, start_timestamp_ms, suit, revision, platf
 
             # Convert to UTC timestamp
             row_timestamp = datetime.fromtimestamp(
-                row_timestamp_ms / 1000.0, tz=UTC
+                row_timestamp_ms / 1000.0, tz=timezone.utc
             ).isoformat()
 
             csv_row = {
@@ -364,11 +364,11 @@ def main():
         recorded_at = convert_timestamp_to_utc(current_timestamp_ms)
     else:
         print("Warning: No timestamp found in JSON, using current time")
-        recorded_at = datetime.now(UTC).isoformat()
+        recorded_at = datetime.now(timezone.utc).isoformat()
 
     if not start_timestamp_ms:
         print("Warning: No start timestamp found in JSON, CSV upload may be incorrect")
-        start_timestamp_ms = current_timestamp_ms or datetime.now(UTC).timestamp() * 1000
+        start_timestamp_ms = current_timestamp_ms or datetime.now(timezone.utc).timestamp() * 1000
 
     # Prepare metrics data for database insertion
     metrics_data = []
