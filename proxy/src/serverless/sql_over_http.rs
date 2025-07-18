@@ -192,34 +192,29 @@ pub(crate) async fn handle(
             let line = get(db_error, |db| db.line().map(|l| l.to_string()));
             let routine = get(db_error, |db| db.routine());
 
-            match &e {
-                SqlOverHttpError::Postgres(e)
-                    if e.as_db_error().is_some() && error_kind == ErrorKind::User =>
-                {
-                    // this error contains too much info, and it's not an error we care about.
-                    if tracing::enabled!(Level::DEBUG) {
-                        tracing::debug!(
-                            kind=error_kind.to_metric_label(),
-                            error=%e,
-                            msg=message,
-                            "forwarding error to user"
-                        );
-                    } else {
-                        tracing::info!(
-                            kind = error_kind.to_metric_label(),
-                            error = "bad query",
-                            "forwarding error to user"
-                        );
-                    }
-                }
-                _ => {
-                    tracing::info!(
+            if db_error.is_some() && error_kind == ErrorKind::User {
+                // this error contains too much info, and it's not an error we care about.
+                if tracing::enabled!(Level::DEBUG) {
+                    debug!(
                         kind=error_kind.to_metric_label(),
                         error=%e,
                         msg=message,
                         "forwarding error to user"
                     );
+                } else {
+                    info!(
+                        kind = error_kind.to_metric_label(),
+                        error = "bad query",
+                        "forwarding error to user"
+                    );
                 }
+            } else {
+                info!(
+                    kind=error_kind.to_metric_label(),
+                    error=%e,
+                    msg=message,
+                    "forwarding error to user"
+                );
             }
 
             json_response(
