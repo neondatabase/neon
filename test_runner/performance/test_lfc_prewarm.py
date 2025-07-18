@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import timeit
-from concurrent.futures import ThreadPoolExecutor as Exec
 from pathlib import Path
+from threading import Thread
 from time import sleep
 from typing import TYPE_CHECKING, cast
 
@@ -59,7 +59,7 @@ def test_compare_prewarmed_pgbench_perf(neon_compare: NeonCompare):
 
 
 @pytest.mark.remote_cluster
-@pytest.mark.timeout(20 * 60)
+@pytest.mark.timeout(2 * 60 * 60)
 def test_compare_prewarmed_pgbench_perf_benchmark(
     pg_bin: PgBin,
     neon_api: NeonAPI,
@@ -99,6 +99,7 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
     offload_secs = 20
     test_duration_min = 5
     pgbench_duration = f"-T{test_duration_min * 60}"
+    pgbench_cmd = ["pgbench", "-n", "-c10", pgbench_duration, "-Mprepared"]
     prewarmed_sleep_secs = 180
 
     ordinary_uri = neon_api.get_connection_uri(project_id, ordinary_branch_id, ordinary_id)["uri"]
@@ -108,8 +109,7 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
 
     def bench(endpoint_name, endpoint_id, env):
         log.info(f"Running pgbench for {pgbench_duration}s to warm up the cache")
-        cmd = ["pgbench", "-c10", pgbench_duration, "-Mprepared"]
-        pg_bin.run(cmd, env)
+        pg_bin.run_capture(pgbench_cmd, env)  # capture useful for debugging
 
         log.info(f"Initialized {endpoint_name}")
         if endpoint_name == "prewarmed":
@@ -124,7 +124,7 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
         log.info(f"Starting benchmark for {endpoint_name}")
         run_start_timestamp = utc_now_timestamp()
         t0 = timeit.default_timer()
-        out = pg_bin.run_capture(cmd, env)
+        out = pg_bin.run_capture(pgbench_cmd, env)
         run_duration = timeit.default_timer() - t0
         run_end_timestamp = utc_now_timestamp()
 
@@ -137,9 +137,12 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
         )
         zenbenchmark.record_pg_bench_result(endpoint_name, res)
 
-    with Exec(max_workers=2) as exe:
-        exe.submit(bench, "ordinary", ordinary_id, connstr_to_env(ordinary_uri))
-        exe.submit(bench, "prewarmed", prewarmed_id, connstr_to_env(prewarmed_uri))
+    prewarmed_args = ("prewarmed", prewarmed_id, connstr_to_env(prewarmed_uri))
+    prewarmed_thread = Thread(target=bench, args=prewarmed_args)
+    prewarmed_thread.start()
+
+    bench("ordinary", ordinary_id, connstr_to_env(ordinary_uri))
+    prewarmed_thread.join()
 
 
 def test_compare_prewarmed_read_perf(neon_compare: NeonCompare):
