@@ -10,6 +10,30 @@
 
 use std::fmt::{self, Write};
 
+use crate::{KeyEncoder, ValueEncoder, ValueSer};
+
+impl KeyEncoder for &str {}
+impl ValueEncoder for &str {
+    #[inline]
+    fn encode(self, v: ValueSer<'_>) {
+        format_escaped_str(v.buf, self);
+        v.finish();
+    }
+}
+
+impl KeyEncoder for fmt::Arguments<'_> {}
+impl ValueEncoder for fmt::Arguments<'_> {
+    #[inline]
+    fn encode(self, v: ValueSer<'_>) {
+        if let Some(s) = self.as_str() {
+            format_escaped_str(v.buf, s);
+        } else {
+            format_escaped_fmt(v.buf, self);
+        }
+        v.finish();
+    }
+}
+
 /// Represents a character escape code in a type-safe manner.
 pub enum CharEscape {
     /// An escaped quote `"`
@@ -50,7 +74,7 @@ impl CharEscape {
     }
 }
 
-pub(crate) fn format_escaped_str(writer: &mut Vec<u8>, value: &str) {
+fn format_escaped_str(writer: &mut Vec<u8>, value: &str) {
     writer.reserve(2 + value.len());
 
     writer.push(b'"');
@@ -61,7 +85,7 @@ pub(crate) fn format_escaped_str(writer: &mut Vec<u8>, value: &str) {
     writer.push(b'"');
 }
 
-pub(crate) fn format_escaped_fmt(writer: &mut Vec<u8>, args: fmt::Arguments) {
+fn format_escaped_fmt(writer: &mut Vec<u8>, args: fmt::Arguments) {
     writer.push(b'"');
 
     Collect { buf: writer }

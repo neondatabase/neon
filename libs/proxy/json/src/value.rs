@@ -1,7 +1,5 @@
-use core::fmt;
 use std::collections::{BTreeMap, HashMap};
 
-use crate::str::{format_escaped_fmt, format_escaped_str};
 use crate::{ValueSer, value_as_list, value_as_object};
 
 /// Marker trait for values that are valid keys
@@ -27,33 +25,11 @@ impl<T: Copy + ValueEncoder> ValueEncoder for &T {
     }
 }
 
-impl KeyEncoder for &str {}
-impl ValueEncoder for &str {
-    #[inline]
-    fn encode(self, v: ValueSer<'_>) {
-        format_escaped_str(v.buf, self);
-        v.finish();
-    }
-}
-
 impl KeyEncoder for String {}
 impl ValueEncoder for String {
     #[inline]
     fn encode(self, v: ValueSer<'_>) {
         self.as_str().encode(v);
-    }
-}
-
-impl KeyEncoder for fmt::Arguments<'_> {}
-impl ValueEncoder for fmt::Arguments<'_> {
-    #[inline]
-    fn encode(self, v: ValueSer<'_>) {
-        if let Some(s) = self.as_str() {
-            format_escaped_str(v.buf, s);
-        } else {
-            format_escaped_fmt(v.buf, self);
-        }
-        v.finish();
     }
 }
 
