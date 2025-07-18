@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa
 """
 Upload BenchBase TPC-C results from summary.json and results.csv files to perf_test_results database.
 
