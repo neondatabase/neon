@@ -25,6 +25,7 @@ use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::error::{ReportableError, UserFacingError};
+use crate::id::ComputeConnId;
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::neon_option;
@@ -356,6 +357,7 @@ pub struct PostgresSettings {
 }
 
 pub struct ComputeConnection {
+    pub compute_conn_id: ComputeConnId,
     /// Socket connected to a compute node.
     pub stream: MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
     /// Labels for proxy's metrics.
@@ -373,6 +375,7 @@ impl ConnectInfo {
         ctx: &RequestContext,
         aux: &MetricsAuxInfo,
         config: &ComputeConfig,
+        compute_conn_id: ComputeConnId,
     ) -> Result<ComputeConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (socket_addr, stream) = self.connect_raw(config).await?;
@@ -382,6 +385,7 @@ impl ConnectInfo {
 
         // TODO: lots of useful info but maybe we can move it elsewhere (eg traces?)
         info!(
+            %compute_conn_id,
             cold_start_info = ctx.cold_start_info().as_str(),
             "connected to compute node at {} ({socket_addr}) sslmode={:?}, latency={}, query_id={}",
             self.host,
@@ -391,6 +395,7 @@ impl ConnectInfo {
         );
 
         let connection = ComputeConnection {
+            compute_conn_id,
             stream,
             socket_addr,
             hostname: self.host.clone(),

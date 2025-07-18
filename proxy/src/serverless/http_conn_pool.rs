@@ -18,6 +18,7 @@ use super::conn_pool_lib::{
 };
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
+use crate::id::ComputeConnId;
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::types::EndpointCacheKey;
@@ -65,7 +66,7 @@ impl<C: ClientInnerExt + Clone> HttpConnPool<C> {
         }
     }
 
-    fn remove_conn(&mut self, conn_id: uuid::Uuid) -> bool {
+    fn remove_conn(&mut self, conn_id: ComputeConnId) -> bool {
         let Self {
             conns,
             global_connections_count,
@@ -73,7 +74,7 @@ impl<C: ClientInnerExt + Clone> HttpConnPool<C> {
         } = self;
 
         let old_len = conns.len();
-        conns.retain(|entry| entry.conn.conn_id != conn_id);
+        conns.retain(|entry| entry.conn.compute_conn_id != conn_id);
         let new_len = conns.len();
         let removed = old_len - new_len;
         if removed > 0 {
@@ -135,7 +136,10 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C, HttpConnPool<C>> {
             return result;
         };
 
-        tracing::Span::current().record("conn_id", tracing::field::display(client.conn.conn_id));
+        tracing::Span::current().record(
+            "conn_id",
+            tracing::field::display(client.conn.compute_conn_id),
+        );
         debug!(
             cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
             "pool: reusing connection '{conn_info}'"
@@ -194,13 +198,13 @@ pub(crate) fn poll_http2_client(
     conn_info: &ConnInfo,
     client: Send,
     connection: Connect,
-    conn_id: uuid::Uuid,
+    compute_conn_id: ComputeConnId,
     aux: MetricsAuxInfo,
 ) -> Client<Send> {
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
     let session_id = ctx.session_id();
 
-    let span = info_span!(parent: None, "connection", %conn_id);
+    let span = info_span!(parent: None, "connection", %compute_conn_id);
     let cold_start_info = ctx.cold_start_info();
     span.in_scope(|| {
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
@@ -212,7 +216,7 @@ pub(crate) fn poll_http2_client(
             let client = ClientInnerCommon {
                 inner: client.clone(),
                 aux: aux.clone(),
-                conn_id,
+                compute_conn_id,
                 data: ClientDataEnum::Http(ClientDataHttp()),
             };
             pool.write().conns.push_back(ConnPoolEntry {
@@ -241,7 +245,7 @@ pub(crate) fn poll_http2_client(
 
             // remove from connection pool
             if let Some(pool) = pool.clone().upgrade()
-                && pool.write().remove_conn(conn_id)
+                && pool.write().remove_conn(compute_conn_id)
             {
                 info!("closed connection removed");
             }
@@ -252,7 +256,7 @@ pub(crate) fn poll_http2_client(
     let client = ClientInnerCommon {
         inner: client,
         aux,
-        conn_id,
+        compute_conn_id,
         data: ClientDataEnum::Http(ClientDataHttp()),
     };
 

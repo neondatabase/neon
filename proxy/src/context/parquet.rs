@@ -124,7 +124,7 @@ impl serde::Serialize for Options<'_> {
 impl From<&RequestContextInner> for RequestData {
     fn from(value: &RequestContextInner) -> Self {
         Self {
-            session_id: value.session_id,
+            session_id: value.session_id.uuid(),
             peer_addr: value.conn_info.addr.ip().to_string(),
             timestamp: value.first_packet.naive_utc(),
             username: value.user.as_deref().map(String::from),

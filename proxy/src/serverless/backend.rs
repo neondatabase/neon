@@ -33,6 +33,7 @@ use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
+use crate::id::{ComputeConnId, RequestId};
 use crate::intern::EndpointIdInt;
 use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
@@ -161,7 +162,7 @@ impl PoolingBackend {
     #[tracing::instrument(skip_all, fields(
         pid = tracing::field::Empty,
         compute_id = tracing::field::Empty,
-        conn_id = tracing::field::Empty,
+        compute_conn_id = tracing::field::Empty,
     ))]
     pub(crate) async fn connect_to_compute(
         &self,
@@ -181,14 +182,14 @@ impl PoolingBackend {
         if let Some(client) = maybe_client {
             return Ok(client);
         }
-        let conn_id = uuid::Uuid::new_v4();
-        tracing::Span::current().record("conn_id", display(conn_id));
-        info!(%conn_id, "pool: opening a new connection '{conn_info}'");
+        let compute_conn_id = ComputeConnId::new();
+        tracing::Span::current().record("compute_conn_id", display(compute_conn_id));
+        info!(%compute_conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| keys.info);
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
-                conn_id,
+                compute_conn_id,
                 conn_info,
                 pool: self.pool.clone(),
                 locks: &self.config.connect_compute_locks,
@@ -204,7 +205,7 @@ impl PoolingBackend {
     // Wake up the destination if needed
     #[tracing::instrument(skip_all, fields(
         compute_id = tracing::field::Empty,
-        conn_id = tracing::field::Empty,
+        compute_conn_id = tracing::field::Empty,
     ))]
     pub(crate) async fn connect_to_local_proxy(
         &self,
@@ -216,9 +217,9 @@ impl PoolingBackend {
             return Ok(client);
         }
 
-        let conn_id = uuid::Uuid::new_v4();
-        tracing::Span::current().record("conn_id", display(conn_id));
-        debug!(%conn_id, "pool: opening a new connection '{conn_info}'");
+        let compute_conn_id = ComputeConnId::new();
+        tracing::Span::current().record("compute_conn_id", display(compute_conn_id));
+        debug!(%compute_conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| ComputeUserInfo {
             user: conn_info.user_info.user.clone(),
             endpoint: EndpointId::from(format!(
@@ -230,7 +231,7 @@ impl PoolingBackend {
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &HyperMechanism {
-                conn_id,
+                compute_conn_id,
                 conn_info,
                 pool: self.http_conn_pool.clone(),
                 locks: &self.config.connect_compute_locks,
@@ -251,7 +252,7 @@ impl PoolingBackend {
     /// Panics if called with a non-local_proxy backend.
     #[tracing::instrument(skip_all, fields(
         pid = tracing::field::Empty,
-        conn_id = tracing::field::Empty,
+        compute_conn_id = tracing::field::Empty,
     ))]
     pub(crate) async fn connect_to_local_postgres(
         &self,
@@ -303,9 +304,9 @@ impl PoolingBackend {
             }
         }
 
-        let conn_id = uuid::Uuid::new_v4();
-        tracing::Span::current().record("conn_id", display(conn_id));
-        info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
+        let compute_conn_id = ComputeConnId::new();
+        tracing::Span::current().record("compute_conn_id", display(compute_conn_id));
+        info!(%compute_conn_id, "local_pool: opening a new connection '{conn_info}'");
 
         let (key, jwk) = create_random_jwk();
 
@@ -340,7 +341,7 @@ impl PoolingBackend {
             client,
             connection,
             key,
-            conn_id,
+            compute_conn_id,
             local_backend.node_info.aux.clone(),
         );
 
@@ -378,7 +379,7 @@ fn create_random_jwk() -> (SigningKey, jose_jwk::Key) {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HttpConnError {
     #[error("pooled connection closed at inconsistent state")]
-    ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
+    ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<RequestId>),
     #[error("could not connect to postgres in compute")]
     PostgresConnectionError(#[from] postgres_client::Error),
     #[error("could not connect to local-proxy in compute")]
@@ -509,7 +510,7 @@ impl ShouldRetryWakeCompute for LocalProxyConnError {
 struct TokioMechanism {
     pool: Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
     conn_info: ConnInfo,
-    conn_id: uuid::Uuid,
+    compute_conn_id: ComputeConnId,
     keys: ComputeCredentialKeys,
 
     /// connect_to_compute concurrency lock
@@ -561,7 +562,7 @@ impl ConnectMechanism for TokioMechanism {
             self.conn_info.clone(),
             client,
             connection,
-            self.conn_id,
+            self.compute_conn_id,
             node_info.aux.clone(),
         ))
     }
@@ -570,7 +571,7 @@ impl ConnectMechanism for TokioMechanism {
 struct HyperMechanism {
     pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
     conn_info: ConnInfo,
-    conn_id: uuid::Uuid,
+    compute_conn_id: ComputeConnId,
 
     /// connect_to_compute concurrency lock
     locks: &'static ApiLocks<Host>,
@@ -620,7 +621,7 @@ impl ConnectMechanism for HyperMechanism {
             &self.conn_info,
             client,
             connection,
-            self.conn_id,
+            self.compute_conn_id,
             node_info.aux.clone(),
         ))
     }

@@ -5406,6 +5406,7 @@ dependencies = [
  "tracing-test",
  "tracing-utils",
  "try-lock",
+ "type-safe-id",
  "typed-json",
  "url",
  "urlencoding",
@@ -8085,6 +8086,19 @@ checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
  "static_assertions",
+]
+
+[[package]]
+name = "type-safe-id"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd9267f90719e0433aae095640b294ff36ccbf89649ecb9ee34464ec504be157"
+dependencies = [
+ "arrayvec",
+ "rand 0.9.1",
+ "serde",
+ "thiserror 2.0.11",
+ "uuid",
 ]
 
 [[package]]

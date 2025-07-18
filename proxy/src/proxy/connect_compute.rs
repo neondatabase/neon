@@ -9,6 +9,7 @@ use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::{self, NodeInfo};
 use crate::error::ReportableError;
+use crate::id::ComputeConnId;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType,
 };
@@ -51,6 +52,7 @@ pub(crate) trait ConnectMechanism {
 pub(crate) struct TcpMechanism {
     /// connect_to_compute concurrency lock
     pub(crate) locks: &'static ApiLocks<Host>,
+    pub(crate) compute_conn_id: ComputeConnId,
 }
 
 #[async_trait]
@@ -70,7 +72,7 @@ impl ConnectMechanism for TcpMechanism {
         config: &ComputeConfig,
     ) -> Result<ComputeConnection, Self::Error> {
         let permit = self.locks.get_permit(&node_info.conn_info.host).await?;
-        permit.release_result(node_info.connect(ctx, config).await)
+        permit.release_result(node_info.connect(ctx, config, self.compute_conn_id).await)
     }
 }
 

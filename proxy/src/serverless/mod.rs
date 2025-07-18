@@ -16,16 +16,16 @@ mod websocket;
 
 use std::net::{IpAddr, SocketAddr};
 use std::pin::{Pin, pin};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Context;
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
-use atomic_take::AtomicTake;
 use bytes::Bytes;
 pub use conn_pool_lib::GlobalConnPoolOptions;
-use futures::TryFutureExt;
 use futures::future::{Either, select};
+use futures::{FutureExt, TryFutureExt};
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
@@ -48,7 +48,8 @@ use crate::cancellation::CancellationHandler;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::ext::TaskExt;
-use crate::metrics::Metrics;
+use crate::id::{ClientConnId, RequestId};
+use crate::metrics::{Metrics, Protocol};
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
@@ -131,13 +132,12 @@ pub async fn task_main(
             tracing::error!("could not set nodelay: {e}");
             continue;
         }
-        let conn_id = uuid::Uuid::new_v4();
-        let http_conn_span = tracing::info_span!("http_conn", ?conn_id);
+        let conn_id = ClientConnId::new();
 
         let n_connections = Metrics::get()
             .proxy
             .client_connections
-            .sample(crate::metrics::Protocol::Http);
+            .sample(Protocol::Http);
         tracing::trace!(?n_connections, threshold = ?config.http_config.client_conn_threshold, "check");
         if n_connections > config.http_config.client_conn_threshold {
             tracing::trace!("attempting to cancel a random connection");
@@ -154,46 +154,41 @@ pub async fn task_main(
         let cancellation_handler = cancellation_handler.clone();
         let endpoint_rate_limiter = endpoint_rate_limiter.clone();
         let cancellations = cancellations.clone();
-        connections.spawn(
-            async move {
-                let conn_token2 = conn_token.clone();
-                let _cancel_guard = config.http_config.cancel_set.insert(conn_id, conn_token2);
+        connections.spawn(async move {
+            let conn_token2 = conn_token.clone();
+            let _cancel_guard = config.http_config.cancel_set.insert(conn_id, conn_token2);
 
-                let session_id = uuid::Uuid::new_v4();
+            let _gauge = Metrics::get()
+                .proxy
+                .client_connections
+                .guard(Protocol::Http);
 
-                let _gauge = Metrics::get()
-                    .proxy
-                    .client_connections
-                    .guard(crate::metrics::Protocol::Http);
+            let startup_result = Box::pin(connection_startup(
+                config,
+                tls_acceptor,
+                conn_id,
+                conn,
+                peer_addr,
+            ))
+            .await;
+            let Some((conn, conn_info)) = startup_result else {
+                return;
+            };
 
-                let startup_result = Box::pin(connection_startup(
-                    config,
-                    tls_acceptor,
-                    session_id,
-                    conn,
-                    peer_addr,
-                ))
-                .await;
-                let Some((conn, conn_info)) = startup_result else {
-                    return;
-                };
-
-                Box::pin(connection_handler(
-                    config,
-                    backend,
-                    connections2,
-                    cancellations,
-                    cancellation_handler,
-                    endpoint_rate_limiter,
-                    conn_token,
-                    conn,
-                    conn_info,
-                    session_id,
-                ))
-                .await;
-            }
-            .instrument(http_conn_span),
-        );
+            Box::pin(connection_handler(
+                config,
+                backend,
+                connections2,
+                cancellations,
+                cancellation_handler,
+                endpoint_rate_limiter,
+                conn_token,
+                conn,
+                conn_info,
+                conn_id,
+            ))
+            .await;
+        });
     }
 
     connections.wait().await;
@@ -230,7 +225,7 @@ impl MaybeTlsAcceptor for &'static ArcSwapOption<crate::config::TlsConfig> {
 async fn connection_startup(
     config: &ProxyConfig,
     tls_acceptor: Arc<dyn MaybeTlsAcceptor>,
-    session_id: uuid::Uuid,
+    conn_id: ClientConnId,
     conn: TcpStream,
     peer_addr: SocketAddr,
 ) -> Option<(AsyncRW, ConnectionInfo)> {
@@ -265,12 +260,12 @@ async fn connection_startup(
         IpAddr::V4(ip) => ip.is_private(),
         IpAddr::V6(_) => false,
     };
-    info!(?session_id, %conn_info, "accepted new TCP connection");
+    info!(%conn_id, %conn_info, "accepted new TCP connection");
 
     // try upgrade to TLS, but with a timeout.
     let conn = match timeout(config.handshake_timeout, tls_acceptor.accept(conn)).await {
         Ok(Ok(conn)) => {
-            info!(?session_id, %conn_info, "accepted new TLS connection");
+            info!(%conn_id, %conn_info, "accepted new TLS connection");
             conn
         }
         // The handshake failed
@@ -278,7 +273,7 @@ async fn connection_startup(
             if !has_private_peer_addr {
                 Metrics::get().proxy.tls_handshake_failures.inc();
             }
-            warn!(?session_id, %conn_info, "failed to accept TLS connection: {e:?}");
+            warn!(%conn_id, %conn_info, "failed to accept TLS connection: {e:?}");
             return None;
         }
         // The handshake timed out
@@ -286,7 +281,7 @@ async fn connection_startup(
             if !has_private_peer_addr {
                 Metrics::get().proxy.tls_handshake_failures.inc();
             }
-            warn!(?session_id, %conn_info, "failed to accept TLS connection: {e:?}");
+            warn!(%conn_id, %conn_info, "failed to accept TLS connection: {e:?}");
             return None;
         }
     };
@@ -309,10 +304,8 @@ async fn connection_handler(
     cancellation_token: CancellationToken,
     conn: AsyncRW,
     conn_info: ConnectionInfo,
-    session_id: uuid::Uuid,
+    conn_id: ClientConnId,
 ) {
-    let session_id = AtomicTake::new(session_id);
-
     // Cancel all current inflight HTTP requests if the HTTP connection is closed.
     let http_cancellation_token = CancellationToken::new();
     let _cancel_connection = http_cancellation_token.clone().drop_guard();
@@ -322,20 +315,6 @@ async fn connection_handler(
     let conn = server.serve_connection_with_upgrades(
         hyper_util::rt::TokioIo::new(conn),
         hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
-            // First HTTP request shares the same session ID
-            let mut session_id = session_id.take().unwrap_or_else(uuid::Uuid::new_v4);
-
-            if matches!(backend.auth_backend, crate::auth::Backend::Local(_)) {
-                // take session_id from request, if given.
-                if let Some(id) = req
-                    .headers()
-                    .get(&NEON_REQUEST_ID)
-                    .and_then(|id| uuid::Uuid::try_parse_ascii(id.as_bytes()).ok())
-                {
-                    session_id = id;
-                }
-            }
-
             // Cancel the current inflight HTTP request if the requets stream is closed.
             // This is slightly different to `_cancel_connection` in that
             // h2 can cancel individual requests with a `RST_STREAM`.
@@ -352,7 +331,7 @@ async fn connection_handler(
                     backend.clone(),
                     connections.clone(),
                     cancellation_handler.clone(),
-                    session_id,
+                    conn_id,
                     conn_info2.clone(),
                     http_request_token,
                     endpoint_rate_limiter.clone(),
@@ -362,15 +341,8 @@ async fn connection_handler(
                 .map_ok_or_else(api_error_into_response, |r| r),
             );
             async move {
-                let mut res = handler.await;
+                let res = handler.await;
                 cancel_request.disarm();
-
-                // add the session ID to the response
-                if let Ok(resp) = &mut res {
-                    resp.headers_mut()
-                        .append(&NEON_REQUEST_ID, uuid_to_header_value(session_id));
-                }
-
                 res
             }
         }),
@@ -392,6 +364,44 @@ async fn connection_handler(
     }
 }
 
+fn get_request_id(backend: &PoolingBackend, req: &hyper::Request<Incoming>) -> RequestId {
+    if matches!(backend.auth_backend, crate::auth::Backend::Local(_)) {
+        // take session_id from request, if given.
+
+        if let Some(id) = req
+            .headers()
+            .get(&NEON_REQUEST_ID)
+            .and_then(|id| uuid::Uuid::try_parse_ascii(id.as_bytes()).ok())
+        {
+            return RequestId::from_uuid(id);
+        }
+
+        if let Some(id) = req
+            .headers()
+            .get(&NEON_REQUEST_ID)
+            .and_then(|id| id.to_str().ok())
+            .and_then(|id| RequestId::from_str(id).ok())
+        {
+            return id;
+        }
+    }
+
+    RequestId::new()
+}
+
+fn set_request_id<T, E>(
+    mut res: Result<hyper::Response<T>, E>,
+    session_id: RequestId,
+) -> Result<hyper::Response<T>, E> {
+    // add the session ID to the response
+    if let Ok(resp) = &mut res {
+        resp.headers_mut()
+            .append(&NEON_REQUEST_ID, uuid_to_header_value(session_id));
+    }
+
+    res
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn request_handler(
     mut request: hyper::Request<Incoming>,
@@ -399,7 +409,7 @@ async fn request_handler(
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
     cancellation_handler: Arc<CancellationHandler>,
-    session_id: uuid::Uuid,
+    conn_id: ClientConnId,
     conn_info: ConnectionInfo,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
@@ -417,7 +427,8 @@ async fn request_handler(
     if config.http_config.accept_websockets
         && framed_websockets::upgrade::is_upgrade_request(&request)
     {
-        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Ws);
+        let session_id = RequestId::from_uuid(conn_id.uuid());
+        let ctx = RequestContext::new(conn_id, session_id, conn_info, Protocol::Ws);
 
         ctx.set_user_agent(
             request
@@ -457,7 +468,8 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response.map(|b| b.map_err(|x| match x {}).boxed()))
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
-        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
+        let session_id = get_request_id(&backend, &request);
+        let ctx = RequestContext::new(conn_id, session_id, conn_info, Protocol::Http);
         let span = ctx.span();
 
         let testodrome_id = request
@@ -473,6 +485,7 @@ async fn request_handler(
 
         sql_over_http::handle(config, ctx, request, backend, http_cancellation_token)
             .instrument(span)
+            .map(|res| set_request_id(res, session_id))
             .await
     } else if request.uri().path() == "/sql" && *request.method() == Method::OPTIONS {
         Response::builder()

@@ -23,6 +23,7 @@ use crate::context::RequestContext;
 use crate::control_plane::ControlPlaneApi;
 use crate::error::ReportableError;
 use crate::ext::LockExt;
+use crate::id::RequestId;
 use crate::metrics::{CancelChannelSizeGuard, CancellationRequest, Metrics, RedisMsgKind};
 use crate::pqproto::CancelKeyData;
 use crate::rate_limiter::LeakyBucketRateLimiter;
@@ -486,7 +487,7 @@ impl Session {
     /// This is not cancel safe
     pub(crate) async fn maintain_cancel_key(
         &self,
-        session_id: uuid::Uuid,
+        session_id: RequestId,
         cancel: tokio::sync::oneshot::Receiver<Infallible>,
         cancel_closure: &CancelClosure,
         compute_config: &ComputeConfig,
@@ -599,7 +600,7 @@ impl Session {
             .await
         {
             tracing::warn!(
-                ?session_id,
+                %session_id,
                 ?err,
                 "could not cancel the query in the database"
             );

@@ -8,6 +8,7 @@ use utils::measured_stream::MeasuredStream;
 use super::copy_bidirectional::ErrorSource;
 use crate::compute::MaybeRustlsStream;
 use crate::control_plane::messages::MetricsAuxInfo;
+use crate::id::ComputeConnId;
 use crate::metrics::{
     Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard,
     NumDbConnectionsGuard,
@@ -65,6 +66,8 @@ pub(crate) async fn proxy_pass(
 }
 
 pub(crate) struct ProxyPassthrough<S> {
+    pub(crate) compute_conn_id: ComputeConnId,
+
     pub(crate) client: Stream<S>,
     pub(crate) compute: MaybeRustlsStream,
 
