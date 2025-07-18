@@ -96,7 +96,7 @@ impl ComputeNode {
         // using $1 doesn't work with ALTER SYSTEM SET
         let safekeepers_sql = format!(
             "ALTER SYSTEM SET neon.safekeepers='{}'",
-            cfg.compute_spec.safekeeper_connstrings.join(",")
+            cfg.spec.safekeeper_connstrings.join(",")
         );
         client
             .query(&safekeepers_sql, &[])
@@ -136,7 +136,7 @@ impl ComputeNode {
             let mut state = self.state.lock().unwrap();
             let spec = &mut state.pspec.as_mut().unwrap().spec;
             spec.mode = ComputeMode::Primary;
-            let new_conf = cfg.compute_spec.cluster.postgresql_conf.as_mut().unwrap();
+            let new_conf = cfg.spec.cluster.postgresql_conf.as_mut().unwrap();
             let existing_conf = spec.cluster.postgresql_conf.as_ref().unwrap();
             Self::merge_spec(new_conf, existing_conf);
         }

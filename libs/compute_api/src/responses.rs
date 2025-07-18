@@ -111,8 +111,7 @@ pub enum PromoteState {
 #[derive(Deserialize, Default, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct PromoteConfig {
-    #[serde(flatten)]
-    pub compute_spec: ComputeSpec,
+    pub spec: ComputeSpec,
     pub wal_flush_lsn: utils::lsn::Lsn,
 }
 
