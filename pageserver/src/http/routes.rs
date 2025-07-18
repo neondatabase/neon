@@ -484,6 +484,8 @@ async fn build_timeline_info_common(
         *timeline.get_applied_gc_cutoff_lsn(),
     );
 
+    let (rel_size_migration, rel_size_migrated_at) = timeline.get_rel_size_v2_status();
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,
         timeline_id: timeline.timeline_id,
@@ -515,7 +517,8 @@ async fn build_timeline_info_common(
 
         state,
         is_archived: Some(is_archived),
-        rel_size_migration: Some(timeline.get_rel_size_v2_status()),
+        rel_size_migration: Some(rel_size_migration),
+        rel_size_migrated_at,
         is_invisible: Some(is_invisible),
 
         walreceiver_status,
@@ -930,9 +933,16 @@ async fn timeline_patch_index_part_handler(
             active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
                 .await?;
 
+        if request_data.rel_size_migration.is_none() && request_data.rel_size_migrated_at.is_some()
+        {
+            return Err(ApiError::BadRequest(anyhow!(
+                "updating rel_size_migrated_at without rel_size_migration is not allowed"
+            )));
+        }
+
         if let Some(rel_size_migration) = request_data.rel_size_migration {
             timeline
-                .update_rel_size_v2_status(rel_size_migration)
+                .update_rel_size_v2_status(rel_size_migration, request_data.rel_size_migrated_at)
                 .map_err(ApiError::InternalServerError)?;
         }
 
