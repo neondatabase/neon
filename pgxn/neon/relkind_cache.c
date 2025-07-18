@@ -53,18 +53,6 @@ typedef struct
 								 * algorithm */
 } RelKindHashControl;
 
-static HTAB *relkind_hash;
-static int	relkind_hash_size;
-static RelKindHashControl* relkind_ctl;
-static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook = NULL;
-static void relkind_shmem_request(void);
-#endif
-
-LWLockId finish_unlogged_build_lock;
-LWLockId relkind_hash_lock;
-
 /*
  * Size of a cache entry is 32 bytes. So this default will take about 2 MB,
  * which seems reasonable.
@@ -72,19 +60,32 @@ LWLockId relkind_hash_lock;
 #define DEFAULT_RELKIND_HASH_SIZE (64 * 1024)
 
 
+static HTAB *relkind_hash;
+static int	relkind_hash_size = DEFAULT_RELKIND_HASH_SIZE;
+static RelKindHashControl* relkind_ctl;
+
+LWLockId finish_unlogged_build_lock;
+LWLockId relkind_hash_lock;
+
 /*
- * Callback for shared memory intialization
+ * Shared memory registration
  */
-static void
-relkind_cache_startup(void)
+void
+RelkindCacheShmemRequest(void)
+{
+	RequestAddinShmemSpace(sizeof(RelKindHashControl) + hash_estimate_size(relkind_hash_size, sizeof(RelKindEntry)));
+	RequestNamedLWLockTranche("neon_relkind", 2);
+}
+
+/*
+ * Intialize shared memory
+ */
+void
+RelkindCacheShmemInit(void)
 {
 	static HASHCTL info;
 	bool found;
 
-	if (prev_shmem_startup_hook)
-		prev_shmem_startup_hook();
-
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	relkind_ctl = (RelKindHashControl *) ShmemInitStruct("relkind_hash", sizeof(RelKindHashControl), &found);
 	if (!found)
 	{
@@ -108,7 +109,6 @@ relkind_cache_startup(void)
 		relkind_ctl->pinned = 0;
 		dlist_init(&relkind_ctl->lru);
 	}
-	LWLockRelease(AddinShmemInitLock);
 }
 
 /*
@@ -286,31 +286,4 @@ relkind_hash_init(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
-
-#if PG_VERSION_NUM >= 150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = relkind_shmem_request;
-#else
-	RequestAddinShmemSpace(hash_estimate_size(relkind_hash_size, sizeof(RelKindEntry)));
-	RequestNamedLWLockTranche("neon_relkind", 2);
-#endif
-
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = relkind_cache_startup;
 }
-
-#if PG_VERSION_NUM >= 150000
-/*
- * shmem_request hook: request additional shared resources.  We'll allocate or
- * attach to the shared resources in neon_smgr_shmem_startup().
- */
-static void
-relkind_shmem_request(void)
-{
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-
-	RequestAddinShmemSpace(sizeof(RelKindHashControl) + hash_estimate_size(relkind_hash_size, sizeof(RelKindEntry)));
-	RequestNamedLWLockTranche("neon_relkind", 2);
-}
-#endif

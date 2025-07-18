@@ -722,6 +722,7 @@ neon_shmem_request_hook(void)
 	NeonPerfCountersShmemRequest();
 	PagestoreShmemRequest();
 	RelsizeCacheShmemRequest();
+	RelkindCacheShmemRequest();
 	WalproposerShmemRequest();
 	LwLsnCacheShmemRequest();
 }
@@ -744,6 +745,7 @@ neon_shmem_startup_hook(void)
 	NeonPerfCountersShmemInit();
 	PagestoreShmemInit();
 	RelsizeCacheShmemInit();
+	RelkindCacheShmemInit();
 	WalproposerShmemInit();
 	LwLsnCacheShmemInit();
 
