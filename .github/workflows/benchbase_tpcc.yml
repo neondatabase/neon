@@ -223,6 +223,7 @@ jobs:
           echo "Uploading warmup metrics from: $WARMUP_JSON"
           python upload_results_to_perf_test_results.py \
             --summary-json "$WARMUP_JSON" \
+            --results-csv "$WARMUP_CSV" \
             --run-type "warmup" \
             --min-cu "${MIN_CU}" \
             --max-cu "${MAX_CU}" \
@@ -249,6 +250,7 @@ jobs:
           echo "Uploading optimal rate metrics from: $OPTRATE_JSON"
           python upload_results_to_perf_test_results.py \
             --summary-json "$OPTRATE_JSON" \
+            --results-csv "$OPTRATE_CSV" \
             --run-type "opt-rate" \
             --min-cu "${MIN_CU}" \
             --max-cu "${MAX_CU}" \

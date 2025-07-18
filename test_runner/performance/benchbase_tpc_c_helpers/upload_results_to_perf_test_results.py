@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Upload BenchBase TPC-C results from summary.json files to perf_test_results database.
+Upload BenchBase TPC-C results from summary.json and results.csv files to perf_test_results database.
 
-This script extracts metrics from BenchBase summary.json files and uploads them
+This script extracts metrics from BenchBase *.summary.json and *.results.csv files and uploads them
 to a PostgreSQL database table for performance tracking and analysis.
 """
 
@@ -12,6 +12,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd  # type: ignore[import-untyped]
 import psycopg2  # type: ignore[import-untyped]
 from psycopg2.extras import RealDictCursor  # type: ignore[import-untyped]
 
@@ -155,6 +156,142 @@ def insert_metrics(conn, metrics_data):
         sys.exit(1)
 
 
+def create_benchbase_results_details_table(conn):
+    """Create benchbase_results_details table if it doesn't exist."""
+    create_table_query = """
+    CREATE TABLE IF NOT EXISTS benchbase_results_details (
+        id BIGSERIAL PRIMARY KEY,
+        suit TEXT,
+        revision CHAR(40),
+        platform TEXT,
+        recorded_at_timestamp TIMESTAMP WITH TIME ZONE,
+        requests_per_second NUMERIC,
+        average_latency_ms NUMERIC,
+        minimum_latency_ms NUMERIC,
+        p25_latency_ms NUMERIC,
+        median_latency_ms NUMERIC,
+        p75_latency_ms NUMERIC,
+        p90_latency_ms NUMERIC,
+        p95_latency_ms NUMERIC,
+        p99_latency_ms NUMERIC,
+        maximum_latency_ms NUMERIC
+    );
+    
+    CREATE INDEX IF NOT EXISTS benchbase_results_details_recorded_at_timestamp_idx 
+        ON benchbase_results_details USING BRIN (recorded_at_timestamp);
+    CREATE INDEX IF NOT EXISTS benchbase_results_details_suit_idx 
+        ON benchbase_results_details USING BTREE (suit text_pattern_ops);
+    """
+    
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(create_table_query)
+        conn.commit()
+        print("Successfully created/verified benchbase_results_details table")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error creating benchbase_results_details table: {e}")
+        sys.exit(1)
+
+
+def process_csv_results(csv_file_path, start_timestamp_ms, suit, revision, platform):
+    """Process CSV results and return data for database insertion."""
+    try:
+        # Read CSV file
+        df = pd.read_csv(csv_file_path)
+        
+        # Validate required columns exist
+        required_columns = [
+            "Time (seconds)",
+            "Throughput (requests/second)",
+            "Average Latency (millisecond)",
+            "Minimum Latency (millisecond)",
+            "25th Percentile Latency (millisecond)",
+            "Median Latency (millisecond)",
+            "75th Percentile Latency (millisecond)",
+            "90th Percentile Latency (millisecond)",
+            "95th Percentile Latency (millisecond)",
+            "99th Percentile Latency (millisecond)",
+            "Maximum Latency (millisecond)"
+        ]
+        
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            print(f"Error: Missing required columns in CSV: {missing_columns}")
+            return []
+        
+        csv_data = []
+        
+        for _, row in df.iterrows():
+            # Calculate timestamp: start_timestamp_ms + (time_seconds * 1000)
+            time_seconds = row["Time (seconds)"]
+            row_timestamp_ms = start_timestamp_ms + (time_seconds * 1000)
+            
+            # Convert to UTC timestamp
+            row_timestamp = datetime.fromtimestamp(row_timestamp_ms / 1000.0, tz=timezone.utc).isoformat()
+            
+            csv_row = {
+                "suit": suit,
+                "revision": revision,
+                "platform": platform,
+                "recorded_at_timestamp": row_timestamp,
+                "requests_per_second": float(row["Throughput (requests/second)"]),
+                "average_latency_ms": float(row["Average Latency (millisecond)"]),
+                "minimum_latency_ms": float(row["Minimum Latency (millisecond)"]),
+                "p25_latency_ms": float(row["25th Percentile Latency (millisecond)"]),
+                "median_latency_ms": float(row["Median Latency (millisecond)"]),
+                "p75_latency_ms": float(row["75th Percentile Latency (millisecond)"]),
+                "p90_latency_ms": float(row["90th Percentile Latency (millisecond)"]),
+                "p95_latency_ms": float(row["95th Percentile Latency (millisecond)"]),
+                "p99_latency_ms": float(row["99th Percentile Latency (millisecond)"]),
+                "maximum_latency_ms": float(row["Maximum Latency (millisecond)"])
+            }
+            csv_data.append(csv_row)
+        
+        print(f"Processed {len(csv_data)} rows from CSV file")
+        return csv_data
+        
+    except FileNotFoundError:
+        print(f"Error: CSV file not found: {csv_file_path}")
+        return []
+    except Exception as e:
+        print(f"Error processing CSV file {csv_file_path}: {e}")
+        return []
+
+
+def insert_csv_results(conn, csv_data):
+    """Insert CSV results into benchbase_results_details table."""
+    if not csv_data:
+        print("No CSV data to insert")
+        return
+        
+    insert_query = """
+    INSERT INTO benchbase_results_details 
+    (suit, revision, platform, recorded_at_timestamp, requests_per_second,
+     average_latency_ms, minimum_latency_ms, p25_latency_ms, median_latency_ms,
+     p75_latency_ms, p90_latency_ms, p95_latency_ms, p99_latency_ms, maximum_latency_ms)
+    VALUES (%(suit)s, %(revision)s, %(platform)s, %(recorded_at_timestamp)s, %(requests_per_second)s,
+            %(average_latency_ms)s, %(minimum_latency_ms)s, %(p25_latency_ms)s, %(median_latency_ms)s,
+            %(p75_latency_ms)s, %(p90_latency_ms)s, %(p95_latency_ms)s, %(p99_latency_ms)s, %(maximum_latency_ms)s)
+    """
+    
+    try:
+        with conn.cursor() as cursor:
+            cursor.executemany(insert_query, csv_data)
+        conn.commit()
+        print(f"Successfully inserted {len(csv_data)} detailed results into benchbase_results_details")
+        
+        # Log some sample data for verification
+        if csv_data:
+            sample = csv_data[0]
+            print(f"Sample detail: {sample['requests_per_second']} req/s at {sample['recorded_at_timestamp']}")
+            
+    except Exception as e:
+        conn.rollback()
+        print(f"Error inserting CSV results into database: {e}")
+        sys.exit(1)
+
+
 def main():
     """Main function to parse arguments and upload results."""
     parser = argparse.ArgumentParser(
@@ -203,6 +340,12 @@ def main():
         required=True, 
         help="PostgreSQL connection string"
     )
+    parser.add_argument(
+        "--results-csv",
+        type=str,
+        required=False,
+        help="Path to the results.csv file for detailed metrics upload"
+    )
     
     args = parser.parse_args()
     
@@ -232,11 +375,17 @@ def main():
     
     # Convert timestamp
     current_timestamp_ms = summary_data.get("Current Timestamp (milliseconds)")
+    start_timestamp_ms = summary_data.get("Start Timestamp (milliseconds)")
+    
     if current_timestamp_ms:
         recorded_at = convert_timestamp_to_utc(current_timestamp_ms)
     else:
         print("Warning: No timestamp found in JSON, using current time")
         recorded_at = datetime.now(timezone.utc).isoformat()
+    
+    if not start_timestamp_ms:
+        print("Warning: No start timestamp found in JSON, CSV upload may be incorrect")
+        start_timestamp_ms = current_timestamp_ms or datetime.now(timezone.utc).timestamp() * 1000
     
     # Prepare metrics data for database insertion
     metrics_data = []
@@ -263,9 +412,37 @@ def main():
     # Connect to database and insert metrics
     try:
         conn = psycopg2.connect(args.connection_string)
+        
+        # Insert summary metrics into perf_test_results
         insert_metrics(conn, metrics_data)
+        
+        # Process and insert detailed CSV results if provided
+        if args.results_csv:
+            print(f"Processing detailed CSV results from: {args.results_csv}")
+            
+            # Create table if it doesn't exist
+            create_benchbase_results_details_table(conn)
+            
+            # Process CSV data
+            csv_data = process_csv_results(
+                args.results_csv, 
+                start_timestamp_ms, 
+                suit, 
+                args.revision, 
+                platform
+            )
+            
+            # Insert CSV data
+            if csv_data:
+                insert_csv_results(conn, csv_data)
+            else:
+                print("No CSV data to upload")
+        else:
+            print("No CSV file provided, skipping detailed results upload")
+        
         conn.close()
         print("Database upload completed successfully")
+        
     except psycopg2.Error as e:
         print(f"Database connection/query error: {e}")
         sys.exit(1)
