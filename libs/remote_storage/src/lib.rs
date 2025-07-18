@@ -10,6 +10,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 mod azure_blob;
+mod azure_reqwest_polyfill;
 mod config;
 mod error;
 mod local_fs;

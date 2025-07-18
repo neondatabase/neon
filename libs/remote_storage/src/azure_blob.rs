@@ -129,7 +129,7 @@ impl AzureBlobStorage {
             .pool_max_idle_per_host(conn_pool_size)
             .build()
             .expect("failed to build `reqwest` client");
-        Arc::new(client)
+        Arc::new(super::azure_reqwest_polyfill::Client(client))
     }
 
     pub fn relative_path_to_name(&self, path: &RemotePath) -> String {
