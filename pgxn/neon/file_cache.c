@@ -2163,8 +2163,8 @@ lfc_approximate_working_set_size_seconds(time_t duration, bool reset)
  * process.
  *
  * NB: This is called from a Rust tokio task inside the communicator process.
- * Acquiring lwlocks, elog(), allocating memory etc. or anything else
- * non-trivial is strictly prohibited here!
+ * Acquiring lwlocks, elog(), allocating memory or anything else non-trivial
+ * is strictly prohibited here!
  */
 struct LfcMetrics
 callback_get_lfc_metrics_unsafe(void)

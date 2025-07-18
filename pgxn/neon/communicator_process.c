@@ -64,7 +64,9 @@ pg_init_communicator_process(void)
 
 /**** Worker process functions. These run in the communicator worker process ****/
 
-/* Entry point for the communicator bgworker process */
+/*
+ * Entry point for the communicator bgworker process
+ */
 void
 communicator_new_bgworker_main(Datum main_arg)
 {
@@ -114,8 +116,8 @@ communicator_new_bgworker_main(Datum main_arg)
 	if (proc_handle == NULL)
 	{
 		/*
-		 * Before exiting, forward any log messages that might've been
-		 * generated during the failed launch.
+		 * Something went wrong. Before exiting, forward any log messages that
+		 * might've been generated during the failed launch.
 		 */
 		pump_logging(logging);
 
@@ -153,9 +155,11 @@ communicator_new_bgworker_main(Datum main_arg)
 		/*
 		 * Check interrupts like system shutdown or config reload
 		 *
-		 * We mustn't block for too long within this loop, or we risk blocking
-		 * threads that are sending log messages to us, or having confusingly
-		 * long skew in the printed timestamps.
+		 * We mustn't block for too long within this loop, or we risk the log
+		 * queue to fill up and messages to be lost. Also, even if we can keep
+		 * up, if there's a long delay between sending a message and printing
+		 * it to the log, the timestamps on the messages get skewed, which is
+		 * confusing.
 		 *
 		 * We expect processing interrupts to happen fast enough that it's OK,
 		 * but measure it just in case, and print a warning if it takes longer
@@ -176,8 +180,8 @@ communicator_new_bgworker_main(Datum main_arg)
 			elog(WARNING, "handling interrupts took %ld ms, communicator log timestamps might be skewed", duration);
 
 		/*
-		 * Wait until we are woken up. The rust threads will set the latch if
-		 * there's log message to forward.
+		 * Wait until we are woken up. The rust threads will set the latch
+		 * when there's a log message to forward.
 		 */
 		(void) WaitLatch(MyLatch,
 						 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,

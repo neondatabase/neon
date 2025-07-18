@@ -34,15 +34,17 @@ where
     // There are a few ways we could work around this:
     //
     // 1. Change the current directory to the Postgres data directory and use a relative
-    //    path  in the connect(2) call. That's problematic because the current directory
+    //    path in the connect(2) call. That's problematic because the current directory
     //    applies to the whole process. We could change the current directory early in
     //    compute_ctl startup, and that might be a good idea anyway for other reasons too:
-    //    it would be more robust if the data directory is moved around or unlinked for some
-    //    reason, and you would be less likely to accidentally litter other parts of the
-    //    filesystem with e.g. temporary files. However, that's a pretty invasive change.
+    //    it would be more robust if the data directory is moved around or unlinked for
+    //    some reason, and you would be less likely to accidentally litter other parts of
+    //    the filesystem with e.g. temporary files. However, that's a pretty invasive
+    //    change.
     //
-    // 2. On Linux, you could open() the data directory, and refer to the the socket inside it
-    //    as "/proc/self/fd/<fd>/neon-communicator.socket". But that's Linux-only.
+    // 2. On Linux, you could open() the data directory, and refer to the the socket
+    //    inside it as "/proc/self/fd/<fd>/neon-communicator.socket". But that's
+    //    Linux-only.
     //
     // 3. Create a symbolic link to the socket with a shorter path, and use that.
     //
