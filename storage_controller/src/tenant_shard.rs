@@ -1611,7 +1611,13 @@ impl TenantShard {
 
         // Update result counter
         let outcome_label = match &result {
-            Ok(_) => ReconcileOutcome::Success,
+            Ok(_) => {
+                if reconciler.compute_notify_failure {
+                    ReconcileOutcome::SuccessNoNotify
+                } else {
+                    ReconcileOutcome::Success
+                }
+            }
             Err(ReconcileError::Cancel) => ReconcileOutcome::Cancel,
             Err(_) => ReconcileOutcome::Error,
         };
