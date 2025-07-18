@@ -145,7 +145,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let session = cancellation_handler.get_key();
 
-    finish_client_init(&pg_settings, *session.key(), client);
+    finish_client_init(ctx, &pg_settings, *session.key(), client);
 
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = oneshot::channel();
@@ -165,6 +165,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 pub(crate) fn finish_client_init(
+    ctx: &RequestContext,
     settings: &compute::PostgresSettings,
     cancel_key_data: CancelKeyData,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
@@ -176,11 +177,42 @@ pub(crate) fn finish_client_init(
         });
     }
 
+    // Expose session_id to clients
+    client.write_message(BeMessage::NoticeResponse(&ctx.session_id().to_string()));
+
     // Forward all postgres connection params to the client.
     for (name, value) in &settings.params {
         client.write_message(BeMessage::ParameterStatus {
             name: name.as_bytes(),
             value: value.as_bytes(),
+        });
+    }
+
+    // Forward recorded latencies for probing requests
+    if let Some(testodrome_id) = ctx.get_testodrome_id() {
+        client.write_message(BeMessage::ParameterStatus {
+            name: "testodrome_id".as_bytes(),
+            value: testodrome_id.as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "cplane_latency".as_bytes(),
+            value: ctx.get_proxy_latency().cplane.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "client_latency".as_bytes(),
+            value: ctx.get_proxy_latency().client.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "compute_latency".as_bytes(),
+            value: ctx.get_proxy_latency().compute.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "retry_latency".as_bytes(),
+            value: ctx.get_proxy_latency().retry.as_micros().to_string().as_bytes(),
         });
     }
 
