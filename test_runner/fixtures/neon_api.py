@@ -29,8 +29,8 @@ class NeonAPI:
         self.__neon_api_key = neon_api_key
         self.__neon_api_base_url = neon_api_base_url.strip("/")
         self.retry_if_possible = False
-        self.attempts = 20
-        self.sleep_before_retry = 30
+        self.attempts = 10
+        self.sleep_before_retry = 2
         self.retries524 = 0
         self.retries4xx = 0
 
