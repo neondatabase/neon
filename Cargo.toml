@@ -49,6 +49,7 @@ members = [
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
     "pgxn/neon/communicator",
+    "proxy/subzero_core",
 ]
 
 [workspace.package]
