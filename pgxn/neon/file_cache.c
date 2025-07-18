@@ -2170,7 +2170,7 @@ struct LfcMetrics
 callback_get_lfc_metrics_unsafe(void)
 {
 	struct LfcMetrics result = {
-		.lfc_cache_size_limit = lfc_size_limit,
+		.lfc_cache_size_limit = (int64) lfc_size_limit * 1024 * 1024,
 		.lfc_hits = lfc_ctl ? lfc_ctl->hits : 0,
 		.lfc_misses = lfc_ctl ? lfc_ctl->misses : 0,
 		.lfc_used = lfc_ctl ? lfc_ctl->used : 0,
