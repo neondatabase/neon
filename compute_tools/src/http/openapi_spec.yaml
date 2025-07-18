@@ -96,7 +96,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ComputeSchema"
+              $ref: "#/components/schemas/ComputeSchemaWithLsn"
       responses:
         200:
           description: Promote succeeded or wasn't started
@@ -590,9 +590,19 @@ components:
         - spec
       properties:
         spec:
-          # TODO(myrrc,mtyazici): I don't want to explain current spec in the OpenAPI format,
-          # as it could be changed really soon. Consider doing it later.
           type: object
+    ComputeSchemaWithLsn:
+      type: object
+      required:
+        - spec
+        - wal_flush_lsn
+      properties:
+        spec:
+          $ref: "#/components/schemas/ComputeState"
+        wal_flush_lsn:
+          type: string
+          description: "last WAL flush LSN"
+          example: "0/028F10D8"
 
     LfcPrewarmState:
       type: object

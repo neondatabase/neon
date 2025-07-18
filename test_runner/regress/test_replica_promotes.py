@@ -101,8 +101,8 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
         client = secondary.http_client()
         client.prewarm_lfc(primary_endpoint_id)
         assert (lsn := primary.terminate_flush_lsn)
-        primary_spec["wal_flush_lsn"] = str(lsn)
-        assert client.promote(primary_spec)["status"] == "completed"
+        promote_spec = {"spec": primary_spec, "wal_flush_lsn": str(lsn)}
+        assert client.promote(promote_spec)["status"] == "completed"
     else:
         promo_cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
         promo_cur.execute("select pg_reload_conf()")
@@ -199,8 +199,8 @@ def test_replica_promote_handler_disconnects(neon_simple_env: NeonEnv):
 
     client = secondary.http_client()
     client.prewarm_lfc(primary_endpoint_id)
-    primary_spec["wal_flush_lsn"] = str(lsn)
-    assert client.promote(primary_spec, disconnect=True)["status"] == "completed"
+    promote_spec = {"spec": primary_spec, "wal_flush_lsn": str(lsn)}
+    assert client.promote(promote_spec, disconnect=True)["status"] == "completed"
 
     with secondary.connect() as conn, conn.cursor() as cur:
         cur.execute("select count(*) from t")
@@ -234,8 +234,8 @@ def test_replica_promote_fails(neon_simple_env: NeonEnv):
 
     client = secondary.http_client()
     client.prewarm_lfc(primary_endpoint_id)
-    primary_spec["wal_flush_lsn"] = str(lsn)
-    assert client.promote(primary_spec)["status"] == "failed"
+    promote_spec = {"spec": primary_spec, "wal_flush_lsn": str(lsn)}
+    assert client.promote(promote_spec)["status"] == "failed"
     secondary.stop()
 
     primary.start()
