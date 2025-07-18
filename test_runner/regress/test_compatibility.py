@@ -197,7 +197,7 @@ def test_create_snapshot(
     shutil.copytree(
         test_output_dir,
         new_compatibility_snapshot_dir,
-        ignore=shutil.ignore_patterns("pg_dynshmem"),
+        ignore=shutil.ignore_patterns("pg_dynshmem", "neon-communicator.socket"),
     )
 
     log.info(f"Copied new compatibility snapshot dir to: {new_compatibility_snapshot_dir}")

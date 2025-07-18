@@ -5,6 +5,7 @@ MODULE_big = neon
 OBJS = \
 	$(WIN32RES) \
 	communicator.o \
+	communicator_process.o \
 	extension_server.o \
 	file_cache.o \
 	hll.o \
@@ -28,6 +29,11 @@ OBJS = \
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
 SHLIB_LINK = -lcurl
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S), Darwin)
+    SHLIB_LINK += -framework Security -framework CoreFoundation -framework SystemConfiguration
+endif
 
 EXTENSION = neon
 DATA = \
@@ -57,7 +63,8 @@ WALPROP_OBJS = \
 
 # libcommunicator.a is built by cargo from the Rust sources under communicator/
 # subdirectory. `cargo build` also generates communicator_bindings.h.
-neon.o: communicator/communicator_bindings.h
+communicator_process.o: communicator/communicator_bindings.h
+file_cache.o: communicator/communicator_bindings.h
 
 $(NEON_CARGO_ARTIFACT_TARGET_DIR)/libcommunicator.a communicator/communicator_bindings.h &:
 	(cd $(srcdir)/communicator && cargo build $(CARGO_BUILD_FLAGS) $(CARGO_PROFILE))

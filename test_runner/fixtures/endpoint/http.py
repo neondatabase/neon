@@ -66,6 +66,12 @@ class EndpointHttpClient(requests.Session):
         res.raise_for_status()
         return res.json()
 
+    def autoscaling_metrics(self):
+        res = self.get(f"http://localhost:{self.external_port}/autoscaling_metrics")
+        res.raise_for_status()
+        log.debug("raw compute metrics: %s", res.text)
+        return res.text
+
     def prewarm_lfc_status(self) -> dict[str, str]:
         res = self.get(self.prewarm_url)
         res.raise_for_status()
