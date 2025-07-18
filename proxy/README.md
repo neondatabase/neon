@@ -183,7 +183,14 @@ cargo run --bin local_proxy --features testing -- \
   --http 0.0.0.0:7432
 ```
 
-Start the auth broker:
+Start the auth/rest broker:
+
+Note: to enable the rest broker you need to replace the stub subzero-core crate with the real one.
+
+```sh
+cargo add -p proxy subzero-core --git https://github.com/neondatabase/subzero --rev 396264617e78e8be428682f87469bb25429af88a
+```
+
 ```sh
 LOGFMT=text OTEL_SDK_DISABLED=true cargo run --bin proxy --features testing,rest_broker -- \
   -c server.crt -k server.key \
