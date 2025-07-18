@@ -80,7 +80,6 @@ RelsizeCacheShmemInit(void)
 		relsize_ctl->writes = 0;
 		dlist_init(&relsize_ctl->lru);
 	}
-	LWLockRelease(AddinShmemInitLock);
 }
 
 bool

@@ -489,6 +489,7 @@ _PG_init(void)
 	/* Stage 1: Define GUCs, and other early intialization */
 	pg_init_libpagestore();
 	relsize_hash_init();
+	relkind_hash_init();
 	lfc_init();
 	pg_init_walproposer();
 	init_lwlsncache();
