@@ -62,6 +62,9 @@ impl ComputeUserInfoMaybeEndpoint {
 
 pub(crate) fn endpoint_sni(sni: &str, common_names: &HashSet<String>) -> Option<EndpointId> {
     let (subdomain, common_name) = sni.split_once('.')?;
+    if subdomain.starts_with("instance-") {
+        return Some(EndpointId::from(subdomain));
+    }
     if !common_names.contains(common_name) {
         return None;
     }
