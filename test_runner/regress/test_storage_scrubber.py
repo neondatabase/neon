@@ -410,6 +410,7 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
 
     # Delete the timeline
     env.storage_controller.pageserver_api().timeline_delete(tenant_id, timeline_id)
+    time.sleep(1)  # give scrubber some time to wait for min_age_secs
 
     # Subsequently doing physical GC should clean up the ancestor layers
     gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=0, mode="full")

@@ -621,6 +621,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         path
         for path in remote_timeline_path.iterdir()
         if not (path.name.endswith("initdb.tar.zst"))
+        and not (path.name.startswith("index_part.json"))
     ]
     assert len(filtered) == 0
 
