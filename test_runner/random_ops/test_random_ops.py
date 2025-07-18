@@ -474,6 +474,7 @@ class NeonProject:
                     f"INSERT INTO sanity_check (name, value) VALUES "
                     f"('snapsot_name', '{snapshot_name}') ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
                 )
+                conn.commit()
                 snapshot = NeonSnapshot(
                     self,
                     self.neon_api.create_snapshot(
@@ -489,6 +490,7 @@ class NeonProject:
                 cur.execute("SELECT * FROM sanity_check WHERE name = 'snapsot_name'")
                 log.info("sanity: %s", cur.fetchone())
                 cur.execute("UPDATE sanity_check SET value = 'tainted' || value")
+                conn.commit()
         return snapshot
 
     def delete_snapshot(self, snapshot_id: str) -> None:
