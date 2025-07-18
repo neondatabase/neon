@@ -21,9 +21,6 @@ platforms = [
     # "x86_64-apple-darwin",
     # "x86_64-pc-windows-msvc",
 ]
-[traversal-excludes]
-third-party = [
-]
 [final-excludes]
 workspace-members = [
     # vm_monitor benefits from the same Cargo.lock as the rest of our artifacts, but
