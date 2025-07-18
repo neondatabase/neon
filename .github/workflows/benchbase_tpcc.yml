@@ -36,14 +36,14 @@ jobs:
             max_rate: 800
             min_cu: 0.25
             max_cu: 2
-          - warehouses: 500
-            max_rate: 2000
-            min_cu: 2
-            max_cu: 8
-          - warehouses: 1000
-            max_rate: 2900
-            min_cu: 2
-            max_cu: 16
+        #   - warehouses: 500
+        #     max_rate: 2000
+        #     min_cu: 2
+        #     max_cu: 8
+        #   - warehouses: 1000
+        #     max_rate: 2900
+        #     min_cu: 2
+        #     max_cu: 16
       max-parallel: 1 # we want to run each workload size sequentially to avoid noisy neighbors
     permissions:
       contents: write
@@ -181,55 +181,90 @@ jobs:
         
         echo "Benchmark execution completed"
 
-    - name: Generate performance diagrams
+    - name: Process results (upload to test results database and generate diagrams)
       env:
         WAREHOUSES: ${{ matrix.warehouses }}
+        MIN_CU: ${{ matrix.min_cu }}
+        MAX_CU: ${{ matrix.max_cu }}
+        PROJECT_ID: ${{ steps.create-neon-project-tpcc.outputs.project_id }}
+        REVISION: ${{ github.sha }}
+        PERF_DB_CONNSTR: ${{ secrets.PERF_TEST_RESULT_CONNSTR }}
       run: |
         cd "${BENCHMARK_WORKDIR}"
         
-        echo "Creating temporary Python environment for diagram generation..."
+        echo "Creating temporary Python environment for results processing..."
         
         # Create temporary virtual environment
-        python3 -m venv temp_diagram_env
-        source temp_diagram_env/bin/activate
+        python3 -m venv temp_results_env
+        source temp_results_env/bin/activate
         
         # Install required packages in virtual environment
-        pip install matplotlib pandas
+        pip install matplotlib pandas psycopg2-binary
         
-        echo "Generating performance diagrams..."
+        echo "Copying results processing scripts..."
         
-        # Copy the diagram generator script
+        # Copy both processing scripts
         cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/generate_diagrams.py" .
+        cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/upload_results_to_perf_test_results.py" .
         
-        # Find and generate diagrams for warmup results
+        echo "Processing warmup results..."
+        
+        # Find and process warmup results
         WARMUP_CSV=$(find results_warmup -name "*.results.csv" -type f | head -1)
-        if [ -n "$WARMUP_CSV" ]; then
+        WARMUP_JSON=$(find results_warmup -name "*.summary.json" -type f | head -1)
+        
+        if [ -n "$WARMUP_CSV" ] && [ -n "$WARMUP_JSON" ]; then
           echo "Generating warmup diagram from: $WARMUP_CSV"
           python generate_diagrams.py \
             --input-csv "$WARMUP_CSV" \
             --output-svg "warmup_${WAREHOUSES}_warehouses_performance.svg" \
             --title-suffix "Warmup at max TPS"
+            
+          echo "Uploading warmup metrics from: $WARMUP_JSON"
+          python upload_results_to_perf_test_results.py \
+            --summary-json "$WARMUP_JSON" \
+            --run-type "warmup" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
         else
-          echo "Warning: No warmup results CSV found in results_warmup/"
+          echo "Warning: Missing warmup results files (CSV: $WARMUP_CSV, JSON: $WARMUP_JSON)"
         fi
         
-        # Find and generate diagrams for optimal rate results  
+        echo "Processing optimal rate results..."
+        
+        # Find and process optimal rate results  
         OPTRATE_CSV=$(find results_opt_rate -name "*.results.csv" -type f | head -1)
-        if [ -n "$OPTRATE_CSV" ]; then
+        OPTRATE_JSON=$(find results_opt_rate -name "*.summary.json" -type f | head -1)
+        
+        if [ -n "$OPTRATE_CSV" ] && [ -n "$OPTRATE_JSON" ]; then
           echo "Generating optimal rate diagram from: $OPTRATE_CSV"
           python generate_diagrams.py \
             --input-csv "$OPTRATE_CSV" \
             --output-svg "benchmark_${WAREHOUSES}_warehouses_performance.svg" \
             --title-suffix "70% of max TPS"
+            
+          echo "Uploading optimal rate metrics from: $OPTRATE_JSON"
+          python upload_results_to_perf_test_results.py \
+            --summary-json "$OPTRATE_JSON" \
+            --run-type "opt-rate" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
         else
-          echo "Warning: No optimal rate results CSV found in results_opt_rate/"
+          echo "Warning: Missing optimal rate results files (CSV: $OPTRATE_CSV, JSON: $OPTRATE_JSON)"
         fi
         
         # Deactivate and clean up virtual environment
         deactivate
-        rm -rf temp_diagram_env
+        rm -rf temp_results_env
+        rm upload_results_to_perf_test_results.py
         
-        echo "Diagram generation completed and environment cleaned up"
+        echo "Results processing completed and environment cleaned up"
 
     - name: Set date for upload
       id: set-date

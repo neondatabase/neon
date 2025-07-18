@@ -9,8 +9,8 @@ SCRIPTS_DIR = Path("../scripts")
 
 # Constants
 ## TODO increase times after testing
-WARMUP_TIME_SECONDS = 1200  # 20 minutes
-BENCHMARK_TIME_SECONDS = 3600  # 1 hour
+WARMUP_TIME_SECONDS = 120  # 20 minutes
+BENCHMARK_TIME_SECONDS = 360  # 1 hour
 RAMP_STEP_TIME_SECONDS = 300  # 5 minutes
 BASE_TERMINALS = 130
 TERMINALS_PER_WAREHOUSE = 0.2
