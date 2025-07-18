@@ -39,6 +39,12 @@ commands:
     user: nobody
     sysvInitAction: respawn
     shell: '/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499'
+  - name: symlink-kernel-modules
+    user: root
+    sysvInitAction: sysinit
+    shell: |
+      mkdir -p /lib/modules
+      ln -s /neonvm/tools/lib/modules /lib/modules
   # Rsyslog by default creates a unix socket under /dev/log . That's where Postgres sends logs also.
   # We run syslog with postgres user so it can't create /dev/log. Instead we configure rsyslog to
   # use a different path for the socket. The symlink actually points to our custom path.
