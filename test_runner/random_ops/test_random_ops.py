@@ -533,14 +533,13 @@ class NeonProject:
                 if ep.type == "read_write":
                     new_branch.connection_parameters["host"] = ep.host
                     break
-            with new_branch.connection_parameters as cp:
-                new_branch.connect_env = {
-                    "PGHOST": cp["host"],
-                    "PGUSER": cp["role"],
-                    "PGDATABASE": cp["database"],
-                    "PGPASSWORD": cp["password"],
-                    "PGSSLMODE": "require",
-                }
+            new_branch.connect_env = {
+                "PGHOST": new_branch.connection_parameters["host"],
+                "PGUSER": new_branch.connection_parameters["role"],
+                "PGDATABASE": new_branch.connection_parameters["database"],
+                "PGPASSWORD": new_branch.connection_parameters["password"],
+                "PGSSLMODE": "require",
+            }
         with psycopg2.connect(
             host=new_branch.connection_parameters["host"],
             port=5432,
