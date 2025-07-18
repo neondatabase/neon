@@ -418,7 +418,7 @@ jobs:
       statuses: write
       id-token: write # aws-actions/configure-aws-credentials
     env:
-      PROJECT_ID: ${{ vars.PREWARM_PROJECT_ID }}
+      PGBENCH_SIZE: ${{ vars.PREWARM_PGBENCH_SIZE }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 17
       TEST_OUTPUT: /tmp/test_output
