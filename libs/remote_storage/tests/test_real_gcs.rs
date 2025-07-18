@@ -62,14 +62,16 @@ impl AsyncTestContext for EnabledGCS {
 
 #[test_context(EnabledGCS)]
 #[tokio::test]
-async fn gcs_test_suite_upload_download_delete(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
+async fn gcs_test_suite_streaming_upload_download_delete_large_file(
+    ctx: &mut EnabledGCS,
+) -> anyhow::Result<()> {
     let gcs = &ctx.client;
 
-    let source_file = std::io::Cursor::new(vec![0; 256]);
-    let file_size = 256 as usize;
+    let source_file = std::io::Cursor::new(vec![0; 256000000]);
+    let file_size = 256000000 as usize;
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, file_size);
     // shared function arguments
-    let remote_path = RemotePath::from_string("small_file.dat")?;
+    let remote_path = RemotePath::from_string("large_file.dat")?;
     let cancel = CancellationToken::new();
 
     // order matters and that's okay for now
@@ -80,7 +82,7 @@ async fn gcs_test_suite_upload_download_delete(ctx: &mut EnabledGCS) -> anyhow::
             &remote_path,
             Some(StorageMetadata::from([(
                 "name",
-                "pageserver/small_file.dat",
+                "pageserver/large_file.dat",
             )])),
             &cancel,
         )
@@ -103,6 +105,84 @@ async fn gcs_test_suite_upload_download_delete(ctx: &mut EnabledGCS) -> anyhow::
     }
 
     let paths = [remote_path];
+    gcs.delete_objects(&paths, &cancel).await?;
+
+    Ok(())
+}
+
+#[test_context(EnabledGCS)]
+#[tokio::test]
+async fn gcs_test_multipart_upload_manifest_without_name_set(
+    ctx: &mut EnabledGCS,
+) -> anyhow::Result<()> {
+    let gcs = &ctx.client;
+
+    // Failed to upload data of length 58 to storage path RemotePath("tenants/99336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json"
+    let source_file = std::io::Cursor::new(vec![0; 256]);
+    let file_size = 256 as usize;
+    let reader = tokio_util::io::ReaderStream::with_capacity(source_file, file_size);
+
+    // shared function arguments
+    let path = "tenants/99336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json";
+    let remote_path = RemotePath::from_string(path)?;
+    let cancel = CancellationToken::new();
+
+    // order matters and that's okay for now
+    let res = gcs
+        .upload(reader, file_size, &remote_path, None, &cancel)
+        .await?;
+
+    let paths = [remote_path];
+    gcs.delete_objects(&paths, &cancel).await?;
+
+    Ok(())
+}
+
+#[test_context(EnabledGCS)]
+#[tokio::test]
+async fn gcs_test_download_manifest_without_name_set(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
+    let gcs = &ctx.client;
+
+    // Failed to upload data of length 58 to storage path RemotePath("tenants/99336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json"
+    let source_file = std::io::Cursor::new(vec![0; 256]);
+    let file_size = 256 as usize;
+    let reader = tokio_util::io::ReaderStream::with_capacity(source_file, file_size);
+
+    // shared function arguments
+    let path = "tenants/99336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json";
+    let remote_path = RemotePath::from_string(path)?;
+    let cancel = CancellationToken::new();
+
+    let opts = DownloadOpts {
+        etag: None,
+        byte_start: Bound::Unbounded,
+        byte_end: Bound::Unbounded,
+        version_id: None,
+        kind: DownloadKind::Small,
+    };
+    let res = gcs.download(&remote_path, &opts, &cancel).await?;
+    let mut stream = std::pin::pin!(res.download_stream);
+    while let Some(item) = stream.next().await {
+        let bytes = item?;
+        if !bytes.len() == 256 {
+            panic!("failed")
+        }
+    }
+    Ok(())
+}
+
+#[test_context(EnabledGCS)]
+#[tokio::test]
+async fn gcs_test_delete_key_not_found_does_not_error(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
+    let gcs = &ctx.client;
+
+    let key = "neon/safekeeper/99336152a31c64b41034e4e904629ce9/814ce0bd2ae452e11575402e8296b64d/000000010000000000000001_0_00000000014EEC40_00000000014EEC40_sk1.partial";
+    let remote_path = RemotePath::from_string(key)?;
+    let cancel = CancellationToken::new();
+
+    let paths = [remote_path];
+    gcs.delete_objects(&paths, &cancel).await?;
+    // Do it again just in case it was there.
     gcs.delete_objects(&paths, &cancel).await?;
 
     Ok(())

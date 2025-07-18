@@ -208,19 +208,22 @@ impl GCSBucket {
         let _permit = self.permit(kind, cancel).await?;
         let started_at = start_measuring_requests(kind);
 
-        let encoded_path: String =
-            url::form_urlencoded::byte_serialize(self.relative_path_to_gcs_object(to).as_bytes())
-                .collect();
-
         let multipart_uri = format!(
             "https://storage.googleapis.com/upload/storage/v1/b/{}/o?uploadType=multipart",
             self.bucket_name.clone()
         );
 
-        metadata
-            .clone()
-            .as_mut()
-            .map(|m| m.0.entry("name".to_string()).or_insert(to.to_string()));
+        let mut metadata = metadata.clone();
+        let gcs_path = self.relative_path_to_gcs_object(to);
+
+        // Always specify destination via `RemotePath` in multipart uploads
+        if metadata.is_none() {
+            metadata = Some(StorageMetadata::from([("name", gcs_path.as_str())]));
+        } else {
+            metadata
+                .as_mut()
+                .map(|m| m.0.insert("name".to_string(), gcs_path));
+        }
 
         let metadata_body = serde_json::to_string(&metadata.map(|m| m.0))?;
         let metadata_part = reqwest::multipart::Part::text(metadata_body)
@@ -465,8 +468,18 @@ impl GCSBucket {
             let errors: HashMap<usize, &String> = parsed
                 .iter()
                 .filter_map(|(x, y)| {
-                    if y.chars().next() != Some('2') {
-                        x.parse::<usize>().ok().map(|v| (v, y))
+                    let id = x.parse::<usize>().ok();
+                    if y == "404" {
+                        // GCS returns Error on 404, S3 doesn't. Warn and omit from failed count.
+                        // https://cloud.google.com/storage/docs/xml-api/delete-object
+                        tracing::warn!(
+                            "DeleteObjects key {} {} NotFound. Already deleted.",
+                            delete_objects_status.get(&id?).unwrap(),
+                            y
+                        );
+                        None
+                    } else if y.chars().next() != Some('2') {
+                        id.map(|v| (v, y))
                     } else {
                         None
                     }

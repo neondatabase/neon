@@ -1,0 +1,20 @@
+[package]
+name = "ctrl_plane_self_hosted"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = "0.7" # Or the latest version if you check crates.io
+serde.workspace = true
+tokio = { version = "1", features = ["full"] }
+futures = { version = "0.3.31" }
+anyhow = { version = "1.0.98" }
+sqlx = { version = "0.8", features = [ "runtime-tokio", "postgres" ] }
+utils.workspace = true
+pageserver_api.workspace = true
+dotenvy = "0.15.7"
+http.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
