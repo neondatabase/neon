@@ -10,9 +10,9 @@ communications with the pageservers.
 ## Source code view
 
 pgxn/neon/communicator_process.c
-	Contains code needed to start up the communicator process, and
-	the glue that interacts with PostgreSQL code and the Rust
-	code in the communicator process.
+    Contains code needed to start up the communicator process, and
+    the glue that interacts with PostgreSQL code and the Rust
+    code in the communicator process.
 
 
 pgxn/neon/communicator/src/worker_process/
