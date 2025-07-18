@@ -29,7 +29,7 @@ storage_controller_client.workspace = true
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { workspace = true, default-features = false, features = ["rustls-tls-native-roots", "json"] }
 
 pageserver = { path = "../pageserver" }
 pageserver_api = { path = "../libs/pageserver_api" }
