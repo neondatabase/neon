@@ -20,6 +20,7 @@ use crate::cache::{Cached, TimedLru};
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
+use crate::id::ComputeConnId;
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::rate_limiter::{EndpointRateLimiter, LeakyBucketConfig};
@@ -77,8 +78,11 @@ impl NodeInfo {
         &self,
         ctx: &RequestContext,
         config: &ComputeConfig,
+        compute_conn_id: ComputeConnId,
     ) -> Result<compute::ComputeConnection, compute::ConnectionError> {
-        self.conn_info.connect(ctx, &self.aux, config).await
+        self.conn_info
+            .connect(ctx, &self.aux, config, compute_conn_id)
+            .await
     }
 }
 

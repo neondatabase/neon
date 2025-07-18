@@ -26,6 +26,7 @@ use utils::project_git_version;
 use utils::sentry_init::init_sentry;
 
 use crate::context::RequestContext;
+use crate::id::{ClientConnId, RequestId};
 use crate::metrics::{Metrics, ThreadPoolMetrics};
 use crate::pglb::TlsRequired;
 use crate::pqproto::FeStartupPacket;
@@ -219,7 +220,8 @@ pub(super) async fn task_main(
     {
         let (socket, peer_addr) = accept_result?;
 
-        let session_id = uuid::Uuid::new_v4();
+        let conn_id = ClientConnId::new();
+        let session_id = RequestId::from_uuid(conn_id.uuid());
         let tls_config = Arc::clone(&tls_config);
         let dest_suffix = Arc::clone(&dest_suffix);
         let compute_tls_config = compute_tls_config.clone();
@@ -231,6 +233,7 @@ pub(super) async fn task_main(
                     .context("failed to set socket option")?;
 
                 let ctx = RequestContext::new(
+                    conn_id,
                     session_id,
                     ConnectionInfo {
                         addr: peer_addr,
@@ -252,7 +255,7 @@ pub(super) async fn task_main(
                 // Acknowledge that the task has finished with an error.
                 error!("per-client task finished with an error: {e:#}");
             })
-            .instrument(tracing::info_span!("handle_client", ?session_id)),
+            .instrument(tracing::info_span!("handle_client", %session_id)),
         );
     }
 

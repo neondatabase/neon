@@ -19,6 +19,7 @@ use super::local_conn_pool::ClientDataLocal;
 use crate::auth::backend::ComputeUserInfo;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
+use crate::id::ComputeConnId;
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::types::{DbName, EndpointCacheKey, RoleName};
@@ -58,7 +59,7 @@ pub(crate) enum ClientDataEnum {
 pub(crate) struct ClientInnerCommon<C: ClientInnerExt> {
     pub(crate) inner: C,
     pub(crate) aux: MetricsAuxInfo,
-    pub(crate) conn_id: uuid::Uuid,
+    pub(crate) compute_conn_id: ComputeConnId,
     pub(crate) data: ClientDataEnum, // custom client data like session, key, jti
 }
 
@@ -77,8 +78,8 @@ impl<C: ClientInnerExt> Drop for ClientInnerCommon<C> {
 }
 
 impl<C: ClientInnerExt> ClientInnerCommon<C> {
-    pub(crate) fn get_conn_id(&self) -> uuid::Uuid {
-        self.conn_id
+    pub(crate) fn get_conn_id(&self) -> ComputeConnId {
+        self.compute_conn_id
     }
 
     pub(crate) fn get_data(&mut self) -> &mut ClientDataEnum {
@@ -144,7 +145,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
     pub(crate) fn remove_client(
         &mut self,
         db_user: (DbName, RoleName),
-        conn_id: uuid::Uuid,
+        conn_id: ComputeConnId,
     ) -> bool {
         let Self {
             pools,
@@ -189,7 +190,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
     }
 
     pub(crate) fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInnerCommon<C>) {
-        let conn_id = client.get_conn_id();
+        let compute_conn_id = client.get_conn_id();
         let (max_conn, conn_count, pool_name) = {
             let pool = pool.read();
             (
@@ -201,12 +202,12 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
         };
 
         if client.inner.is_closed() {
-            info!(%conn_id, "{}: throwing away connection '{conn_info}' because connection is closed", pool_name);
+            info!(%compute_conn_id, "{}: throwing away connection '{conn_info}' because connection is closed", pool_name);
             return;
         }
 
         if conn_count >= max_conn {
-            info!(%conn_id, "{}: throwing away connection '{conn_info}' because pool is full", pool_name);
+            info!(%compute_conn_id, "{}: throwing away connection '{conn_info}' because pool is full", pool_name);
             return;
         }
 
@@ -241,9 +242,9 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
 
         // do logging outside of the mutex
         if returned {
-            debug!(%conn_id, "{pool_name}: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
+            debug!(%compute_conn_id, "{pool_name}: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
         } else {
-            info!(%conn_id, "{pool_name}: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
+            info!(%compute_conn_id, "{pool_name}: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
         }
     }
 }

@@ -10,7 +10,8 @@ use crate::cancellation::CancellationHandler;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
-use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::id::{ClientConnId, ComputeConnId, RequestId};
+use crate::metrics::{Metrics, NumClientConnectionsGuard, Protocol};
 use crate::pglb::ClientRequestError;
 use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
@@ -42,12 +43,10 @@ pub async fn task_main(
     {
         let (socket, peer_addr) = accept_result?;
 
-        let conn_gauge = Metrics::get()
-            .proxy
-            .client_connections
-            .guard(crate::metrics::Protocol::Tcp);
+        let conn_gauge = Metrics::get().proxy.client_connections.guard(Protocol::Tcp);
 
-        let session_id = uuid::Uuid::new_v4();
+        let conn_id = ClientConnId::new();
+        let session_id = RequestId::from_uuid(conn_id.uuid());
         let cancellation_handler = Arc::clone(&cancellation_handler);
         let cancellations = cancellations.clone();
 
@@ -90,7 +89,7 @@ pub async fn task_main(
                 }
             }
 
-            let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Tcp);
+            let ctx = RequestContext::new(conn_id, session_id, conn_info, Protocol::Tcp);
 
             let res = handle_client(
                 config,
@@ -120,13 +119,13 @@ pub async fn task_main(
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
                             error!(
-                                ?session_id,
+                                %session_id,
                                 "per-client task finished with an IO error from the client: {e:#}"
                             );
                         }
                         Err(ErrorSource::Compute(e)) => {
                             error!(
-                                ?session_id,
+                                %session_id,
                                 "per-client task finished with an IO error from the compute: {e:#}"
                             );
                         }
@@ -214,10 +213,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     };
     auth_info.set_startup_params(&params, true);
 
+    // for TCP/WS, we have client_id=session_id=compute_id for now.
+    let compute_conn_id = ComputeConnId::from_uuid(ctx.session_id().uuid());
+
     let mut node = connect_to_compute(
         ctx,
         &TcpMechanism {
             locks: &config.connect_compute_locks,
+            compute_conn_id,
         },
         &node_info,
         config.wake_compute_retry_config,
@@ -250,6 +253,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     });
 
     Ok(Some(ProxyPassthrough {
+        compute_conn_id: node.compute_conn_id,
+
         client: stream,
         compute: node.stream,
 

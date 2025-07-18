@@ -9,11 +9,11 @@ use tokio::sync::mpsc;
 use tracing::field::display;
 use tracing::{Span, error, info_span};
 use try_lock::TryLock;
-use uuid::Uuid;
 
 use self::parquet::RequestData;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::error::ErrorKind;
+use crate::id::{ClientConnId, RequestId};
 use crate::intern::{BranchIdInt, ProjectIdInt};
 use crate::metrics::{LatencyAccumulated, LatencyTimer, Metrics, Protocol, Waiting};
 use crate::pqproto::StartupMessageParams;
@@ -40,7 +40,7 @@ pub struct RequestContext(
 
 struct RequestContextInner {
     pub(crate) conn_info: ConnectionInfo,
-    pub(crate) session_id: Uuid,
+    pub(crate) session_id: RequestId,
     pub(crate) protocol: Protocol,
     first_packet: chrono::DateTime<Utc>,
     pub(crate) span: Span,
@@ -116,12 +116,18 @@ impl Clone for RequestContext {
 }
 
 impl RequestContext {
-    pub fn new(session_id: Uuid, conn_info: ConnectionInfo, protocol: Protocol) -> Self {
+    pub fn new(
+        conn_id: ClientConnId,
+        session_id: RequestId,
+        conn_info: ConnectionInfo,
+        protocol: Protocol,
+    ) -> Self {
         // TODO: be careful with long lived spans
         let span = info_span!(
             "connect_request",
             %protocol,
-            ?session_id,
+            %session_id,
+            %conn_id,
             %conn_info,
             ep = tracing::field::Empty,
             role = tracing::field::Empty,
@@ -164,7 +170,13 @@ impl RequestContext {
         let ip = IpAddr::from([127, 0, 0, 1]);
         let addr = SocketAddr::new(ip, 5432);
         let conn_info = ConnectionInfo { addr, extra: None };
-        RequestContext::new(Uuid::now_v7(), conn_info, Protocol::Tcp)
+        let uuid = uuid::Uuid::now_v7();
+        RequestContext::new(
+            ClientConnId::from_uuid(uuid),
+            RequestId::from_uuid(uuid),
+            conn_info,
+            Protocol::Tcp,
+        )
     }
 
     pub(crate) fn console_application_name(&self) -> String {
@@ -311,7 +323,7 @@ impl RequestContext {
         self.0.try_lock().expect("should not deadlock").span.clone()
     }
 
-    pub(crate) fn session_id(&self) -> Uuid {
+    pub(crate) fn session_id(&self) -> RequestId {
         self.0.try_lock().expect("should not deadlock").session_id
     }
 

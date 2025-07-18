@@ -91,6 +91,7 @@ mod control_plane;
 mod error;
 mod ext;
 mod http;
+mod id;
 mod intern;
 mod jemalloc;
 mod logging;

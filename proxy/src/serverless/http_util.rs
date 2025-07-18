@@ -10,7 +10,6 @@ use http_body_util::{BodyExt, Full};
 use http_utils::error::ApiError;
 use serde::Serialize;
 use url::Url;
-use uuid::Uuid;
 
 use super::conn_pool::{AuthData, ConnInfoWithAuth};
 use super::conn_pool_lib::ConnInfo;
@@ -18,6 +17,7 @@ use super::error::{ConnInfoError, Credentials};
 use crate::auth::backend::ComputeUserInfo;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
+use crate::id::RequestId;
 use crate::metrics::{Metrics, SniGroup, SniKind};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::NeonOptions;
@@ -34,9 +34,8 @@ pub(super) static TXN_ISOLATION_LEVEL: HeaderName =
 pub(super) static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
 pub(super) static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
 
-pub(crate) fn uuid_to_header_value(id: Uuid) -> HeaderValue {
-    let mut uuid = [0; uuid::fmt::Hyphenated::LENGTH];
-    HeaderValue::from_str(id.as_hyphenated().encode_lower(&mut uuid[..]))
+pub(crate) fn uuid_to_header_value(id: RequestId) -> HeaderValue {
+    HeaderValue::from_maybe_shared(Bytes::from(id.to_string().into_bytes()))
         .expect("uuid hyphenated format should be all valid header characters")
 }
 

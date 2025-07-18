@@ -24,6 +24,7 @@ use crate::compute::ComputeConnection;
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ControlPlaneClient;
+use crate::id::ComputeConnId;
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use crate::pglb::{ClientMode, ClientRequestError};
 use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
@@ -94,6 +95,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut attempt = 0;
     let connect = TcpMechanism {
         locks: &config.connect_compute_locks,
+        // for TCP/WS, we have client_id=session_id=compute_id for now.
+        compute_conn_id: ComputeConnId::from_uuid(ctx.session_id().uuid()),
     };
     let backend = auth::Backend::ControlPlane(cplane, creds.info);
 

@@ -10,7 +10,8 @@ use rand::{Rng, thread_rng};
 use rustc_hash::FxHasher;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
+
+use crate::id::ClientConnId;
 
 type Hasher = BuildHasherDefault<FxHasher>;
 
@@ -21,7 +22,7 @@ pub struct CancelSet {
 }
 
 pub(crate) struct CancelShard {
-    tokens: IndexMap<uuid::Uuid, (Instant, CancellationToken), Hasher>,
+    tokens: IndexMap<ClientConnId, (Instant, CancellationToken), Hasher>,
 }
 
 impl CancelSet {
@@ -53,7 +54,7 @@ impl CancelSet {
             .and_then(|len| self.shards[rng % len].lock().take(rng / len))
     }
 
-    pub(crate) fn insert(&self, id: uuid::Uuid, token: CancellationToken) -> CancelGuard<'_> {
+    pub(crate) fn insert(&self, id: ClientConnId, token: CancellationToken) -> CancelGuard<'_> {
         let shard = NonZeroUsize::new(self.shards.len()).map(|len| {
             let hash = self.hasher.hash_one(id) as usize;
             let shard = &self.shards[hash % len];
@@ -77,18 +78,18 @@ impl CancelShard {
         })
     }
 
-    fn remove(&mut self, id: uuid::Uuid) {
+    fn remove(&mut self, id: ClientConnId) {
         self.tokens.swap_remove(&id);
     }
 
-    fn insert(&mut self, id: uuid::Uuid, token: CancellationToken) {
+    fn insert(&mut self, id: ClientConnId, token: CancellationToken) {
         self.tokens.insert(id, (Instant::now(), token));
     }
 }
 
 pub(crate) struct CancelGuard<'a> {
     shard: Option<&'a Mutex<CancelShard>>,
-    id: Uuid,
+    id: ClientConnId,
 }
 
 impl Drop for CancelGuard<'_> {

@@ -98,6 +98,7 @@ tracing-log.workspace = true
 tracing-opentelemetry.workspace = true
 try-lock.workspace = true
 typed-json.workspace = true
+type-safe-id = { version = "0.3.3", features = ["serde"] }
 url.workspace = true
 urlencoding.workspace = true
 utils.workspace = true

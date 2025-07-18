@@ -26,6 +26,7 @@ use super::conn_pool_lib::{
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
+use crate::id::{ComputeConnId, RequestId};
 use crate::metrics::Metrics;
 
 type TlsStream = <ComputeConfig as MakeTlsConnect<TcpStream>>::Stream;
@@ -62,14 +63,14 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     conn_info: ConnInfo,
     client: C,
     mut connection: postgres_client::Connection<TcpStream, TlsStream>,
-    conn_id: uuid::Uuid,
+    compute_conn_id: ComputeConnId,
     aux: MetricsAuxInfo,
 ) -> Client<C> {
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
     let mut session_id = ctx.session_id();
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
-    let span = info_span!(parent: None, "connection", %conn_id);
+    let span = info_span!(parent: None, "connection", %compute_conn_id);
     let cold_start_info = ctx.cold_start_info();
     span.in_scope(|| {
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
@@ -117,7 +118,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 if let Some(pool) = pool.clone().upgrade() {
                     // remove client from pool - should close the connection if it's idle.
                     // does nothing if the client is currently checked-out and in-use
-                    if pool.write().remove_client(db_user.clone(), conn_id) {
+                    if pool.write().remove_client(db_user.clone(), compute_conn_id) {
                         info!("idle connection removed");
                     }
                 }
@@ -149,7 +150,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
 
             // remove from connection pool
             if let Some(pool) = pool.clone().upgrade()
-                && pool.write().remove_client(db_user.clone(), conn_id) {
+                && pool.write().remove_client(db_user.clone(), compute_conn_id) {
                     info!("closed connection removed");
                 }
 
@@ -161,7 +162,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     let inner = ClientInnerCommon {
         inner: client,
         aux,
-        conn_id,
+        compute_conn_id,
         data: ClientDataEnum::Remote(ClientDataRemote {
             session: tx,
             cancel,
@@ -173,12 +174,12 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
 
 #[derive(Clone)]
 pub(crate) struct ClientDataRemote {
-    session: tokio::sync::watch::Sender<uuid::Uuid>,
+    session: tokio::sync::watch::Sender<RequestId>,
     cancel: CancellationToken,
 }
 
 impl ClientDataRemote {
-    pub fn session(&mut self) -> &mut tokio::sync::watch::Sender<uuid::Uuid> {
+    pub fn session(&mut self) -> &mut tokio::sync::watch::Sender<RequestId> {
         &mut self.session
     }
 
@@ -192,6 +193,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use super::*;
+    use crate::id::ComputeConnId;
     use crate::proxy::NeonOptions;
     use crate::serverless::cancel_set::CancelSet;
     use crate::types::{BranchId, EndpointId, ProjectId};
@@ -225,9 +227,9 @@ mod tests {
                 compute_id: "compute".into(),
                 cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
             },
-            conn_id: uuid::Uuid::new_v4(),
+            compute_conn_id: ComputeConnId::new(),
             data: ClientDataEnum::Remote(ClientDataRemote {
-                session: tokio::sync::watch::Sender::new(uuid::Uuid::new_v4()),
+                session: tokio::sync::watch::Sender::new(RequestId::new()),
                 cancel: CancellationToken::new(),
             }),
         }
