@@ -449,6 +449,9 @@ pub struct Timeline {
     basebackup_cache: Arc<BasebackupCache>,
 
     feature_resolver: Arc<TenantFeatureResolver>,
+
+    /// Basebackup will collect the count and store it here. Used for reldirv2 rollout.
+    pub(crate) db_rel_count: ArcSwap<Option<(usize, usize)>>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -3338,6 +3341,8 @@ impl Timeline {
                 basebackup_cache: resources.basebackup_cache,
 
                 feature_resolver: resources.feature_resolver.clone(),
+
+                db_rel_count: ArcSwap::from_pointee(None),
             };
 
             result.repartition_threshold =

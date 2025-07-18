@@ -156,6 +156,8 @@ impl FeatureResolver {
 
                     let tenant_properties = PerTenantProperties {
                         remote_size_mb: Some(rand::thread_rng().gen_range(100.0..1000000.00)),
+                        db_count_max: Some(rand::thread_rng().gen_range(1..1000)),
+                        rel_count_max: Some(rand::thread_rng().gen_range(1..1000)),
                     }
                     .into_posthog_properties();
 
@@ -344,6 +346,8 @@ impl FeatureResolver {
 
 struct PerTenantProperties {
     pub remote_size_mb: Option<f64>,
+    pub db_count_max: Option<usize>,
+    pub rel_count_max: Option<usize>,
 }
 
 impl PerTenantProperties {
@@ -353,6 +357,18 @@ impl PerTenantProperties {
             properties.insert(
                 "tenant_remote_size_mb".to_string(),
                 PostHogFlagFilterPropertyValue::Number(remote_size_mb),
+            );
+        }
+        if let Some(db_count) = self.db_count_max {
+            properties.insert(
+                "tenant_db_count_max".to_string(),
+                PostHogFlagFilterPropertyValue::Number(db_count as f64),
+            );
+        }
+        if let Some(rel_count) = self.rel_count_max {
+            properties.insert(
+                "tenant_rel_count_max".to_string(),
+                PostHogFlagFilterPropertyValue::Number(rel_count as f64),
             );
         }
         properties
@@ -409,7 +425,11 @@ impl TenantFeatureResolver {
 
     /// Refresh the cached properties and flags on the critical path.
     pub fn refresh_properties_and_flags(&self, tenant_shard: &TenantShard) {
+        // Any of the remote size is none => this property is none.
         let mut remote_size_mb = Some(0.0);
+        // Any of the db or rel count is available => this property is available.
+        let mut db_count_max = None;
+        let mut rel_count_max = None;
         for timeline in tenant_shard.list_timelines() {
             let size = timeline.metrics.resident_physical_size_get();
             if size == 0 {
@@ -419,9 +439,24 @@ impl TenantFeatureResolver {
             if let Some(ref mut remote_size_mb) = remote_size_mb {
                 *remote_size_mb += size as f64 / 1024.0 / 1024.0;
             }
+            if let Some((db_count, rel_count)) = *timeline.db_rel_count.load().as_ref() {
+                if db_count_max.is_none() {
+                    db_count_max = Some(db_count);
+                }
+                if rel_count_max.is_none() {
+                    rel_count_max = Some(rel_count);
+                }
+                db_count_max = db_count_max.map(|max| max.max(db_count));
+                rel_count_max = rel_count_max.map(|max| max.max(rel_count));
+            }
         }
         self.cached_tenant_properties.store(Arc::new(
-            PerTenantProperties { remote_size_mb }.into_posthog_properties(),
+            PerTenantProperties {
+                remote_size_mb,
+                db_count_max,
+                rel_count_max,
+            }
+            .into_posthog_properties(),
         ));
 
         // BEGIN: Update the feature flag on the critical path.
