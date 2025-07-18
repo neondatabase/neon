@@ -72,22 +72,21 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 		(tag).rnode = (rinfo); \
 	} while (false)
 
-#define BufTagGetNRelFileInfo(tag) tag.rnode
+#define BufTagGetNRelFileInfo(tag) (tag).rnode
 
 #define BufTagGetRelNumber(tagp) ((tagp)->rnode.relNode)
 
-#define BufTagInit(tag, relNumber, forknum, blkno, spcOid, dbOid) \
+#define BufTagInit(tag, rel_number, fork_number, block_number, spc_oid, db_oid) \
 	do { \
-		RelFileNode rnode = { .spcNode = spcOid, .dbNode = dbOid, .relNode = relNumber}; \
-		(tag).forkNum = forknum; \
-		(tag).blockNum = blkno; \
-		(tag).rnode = rnode; \
+		RelFileNode rnode = { .spcNode = (spc_oid), .dbNode = (db_oid), .relNode = (rel_number)}; \
+		(tag).forkNum = (fork_number);								\
+		(tag).blockNum = (block_number);							\
+		(tag).rnode = rnode;										\
 	} while (false)
 
 #define InvalidRelFileNumber InvalidOid
 
-#define SMgrRelGetRelInfo(reln)				\
-	(reln->smgr_rnode.node)
+#define SMgrRelGetRelInfo(reln)	   	((reln)->smgr_rnode.node)
 
 #define DropRelationAllLocalBuffers DropRelFileNodeAllLocalBuffers
 
@@ -133,17 +132,16 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 		.relNumber = (tag).relNumber, \
 	})
 
-#define BufTagInit(tag, relNumber, forknum, blkno, spcOid, dbOid) \
+#define BufTagInit(tag, rel_number, fork_number, block_number, spc_oid, db_oid) \
 	do { \
-		(tag).forkNum = forknum; \
-		(tag).blockNum = blkno; \
-		(tag).spcOid = spcOid; \
-		(tag).dbOid = dbOid; \
-		(tag).relNumber = relNumber; \
+		(tag).forkNum = (fork_number);					\
+		(tag).blockNum = (block_number);				\
+		(tag).spcOid = (spc_oid);						\
+		(tag).dbOid = (db_oid);							\
+		(tag).relNumber = (rel_number);					\
 	} while (false)
 
-#define SMgrRelGetRelInfo(reln) \
-	((reln)->smgr_rlocator)
+#define SMgrRelGetRelInfo(reln)	   	((reln)->smgr_rlocator)
 
 #define DropRelationAllLocalBuffers DropRelationAllLocalBuffers
 #endif
