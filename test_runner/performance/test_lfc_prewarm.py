@@ -99,7 +99,7 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
     offload_secs = 20
     test_duration_min = 5
     pgbench_duration = f"-T{test_duration_min * 60}"
-    pgbench_cmd = ["pgbench", "-n", "-c10", pgbench_duration, "-Mprepared"]
+    pgbench_cmd = ["pgbench", "-P10", "-S", "-n", "-c10", pgbench_duration, "-Mprepared"]
     prewarmed_sleep_secs = 180
 
     ordinary_uri = neon_api.get_connection_uri(project_id, ordinary_branch_id, ordinary_id)["uri"]
