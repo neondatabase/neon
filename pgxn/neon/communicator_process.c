@@ -43,7 +43,7 @@ PGDLLEXPORT void communicator_new_bgworker_main(Datum main_arg);
 /**** Initialization functions. These run in postmaster ****/
 
 void
-register_communicator_bgworker(void)
+pg_init_communicator_process(void)
 {
 	BackgroundWorker bgw;
 

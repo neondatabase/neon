@@ -847,7 +847,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def timeline_lsn_lease(
-        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn, **kwargs
     ):
         data = {
             "lsn": str(lsn),
@@ -857,6 +857,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/lsn_lease",
             json=data,
+            **kwargs,
         )
         self.verbose_error(res)
         res_json = res.json()

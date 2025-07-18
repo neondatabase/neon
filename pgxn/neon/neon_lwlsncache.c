@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "neon.h"
 #include "neon_lwlsncache.h"
 
 #include "miscadmin.h"
@@ -81,14 +82,6 @@ static set_max_lwlsn_hook_type prev_set_max_lwlsn_hook = NULL;
 static set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
 static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
 
-static shmem_startup_hook_type prev_shmem_startup_hook;
-
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook;
-#endif
-
-static void shmemrequest(void);
-static void shmeminit(void);
 static void neon_set_max_lwlsn(XLogRecPtr lsn);
 
 void
@@ -99,16 +92,6 @@ init_lwlsncache(void)
 	
 	lwlc_register_gucs();
 
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = shmeminit;
-
-	#if PG_VERSION_NUM >= 150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = shmemrequest;
-	#else
-	shmemrequest();
-	#endif
-	
 	prev_set_lwlsn_block_range_hook = set_lwlsn_block_range_hook;
 	set_lwlsn_block_range_hook = neon_set_lwlsn_block_range;
 	prev_set_lwlsn_block_v_hook = set_lwlsn_block_v_hook;
@@ -124,20 +107,19 @@ init_lwlsncache(void)
 }
 
 
-static void shmemrequest(void) {
+void
+LwLsnCacheShmemRequest(void)
+{
 	Size requested_size = sizeof(LwLsnCacheCtl);
-	
+
 	requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
 
 	RequestAddinShmemSpace(requested_size);
-
-	#if PG_VERSION_NUM >= 150000
-	if (prev_shmem_request_hook)
-			prev_shmem_request_hook();
-	#endif
 }
 
-static void shmeminit(void) {
+void
+LwLsnCacheShmemInit(void)
+{
 	static HASHCTL info;
 	bool found;
 	if (lwlsn_cache_size > 0)
@@ -157,9 +139,6 @@ static void shmeminit(void) {
 	}
 	dlist_init(&LwLsnCache->lastWrittenLsnLRU);
     LwLsnCache->maxLastWrittenLsn = GetRedoRecPtr();
-	if (prev_shmem_startup_hook) {
-		prev_shmem_startup_hook();
-	}
 }
 
 /*
