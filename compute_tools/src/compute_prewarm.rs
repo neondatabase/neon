@@ -90,6 +90,7 @@ impl ComputeNode {
     }
 
     /// If there is a prewarm request ongoing, return `false`, `true` otherwise.
+    /// Has a failpoint "compute-promotion"
     pub fn prewarm_lfc(self: &Arc<Self>, from_endpoint: Option<String>) -> bool {
         {
             let state = &mut self.state.lock().unwrap().lfc_prewarm_state;
@@ -134,6 +135,12 @@ impl ComputeNode {
     /// Returns a result with `false` if the LFC state is not found in endpoint storage.
     async fn prewarm_impl(&self, from_endpoint: Option<String>) -> Result<bool> {
         let EndpointStoragePair { url, token } = self.endpoint_storage_pair(from_endpoint)?;
+
+        if cfg!(feature = "testing") {
+            fail::fail_point!("compute-prewarm", |_| {
+                bail!("prewarm configured to fail because of a failpoint")
+            });
+        }
 
         info!(%url, "requesting LFC state from endpoint storage");
         let request = Client::new().get(&url).bearer_auth(token);

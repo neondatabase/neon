@@ -87,9 +87,10 @@ class EndpointHttpClient(requests.Session):
         def prewarmed():
             json = self.prewarm_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"{status}, {err=}"
+            assert status == "failed" or status == "completed", f"{status}, {err=}"
 
         wait_until(prewarmed, timeout=60)
+        assert self.prewarm_lfc_status()["status"] != "failed"
 
     def offload_lfc_status(self) -> dict[str, str]:
         res = self.get(self.offload_url)
