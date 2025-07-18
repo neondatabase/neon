@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnv
 
 LINUX_VERSION_REQUIRED = 6.0
-PG_REASON = "test doesn't use postgres"
+PG_REASON = "test doesn't use postgres in a manner that requires any specific version"
 LINUX_REASON = f"test requires linux {LINUX_VERSION_REQUIRED} for ebpfs"
 
 
