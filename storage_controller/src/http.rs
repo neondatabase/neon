@@ -819,7 +819,7 @@ async fn handle_tenant_timeline_passthrough(
                 .map_err(|e| ApiError::InternalServerError(e.into()))?;
             // We only handle "tenant not found" errors; other 404s like timeline not found should
             // be forwarded as-is.
-            if resp_str.contains(&format!("tenant {tenant_or_shard_id}")) {
+            if Service::is_tenant_not_found_error(resp_str, tenant_or_shard_id.tenant_id) {
                 // Rather than retry here, send the client a 503 to prompt a retry: this matches
                 // the pageserver's use of 503, and all clients calling this API should retry on 503.
                 return Err(ApiError::ResourceUnavailable(

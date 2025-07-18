@@ -207,27 +207,6 @@ enum ShardGenerationValidity {
     },
 }
 
-/// We collect the state of attachments for some operations to determine if the operation
-/// needs to be retried when it fails.
-struct TenantShardAttachState {
-    /// The targets of the operation.
-    ///
-    /// Tenant shard ID, node ID, node, is intent node observed primary.
-    targets: Vec<(TenantShardId, NodeId, Node, bool)>,
-
-    /// The targets grouped by node ID.
-    by_node_id: HashMap<NodeId, (TenantShardId, Node, bool)>,
-}
-
-impl TenantShardAttachState {
-    fn for_api_call(&self) -> Vec<(TenantShardId, Node)> {
-        self.targets
-            .iter()
-            .map(|(tenant_shard_id, _, node, _)| (*tenant_shard_id, node.clone()))
-            .collect()
-    }
-}
-
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 pub const PRIORITY_RECONCILER_CONCURRENCY_DEFAULT: usize = 256;
 pub const SAFEKEEPER_RECONCILER_CONCURRENCY_DEFAULT: usize = 32;
@@ -4795,78 +4774,24 @@ impl Service {
         Ok(())
     }
 
-    fn is_observed_consistent_with_intent(
-        &self,
-        shard: &TenantShard,
-        intent_node_id: NodeId,
-    ) -> bool {
-        if let Some(location) = shard.observed.locations.get(&intent_node_id)
-            && let Some(ref conf) = location.conf
-            && (conf.mode == LocationConfigMode::AttachedSingle
-                || conf.mode == LocationConfigMode::AttachedMulti)
-        {
-            true
-        } else {
-            false
-        }
-    }
-
-    fn collect_tenant_shards(
-        &self,
-        tenant_id: TenantId,
-    ) -> Result<TenantShardAttachState, ApiError> {
-        let locked = self.inner.read().unwrap();
-        let mut targets = Vec::new();
-        let mut by_node_id = HashMap::new();
-
-        // If the request got an unsharded tenant id, then apply
-        // the operation to all shards. Otherwise, apply it to a specific shard.
-        let shards_range = TenantShardId::tenant_range(tenant_id);
-
-        for (tenant_shard_id, shard) in locked.tenants.range(shards_range) {
-            if let Some(node_id) = shard.intent.get_attached() {
-                let node = locked
-                    .nodes
-                    .get(node_id)
-                    .expect("Pageservers may not be deleted while referenced");
-
-                let consistent = self.is_observed_consistent_with_intent(shard, *node_id);
-
-                targets.push((*tenant_shard_id, *node_id, node.clone(), consistent));
-                by_node_id.insert(*node_id, (*tenant_shard_id, node.clone(), consistent));
-            }
-        }
-
-        if targets.is_empty() {
-            return Err(ApiError::NotFound(
-                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
-            ));
-        }
-
-        Ok(TenantShardAttachState {
-            targets,
-            by_node_id,
-        })
+    pub(crate) fn is_tenant_not_found_error(body: &str, tenant_id: TenantId) -> bool {
+        body.contains(&format!("tenant {tenant_id}"))
     }
 
     fn process_result_and_passthrough_errors<T>(
         &self,
+        tenant_id: TenantId,
         results: Vec<(Node, Result<T, mgmt_api::Error>)>,
-        attach_state: TenantShardAttachState,
     ) -> Result<Vec<(Node, T)>, ApiError> {
         let mut processed_results: Vec<(Node, T)> = Vec::with_capacity(results.len());
-        debug_assert_eq!(results.len(), attach_state.targets.len());
         for (node, res) in results {
-            let is_consistent = attach_state
-                .by_node_id
-                .get(&node.get_id())
-                .map(|(_, _, consistent)| *consistent);
             match res {
                 Ok(res) => processed_results.push((node, res)),
-                Err(mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _))
-                    if is_consistent == Some(false) =>
+                Err(mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, body))
+                    if Self::is_tenant_not_found_error(&body, tenant_id) =>
                 {
-                    // This is expected if the attach is not finished yet. Return 503 so that the client can retry.
+                    // If there's a tenant not found, we are still in the process of attaching the tenant.
+                    // Return 503 so that the client can retry.
                     return Err(ApiError::ResourceUnavailable(
                         format!(
                             "Timeline is not attached to the pageserver {} yet, please retry",
@@ -4894,35 +4819,48 @@ impl Service {
         )
         .await;
 
-        let attach_state = self.collect_tenant_shards(tenant_id)?;
-
-        let results = self
-            .tenant_for_shards_api(
-                attach_state.for_api_call(),
-                |tenant_shard_id, client| async move {
-                    client
-                        .timeline_lease_lsn(tenant_shard_id, timeline_id, lsn)
-                        .await
-                },
-                1,
-                1,
-                SHORT_RECONCILE_TIMEOUT,
-                &self.cancel,
-            )
-            .await;
-
-        let leases = self.process_result_and_passthrough_errors(results, attach_state)?;
-        let mut valid_until = None;
-        for (_, lease) in leases {
-            if let Some(ref mut valid_until) = valid_until {
-                *valid_until = std::cmp::min(*valid_until, lease.valid_until);
-            } else {
-                valid_until = Some(lease.valid_until);
+        self.tenant_remote_mutation(tenant_id, |locations| async move {
+            if locations.0.is_empty() {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant not found").into(),
+                ));
             }
-        }
-        Ok(LsnLease {
-            valid_until: valid_until.unwrap_or_else(SystemTime::now),
+
+            let results = self
+                .tenant_for_shards_api(
+                    locations
+                        .0
+                        .iter()
+                        .map(|(tenant_shard_id, ShardMutationLocations { latest, .. })| {
+                            (*tenant_shard_id, latest.node.clone())
+                        })
+                        .collect(),
+                    |tenant_shard_id, client| async move {
+                        client
+                            .timeline_lease_lsn(tenant_shard_id, timeline_id, lsn)
+                            .await
+                    },
+                    1,
+                    1,
+                    SHORT_RECONCILE_TIMEOUT,
+                    &self.cancel,
+                )
+                .await;
+
+            let leases = self.process_result_and_passthrough_errors(tenant_id, results)?;
+            let mut valid_until = None;
+            for (_, lease) in leases {
+                if let Some(ref mut valid_until) = valid_until {
+                    *valid_until = std::cmp::min(*valid_until, lease.valid_until);
+                } else {
+                    valid_until = Some(lease.valid_until);
+                }
+            }
+            Ok(LsnLease {
+                valid_until: valid_until.unwrap_or_else(SystemTime::now),
+            })
         })
+        .await?
     }
 
     pub(crate) async fn tenant_timeline_download_heatmap_layers(
