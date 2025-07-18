@@ -90,7 +90,7 @@ impl ComputeNode {
     }
 
     /// If there is a prewarm request ongoing, return `false`, `true` otherwise.
-    /// Has a failpoint "compute-promotion"
+    /// Has a failpoint "compute-prewarm"
     pub fn prewarm_lfc(self: &Arc<Self>, from_endpoint: Option<String>) -> bool {
         {
             let state = &mut self.state.lock().unwrap().lfc_prewarm_state;
