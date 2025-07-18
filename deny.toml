@@ -53,8 +53,6 @@ exceptions = [
     # Zlib license has some restrictions if we decide to change sth
     { allow = ["Zlib"], name = "const_format_proc_macros", version = "*" },
     { allow = ["Zlib"], name = "const_format", version = "*" },
-    # Subzero integration - unlicensed internal crate
-    { allow = ["LicenseRef-UNLICENSED"], name = "subzero-core", version = "*" },
 ]
 
 [licenses.private]

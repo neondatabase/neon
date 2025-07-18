@@ -55,10 +55,6 @@ jobs:
         with:
           submodules: true
 
-      - uses: ./.github/actions/prepare-for-subzero
-        with:
-          token: ${{ secrets.CI_ACCESS_TOKEN }}
-
       - name: Install build dependencies
         run: |
           brew install flex bison openssl protobuf icu4c
