@@ -1324,6 +1324,9 @@ impl Timeline {
     ///
     /// This naive implementation will be replaced with a more efficient one
     /// which actually vectorizes the read path.
+    ///
+    /// NB: the read path must be cancellation-safe. The Tonic gRPC service will drop the future
+    /// if the client goes away (e.g. due to timeout or cancellation).
     pub(crate) async fn get_vectored(
         &self,
         query: VersionedKeySpaceQuery,
