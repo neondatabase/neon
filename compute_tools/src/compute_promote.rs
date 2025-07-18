@@ -144,17 +144,21 @@ impl ComputeNode {
         self.reconfigure()
     }
 
+    /// Merge old and new Postgres conf specs to apply on secondary.
+    /// Change new spec's port and safekeepers since they are supplied
+    /// differenly
     fn merge_spec(new_conf: &mut String, existing_conf: &str) {
         let mut new_conf_set: HashMap<&str, &str> = new_conf
             .split_terminator('\n')
             .map(|e| e.split_once("=").expect("invalid item"))
             .collect();
+        new_conf_set.remove("neon.safekeepers");
+
         let existing_conf_set: HashMap<&str, &str> = existing_conf
             .split_terminator('\n')
             .map(|e| e.split_once("=").expect("invalid item"))
             .collect();
         new_conf_set.insert("port", existing_conf_set["port"]);
-        new_conf_set.remove("neon.safekeepers");
         *new_conf = new_conf_set
             .iter()
             .map(|(k, v)| format!("{k}={v}"))
