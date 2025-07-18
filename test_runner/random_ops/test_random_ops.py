@@ -533,8 +533,14 @@ class NeonProject:
                 if ep.type == "read_write":
                     new_branch.connection_parameters["host"] = ep.host
                     break
-        # XXX do not merge
-        log.info("%s", new_branch.connection_parameters)
+            with new_branch.connection_parameters as cp:
+                new_branch.connect_env = {
+                    "PGHOST": cp["host"],
+                    "PGUSER": cp["role"],
+                    "PGDATABASE": cp["database"],
+                    "PGPASSWORD": cp["password"],
+                    "PGSSLMODE": "require",
+                }
         with psycopg2.connect(
             host=new_branch.connection_parameters["host"],
             port=5432,
@@ -571,8 +577,8 @@ def setup_class(
     if neon_api.retries4xx > 0:
         print(f"::warning::Retried on 4xx error {neon_api.retries4xx} times")
     # XXX Do not merge !!!
-    #log.info("Removing the project %s", project.id)
-    #project.delete()
+    # log.info("Removing the project %s", project.id)
+    # project.delete()
 
 
 def do_action(project: NeonProject, action: str) -> bool:
