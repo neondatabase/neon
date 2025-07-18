@@ -157,23 +157,6 @@ impl PageserverClient {
         Ok(())
     }
 
-    /// Returns whether a relation exists.
-    #[instrument(skip_all, fields(rel=%req.rel, lsn=%req.read_lsn))]
-    pub async fn check_rel_exists(
-        &self,
-        req: page_api::CheckRelExistsRequest,
-    ) -> tonic::Result<page_api::CheckRelExistsResponse> {
-        debug!("sending request: {req:?}");
-        let resp = Self::with_retries(CALL_TIMEOUT, async |_| {
-            // Relation metadata is only available on shard 0.
-            let mut client = self.shards.load_full().get_zero().client().await?;
-            Self::with_timeout(REQUEST_TIMEOUT, client.check_rel_exists(req)).await
-        })
-        .await?;
-        debug!("received response: {resp:?}");
-        Ok(resp)
-    }
-
     /// Returns the total size of a database, as # of bytes.
     #[instrument(skip_all, fields(db_oid=%req.db_oid, lsn=%req.read_lsn))]
     pub async fn get_db_size(
