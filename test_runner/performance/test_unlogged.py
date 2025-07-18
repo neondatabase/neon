@@ -9,10 +9,22 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-# This test checks that the is no race between end of unlogged build and backends evicting pages of this index.
-# We need to create quite large  index (more than one gigabyte segment) to reproduce write error caused by this race condition
-# (backend completed unlogged build removes local files while backend evicting page tries to write to the file).
-# If index size is smaller than segment size, the problem is avoided by file descriptor cache which prevents file deletion.
+#
+# This test demonstrates effect of relkind cache. Postgres doesn't store relation persistence in shared buffer tag.
+# It means that if page is evicted from shared buffers and relation is not cache in relation cache, then persistence=0 (auto) is used.
+# For vanilla Postgres it is not important, because in both cases we need to write changes to the file.
+# In Neon for permanent relations neon_write does nothing, while for unlogged relation - should store data in local file.
+# Originally Neon uses `mdexists` call to check if local file exists and so determine if it is unlogged relation.
+# mdexists is not so cheap: it closes and opens file. Relkind cache allow to eliminate this checks.
+#
+# This test tries to emulate situation when most of writes are with persistence=0.
+# We create multiple connections to the database and in each fill it's own table. So each backends writes only it's own table and other tables
+# descriptors are not cached. At the same time all backends perform eviction from shared buffers. Probability that backends evicts page of it's own
+# relation is 1/N when N is number of relations=number of backends. The more relations, the smaller probability.
+# For large enough number of relations most of writes are with unknown persistence.
+#
+# At Linux this test shows about 2x time speed improvement.
+#
 @pytest.mark.timeout(10000)
 def test_unlogged(neon_env_builder: NeonEnvBuilder):
     n_tables = 20

@@ -1622,7 +1622,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 				/*
 				 * There is no lock hold between get_cached_relkind and set_cached_relkind.
 				 * We assume that multiple backends can repeat this check and get the same result (there is assert in set_cached_relkind).
-				 * And concurrent setting UNLOGGED_BUILD is not possible because only one relation can perform unlogged build.
+				 * And concurrent setting UNLOGGED_BUILD is not possible because only one backend can perform unlogged build.
 				 */
 				set_cached_relkind(rinfo, relkind);
 			}
