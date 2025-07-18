@@ -497,6 +497,7 @@ class NeonProject:
         """
         Deletes the snapshot with the given id
         """
+        self.wait()
         self.neon_api.delete_snapshot(self.id, snapshot_id)
         self.snapshots.pop(snapshot_id)
         self.wait()
