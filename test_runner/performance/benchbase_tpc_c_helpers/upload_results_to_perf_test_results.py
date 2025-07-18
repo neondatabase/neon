@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # ruff: noqa
+# we exclude the file from ruff because on the github runner we have python 3.9 and ruff
+# is running with newer python which suggests changes incompatible with python 3.9
 """
 Upload BenchBase TPC-C results from summary.json and results.csv files to perf_test_results database.
 
@@ -359,7 +361,7 @@ def main():
 
     # Convert timestamp
     current_timestamp_ms = summary_data.get("Current Timestamp (milliseconds)")
-    start_timestamp_ms = summary_data.get("Start Timestamp (milliseconds)")
+    start_timestamp_ms = summary_data.get("Start timestamp (milliseconds)")
 
     if current_timestamp_ms:
         recorded_at = convert_timestamp_to_utc(current_timestamp_ms)
