@@ -5,13 +5,12 @@ use std::task::{Poll, ready};
 
 use futures::Future;
 use futures::future::poll_fn;
-use postgres_client::AsyncMessage;
 use postgres_client::tls::MakeTlsConnect;
 use smallvec::SmallVec;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn};
+use tracing::{error, info, info_span};
 #[cfg(test)]
 use {
     super::conn_pool_lib::GlobalConnPoolOptions,
@@ -128,12 +127,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 let message = ready!(connection.poll_message(cx));
 
                 match message {
-                    Some(Ok(AsyncMessage::Notice(notice))) => {
-                        info!(%session_id, "notice: {}", notice);
-                    }
-                    Some(Ok(_)) => {
-                        warn!(%session_id, "unknown message");
-                    }
+                    Some(Ok(())) => {}
                     Some(Err(e)) => {
                         error!(%session_id, "connection error: {}", e);
                         break;

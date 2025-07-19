@@ -3,19 +3,21 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::BytesMut;
+use fallible_iterator::FallibleIterator;
 use futures_util::{Sink, StreamExt, ready};
-use postgres_protocol2::message::backend::Message;
+use postgres_protocol2::message::backend::{Message, NoticeResponseBody};
 use postgres_protocol2::message::frontend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use tokio_util::sync::PollSender;
-use tracing::{info, trace};
+use tracing::trace;
 
-use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
-use crate::error::DbError;
+use crate::Error;
+use crate::codec::{
+    BackendMessage, BackendMessages, FrontendMessage, PostgresCodec, RecordNotices,
+};
 use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::{AsyncMessage, Error};
 
 #[derive(PartialEq, Debug)]
 enum State {
@@ -36,6 +38,7 @@ pub struct Connection<S, T> {
 
     sender: PollSender<BackendMessages>,
     receiver: mpsc::UnboundedReceiver<FrontendMessage>,
+    notices: Option<RecordNotices>,
 
     pending_response: Option<BackendMessages>,
     state: State,
@@ -55,6 +58,7 @@ where
             stream,
             sender: PollSender::new(sender),
             receiver,
+            notices: None,
             pending_response: None,
             state: State::Active,
         }
@@ -62,7 +66,7 @@ where
 
     /// Read and process messages from the connection to postgres.
     /// client <- postgres
-    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<AsyncMessage, Error>> {
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         loop {
             let messages = match self.pending_response.take() {
                 Some(messages) => messages,
@@ -76,8 +80,8 @@ where
 
                     match message {
                         BackendMessage::Async(Message::NoticeResponse(body)) => {
-                            let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
-                            return Poll::Ready(Ok(AsyncMessage::Notice(error)));
+                            self.handle_notice(body)?;
+                            continue;
                         }
                         BackendMessage::Async(_) => continue,
                         BackendMessage::Normal { messages } => messages,
@@ -99,6 +103,31 @@ where
                 }
             }
         }
+    }
+
+    fn handle_notice(&mut self, body: NoticeResponseBody) -> Result<(), Error> {
+        let Some(notices) = &mut self.notices else {
+            return Ok(());
+        };
+
+        let mut fields = body.fields();
+        while let Some(field) = fields.next().map_err(Error::parse)? {
+            // loop until we find the message field
+            if field.type_() == b'M' {
+                // if the message field is within the limit, send it.
+                if let Some(new_limit) = notices.limit.checked_sub(field.value().len()) {
+                    match notices.sender.send(field.value().into()) {
+                        // set the new limit.
+                        Ok(()) => notices.limit = new_limit,
+                        // closed.
+                        Err(_) => self.notices = None,
+                    }
+                }
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     /// Fetch the next client request and enqueue the response sender.
@@ -134,10 +163,13 @@ where
 
             match self.poll_request(cx) {
                 // send the message to postgres
-                Poll::Ready(Some(request)) => {
+                Poll::Ready(Some(FrontendMessage::Raw(request))) => {
                     Pin::new(&mut self.stream)
                         .start_send(request)
                         .map_err(Error::io)?;
+                }
+                Poll::Ready(Some(FrontendMessage::RecordNotices(notices))) => {
+                    self.notices = Some(notices)
                 }
                 // No more messages from the client, and no more responses to wait for.
                 // Send a terminate message to postgres
@@ -145,10 +177,9 @@ where
                     trace!("poll_write: at eof, terminating");
                     let mut request = BytesMut::new();
                     frontend::terminate(&mut request);
-                    let request = FrontendMessage::Raw(request.freeze());
 
                     Pin::new(&mut self.stream)
-                        .start_send(request)
+                        .start_send(request.freeze())
                         .map_err(Error::io)?;
 
                     trace!("poll_write: sent eof, closing");
@@ -201,20 +232,17 @@ where
     ///
     /// The server can send notices as well as notifications asynchronously to the client. Applications that wish to
     /// examine those messages should use this method to drive the connection rather than its `Future` implementation.
-    pub fn poll_message(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<AsyncMessage, Error>>> {
+    pub fn poll_message(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(), Error>>> {
         if self.state != State::Closing {
             // if the state is still active, try read from and write to postgres.
-            let message = self.poll_read(cx)?;
+            let read = self.poll_read(cx)?;
             let closing = self.poll_write(cx)?;
             if let Poll::Ready(()) = closing {
                 self.state = State::Closing;
             }
 
-            if let Poll::Ready(message) = message {
-                return Poll::Ready(Some(Ok(message)));
+            if read.is_ready() {
+                return Poll::Ready(Some(Ok(())));
             }
 
             // poll_read returned Pending.
@@ -241,10 +269,7 @@ where
     type Output = Result<(), Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        while let Some(message) = ready!(self.poll_message(cx)?) {
-            let AsyncMessage::Notice(notice) = message;
-            info!("{}: {}", notice.severity(), notice.message());
-        }
+        while ready!(self.poll_message(cx)?).is_some() {}
         Poll::Ready(Ok(()))
     }
 }
