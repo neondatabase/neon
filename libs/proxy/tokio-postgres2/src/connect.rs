@@ -5,11 +5,11 @@ use tokio::sync::mpsc;
 
 use crate::client::SocketConfig;
 use crate::config::Host;
-use crate::connect_raw::connect_raw;
+use crate::connect_raw::{connect_raw, read_info};
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::connect_tls;
 use crate::tls::{MakeTlsConnect, TlsConnect};
-use crate::{Client, Config, Connection, Error, RawConnection};
+use crate::{Client, Config, Connection, Error};
 
 pub async fn connect<T>(
     tls: &T,
@@ -44,13 +44,10 @@ where
 {
     let socket = connect_socket(host_addr, host, port, config.connect_timeout).await?;
     let stream = connect_tls(socket, config.ssl_mode, tls).await?;
-    let RawConnection {
-        stream,
-        parameters: _,
-        delayed_notice: _,
-        process_id,
-        secret_key,
-    } = connect_raw(stream, config).await?;
+    let mut stream = connect_raw(stream, config).await?;
+
+    let (process_id, secret_key, _, _) = read_info(&mut stream).await?;
+    let stream = stream.into_framed();
 
     let socket_config = SocketConfig {
         host_addr,

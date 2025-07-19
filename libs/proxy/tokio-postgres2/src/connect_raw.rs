@@ -132,18 +132,10 @@ where
     }
 }
 
-pub struct RawConnection<S, T> {
-    pub stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-    pub parameters: HashMap<String, String>,
-    pub delayed_notice: Vec<NoticeResponseBody>,
-    pub process_id: i32,
-    pub secret_key: i32,
-}
-
 pub async fn connect_raw<S, T>(
     stream: MaybeTlsStream<S, T>,
     config: &Config,
-) -> Result<RawConnection<S, T>, Error>
+) -> Result<StartupStream<S, T>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsStream + Unpin,
@@ -152,15 +144,8 @@ where
 
     startup(&mut stream, config).await?;
     authenticate(&mut stream, config).await?;
-    let (process_id, secret_key, parameters, delayed_notice) = read_info(&mut stream).await?;
 
-    Ok(RawConnection {
-        stream: stream.into_framed(),
-        parameters,
-        delayed_notice,
-        process_id,
-        secret_key,
-    })
+    Ok(stream)
 }
 
 async fn startup<S, T>(stream: &mut StartupStream<S, T>, config: &Config) -> Result<(), Error>
@@ -330,7 +315,7 @@ where
     Ok(())
 }
 
-async fn read_info<S, T>(
+pub async fn read_info<S, T>(
     stream: &mut StartupStream<S, T>,
 ) -> Result<(i32, i32, HashMap<String, String>, Vec<NoticeResponseBody>), Error>
 where

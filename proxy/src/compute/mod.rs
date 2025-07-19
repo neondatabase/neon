@@ -9,7 +9,7 @@ use itertools::Itertools;
 use postgres_client::config::{AuthKeys, ChannelBinding, SslMode};
 use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::MakeTlsConnect;
-use postgres_client::{NoTls, RawCancelToken, RawConnection};
+use postgres_client::{NoTls, RawCancelToken};
 use postgres_protocol::message::backend::NoticeResponseBody;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
@@ -247,18 +247,13 @@ impl AuthInfo {
         let tmp_config = self.enrich(tmp_config);
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let connection = tmp_config
+        let mut startup_stream = tmp_config
             .tls_and_authenticate(&mut compute.stream, NoTls)
             .await?;
         drop(pause);
 
-        let RawConnection {
-            stream: _,
-            parameters,
-            delayed_notice,
-            process_id,
-            secret_key,
-        } = connection;
+        let (process_id, secret_key, parameters, delayed_notice) =
+            postgres_client::connect_raw::read_info(&mut startup_stream).await?;
 
         tracing::Span::current().record("pid", tracing::field::display(process_id));
 
