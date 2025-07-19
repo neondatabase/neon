@@ -236,9 +236,6 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                     Some(Ok(AsyncMessage::Notice(notice))) => {
                         info!(%session_id, "notice: {}", notice);
                     }
-                    Some(Ok(AsyncMessage::Notification(notif))) => {
-                        warn!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
-                    }
                     Some(Ok(_)) => {
                         warn!(%session_id, "unknown message");
                     }

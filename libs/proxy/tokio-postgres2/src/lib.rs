@@ -102,10 +102,6 @@ pub enum AsyncMessage {
     ///
     /// Notices use the same format as errors, but aren't "errors" per-se.
     Notice(DbError),
-    /// A notification.
-    ///
-    /// Connections can subscribe to notifications with the `LISTEN` command.
-    Notification(Notification),
 }
 
 /// Message returned by the `SimpleQuery` stream.

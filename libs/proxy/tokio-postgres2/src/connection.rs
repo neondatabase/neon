@@ -15,7 +15,7 @@ use tracing::{info, trace};
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
 use crate::error::DbError;
 use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::{AsyncMessage, Error, Notification};
+use crate::{AsyncMessage, Error};
 
 #[derive(PartialEq, Debug)]
 enum State {
@@ -79,16 +79,7 @@ where
                             let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
                             return Poll::Ready(Ok(AsyncMessage::Notice(error)));
                         }
-                        BackendMessage::Async(Message::NotificationResponse(body)) => {
-                            let notification = Notification {
-                                process_id: body.process_id(),
-                                channel: body.channel().map_err(Error::parse)?.to_string(),
-                                payload: body.message().map_err(Error::parse)?.to_string(),
-                            };
-                            return Poll::Ready(Ok(AsyncMessage::Notification(notification)));
-                        }
-                        BackendMessage::Async(Message::ParameterStatus(_)) => continue,
-                        BackendMessage::Async(_) => unreachable!(),
+                        BackendMessage::Async(_) => continue,
                         BackendMessage::Normal { messages } => messages,
                     }
                 }
@@ -251,9 +242,8 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         while let Some(message) = ready!(self.poll_message(cx)?) {
-            if let AsyncMessage::Notice(notice) = message {
-                info!("{}: {}", notice.severity(), notice.message());
-            }
+            let AsyncMessage::Notice(notice) = message;
+            info!("{}: {}", notice.severity(), notice.message());
         }
         Poll::Ready(Ok(()))
     }
