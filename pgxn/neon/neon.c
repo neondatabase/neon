@@ -562,7 +562,7 @@ _PG_init(void)
 							"Maximal size of pgstat.stat file saved in Neon storage",
 							"Zero value disables persisting pgstat.stat file",
 							&neon_pgstat_file_size_limit,
-							0, 0, 1000000, /* disabled by default */
+							16384, 0, 1000000, /* disabled by default */
 							PGC_SIGHUP,
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);

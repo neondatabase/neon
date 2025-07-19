@@ -226,7 +226,14 @@ def test_deletion_queue_recovery(
 
     ps_http.configure_failpoints(failpoints)
 
-    generate_uploads_and_deletions(env, pageserver=main_pageserver)
+    # As the compute will write a pg_stat aux file record when shutting down and we check the delta layers
+    # generated in this test case, we need to disable it to avoid the test case from failing + make things
+    # more deterministic.
+    disable_pg_stat_persistence_config_line = ["neon.pgstat_file_size_limit = 0"]
+
+    generate_uploads_and_deletions(
+        env, pageserver=main_pageserver, config_lines=disable_pg_stat_persistence_config_line
+    )
 
     # There should be entries in the deletion queue
     assert_deletion_queue(ps_http, lambda n: n > 0)
