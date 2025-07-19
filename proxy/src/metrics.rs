@@ -385,10 +385,10 @@ pub enum RedisMsgKind {
 
 #[derive(Default, Clone)]
 pub struct LatencyAccumulated {
-    cplane: time::Duration,
-    client: time::Duration,
-    compute: time::Duration,
-    retry: time::Duration,
+    pub cplane: time::Duration,
+    pub client: time::Duration,
+    pub compute: time::Duration,
+    pub retry: time::Duration,
 }
 
 impl std::fmt::Display for LatencyAccumulated {
