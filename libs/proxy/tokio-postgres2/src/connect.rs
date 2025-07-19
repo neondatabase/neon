@@ -1,11 +1,13 @@
 use std::net::IpAddr;
 
+use futures_util::TryStreamExt;
+use postgres_protocol2::message::backend::Message;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::client::SocketConfig;
 use crate::config::Host;
-use crate::connect_raw::{connect_raw, read_info};
+use crate::connect_raw::connect_raw;
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::connect_tls;
 use crate::tls::{MakeTlsConnect, TlsConnect};
@@ -46,7 +48,23 @@ where
     let stream = connect_tls(socket, config.ssl_mode, tls).await?;
     let mut stream = connect_raw(stream, config).await?;
 
-    let (process_id, secret_key, _, _) = read_info(&mut stream).await?;
+    let mut process_id = 0;
+    let mut secret_key = 0;
+    loop {
+        match stream.try_next().await.map_err(Error::io)? {
+            Some(Message::BackendKeyData(body)) => {
+                process_id = body.process_id();
+                secret_key = body.secret_key();
+            }
+            Some(Message::ParameterStatus(_)) => {}
+            Some(Message::NoticeResponse(_)) => {}
+            Some(Message::ReadyForQuery(_)) => break,
+            Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
+            Some(_) => return Err(Error::unexpected_message()),
+            None => return Err(Error::closed()),
+        }
+    }
+
     let stream = stream.into_framed();
 
     let socket_config = SocketConfig {
