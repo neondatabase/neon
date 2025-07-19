@@ -133,19 +133,17 @@ where
 }
 
 pub async fn connect_raw<S, T>(
-    stream: MaybeTlsStream<S, T>,
+    stream: &mut StartupStream<S, T>,
     config: &Config,
-) -> Result<StartupStream<S, T>, Error>
+) -> Result<(), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsStream + Unpin,
 {
-    let mut stream = StartupStream::new(stream);
+    startup(stream, config).await?;
+    authenticate(stream, config).await?;
 
-    startup(&mut stream, config).await?;
-    authenticate(&mut stream, config).await?;
-
-    Ok(stream)
+    Ok(())
 }
 
 async fn startup<S, T>(stream: &mut StartupStream<S, T>, config: &Config) -> Result<(), Error>

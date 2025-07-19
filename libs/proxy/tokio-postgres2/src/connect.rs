@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::client::SocketConfig;
 use crate::config::Host;
-use crate::connect_raw::connect_raw;
+use crate::connect_raw::{StartupStream, connect_raw};
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::connect_tls;
 use crate::tls::{MakeTlsConnect, TlsConnect};
@@ -46,7 +46,8 @@ where
 {
     let socket = connect_socket(host_addr, host, port, config.connect_timeout).await?;
     let stream = connect_tls(socket, config.ssl_mode, tls).await?;
-    let mut stream = connect_raw(stream, config).await?;
+    let mut stream = StartupStream::new(stream);
+    connect_raw(&mut stream, config).await?;
 
     let mut process_id = 0;
     let mut secret_key = 0;

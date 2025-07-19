@@ -6,10 +6,11 @@ use std::net::{IpAddr, SocketAddr};
 
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
+use postgres_client::RawCancelToken;
 use postgres_client::config::{AuthKeys, ChannelBinding, SslMode};
+use postgres_client::connect_raw::StartupStream;
 use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::MakeTlsConnect;
-use postgres_client::{NoTls, RawCancelToken};
 use postgres_protocol::message::backend::NoticeResponseBody;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
@@ -247,13 +248,11 @@ impl AuthInfo {
         let tmp_config = self.enrich(tmp_config);
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let mut startup_stream = tmp_config
-            .tls_and_authenticate(&mut compute.stream, NoTls)
-            .await?;
+        tmp_config.authenticate(&mut compute.stream).await?;
         drop(pause);
 
         let (process_id, secret_key, parameters, delayed_notice) =
-            postgres_client::connect_raw::read_info(&mut startup_stream).await?;
+            postgres_client::connect_raw::read_info(&mut compute.stream).await?;
 
         tracing::Span::current().record("pid", tracing::field::display(process_id));
 
@@ -352,7 +351,7 @@ pub struct PostgresSettings {
 
 pub struct ComputeConnection {
     /// Socket connected to a compute node.
-    pub stream: MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
+    pub stream: StartupStream<tokio::net::TcpStream, RustlsStream>,
     /// Labels for proxy's metrics.
     pub aux: MetricsAuxInfo,
     pub hostname: Host,
@@ -385,6 +384,7 @@ impl ConnectInfo {
             ctx.get_testodrome_id().unwrap_or_default(),
         );
 
+        let stream = StartupStream::new(stream);
         let connection = ComputeConnection {
             stream,
             socket_addr,

@@ -257,7 +257,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     Ok(Some(ProxyPassthrough {
         client: stream,
-        compute: node.stream,
+        compute: node.stream.into_framed().into_inner(),
 
         aux: node.aux,
         private_link_id: None,
