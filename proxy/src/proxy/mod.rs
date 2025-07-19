@@ -5,12 +5,15 @@ pub(crate) mod connect_compute;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use postgres_client::RawCancelToken;
+use postgres_client::connect_raw::read_info;
+use postgres_protocol::message::backend::NoticeResponseBody;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::{SmolStr, format_smolstr};
@@ -19,8 +22,8 @@ use tokio::sync::oneshot;
 use tracing::Instrument;
 
 use crate::cache::Cache;
-use crate::cancellation::CancellationHandler;
-use crate::compute::ComputeConnection;
+use crate::cancellation::{CancelClosure, CancellationHandler};
+use crate::compute::{ComputeConnection, PostgresError};
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ControlPlaneClient;
@@ -105,7 +108,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     // the compute was cached, and we connected, but the compute cache was actually stale
     // and is associated with the wrong endpoint. We detect this when the **authentication** fails.
     // As such, we retry once here if the `authenticate` function fails and the error is valid to retry.
-    let pg_settings = loop {
+    loop {
         attempt += 1;
 
         // TODO: callback to pglb
@@ -127,9 +130,9 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             unreachable!("ensured above");
         };
 
-        let res = auth_info.authenticate(ctx, &mut node, user_info).await;
+        let res = auth_info.authenticate(ctx, &mut node).await;
         match res {
-            Ok(pg_settings) => break pg_settings,
+            Ok(()) => break,
             Err(e) if attempt < 2 && e.should_retry_wake_compute() => {
                 tracing::warn!(error = ?e, "retrying wake compute");
 
@@ -141,11 +144,31 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             }
             Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
         }
+    }
+
+    let auth::Backend::ControlPlane(_, user_info) = backend else {
+        unreachable!("ensured above");
     };
 
     let session = cancellation_handler.get_key();
 
-    finish_client_init(ctx, &pg_settings, *session.key(), client, &config.greetings);
+    let (process_id, secret_key, parameters, delayed_notices) =
+        match read_info(&mut node.stream).await {
+            Ok(r) => r,
+            Err(e) => Err(client
+                .throw_error(PostgresError::Postgres(e), Some(ctx))
+                .await)?,
+        };
+
+    finish_client_init(
+        ctx,
+        &parameters,
+        &delayed_notices,
+        *session.key(),
+        client,
+        &config.greetings,
+    );
+    let hostname = node.hostname.to_string();
 
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = oneshot::channel();
@@ -154,7 +177,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .maintain_cancel_key(
                 session_id,
                 cancel,
-                &pg_settings.cancel_closure,
+                &CancelClosure {
+                    socket_addr: node.socket_addr,
+                    cancel_token: RawCancelToken {
+                        ssl_mode: node.ssl_mode,
+                        process_id,
+                        secret_key,
+                    },
+                    hostname,
+                    user_info,
+                },
                 &config.connect_to_compute,
             )
             .await;
@@ -166,13 +198,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 /// Finish client connection initialization: confirm auth success, send params, etc.
 pub(crate) fn finish_client_init(
     ctx: &RequestContext,
-    settings: &compute::PostgresSettings,
+    params: &HashMap<String, String>,
+    delayed_notice: &[NoticeResponseBody],
     cancel_key_data: CancelKeyData,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     greetings: &String,
 ) {
     // Forward all deferred notices to the client.
-    for notice in &settings.delayed_notice {
+    for notice in delayed_notice {
         client.write_raw(notice.as_bytes().len(), b'N', |buf| {
             buf.extend_from_slice(notice.as_bytes());
         });
@@ -185,7 +218,7 @@ pub(crate) fn finish_client_init(
     }
 
     // Forward all postgres connection params to the client.
-    for (name, value) in &settings.params {
+    for (name, value) in params {
         client.write_message(BeMessage::ParameterStatus {
             name: name.as_bytes(),
             value: value.as_bytes(),
