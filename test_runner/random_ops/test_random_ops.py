@@ -11,6 +11,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import psycopg2
 import pytest
 from fixtures.log_helper import log
 
@@ -20,6 +21,29 @@ if TYPE_CHECKING:
     from fixtures.neon_api import NeonAPI
     from fixtures.neon_fixtures import PgBin
     from fixtures.pg_version import PgVersion
+
+
+class NeonSnapshot:
+    """
+    A snapshot of the Neon Branch
+    Gets the output of the API call af a snapshot creation
+    """
+
+    def __init__(self, project: NeonProject, snapshot: dict[str, Any]):
+        self.project: NeonProject = project
+        snapshot = snapshot["snapshot"]
+        self.id: str = snapshot["id"]
+        self.name: str = snapshot["name"]
+        self.created_at: datetime = datetime.fromisoformat(snapshot["created_at"])
+        self.source_branch: NeonBranch = project.branches[snapshot["source_branch_id"]]
+        project.snapshots[self.id] = self
+        self.restored: bool = False
+
+    def __str__(self) -> str:
+        return f"id: {self.id}, name: {self.name}, created_at: {self.created_at}"
+
+    def delete(self) -> None:
+        self.project.delete_snapshot(self.id)
 
 
 class NeonEndpoint:
@@ -96,6 +120,11 @@ class NeonBranch:
         )
         self.benchmark: subprocess.Popen[Any] | None = None
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
+        self.parent_timestamp: datetime = (
+            datetime.fromisoformat(branch["branch"]["parent_timestamp"])
+            if "parent_timestamp" in branch["branch"]
+            else datetime.fromtimestamp(0, tz=UTC)
+        )
         self.connect_env: dict[str, str] | None = None
         if self.connection_parameters:
             self.connect_env = {
@@ -113,8 +142,18 @@ class NeonBranch:
         """
         return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''}, parent: {self.parent}"
 
-    def create_child_branch(self) -> NeonBranch | None:
-        return self.project.create_branch(self.id)
+    def random_time(self) -> datetime:
+        min_time = max(
+            self.updated_at + timedelta(seconds=1),
+            self.project.min_time,
+            self.parent_timestamp + timedelta(seconds=1),
+        )
+        max_time = datetime.now(UTC) - timedelta(seconds=1)
+        log.info("min_time: %s, max_time: %s", min_time, max_time)
+        return (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
+
+    def create_child_branch(self, parent_timestamp: datetime | None = None) -> NeonBranch | None:
+        return self.project.create_branch(self.id, parent_timestamp)
 
     def create_ro_endpoint(self) -> NeonEndpoint | None:
         if not self.project.check_limit_endpoints():
@@ -136,21 +175,36 @@ class NeonBranch:
     def terminate_benchmark(self) -> None:
         self.project.terminate_benchmark(self.id)
 
+    def reset_to_parent(self) -> None:
+        """
+        Resets the branch to the parent branch
+        """
+        for ep in self.project.endpoints.values():
+            if ep.type == "read_only":
+                ep.terminate_benchmark()
+        self.terminate_benchmark()
+        res = self.neon_api.reset_to_parent(self.project_id, self.id)
+        self.updated_at = datetime.fromisoformat(res["branch"]["updated_at"])
+        self.parent_timestamp = datetime.fromisoformat(res["branch"]["parent_timestamp"])
+        self.project.wait()
+        self.start_benchmark()
+        for ep in self.project.endpoints.values():
+            if ep.type == "read_only":
+                ep.start_benchmark()
+
     def restore_random_time(self) -> None:
         """
         Does PITR, i.e. calls the reset API call on the same branch to the random time in the past
         """
-        min_time = self.updated_at + timedelta(seconds=1)
-        max_time = datetime.now(UTC) - timedelta(seconds=1)
-        target_time = (min_time + (max_time - min_time) * random.random()).replace(microsecond=0)
         res = self.restore(
             self.id,
-            source_timestamp=target_time.isoformat().replace("+00:00", "Z"),
+            source_timestamp=self.random_time().isoformat().replace("+00:00", "Z"),
             preserve_under_name=self.project.gen_restore_name(),
         )
         if res is None:
             return
         self.updated_at = datetime.fromisoformat(res["branch"]["updated_at"])
+        self.parent_timestamp = datetime.fromisoformat(res["branch"]["parent_timestamp"])
         parent_id: str = res["branch"]["parent_id"]
         # Creates an object for the parent branch
         # After the reset operation a new parent branch is created
@@ -213,6 +267,7 @@ class NeonProject:
         # Leaf branches are the branches, which do not have children
         self.leaf_branches: dict[str, NeonBranch] = {}
         self.branches: dict[str, NeonBranch] = {}
+        self.branch_num: int = 0
         self.reset_branches: set[str] = set()
         self.main_branch: NeonBranch = NeonBranch(self, proj)
         self.main_branch.connection_parameters = self.connection_parameters
@@ -225,6 +280,9 @@ class NeonProject:
         self.restart_pgbench_on_console_errors: bool = False
         self.limits: dict[str, Any] = self.get_limits()["limits"]
         self.read_only_endpoints_total: int = 0
+        self.min_time: datetime = datetime.now(UTC)
+        self.snapshots: dict[str, NeonSnapshot] = {}
+        self.snapshot_num: int = 0
 
     def get_limits(self) -> dict[str, Any]:
         return self.neon_api.get_project_limits(self.id)
@@ -251,12 +309,24 @@ class NeonProject:
         )
         return False
 
-    def create_branch(self, parent_id: str | None = None) -> NeonBranch | None:
+    def create_branch(
+        self,
+        parent_id: str | None = None,
+        parent_timestamp: datetime | None = None,
+        is_reset: bool = False,
+    ) -> NeonBranch | None:
         self.wait()
         if not self.check_limit_branches():
             return None
-        branch_def = self.neon_api.create_branch(self.id, parent_id=parent_id)
-        new_branch = NeonBranch(self, branch_def)
+        if parent_timestamp:
+            log.info("Timestamp: %s", parent_timestamp)
+        parent_timestamp_str: str | None = None
+        if parent_timestamp:
+            parent_timestamp_str = parent_timestamp.isoformat().replace("+00:00", "Z")
+        branch_def = self.neon_api.create_branch(
+            self.id, parent_id=parent_id, parent_timestamp=parent_timestamp_str
+        )
+        new_branch = NeonBranch(self, branch_def, is_reset)
         self.wait()
         return new_branch
 
@@ -287,6 +357,27 @@ class NeonProject:
         self.wait()
         if parent.id in self.reset_branches:
             parent.delete()
+
+    def get_random_leaf_branch(self) -> NeonBranch | None:
+        target: NeonBranch | None = None
+        if self.leaf_branches:
+            target = random.choice(list(self.leaf_branches.values()))
+        else:
+            log.info("No leaf branches found")
+        return target
+
+    def generate_branch_name(self) -> str:
+        self.branch_num += 1
+        return f"branch{self.branch_num}"
+
+    def get_random_snapshot(self) -> NeonSnapshot | None:
+        snapshot: NeonSnapshot | None = None
+        avail_snapshots = [sn for sn in self.snapshots.values() if not sn.restored]
+        if avail_snapshots:
+            snapshot = random.choice(avail_snapshots)
+        else:
+            log.info("No snapshots found")
+        return snapshot
 
     def delete_endpoint(self, endpoint_id: str) -> None:
         self.terminate_benchmark(endpoint_id)
@@ -364,6 +455,110 @@ class NeonProject:
         self.restore_num += 1
         return f"restore{self.restore_num}"
 
+    def gen_snapshot_name(self) -> str:
+        self.snapshot_num += 1
+        return f"snapshot{self.snapshot_num}"
+
+    def create_snapshot(
+        self,
+        lsn: str | None = None,
+        timestamp: datetime | None = None,
+    ) -> NeonSnapshot:
+        """
+        Create a new Neon snapshot for the current project
+        Two optional arguments: lsn and timestamp are mutually exclusive
+        they instruct to create a snapshot with the specific lns or timestamp
+        """
+        snapshot_name = self.gen_snapshot_name()
+        with psycopg2.connect(self.connection_uri) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO sanity_check (name, value) VALUES "
+                    f"('snapsot_name', '{snapshot_name}') ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
+                )
+                conn.commit()
+                snapshot = NeonSnapshot(
+                    self,
+                    self.neon_api.create_snapshot(
+                        self.id,
+                        self.main_branch.id,
+                        lsn,
+                        timestamp.isoformat().replace("+00:00", "Z") if timestamp else None,
+                        snapshot_name,
+                    ),
+                )
+                self.wait()
+                cur.execute("UPDATE sanity_check SET value = 'tainted' || value")
+                conn.commit()
+        return snapshot
+
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        """
+        Deletes the snapshot with the given id
+        """
+        self.wait()
+        self.neon_api.delete_snapshot(self.id, snapshot_id)
+        self.snapshots.pop(snapshot_id)
+        self.wait()
+
+    def restore_snapshot(self, snapshot_id: str) -> NeonBranch | None:
+        """
+        Creates a new Neon branch for the current project, then restores the snapshot
+        with the given id
+        """
+        target_branch = self.create_branch()
+        if not target_branch:
+            return None
+        self.snapshots[snapshot_id].restored = True
+        new_branch_def = self.neon_api.restore_snapshot(
+            self.id,
+            snapshot_id,
+            target_branch.id,
+            self.generate_branch_name(),
+        )
+        self.wait()
+        NeonBranch(
+            self,
+            self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["parent_id"]),
+            is_reset=True,
+        )
+        new_branch = NeonBranch(
+            self, self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
+        )
+        if new_branch.connection_parameters is None:
+            if not new_branch.endpoints:
+                for ep in self.neon_api.get_endpoints(self.id)["endpoints"]:
+                    NeonEndpoint(self, ep)
+            new_branch.connection_parameters = self.connection_parameters.copy()
+            for ep in new_branch.endpoints.values():
+                if ep.type == "read_write":
+                    new_branch.connection_parameters["host"] = ep.host
+                    break
+            new_branch.connect_env = {
+                "PGHOST": new_branch.connection_parameters["host"],
+                "PGUSER": new_branch.connection_parameters["role"],
+                "PGDATABASE": new_branch.connection_parameters["database"],
+                "PGPASSWORD": new_branch.connection_parameters["password"],
+                "PGSSLMODE": "require",
+            }
+        with psycopg2.connect(
+            host=new_branch.connection_parameters["host"],
+            port=5432,
+            user=new_branch.connection_parameters["role"],
+            password=new_branch.connection_parameters["password"],
+            database=new_branch.connection_parameters["database"],
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM sanity_check WHERE name = 'snapsot_name'")
+                snapshot_name = None
+                if row := cur.fetchone():
+                    snapshot_name = row[0]
+                assert snapshot_name == self.snapshots[snapshot_id].name
+        self.wait()
+        target_branch.start_benchmark()
+        new_branch.start_benchmark()
+        return new_branch
+
 
 @pytest.fixture()
 def setup_class(
@@ -390,24 +585,22 @@ def do_action(project: NeonProject, action: str) -> bool:
     Runs the action
     """
     log.info("Action: %s", action)
-    if action == "new_branch":
-        log.info("Trying to create a new branch")
+    if action == "new_branch" or action == "new_branch_random_time":
+        use_random_time: bool = action == "new_branch_random_time"
+        log.info("Trying to create a new branch %s", "random time" if use_random_time else "")
         parent = project.branches[
             random.choice(list(set(project.branches.keys()) - project.reset_branches))
         ]
-        child = parent.create_child_branch()
+        child = parent.create_child_branch(parent.random_time() if use_random_time else None)
         if child is None:
             return False
         log.info("Created branch %s", child)
         child.start_benchmark()
     elif action == "delete_branch":
-        if project.leaf_branches:
-            target: NeonBranch = random.choice(list(project.leaf_branches.values()))
-            log.info("Trying to delete branch %s", target)
-            target.delete()
-        else:
-            log.info("Leaf branches not found, skipping")
+        if (target := project.get_random_leaf_branch()) is None:
             return False
+        log.info("Trying to delete branch %s", target)
+        target.delete()
     elif action == "new_ro_endpoint":
         ep = random.choice(
             [br for br in project.branches.values() if br.id not in project.reset_branches]
@@ -427,13 +620,32 @@ def do_action(project: NeonProject, action: str) -> bool:
         target_ep.delete()
         log.info("endpoint %s deleted", target_ep.id)
     elif action == "restore_random_time":
-        if project.leaf_branches:
-            br: NeonBranch = random.choice(list(project.leaf_branches.values()))
-            log.info("Restore %s", br)
-            br.restore_random_time()
-        else:
-            log.info("No leaf branches found")
+        if (target := project.get_random_leaf_branch()) is None:
             return False
+        log.info("Restore %s", target)
+        target.restore_random_time()
+    elif action == "reset_to_parent":
+        if (target := project.get_random_leaf_branch()) is None:
+            return False
+        log.info("Reset to parent %s", target)
+        target.reset_to_parent()
+    elif action == "create_snapshot":
+        snapshot = project.create_snapshot()
+        if snapshot is None:
+            return False
+        log.info("Created snapshot %s", snapshot)
+    elif action == "restore_snapshot":
+        if (snapshot_to_restore := project.get_random_snapshot()) is None:
+            return False
+        log.info("Restoring snapshot %s", snapshot_to_restore)
+        if project.restore_snapshot(snapshot_to_restore.id) is None:
+            return False
+    elif action == "delete_snapshot":
+        snapshot_to_delete = project.get_random_snapshot()
+        if snapshot_to_delete is None:
+            return False
+        snapshot_to_delete.delete()
+        log.info("Deleted snapshot %s", snapshot_to_delete)
     else:
         raise ValueError(f"The action {action} is unknown")
     return True
@@ -460,17 +672,35 @@ def test_api_random(
     pg_bin, project = setup_class
     # Here we can assign weights
     ACTIONS = (
-        ("new_branch", 1.5),
+        ("new_branch", 1.2),
+        ("new_branch_random_time", 0.5),
         ("new_ro_endpoint", 1.4),
         ("delete_ro_endpoint", 0.8),
-        ("delete_branch", 1.0),
-        ("restore_random_time", 1.2),
+        ("delete_branch", 1.2),
+        ("restore_random_time", 0.9),
+        ("reset_to_parent", 0.3),
+        ("create_snapshot", 0.15),
+        ("restore_snapshot", 0.1),
+        ("delete_snapshot", 0.1),
     )
     if num_ops_env := os.getenv("NUM_OPERATIONS"):
         num_operations = int(num_ops_env)
     else:
         num_operations = 250
     pg_bin.run(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=project.main_branch.connect_env)
+    # Create a table for sanity check
+    # We are going to leve some control values there to check, e.g., after restoring a snapshot
+    pg_bin.run(
+        [
+            "psql",
+            "-c",
+            "CREATE TABLE IF NOT EXISTS sanity_check (name VARCHAR NOT NULL PRIMARY KEY, value VARCHAR)",
+        ],
+        env=project.main_branch.connect_env,
+    )
+    # To not go to the past where pgbench tables do not exist
+    time.sleep(1)
+    project.min_time = datetime.now(UTC)
     for _ in range(num_operations):
         log.info("Starting action #%s", _ + 1)
         while not do_action(
