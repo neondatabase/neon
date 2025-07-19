@@ -2537,8 +2537,7 @@ void
 communicator_reconfigure_timeout_if_needed(void)
 {
 	bool	needs_set = (MyPState->ring_receive != MyPState->ring_unused ||
-						 (RecoveryInProgress() &&
-						  MIN_BACKEND_PREFETCH_LSN != InvalidXLogRecPtr &&
+						 (MIN_BACKEND_PREFETCH_LSN != InvalidXLogRecPtr &&
 						  MIN_BACKEND_PREFETCH_LSN != GetXLogReplayRecPtr(NULL))) &&
 						!AmPrewarmWorker && /* do not pump prefetch state in prewarm worker */
 						readahead_getpage_pull_timeout_ms > 0;
@@ -2553,6 +2552,7 @@ communicator_reconfigure_timeout_if_needed(void)
 		if (unlikely(PS_TIMEOUT_ID == 0))
 		{
 			PS_TIMEOUT_ID = RegisterTimeout(USER_TIMEOUT, pagestore_timeout_handler);
+			Assert(PS_TIMEOUT_ID >= 0);
 		}
 
 		if (needs_set)
