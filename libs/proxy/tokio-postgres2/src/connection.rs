@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -38,7 +37,7 @@ pub struct Connection<S, T> {
     sender: PollSender<BackendMessages>,
     receiver: mpsc::UnboundedReceiver<FrontendMessage>,
 
-    pending_responses: VecDeque<BackendMessage>,
+    pending_response: Option<BackendMessages>,
     state: State,
 }
 
@@ -56,7 +55,7 @@ where
             stream,
             sender: PollSender::new(sender),
             receiver,
-            pending_responses: VecDeque::new(),
+            pending_response: None,
             state: State::Active,
         }
     }
@@ -65,9 +64,9 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<BackendMessage, Error>>> {
-        if let Some(message) = self.pending_responses.pop_front() {
+        if let Some(messages) = self.pending_response.take() {
             trace!("retrying pending response");
-            return Poll::Ready(Some(Ok(message)));
+            return Poll::Ready(Some(Ok(BackendMessage::Normal { messages })));
         }
 
         Pin::new(&mut self.stream)
@@ -87,6 +86,7 @@ where
                     return Poll::Pending;
                 }
             };
+            debug_assert!(self.pending_response.is_none());
 
             let messages = match message {
                 BackendMessage::Async(Message::NoticeResponse(body)) => {
@@ -114,8 +114,7 @@ where
                     return Poll::Ready(Err(Error::closed()));
                 }
                 Poll::Pending => {
-                    self.pending_responses
-                        .push_back(BackendMessage::Normal { messages });
+                    self.pending_response = Some(messages);
                     trace!("poll_read: waiting on sender");
                     return Poll::Pending;
                 }
