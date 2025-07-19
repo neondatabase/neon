@@ -142,6 +142,7 @@ static bool bounce_needed(void *buffer);
 static void *bounce_buf(void);
 static void *bounce_write_if_needed(void *buffer);
 
+static void pump_logging(struct LoggingReceiver *logging);
 PGDLLEXPORT void communicator_new_bgworker_main(Datum main_arg);
 static void communicator_new_backend_exit(int code, Datum arg);
 
@@ -184,6 +185,9 @@ pg_init_communicator_new(void)
 {
 	BackgroundWorker bgw;
 
+	if (!neon_use_communicator_worker)
+		return;
+
 	if (pageserver_connstring[0] == '\0' && pageserver_grpc_urls[0] == '\0')
 	{
 		/* running with local storage */
@@ -211,6 +215,9 @@ communicator_new_shmem_size(void)
 	size_t		size = 0;
 	int			num_request_slots;
 
+	if (!neon_use_communicator_worker)
+		return 0;
+
 	size += MAXALIGN(
 					 offsetof(CommunicatorShmemData, backends) +
 					 MaxProcs * sizeof(CommunicatorShmemPerBackendData)
@@ -225,13 +232,16 @@ communicator_new_shmem_size(void)
 }
 
 void
-communicator_new_shmem_request(void)
+CommunicatorNewShmemRequest(void)
 {
+	if (!neon_use_communicator_worker)
+		return;
+
 	RequestAddinShmemSpace(communicator_new_shmem_size());
 }
 
 void
-communicator_new_shmem_startup(void)
+CommunicatorNewShmemInit(void)
 {
 	bool		found;
 	int			pipefd[2];
@@ -241,6 +251,9 @@ communicator_new_shmem_startup(void)
 	void	   *shmem_ptr;
 	uint64		initial_file_cache_size;
 	uint64		max_file_cache_size;
+
+	if (!neon_use_communicator_worker)
+		return;
 
 	rc = pipe(pipefd);
 	if (rc != 0)
@@ -294,10 +307,8 @@ communicator_new_bgworker_main(Datum main_arg)
 {
 	char	  **connstrings;
 	ShardMap	shard_map;
-	struct LoggingState *logging;
-	char		errbuf[1000];
-	int			elevel;
 	uint64		file_cache_size;
+	struct LoggingReceiver *logging;
 	const struct CommunicatorWorkerProcessStruct *proc_handle;
 
 	/*
@@ -334,8 +345,21 @@ communicator_new_bgworker_main(Datum main_arg)
 	for (int i = 0; i < shard_map.num_shards; i++)
 		connstrings[i] = shard_map.connstring[i];
 
-	logging = configure_logging();
+	/*
+	 * By default, INFO messages are not printed to the log. We want
+	 * `tracing::info!` messages emitted from the communicator to be printed,
+	 * however, so increase the log level.
+	 *
+	 * XXX: This overrides any user-set value from the config file. That's not
+	 * great, but on the other hand, there should be little reason for user to
+	 * control the verbosity of the communicator. It's not too verbose by
+	 * default.
+	 */
+	SetConfigOption("log_min_messages", "INFO", PGC_SUSET, PGC_S_OVERRIDE);
 
+	logging = communicator_worker_configure_logging();
+
+	elog(LOG, "launching worker process threads");
 	proc_handle = communicator_worker_process_launch(
 									   cis,
 									   neon_tenant,
@@ -348,11 +372,27 @@ communicator_new_bgworker_main(Datum main_arg)
 									   file_cache_size);
 	pfree(connstrings);
 	cis = NULL;
+	if (proc_handle == NULL)
+	{
+		/*
+		 * Something went wrong. Before exiting, forward any log messages that
+		 * might've been generated during the failed launch.
+		 */
+		pump_logging(logging);
+
+		elog(PANIC, "failure launching threads");
+	}
 
 	elog(LOG, "communicator threads started");
 	for (;;)
 	{
-		int32		rc;
+		ResetLatch(MyLatch);
+
+		/*
+		 * Forward any log messages from the Rust threads into the normal
+		 * Postgres logging facility.
+		 */
+		pump_logging(logging);
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -383,36 +423,80 @@ communicator_new_bgworker_main(Datum main_arg)
 			pfree(connstrings);
 		}
 
-		for (;;)
-		{
-			rc = pump_logging(logging, (uint8 *) errbuf, sizeof(errbuf), &elevel);
-			if (rc == 0)
-			{
-				/* nothing to do */
-				break;
-			}
-			else if (rc == 1)
-			{
-				/* Because we don't want to exit on error */
-				if (elevel == ERROR)
-					elevel = LOG;
-				if (elevel == INFO)
-					elevel = LOG;
-				elog(elevel, "[COMMUNICATOR] %s", errbuf);
-			}
-			else if (rc == -1)
-			{
-				elog(ERROR, "logging channel was closed unexpectedly");
-			}
-		}
-
 		(void) WaitLatch(MyLatch,
 						 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
 						 0,
 						 PG_WAIT_EXTENSION);
-		ResetLatch(MyLatch);
 	}
 }
+
+static void
+pump_logging(struct LoggingReceiver *logging)
+{
+	char		errbuf[1000];
+	int			elevel;
+	int32		rc;
+	static uint64_t last_dropped_event_count = 0;
+	uint64_t	dropped_event_count;
+	uint64_t	dropped_now;
+
+	for (;;)
+	{
+		rc = communicator_worker_poll_logging(logging,
+											  errbuf,
+											  sizeof(errbuf),
+											  &elevel,
+											  &dropped_event_count);
+		if (rc == 0)
+		{
+			/* nothing to do */
+			break;
+		}
+		else if (rc == 1)
+		{
+			/* Because we don't want to exit on error */
+
+			if (message_level_is_interesting(elevel))
+			{
+				/*
+				 * Prevent interrupts while cleaning up.
+				 *
+				 * (Not sure if this is required, but all the error handlers
+				 * in Postgres that are installed as sigsetjmp() targets do
+				 * this, so let's follow the example)
+				 */
+				HOLD_INTERRUPTS();
+
+				errstart(elevel, TEXTDOMAIN);
+				errmsg_internal("[COMMUNICATOR] %s", errbuf);
+				EmitErrorReport();
+				FlushErrorState();
+
+				/* Now we can allow interrupts again */
+				RESUME_INTERRUPTS();
+			}
+		}
+		else if (rc == -1)
+		{
+			elog(ERROR, "logging channel was closed unexpectedly");
+		}
+	}
+
+	/*
+	 * If the queue was full at any time since the last time we reported it,
+	 * report how many messages were lost. We do this outside the loop, so
+	 * that if the logging system is clogged, we don't exacerbate it by
+	 * printing lots of warnings about dropped messages.
+	 */
+	dropped_now = dropped_event_count - last_dropped_event_count;
+	if (dropped_now != 0)
+	{
+		elog(WARNING, "%lu communicator log messages were dropped because the log buffer was full",
+			 (unsigned long) dropped_now);
+		last_dropped_event_count = dropped_event_count;
+	}
+}
+
 
 /*
  * Callbacks from the rust code, in the communicator process.

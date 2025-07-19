@@ -43,9 +43,6 @@ pub(crate) struct CoreHashMap<'a, K, V> {
     pub(crate) alloc_limit: u32,
     /// The number of currently occupied buckets.
     pub(crate) buckets_in_use: u32,
-    // pub(crate) lock: libc::pthread_mutex_t,
-    // Unclear what the purpose of this is.
-    pub(crate) _user_list_head: u32,
 }
 
 impl<'a, K, V> Debug for CoreHashMap<'a, K, V>
@@ -66,7 +63,7 @@ where
 
 /// Error for when there are no empty buckets left but one is needed.
 #[derive(Debug, PartialEq)]
-pub struct FullError();
+pub struct FullError;
 
 impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
     const FILL_FACTOR: f32 = 0.60;
@@ -118,7 +115,6 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
             buckets,
             free_head: 0,
             buckets_in_use: 0,
-            _user_list_head: INVALID_POS,
             alloc_limit: INVALID_POS,
         }
     }
@@ -179,7 +175,7 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
             pos = bucket.next;
         }
         if pos == INVALID_POS {
-            return Err(FullError());
+            return Err(FullError);
         }
 
         // Repair the freelist.

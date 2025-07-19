@@ -83,10 +83,8 @@ static XLogRecPtr standby_flush_lsn = InvalidXLogRecPtr;
 static XLogRecPtr standby_apply_lsn = InvalidXLogRecPtr;
 static HotStandbyFeedback agg_hs_feedback;
 
-static void nwp_shmem_startup_hook(void);
 static void nwp_register_gucs(void);
 static void assign_neon_safekeepers(const char *newval, void *extra);
-static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
 static uint64 startup_backpressure_wrap(void);
 static bool backpressure_throttling_impl(void);
@@ -99,11 +97,6 @@ static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
 static void walprop_pg_load_libpqwalreceiver(void);
 
 static process_interrupts_callback_t PrevProcessInterruptsCallback = NULL;
-static shmem_startup_hook_type prev_shmem_startup_hook_type;
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook = NULL;
-static void walproposer_shmem_request(void);
-#endif
 static void WalproposerShmemInit_SyncSafekeeper(void);
 
 
@@ -192,8 +185,6 @@ pg_init_walproposer(void)
 		return;
 
 	nwp_register_gucs();
-
-	nwp_prepare_shmem();
 
 	delay_backend_us = &startup_backpressure_wrap;
 	PrevProcessInterruptsCallback = ProcessInterruptsCallback;
@@ -494,12 +485,11 @@ WalproposerShmemSize(void)
 	return sizeof(WalproposerShmemState);
 }
 
-static bool
+void
 WalproposerShmemInit(void)
 {
 	bool		found;
 
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	walprop_shared = ShmemInitStruct("Walproposer shared state",
 									 sizeof(WalproposerShmemState),
 									 &found);
@@ -517,9 +507,6 @@ WalproposerShmemInit(void)
 		pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.last_recorded_time_us, 0);
 		/* END_HADRON */
 	}
-	LWLockRelease(AddinShmemInitLock);
-
-	return found;
 }
 
 static void
@@ -623,41 +610,14 @@ walprop_register_bgworker(void)
 
 /* shmem handling */
 
-static void
-nwp_prepare_shmem(void)
-{
-#if PG_VERSION_NUM >= 150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = walproposer_shmem_request;
-#else
-	RequestAddinShmemSpace(WalproposerShmemSize());
-#endif
-	prev_shmem_startup_hook_type = shmem_startup_hook;
-	shmem_startup_hook = nwp_shmem_startup_hook;
-}
-
-#if PG_VERSION_NUM >= 150000
 /*
  * shmem_request hook: request additional shared resources.  We'll allocate or
- * attach to the shared resources in nwp_shmem_startup_hook().
+ * attach to the shared resources in WalproposerShmemInit().
  */
-static void
-walproposer_shmem_request(void)
+void
+WalproposerShmemRequest(void)
 {
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-
 	RequestAddinShmemSpace(WalproposerShmemSize());
-}
-#endif
-
-static void
-nwp_shmem_startup_hook(void)
-{
-	if (prev_shmem_startup_hook_type)
-		prev_shmem_startup_hook_type();
-
-	WalproposerShmemInit();
 }
 
 WalproposerShmemState *

@@ -20,8 +20,8 @@
 
 /* initialization at postmaster startup */
 extern void pg_init_communicator_new(void);
-extern void communicator_new_shmem_request(void);
-extern void communicator_new_shmem_startup(void);
+extern void CommunicatorNewShmemRequest(void);
+extern void CommunicatorNewShmemInit(void);
 
 /* initialization at backend startup */
 extern void communicator_new_init(void);

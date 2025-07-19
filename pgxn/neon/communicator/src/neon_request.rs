@@ -1,4 +1,3 @@
-
 // Definitions of some core PostgreSQL datatypes.
 
 /// XLogRecPtr is defined in "access/xlogdefs.h" as:

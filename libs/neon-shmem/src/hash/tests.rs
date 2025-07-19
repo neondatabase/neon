@@ -164,16 +164,16 @@ fn do_deletes(
 fn do_shrink(
     writer: &mut HashMapAccess<TestKey, usize>,
     shadow: &mut BTreeMap<TestKey, usize>,
+    from: u32,
     to: u32,
 ) {
     assert!(writer.shrink_goal().is_none());
     writer.begin_shrink(to);
     assert_eq!(writer.shrink_goal(), Some(to as usize));
-    while writer.get_num_buckets_in_use() > to as usize {
-        let (k, _) = shadow.pop_first().unwrap();
-        let entry = writer.entry(k);
-        if let Entry::Occupied(e) = entry {
-            e.remove();
+    for i in to..from {
+        if let Some(entry) = writer.entry_at_bucket(i as usize) {
+            shadow.remove(&entry._key);
+            entry.remove();
         }
     }
     let old_usage = writer.get_num_buckets_in_use();
@@ -298,7 +298,7 @@ fn test_shrink() {
     let mut rng = rand::rng();
 
     do_random_ops(10000, 1500, 0.75, &mut writer, &mut shadow, &mut rng);
-    do_shrink(&mut writer, &mut shadow, 1000);
+    do_shrink(&mut writer, &mut shadow, 1500, 1000);
     assert_eq!(writer.get_num_buckets(), 1000);
     do_deletes(500, &mut writer, &mut shadow);
     do_random_ops(10000, 500, 0.75, &mut writer, &mut shadow, &mut rng);
@@ -315,7 +315,7 @@ fn test_shrink_grow_seq() {
 
     do_random_ops(500, 1000, 0.1, &mut writer, &mut shadow, &mut rng);
     eprintln!("Shrinking to 750");
-    do_shrink(&mut writer, &mut shadow, 750);
+    do_shrink(&mut writer, &mut shadow, 1000, 750);
     do_random_ops(200, 1000, 0.5, &mut writer, &mut shadow, &mut rng);
     eprintln!("Growing to 1500");
     writer.grow(1500).unwrap();
@@ -324,7 +324,7 @@ fn test_shrink_grow_seq() {
     while shadow.len() > 100 {
         do_deletes(1, &mut writer, &mut shadow);
     }
-    do_shrink(&mut writer, &mut shadow, 200);
+    do_shrink(&mut writer, &mut shadow, 1500, 200);
     do_random_ops(50, 1500, 0.25, &mut writer, &mut shadow, &mut rng);
     eprintln!("Growing to 10k");
     writer.grow(10000).unwrap();
@@ -349,8 +349,7 @@ fn test_bucket_ops() {
     let pos = match writer.entry(1.into()) {
         Entry::Occupied(e) => {
             assert_eq!(e._key, 1.into());
-            let pos = e.bucket_pos as usize;
-            pos
+            e.bucket_pos as usize
         }
         Entry::Vacant(_) => {
             panic!("Insert didn't affect entry");

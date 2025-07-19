@@ -47,6 +47,7 @@ tracing-subscriber = { workspace = true, features = ["json", "registry"] }
 tracing-utils.workspace = true
 rand.workspace = true
 scopeguard.workspace = true
+uuid.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 walkdir.workspace = true

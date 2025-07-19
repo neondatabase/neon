@@ -250,6 +250,7 @@ typedef struct
 {
 	char		connstring[MAX_SHARDS][MAX_PAGESERVER_CONNSTRING_SIZE];
 	size_t		num_shards;
+	size_t		stripe_size;
 } ShardMap;
 
 extern bool parse_shard_map(const char *connstr, ShardMap *result);

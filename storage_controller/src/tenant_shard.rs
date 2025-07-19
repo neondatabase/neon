@@ -131,14 +131,16 @@ pub(crate) struct TenantShard {
     #[serde(serialize_with = "read_last_error")]
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<Option<Arc<ReconcileError>>>>,
 
-    /// Number of consecutive reconciliation errors that have occurred for this shard.
+    /// Amount of consecutive [`crate::service::Service::reconcile_all`] iterations that have been
+    /// scheduled a reconciliation for this shard.
     ///
-    /// When this count reaches MAX_CONSECUTIVE_RECONCILIATION_ERRORS, the tenant shard
-    /// will be countered as keep-failing in `reconcile_all` calculations. This will lead to
-    /// allowing optimizations to run even with some failing shards.
+    /// If this reaches `MAX_CONSECUTIVE_RECONCILES`, the shard is considered "stuck" and will be
+    /// ignored when deciding whether optimizations can run. This includes both successful and failed
+    /// reconciliations.
     ///
-    /// The counter is reset to 0 after a successful reconciliation.
-    pub(crate) consecutive_errors_count: usize,
+    /// Incremented in [`crate::service::Service::process_result`], and reset to 0 when
+    /// [`crate::service::Service::reconcile_all`] determines no reconciliation is needed for this shard.
+    pub(crate) consecutive_reconciles_count: usize,
 
     /// If we have a pending compute notification that for some reason we weren't able to send,
     /// set this to true. If this is set, calls to [`Self::get_reconcile_needed`] will return Yes
@@ -603,7 +605,7 @@ impl TenantShard {
             waiter: Arc::new(SeqWait::new(Sequence(0))),
             error_waiter: Arc::new(SeqWait::new(Sequence(0))),
             last_error: Arc::default(),
-            consecutive_errors_count: 0,
+            consecutive_reconciles_count: 0,
             pending_compute_notification: false,
             scheduling_policy: ShardSchedulingPolicy::default(),
             preferred_node: None,
@@ -1609,7 +1611,13 @@ impl TenantShard {
 
         // Update result counter
         let outcome_label = match &result {
-            Ok(_) => ReconcileOutcome::Success,
+            Ok(_) => {
+                if reconciler.compute_notify_failure {
+                    ReconcileOutcome::SuccessNoNotify
+                } else {
+                    ReconcileOutcome::Success
+                }
+            }
             Err(ReconcileError::Cancel) => ReconcileOutcome::Cancel,
             Err(_) => ReconcileOutcome::Error,
         };
@@ -1908,7 +1916,7 @@ impl TenantShard {
             waiter: Arc::new(SeqWait::new(Sequence::initial())),
             error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
             last_error: Arc::default(),
-            consecutive_errors_count: 0,
+            consecutive_reconciles_count: 0,
             pending_compute_notification: false,
             delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),

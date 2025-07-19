@@ -90,7 +90,6 @@ impl<K, V> OccupiedEntry<'_, '_, K, V> {
                 self.map.dictionary[dict_pos as usize] = bucket.next;
             }
             PrevPos::Chained(bucket_pos) => {
-                // println!("we think prev of {} is {bucket_pos}", self.bucket_pos);
                 self.map.buckets[bucket_pos as usize].next = bucket.next;
             }
             _ => unreachable!(),
@@ -125,9 +124,6 @@ impl<'b, K: Clone + Hash + Eq, V> VacantEntry<'_, 'b, K, V> {
     /// Will return [`FullError`] if there are no unoccupied buckets in the map.
     pub fn insert(mut self, value: V) -> Result<ValueWriteGuard<'b, V>, FullError> {
         let pos = self.map.alloc_bucket(self.key, value)?;
-        if pos == INVALID_POS {
-            return Err(FullError());
-        }
         self.map.buckets[pos as usize].next = self.map.dictionary[self.dict_pos as usize];
         self.map.dictionary[self.dict_pos as usize] = pos;
 

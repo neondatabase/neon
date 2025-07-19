@@ -30,6 +30,7 @@ pub extern "C" fn communicator_worker_process_launch(
     file_cache_path: *const c_char,
     initial_file_cache_size: u64,
 ) -> &'static CommunicatorWorkerProcessStruct<'static> {
+    tracing::warn!("starting threads in rust code");
     // Convert the arguments into more convenient Rust types
     let tenant_id = unsafe { CStr::from_ptr(tenant_id) }.to_str().unwrap();
     let timeline_id = unsafe { CStr::from_ptr(timeline_id) }.to_str().unwrap();

@@ -1951,6 +1951,7 @@ dependencies = [
  "diesel_derives",
  "itoa",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -3962,7 +3963,6 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "criterion",
- "foldhash",
  "hashbrown 0.15.4",
  "libc",
  "lock_api",
@@ -5509,7 +5509,7 @@ dependencies = [
  "reqwest-tracing",
  "rsa",
  "rstest",
- "rustc-hash 1.1.0",
+ "rustc-hash 2.1.1",
  "rustls 0.23.27",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.1.1",
@@ -7138,6 +7138,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "utils",
+ "uuid",
  "workspace_hack",
 ]
 
@@ -8444,6 +8445,7 @@ dependencies = [
  "tracing-error",
  "tracing-subscriber",
  "tracing-utils",
+ "uuid",
  "walkdir",
 ]
 
@@ -9063,7 +9065,6 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
- "uuid",
  "zeroize",
  "zstd",
  "zstd-safe",
