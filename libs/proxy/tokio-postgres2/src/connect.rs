@@ -48,7 +48,7 @@ where
     let stream = connect_tls(socket, config.ssl_mode, tls).await?;
     let RawConnection {
         stream,
-        parameters,
+        parameters: _,
         delayed_notice,
         process_id,
         secret_key,
@@ -78,7 +78,7 @@ where
         .map(|m| BackendMessage::Async(Message::NoticeResponse(m)))
         .collect();
 
-    let connection = Connection::new(stream, delayed, parameters, conn_tx, conn_rx);
+    let connection = Connection::new(stream, delayed, conn_tx, conn_rx);
 
     Ok((client, connection))
 }

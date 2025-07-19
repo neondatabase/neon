@@ -74,7 +74,6 @@ impl Header {
 }
 
 /// An enum representing Postgres backend messages.
-#[non_exhaustive]
 pub enum Message {
     AuthenticationCleartextPassword,
     AuthenticationGss,
