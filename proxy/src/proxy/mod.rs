@@ -9,10 +9,12 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use futures::TryStreamExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use postgres_client::RawCancelToken;
-use postgres_client::connect_raw::{StartupStream, read_info};
+use postgres_client::connect_raw::StartupStream;
+use postgres_protocol::message::backend::Message;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::{SmolStr, format_smolstr};
@@ -195,32 +197,10 @@ pub(crate) async fn finish_client_init(
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     compute: &mut StartupStream<TcpStream, RustlsStream>,
 ) -> Result<(i32, i32), ClientRequestError> {
-    let (process_id, secret_key, params, delayed_notice) = match read_info(compute).await {
-        Ok(r) => r,
-        Err(e) => Err(client
-            .throw_error(PostgresError::Postgres(e), Some(ctx))
-            .await)?,
-    };
-
-    // Forward all deferred notices to the client.
-    for notice in delayed_notice {
-        client.write_raw(notice.as_bytes().len(), b'N', |buf| {
-            buf.extend_from_slice(notice.as_bytes());
-        });
-    }
-
     // Expose session_id to clients if we have a greeting message.
     if !greetings.is_empty() {
         let session_msg = format!("{}, session_id: {}", greetings, ctx.session_id());
         client.write_message(BeMessage::NoticeResponse(session_msg.as_str()));
-    }
-
-    // Forward all postgres connection params to the client.
-    for (name, value) in params {
-        client.write_message(BeMessage::ParameterStatus {
-            name: name.as_bytes(),
-            value: value.as_bytes(),
-        });
     }
 
     // Forward recorded latencies for probing requests
@@ -253,10 +233,52 @@ pub(crate) async fn finish_client_init(
         });
     }
 
-    client.write_message(BeMessage::BackendKeyData(cancel_key_data));
-    client.write_message(BeMessage::ReadyForQuery);
+    let mut process_id = 0;
+    let mut secret_key = 0;
 
-    Ok((process_id, secret_key))
+    let err = loop {
+        let msg = match compute.try_next().await {
+            Ok(msg) => msg,
+            Err(e) => break postgres_client::Error::io(e),
+        };
+
+        match msg {
+            // Send our cancellation key data instead.
+            Some(Message::BackendKeyData(body)) => {
+                client.write_message(BeMessage::BackendKeyData(cancel_key_data));
+                process_id = body.process_id();
+                secret_key = body.secret_key();
+            }
+            // Forward all postgres connection params to the client.
+            Some(Message::ParameterStatus(body)) => {
+                if let Ok(name) = body.name()
+                    && let Ok(value) = body.value()
+                {
+                    client.write_message(BeMessage::ParameterStatus {
+                        name: name.as_bytes(),
+                        value: value.as_bytes(),
+                    });
+                }
+            }
+            // Forward all notices to the client.
+            Some(Message::NoticeResponse(notice)) => {
+                client.write_raw(notice.as_bytes().len(), b'N', |buf| {
+                    buf.extend_from_slice(notice.as_bytes());
+                });
+            }
+            Some(Message::ReadyForQuery(_)) => {
+                client.write_message(BeMessage::ReadyForQuery);
+                return Ok((process_id, secret_key));
+            }
+            Some(Message::ErrorResponse(body)) => break postgres_client::Error::db(body),
+            Some(_) => break postgres_client::Error::unexpected_message(),
+            None => break postgres_client::Error::closed(),
+        }
+    };
+
+    Err(client
+        .throw_error(PostgresError::Postgres(err), Some(ctx))
+        .await)?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

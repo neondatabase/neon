@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
@@ -8,7 +7,7 @@ use fallible_iterator::FallibleIterator;
 use futures_util::{Sink, SinkExt, Stream, TryStreamExt};
 use postgres_protocol2::authentication::sasl;
 use postgres_protocol2::authentication::sasl::ScramSha256;
-use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message, NoticeResponseBody};
+use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message};
 use postgres_protocol2::message::frontend;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::codec::{Framed, FramedParts, FramedWrite};
@@ -311,39 +310,4 @@ where
         .map_err(|e| Error::authentication(e.into()))?;
 
     Ok(())
-}
-
-pub async fn read_info<S, T>(
-    stream: &mut StartupStream<S, T>,
-) -> Result<(i32, i32, HashMap<String, String>, Vec<NoticeResponseBody>), Error>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut process_id = 0;
-    let mut secret_key = 0;
-    let mut parameters = HashMap::new();
-    let mut delayed_notice = Vec::new();
-
-    loop {
-        match stream.try_next().await.map_err(Error::io)? {
-            Some(Message::BackendKeyData(body)) => {
-                process_id = body.process_id();
-                secret_key = body.secret_key();
-            }
-            Some(Message::ParameterStatus(body)) => {
-                parameters.insert(
-                    body.name().map_err(Error::parse)?.to_string(),
-                    body.value().map_err(Error::parse)?.to_string(),
-                );
-            }
-            Some(Message::NoticeResponse(body)) => delayed_notice.push(body),
-            Some(Message::ReadyForQuery(_)) => {
-                return Ok((process_id, secret_key, parameters, delayed_notice));
-            }
-            Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
-            Some(_) => return Err(Error::unexpected_message()),
-            None => return Err(Error::closed()),
-        }
-    }
 }
