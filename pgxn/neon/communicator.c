@@ -2540,15 +2540,11 @@ communicator_reconfigure_timeout_if_needed(void)
 
 	if (needs_set != timeout_set)
 	{
-		/* The background writer doens't (shouldn't) read any pages */
-		Assert(!AmBackgroundWriterProcess());
-		/* The checkpointer doens't (shouldn't) read any pages */
-		Assert(!AmCheckpointerProcess());
-
 		if (unlikely(PS_TIMEOUT_ID == 0))
 		{
 			PS_TIMEOUT_ID = RegisterTimeout(USER_TIMEOUT, pagestore_timeout_handler);
-			Assert(PS_TIMEOUT_ID >= 0);
+			if (PS_TIMEOUT_ID == -1)
+				ereport(PANIC, (errmsg("PS_TIMEOUT_ID == %d", PS_TIMEOUT_ID), errbacktrace()));
 		}
 
 		if (needs_set)
