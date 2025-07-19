@@ -3,8 +3,8 @@ use std::pin::pin;
 use std::sync::{Arc, Weak};
 use std::task::{Poll, ready};
 
-use futures::Future;
 use futures::future::poll_fn;
+use futures::{Future, FutureExt};
 use postgres_client::tls::MakeTlsConnect;
 use smallvec::SmallVec;
 use tokio::net::TcpStream;
@@ -123,20 +123,9 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 }
             }
 
-            loop {
-                let message = ready!(connection.poll_message(cx));
-
-                match message {
-                    Some(Ok(())) => {}
-                    Some(Err(e)) => {
-                        error!(%session_id, "connection error: {}", e);
-                        break;
-                    }
-                    None => {
-                        info!("connection closed");
-                        break;
-                    }
-                }
+            match ready!(connection.poll_unpin(cx)) {
+                Err(e) => error!(%session_id, "connection error: {}", e),
+                Ok(()) => info!("connection closed"),
             }
 
             // remove from connection pool

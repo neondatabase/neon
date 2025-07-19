@@ -44,6 +44,8 @@ pub struct Connection<S, T> {
     state: State,
 }
 
+pub enum Never {}
+
 impl<S, T> Connection<S, T>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -66,7 +68,7 @@ where
 
     /// Read and process messages from the connection to postgres.
     /// client <- postgres
-    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<Never, Error>> {
         loop {
             let messages = match self.pending_response.take() {
                 Some(messages) => messages,
@@ -228,26 +230,17 @@ where
         }
     }
 
-    /// Polls for asynchronous messages from the server.
-    ///
-    /// The server can send notices as well as notifications asynchronously to the client. Applications that wish to
-    /// examine those messages should use this method to drive the connection rather than its `Future` implementation.
-    pub fn poll_message(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(), Error>>> {
+    fn poll_message(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Never, Error>>> {
         if self.state != State::Closing {
             // if the state is still active, try read from and write to postgres.
-            let read = self.poll_read(cx)?;
-            let closing = self.poll_write(cx)?;
-            if let Poll::Ready(()) = closing {
+            let Poll::Pending = self.poll_read(cx)?;
+            if self.poll_write(cx)?.is_ready() {
                 self.state = State::Closing;
             }
 
-            if read.is_ready() {
-                return Poll::Ready(Some(Ok(())));
-            }
-
             // poll_read returned Pending.
-            // poll_write returned Pending or Ready(WriteReady::WaitingOnRead).
-            // if poll_write returned Ready(WriteReady::WaitingOnRead), then we are waiting to read more data from postgres.
+            // poll_write returned Pending or Ready(()).
+            // if poll_write returned Ready(()), then we are waiting to read more data from postgres.
             if self.state != State::Closing {
                 return Poll::Pending;
             }
@@ -269,7 +262,9 @@ where
     type Output = Result<(), Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        while ready!(self.poll_message(cx)?).is_some() {}
-        Poll::Ready(Ok(()))
+        match self.poll_message(cx)? {
+            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }

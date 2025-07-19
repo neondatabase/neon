@@ -19,8 +19,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer, SigningKey};
-use futures::Future;
 use futures::future::poll_fn;
+use futures::{Future, FutureExt};
 use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use parking_lot::RwLock;
@@ -228,20 +228,9 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 }
             }
 
-            loop {
-                let message = ready!(connection.poll_message(cx));
-
-                match message {
-                    Some(Ok(())) => {}
-                    Some(Err(e)) => {
-                        error!(%session_id, "connection error: {}", e);
-                        break;
-                    }
-                    None => {
-                        info!("connection closed");
-                        break;
-                    }
-                }
+            match ready!(connection.poll_unpin(cx)) {
+                Err(e) => error!(%session_id, "connection error: {}", e),
+                Ok(()) => info!("connection closed"),
             }
 
             // remove from connection pool
