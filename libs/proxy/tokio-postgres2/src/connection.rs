@@ -49,7 +49,6 @@ where
 {
     pub(crate) fn new(
         stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-        pending_responses: VecDeque<BackendMessage>,
         sender: mpsc::Sender<BackendMessages>,
         receiver: mpsc::UnboundedReceiver<FrontendMessage>,
     ) -> Connection<S, T> {
@@ -57,7 +56,7 @@ where
             stream,
             sender: PollSender::new(sender),
             receiver,
-            pending_responses,
+            pending_responses: VecDeque::new(),
             state: State::Active,
         }
     }

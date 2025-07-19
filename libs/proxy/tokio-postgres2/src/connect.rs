@@ -1,11 +1,9 @@
 use std::net::IpAddr;
 
-use postgres_protocol2::message::backend::Message;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::client::SocketConfig;
-use crate::codec::BackendMessage;
 use crate::config::Host;
 use crate::connect_raw::connect_raw;
 use crate::connect_socket::connect_socket;
@@ -49,7 +47,7 @@ where
     let RawConnection {
         stream,
         parameters: _,
-        delayed_notice,
+        delayed_notice: _,
         process_id,
         secret_key,
     } = connect_raw(stream, config).await?;
@@ -72,13 +70,7 @@ where
         secret_key,
     );
 
-    // delayed notices are always sent as "Async" messages.
-    let delayed = delayed_notice
-        .into_iter()
-        .map(|m| BackendMessage::Async(Message::NoticeResponse(m)))
-        .collect();
-
-    let connection = Connection::new(stream, delayed, conn_tx, conn_rx);
+    let connection = Connection::new(stream, conn_tx, conn_rx);
 
     Ok((client, connection))
 }
