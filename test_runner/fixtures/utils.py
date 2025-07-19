@@ -741,3 +741,29 @@ def shared_buffers_for_max_cu(max_cu: float) -> str:
     sharedBuffersMb = int(max(128, (1023 + maxBackends * 256) / 1024))
     sharedBuffers = int(sharedBuffersMb * 1024 / 8)
     return str(sharedBuffers)
+
+
+def skip_if_proxy_lacks_rest_broker(reason: str = "proxy was built without 'rest_broker' feature"):
+    # Determine the binary path using the same logic as neon_binpath fixture
+    def has_rest_broker_feature():
+        # Find the neon binaries
+        if env_neon_bin := os.environ.get("NEON_BIN"):
+            binpath = Path(env_neon_bin)
+        else:
+            base_dir = Path(__file__).parents[2]  # Same as BASE_DIR in paths.py
+            build_type = os.environ.get("BUILD_TYPE", "debug")
+            binpath = base_dir / "target" / build_type
+
+        proxy_bin = binpath / "proxy"
+        if not proxy_bin.exists():
+            return False
+
+        try:
+            cmd = [str(proxy_bin), "--help"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
+            help_output = result.stdout
+            return "--is-rest-broker" in help_output
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            return False
+
+    return pytest.mark.skipif(not has_rest_broker_feature(), reason=reason)

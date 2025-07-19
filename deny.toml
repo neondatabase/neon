@@ -35,6 +35,7 @@ reason = "The paste crate is a build-only dependency with no runtime components.
 # More documentation for the licenses section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
 [licenses]
+version = 2
 allow = [
     "0BSD",
     "Apache-2.0",

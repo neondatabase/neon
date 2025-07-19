@@ -1,0 +1,12 @@
+# This is a stub for the subzero-core crate.
+[package]
+name = "subzero-core"
+version = "3.0.1"
+edition = "2024"
+publish = false # "private"!
+
+[features]
+default = []
+postgresql = []
+
+[dependencies]
