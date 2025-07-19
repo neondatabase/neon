@@ -2540,11 +2540,25 @@ communicator_reconfigure_timeout_if_needed(void)
 
 	if (needs_set != timeout_set)
 	{
+		/*
+		 * The background writer/checkpointer doens't (shouldn't) read any pages.
+		 * And definitely they should run on replica.
+		 * The only cae when we can get here is replica promotion.
+		 */
+		if (AmBackgroundWriterProcess() || AmCheckpointerProcess())
+		{
+			MIN_BACKEND_PREFETCH_LSN = InvalidXLogRecPtr;
+			if (timeout_set)
+			{
+				disable_timeout(PS_TIMEOUT_ID, false);
+				timeout_set = false;
+			}
+			return;
+		}
+
 		if (unlikely(PS_TIMEOUT_ID == 0))
 		{
 			PS_TIMEOUT_ID = RegisterTimeout(USER_TIMEOUT, pagestore_timeout_handler);
-			if (PS_TIMEOUT_ID == -1)
-				ereport(PANIC, (errmsg("PS_TIMEOUT_ID == %d", PS_TIMEOUT_ID), errbacktrace()));
 		}
 
 		if (needs_set)
@@ -2573,14 +2587,6 @@ communicator_reconfigure_timeout_if_needed(void)
 static void
 pagestore_timeout_handler(void)
 {
-#if PG_MAJORVERSION_NUM <= 14
-	/*
-	 * PG14: Setting a repeating timeout is not possible, so we signal here
-	 * that the timeout has already been reset, and by telling the system
-	 * that system will re-schedule it later if we need to.
-	 */
-	timeout_set = false;
-#endif
 	timeout_signaled = true;
 	InterruptPending = true;
 }
@@ -2600,6 +2606,14 @@ communicator_processinterrupts(void)
 		if (!readpage_reentrant_guard && readahead_getpage_pull_timeout_ms > 0)
 			communicator_prefetch_pump_state();
 
+#if PG_MAJORVERSION_NUM <= 14
+		/*
+		 * PG14: Setting a repeating timeout is not possible, so we signal here
+		 * that the timeout has already been reset, and by telling the system
+		 * that system will re-schedule it later if we need to.
+		 */
+		timeout_set = false;
+#endif
 		timeout_signaled = false;
 		communicator_reconfigure_timeout_if_needed();
 	}
