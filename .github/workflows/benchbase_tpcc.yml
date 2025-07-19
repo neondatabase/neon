@@ -19,7 +19,7 @@ defaults:
     shell: bash -euxo pipefail {0}
 
 concurrency:
-  # Allow only one workflow globally because we need dedicated resources which only exist once
+  # Allow only one workflow globally because we do not want to be too noisy in production environment
   group: benchbase-tpcc-workflow
   cancel-in-progress: false
 
@@ -168,7 +168,7 @@ jobs:
         
         echo "Database loading completed"
 
-    - name: Run TPC-C benchmark
+    - name: Run TPC-C benchmark (warmup phase, then benchmark at 70% of configuredmax TPS)
       env:
         WAREHOUSES: ${{ matrix.warehouses }}
       run: |
