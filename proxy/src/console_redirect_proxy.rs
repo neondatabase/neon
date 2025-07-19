@@ -2,14 +2,12 @@ use std::sync::Arc;
 
 use futures::{FutureExt, TryFutureExt};
 use postgres_client::RawCancelToken;
-use postgres_client::connect_raw::read_info;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info};
 
 use crate::auth::backend::ConsoleRedirectBackend;
 use crate::cancellation::{CancelClosure, CancellationHandler};
-use crate::compute::PostgresError;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
@@ -236,22 +234,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let session = cancellation_handler.get_key();
 
-    let (process_id, secret_key, parameters, delayed_notices) =
-        match read_info(&mut node.stream).await {
-            Ok(r) => r,
-            Err(e) => Err(stream
-                .throw_error(PostgresError::Postgres(e), Some(ctx))
-                .await)?,
-        };
-
-    finish_client_init(
+    let (process_id, secret_key) = finish_client_init(
         ctx,
-        &parameters,
-        &delayed_notices,
+        &config.greetings,
         *session.key(),
         &mut stream,
-        &config.greetings,
-    );
+        &mut node.stream,
+    )
+    .await?;
     let stream = stream.flush_and_into_inner().await?;
     let hostname = node.hostname.to_string();
 

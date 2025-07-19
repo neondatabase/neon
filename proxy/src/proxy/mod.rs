@@ -5,25 +5,25 @@ pub(crate) mod connect_compute;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use postgres_client::RawCancelToken;
-use postgres_client::connect_raw::read_info;
-use postgres_protocol::message::backend::NoticeResponseBody;
+use postgres_client::connect_raw::{StartupStream, read_info};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::{SmolStr, format_smolstr};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 
 use crate::cache::Cache;
 use crate::cancellation::{CancelClosure, CancellationHandler};
-use crate::compute::{ComputeConnection, PostgresError};
+use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ControlPlaneClient;
@@ -152,22 +152,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let session = cancellation_handler.get_key();
 
-    let (process_id, secret_key, parameters, delayed_notices) =
-        match read_info(&mut node.stream).await {
-            Ok(r) => r,
-            Err(e) => Err(client
-                .throw_error(PostgresError::Postgres(e), Some(ctx))
-                .await)?,
-        };
-
-    finish_client_init(
+    let (process_id, secret_key) = finish_client_init(
         ctx,
-        &parameters,
-        &delayed_notices,
+        &config.greetings,
         *session.key(),
         client,
-        &config.greetings,
-    );
+        &mut node.stream,
+    )
+    .await?;
     let hostname = node.hostname.to_string();
 
     let session_id = ctx.session_id();
@@ -196,14 +188,20 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
-pub(crate) fn finish_client_init(
+pub(crate) async fn finish_client_init(
     ctx: &RequestContext,
-    params: &HashMap<String, String>,
-    delayed_notice: &[NoticeResponseBody],
+    greetings: &String,
     cancel_key_data: CancelKeyData,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    greetings: &String,
-) {
+    compute: &mut StartupStream<TcpStream, RustlsStream>,
+) -> Result<(i32, i32), ClientRequestError> {
+    let (process_id, secret_key, params, delayed_notice) = match read_info(compute).await {
+        Ok(r) => r,
+        Err(e) => Err(client
+            .throw_error(PostgresError::Postgres(e), Some(ctx))
+            .await)?,
+    };
+
     // Forward all deferred notices to the client.
     for notice in delayed_notice {
         client.write_raw(notice.as_bytes().len(), b'N', |buf| {
@@ -257,6 +255,8 @@ pub(crate) fn finish_client_init(
 
     client.write_message(BeMessage::BackendKeyData(cancel_key_data));
     client.write_message(BeMessage::ReadyForQuery);
+
+    Ok((process_id, secret_key))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
