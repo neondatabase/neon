@@ -30,7 +30,7 @@ use serde_json::value::RawValue;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, info, info_span, warn};
+use tracing::{debug, error, info, info_span, warn};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
@@ -186,16 +186,17 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     let cancel = CancellationToken::new();
     let cancelled = cancel.clone().cancelled_owned();
 
-    tokio::spawn(
-    async move {
+    tokio::spawn(async move {
         let _conn_gauge = conn_gauge;
         let mut idle_timeout = pin!(tokio::time::sleep(idle));
         let mut cancelled = pin!(cancelled);
 
         poll_fn(move |cx| {
+            let _instrument = span.enter();
+
             if cancelled.as_mut().poll(cx).is_ready() {
                 info!("connection dropped");
-                return Poll::Ready(())
+                return Poll::Ready(());
             }
 
             match rx.has_changed() {
@@ -206,7 +207,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 }
                 Err(_) => {
                     info!("connection dropped");
-                    return Poll::Ready(())
+                    return Poll::Ready(());
                 }
                 _ => {}
             }
@@ -218,7 +219,11 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 if let Some(pool) = pool.clone().upgrade() {
                     // remove client from pool - should close the connection if it's idle.
                     // does nothing if the client is currently checked-out and in-use
-                    if pool.global_pool.write().remove_client(db_user.clone(), conn_id) {
+                    if pool
+                        .global_pool
+                        .write()
+                        .remove_client(db_user.clone(), conn_id)
+                    {
                         info!("idle connection removed");
                     }
                 }
@@ -239,26 +244,29 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                     }
                     Some(Err(e)) => {
                         error!(%session_id, "connection error: {}", e);
-                        break
+                        break;
                     }
                     None => {
                         info!("connection closed");
-                        break
+                        break;
                     }
                 }
             }
 
             // remove from connection pool
             if let Some(pool) = pool.clone().upgrade()
-                && pool.global_pool.write().remove_client(db_user.clone(), conn_id) {
-                    info!("closed connection removed");
-                }
+                && pool
+                    .global_pool
+                    .write()
+                    .remove_client(db_user.clone(), conn_id)
+            {
+                info!("closed connection removed");
+            }
 
             Poll::Ready(())
-        }).await;
-
-    }
-    .instrument(span));
+        })
+        .await;
+    });
 
     let inner = ClientInnerCommon {
         inner: client,
