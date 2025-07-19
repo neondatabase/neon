@@ -178,7 +178,9 @@ pub(crate) fn finish_client_init(
     }
 
     // Expose session_id to clients
-    client.write_message(BeMessage::NoticeResponse(&ctx.session_id().to_string()));
+    let session_msg = format!("Neon session_id: {}\n", ctx.session_id());
+
+    client.write_message(BeMessage::NoticeResponse(session_msg.as_str()));
 
     // Forward all postgres connection params to the client.
     for (name, value) in &settings.params {
@@ -191,28 +193,30 @@ pub(crate) fn finish_client_init(
     // Forward recorded latencies for probing requests
     if let Some(testodrome_id) = ctx.get_testodrome_id() {
         client.write_message(BeMessage::ParameterStatus {
-            name: "testodrome_id".as_bytes(),
+            name: "neon.testodrome_id".as_bytes(),
             value: testodrome_id.as_bytes(),
         });
 
+        let latency_measured = ctx.get_proxy_latency();
+
         client.write_message(BeMessage::ParameterStatus {
-            name: "cplane_latency".as_bytes(),
-            value: ctx.get_proxy_latency().cplane.as_micros().to_string().as_bytes(),
+            name: "neon.cplane_latency".as_bytes(),
+            value: latency_measured.cplane.as_micros().to_string().as_bytes(),
         });
 
         client.write_message(BeMessage::ParameterStatus {
-            name: "client_latency".as_bytes(),
-            value: ctx.get_proxy_latency().client.as_micros().to_string().as_bytes(),
+            name: "neon.client_latency".as_bytes(),
+            value: latency_measured.client.as_micros().to_string().as_bytes(),
         });
 
         client.write_message(BeMessage::ParameterStatus {
-            name: "compute_latency".as_bytes(),
-            value: ctx.get_proxy_latency().compute.as_micros().to_string().as_bytes(),
+            name: "neon.compute_latency".as_bytes(),
+            value: latency_measured.compute.as_micros().to_string().as_bytes(),
         });
 
         client.write_message(BeMessage::ParameterStatus {
-            name: "retry_latency".as_bytes(),
-            value: ctx.get_proxy_latency().retry.as_micros().to_string().as_bytes(),
+            name: "neon.retry_latency".as_bytes(),
+            value: latency_measured.retry.as_micros().to_string().as_bytes(),
         });
     }
 
