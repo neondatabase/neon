@@ -1,3 +1,4 @@
+use std::env;
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
@@ -264,6 +265,14 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         timeout: Duration::from_secs(2),
     };
 
+    let greetings = env::var_os("NEON_MOTD").map_or(String::new(), |s| match s.into_string() {
+        Ok(s) => s,
+        Err(_) => {
+            debug!("NEON_MOTD environment variable is not valid UTF-8");
+            String::new()
+        }
+    });
+
     Ok(Box::leak(Box::new(ProxyConfig {
         tls_config: ArcSwapOption::from(None),
         metric_collection: None,
@@ -290,6 +299,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         wake_compute_retry_config: RetryConfig::parse(RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
+        greetings,
         #[cfg(feature = "testing")]
         disable_pg_session_jwt: args.disable_pg_session_jwt,
     })))
