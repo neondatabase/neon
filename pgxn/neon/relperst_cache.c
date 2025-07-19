@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
- * relkind_cache.c
- *      Cache to track the relkind of relations
+ * relperst_cache.c
+ *      Cache to track the relperst of relations
  *
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -51,42 +51,42 @@ typedef struct
 	uint64		pinned;
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
-} RelKindHashControl;
+} NeonRelPersistenceHashControl;
 
 /*
  * Size of a cache entry is 32 bytes. So this default will take about 2 MB,
  * which seems reasonable.
  */
-#define DEFAULT_RELKIND_HASH_SIZE (64 * 1024)
+#define DEFAULT_RELPERST_HASH_SIZE (64 * 1024)
 
 
-static HTAB *relkind_hash;
-static int	relkind_hash_size = DEFAULT_RELKIND_HASH_SIZE;
-static RelKindHashControl* relkind_ctl;
+static HTAB *relperst_hash;
+static int	relperst_hash_size = DEFAULT_RELPERST_HASH_SIZE;
+static NeonRelPersistenceHashControl* relperst_ctl;
 
 LWLockId finish_unlogged_build_lock;
-LWLockId relkind_hash_lock;
+LWLockId relperst_hash_lock;
 
 /*
  * Shared memory registration
  */
 void
-RelkindCacheShmemRequest(void)
+RelperstCacheShmemRequest(void)
 {
-	RequestAddinShmemSpace(sizeof(RelKindHashControl) + hash_estimate_size(relkind_hash_size, sizeof(RelKindEntry)));
-	RequestNamedLWLockTranche("neon_relkind", 2);
+	RequestAddinShmemSpace(sizeof(NeonRelPersistenceHashControl) + hash_estimate_size(relperst_hash_size, sizeof(NeonRelPersistenceEntry)));
+	RequestNamedLWLockTranche("neon_relperst", 2);
 }
 
 /*
  * Intialize shared memory
  */
 void
-RelkindCacheShmemInit(void)
+RelperstCacheShmemInit(void)
 {
 	static HASHCTL info;
 	bool found;
 
-	relkind_ctl = (RelKindHashControl *) ShmemInitStruct("relkind_hash", sizeof(RelKindHashControl), &found);
+	relperst_ctl = (NeonRelPersistenceHashControl *) ShmemInitStruct("relperst_hash", sizeof(NeonRelPersistenceHashControl), &found);
 	if (!found)
 	{
 		/*
@@ -94,64 +94,64 @@ RelkindCacheShmemInit(void)
 		 * Or actually twice that, because while performing an unlogged index build, each backend can also be trying to write out a page for another
 		 * relation and hence hold one more entry in the cache pinned. Use MaxConnections instead of MaxBackends because only normal backends can perform unlogged build.
 		 */
-		size_t hash_size = Max(2 * MaxConnections, relkind_hash_size);
-		relkind_hash_lock = (LWLockId) GetNamedLWLockTranche("neon_relkind");
-		finish_unlogged_build_lock = (LWLockId)(GetNamedLWLockTranche("neon_relkind") + 1);
+		size_t hash_size = Max(2 * MaxConnections, relperst_hash_size);
+		relperst_hash_lock = (LWLockId) GetNamedLWLockTranche("neon_relperst");
+		finish_unlogged_build_lock = (LWLockId)(GetNamedLWLockTranche("neon_relperst") + 1);
 		info.keysize = sizeof(NRelFileInfo);
-		info.entrysize = sizeof(RelKindEntry);
-		relkind_hash = ShmemInitHash("neon_relkind",
+		info.entrysize = sizeof(NeonRelPersistenceEntry);
+		relperst_hash = ShmemInitHash("neon_relperst",
 									 hash_size, hash_size,
 									 &info,
 									 HASH_ELEM | HASH_BLOBS);
-		relkind_ctl->size = 0;
-		relkind_ctl->hits = 0;
-		relkind_ctl->misses = 0;
-		relkind_ctl->pinned = 0;
-		dlist_init(&relkind_ctl->lru);
+		relperst_ctl->size = 0;
+		relperst_ctl->hits = 0;
+		relperst_ctl->misses = 0;
+		relperst_ctl->pinned = 0;
+		dlist_init(&relperst_ctl->lru);
 	}
 }
 
 /*
  * Lookup existed entry or create new one
  */
-static RelKindEntry*
+static NeonRelPersistenceEntry*
 get_pinned_entry(NRelFileInfo rinfo)
 {
 	bool found;
-	RelKindEntry* entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, &found);
+	NeonRelPersistenceEntry* entry = hash_search(relperst_hash, &rinfo, HASH_ENTER_NULL, &found);
 
 	if (entry == NULL)
 	{
-		if (dlist_is_empty(&relkind_ctl->lru))
+		if (dlist_is_empty(&relperst_ctl->lru))
 		{
-			neon_log(PANIC, "Not unpinned relkind entries");
+			neon_log(PANIC, "Not unpinned relperst entries");
 		}
 		else
 		{
 			/*
 			 * Remove least recently used element from the hash.
 			 */
-			RelKindEntry *victim = dlist_container(RelKindEntry, lru_node, dlist_pop_head_node(&relkind_ctl->lru));
+			NeonRelPersistenceEntry *victim = dlist_container(NeonRelPersistenceEntry, lru_node, dlist_pop_head_node(&relperst_ctl->lru));
 			Assert(victim->access_count == 0);
-			hash_search(relkind_hash, &victim->rel, HASH_REMOVE, &found);
+			hash_search(relperst_hash, &victim->rel, HASH_REMOVE, &found);
 			Assert(found);
-			Assert(relkind_ctl->size > 0);
-			relkind_ctl->size -= 1;
+			Assert(relperst_ctl->size > 0);
+			relperst_ctl->size -= 1;
 		}
-		entry = hash_search(relkind_hash, &rinfo, HASH_ENTER_NULL, &found);
+		entry = hash_search(relperst_hash, &rinfo, HASH_ENTER_NULL, &found);
 		Assert(!found);
 	}
 	if (!found)
 	{
-		entry->relkind = RELKIND_UNKNOWN; /* information about relation kind is not yet available */
-		relkind_ctl->pinned += 1;
+		entry->relperst = NEON_RELPERSISTENCE_UNKNOWN; /* information about relation kind is not yet available */
+		relperst_ctl->pinned += 1;
 		entry->access_count = 1;
-		relkind_ctl->size += 1;
+		relperst_ctl->size += 1;
 	}
 	else if (entry->access_count++ == 0)
 	{
 		dlist_delete(&entry->lru_node);
-		relkind_ctl->pinned += 1;
+		relperst_ctl->pinned += 1;
 	}
 	return entry;
 }
@@ -160,65 +160,65 @@ get_pinned_entry(NRelFileInfo rinfo)
  * Unpin entry and place it at the end of LRU list
  */
 static void
-unpin_entry(RelKindEntry *entry)
+unpin_entry(NeonRelPersistenceEntry *entry)
 {
 	Assert(entry->access_count != 0);
 	if (--entry->access_count == 0)
 	{
-		Assert(relkind_ctl->pinned != 0);
-		relkind_ctl->pinned -= 1;
-		dlist_push_tail(&relkind_ctl->lru, &entry->lru_node);
+		Assert(relperst_ctl->pinned != 0);
+		relperst_ctl->pinned -= 1;
+		dlist_push_tail(&relperst_ctl->lru, &entry->lru_node);
 	}
 }
 
 /*
  * Intialize new entry. This function is used by neon_start_unlogged_build to mark relation involved in unlogged build.
  * In case of overflow removes least recently used entry.
- * Return pinned entry. It will be released by unpin_cached_relkind at the end of unlogged build.
+ * Return pinned entry. It will be released by unpin_cached_relperst at the end of unlogged build.
  */
-RelKindEntry*
-pin_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
+NeonRelPersistenceEntry*
+pin_cached_relperst(NRelFileInfo rinfo, NeonRelPersistence relperst)
 {
-	RelKindEntry *entry;
+	NeonRelPersistenceEntry *entry;
 
-	LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
+	LWLockAcquire(relperst_hash_lock, LW_EXCLUSIVE);
 
 	entry = get_pinned_entry(rinfo);
-	entry->relkind = relkind;
+	entry->relperst = relperst;
 
-	LWLockRelease(relkind_hash_lock);
+	LWLockRelease(relperst_hash_lock);
 	return entry;
 }
 
 /*
  * Lookup entry and create new one if not exists. This function is called by neon_write to detenmine if changes should be written to the local disk.
  * In case of overflow removes least recently used entry.
- * If entry is found and its relkind is known, then it is stored in provided location and NULL is returned.
- * If entry is not found then new one is created, pinned and returned. Entry should be updated using store_cached_relkind.
+ * If entry is found and its relperst is known, then it is stored in provided location and NULL is returned.
+ * If entry is not found then new one is created, pinned and returned. Entry should be updated using store_cached_relperst.
  * Shared lock is obtained if relation is involved in inlogged build.
  */
-RelKind
-get_cached_relkind(NRelFileInfo rinfo)
+NeonRelPersistence
+get_cached_relperst(NRelFileInfo rinfo)
 {
-	RelKindEntry *entry;
-	RelKind relkind = RELKIND_UNKNOWN;
+	NeonRelPersistenceEntry *entry;
+	NeonRelPersistence relperst = NEON_RELPERSISTENCE_UNKNOWN;
 
-	LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
+	LWLockAcquire(relperst_hash_lock, LW_EXCLUSIVE);
 
-	entry = hash_search(relkind_hash, &rinfo, HASH_FIND, NULL);
+	entry = hash_search(relperst_hash, &rinfo, HASH_FIND, NULL);
 	if (entry != NULL)
 	{
 		/* Do pin+unpin entry to move it to the end of LRU list */
 		if (entry->access_count++ == 0)
 		{
 			dlist_delete(&entry->lru_node);
-			relkind_ctl->pinned += 1;
+			relperst_ctl->pinned += 1;
 		}
-		relkind = entry->relkind;
+		relperst = entry->relperst;
 		unpin_entry(entry);
 	}
-	LWLockRelease(relkind_hash_lock);
-	return relkind;
+	LWLockRelease(relperst_hash_lock);
+	return relperst;
 }
 
 
@@ -226,61 +226,61 @@ get_cached_relkind(NRelFileInfo rinfo)
  * Store relation kind as a result of mdexists check. Unpin entry.
  */
 void
-set_cached_relkind(NRelFileInfo rinfo, RelKind relkind)
+set_cached_relperst(NRelFileInfo rinfo, NeonRelPersistence relperst)
 {
-	RelKindEntry *entry;
+	NeonRelPersistenceEntry *entry;
 
-	LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
+	LWLockAcquire(relperst_hash_lock, LW_EXCLUSIVE);
 
 	/* Do pin+unpin entry to move it to the end of LRU list */
 	entry = get_pinned_entry(rinfo);
-	Assert(entry->relkind == RELKIND_UNKNOWN || entry->relkind == relkind);
-	entry->relkind = relkind;
+	Assert(entry->relperst == NEON_RELPERSISTENCE_UNKNOWN || entry->relperst == relperst);
+	entry->relperst = relperst;
 	unpin_entry(entry);
 
-	LWLockRelease(relkind_hash_lock);
+	LWLockRelease(relperst_hash_lock);
 }
 
 void
-unpin_cached_relkind(RelKindEntry* entry)
+unpin_cached_relperst(NeonRelPersistenceEntry* entry)
 {
 	if (entry)
 	{
-		LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
+		LWLockAcquire(relperst_hash_lock, LW_EXCLUSIVE);
 		unpin_entry(entry);
-		LWLockRelease(relkind_hash_lock);
+		LWLockRelease(relperst_hash_lock);
 	}
 }
 
 void
-forget_cached_relkind(NRelFileInfo rinfo)
+forget_cached_relperst(NRelFileInfo rinfo)
 {
-	RelKindEntry *entry;
+	NeonRelPersistenceEntry *entry;
 
-	LWLockAcquire(relkind_hash_lock, LW_EXCLUSIVE);
+	LWLockAcquire(relperst_hash_lock, LW_EXCLUSIVE);
 
-	entry = hash_search(relkind_hash, &rinfo, HASH_REMOVE, NULL);
+	entry = hash_search(relperst_hash, &rinfo, HASH_REMOVE, NULL);
 	if (entry)
 	{
 		Assert(entry->access_count == 0);
 		dlist_delete(&entry->lru_node);
-		relkind_ctl->size -= 1;
+		relperst_ctl->size -= 1;
 	}
 
-	LWLockRelease(relkind_hash_lock);
+	LWLockRelease(relperst_hash_lock);
 }
 
 
 
 
 void
-relkind_hash_init(void)
+relperst_hash_init(void)
 {
-	DefineCustomIntVariable("neon.relkind_hash_size",
-							"Sets the maximum number of cached relation kinds for neon",
+	DefineCustomIntVariable("neon.relperst_hash_size",
+							"Sets the maximum number of cached relation persistence for neon",
 							NULL,
-							&relkind_hash_size,
-							DEFAULT_RELKIND_HASH_SIZE,
+							&relperst_hash_size,
+							DEFAULT_RELPERST_HASH_SIZE,
 							1,
 							INT_MAX,
 							PGC_POSTMASTER,
