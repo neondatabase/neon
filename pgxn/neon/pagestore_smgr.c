@@ -163,7 +163,7 @@ log_newpages_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 					 page_std);
 	}
 
-	return ProcLastRecPtr;
+	return GetXLogInsertRecPtr();
 }
 #endif /* PG_MAJORVERSION_NUM >= 17 */
 
@@ -592,6 +592,16 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		/* Request the page at the end of the last fully replayed LSN. */
 		XLogRecPtr replay_lsn = GetXLogReplayRecPtr(NULL);
 
+		if (MIN_BACKEND_PREFETCH_LSN == InvalidXLogRecPtr)
+		{
+			/* mark the backend's replay_lsn as "we have a request ongoing", blocking the expiration of any current LSN */
+			MIN_BACKEND_PREFETCH_LSN = replay_lsn;
+			/* make sure memory operations are in correct order, even in concurrent systems */
+			pg_memory_barrier();
+			/* get the current LSN to register */
+			replay_lsn = GetXLogReplayRecPtr(NULL);
+			MIN_BACKEND_PREFETCH_LSN = replay_lsn;
+		}
 		for (int i = 0; i < nblocks; i++)
 		{
 			neon_request_lsns *result = &output[i];

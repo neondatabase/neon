@@ -478,8 +478,9 @@ communicator_prefetch_pump_state(void)
 		NeonResponse   *response;
 		PrefetchRequest *slot;
 		MemoryContext	old;
+		uint64			my_ring_index = MyPState->ring_receive;
 
-		slot = GetPrfSlot(MyPState->ring_receive);
+		slot = GetPrfSlot(my_ring_index);
 
 		old = MemoryContextSwitchTo(MyPState->errctx);
 		response = page_server->try_receive(slot->shard_no);
@@ -493,12 +494,12 @@ communicator_prefetch_pump_state(void)
 		/* The slot should still be valid */
 		if (slot->status != PRFS_REQUESTED ||
 			slot->response != NULL ||
-			slot->my_ring_index != MyPState->ring_receive)
+			slot->my_ring_index != my_ring_index)
 		{
 			neon_shard_log(slot->shard_no, PANIC,
 						   "Incorrect prefetch slot state after receive: status=%d response=%p my=" UINT64_FORMAT " receive=" UINT64_FORMAT "",
 						   slot->status, slot->response,
-						   slot->my_ring_index, MyPState->ring_receive);
+						   slot->my_ring_index, my_ring_index);
 		}
 		/* update prefetch state */
 		MyPState->n_responses_buffered += 1;
@@ -526,6 +527,19 @@ communicator_prefetch_pump_state(void)
 
 	END_PREFETCH_RECEIVE_WORK();
 
+	if (RecoveryInProgress())
+	{
+		/*
+		 * Update backend's min in-flight prefetch LSN.
+		 */
+		XLogRecPtr min_backend_prefetch_lsn = GetXLogReplayRecPtr(NULL);
+		for (uint64_t ring_index = MyPState->ring_receive; ring_index < MyPState->ring_unused; ring_index++)
+		{
+			PrefetchRequest* slot = GetPrfSlot(ring_index);
+			min_backend_prefetch_lsn = Min(slot->request_lsns.request_lsn, min_backend_prefetch_lsn);
+		}
+		MIN_BACKEND_PREFETCH_LSN = min_backend_prefetch_lsn;
+	}
 	communicator_reconfigure_timeout_if_needed();
 }
 
@@ -665,6 +679,7 @@ consume_prefetch_responses(void)
 {
 	if (MyPState->ring_receive < MyPState->ring_unused)
 		prefetch_wait_for(MyPState->ring_unused - 1);
+
 	/*
 	 * We know for sure we're not working on any prefetch pages after
 	 * this.
@@ -806,6 +821,7 @@ prefetch_read(PrefetchRequest *slot)
 	old = MemoryContextSwitchTo(MyPState->errctx);
 	response = (NeonResponse *) page_server->receive(shard_no);
 	MemoryContextSwitchTo(old);
+
 	if (response)
 	{
 		check_getpage_response(slot, response);
@@ -1046,6 +1062,25 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 }
 
 /*
+ * Check that returned page LSN is consistent with request lsns
+ */
+static void
+check_page_lsn(NeonGetPageResponse* resp)
+{
+	if (neon_protocol_version < 3) /* no information to check */
+		return;
+	if (PageGetLSN(resp->page) > resp->req.hdr.not_modified_since)
+		neon_log(PANIC, "Invalid getpage response version: %X/%08X is higher than last modified LSN %X/%08X",
+				 LSN_FORMAT_ARGS(PageGetLSN(resp->page)),
+			 LSN_FORMAT_ARGS(resp->req.hdr.not_modified_since));
+
+	if (PageGetLSN(resp->page) > resp->req.hdr.lsn)
+		neon_log(PANIC, "Invalid getpage response version: %X/%08X is higher than request LSN %X/%08X",
+			 LSN_FORMAT_ARGS(PageGetLSN(resp->page)),
+			 LSN_FORMAT_ARGS(resp->req.hdr.lsn));
+}
+
+/*
  * Lookup of already received prefetch requests. Only already received responses matching required LSNs are accepted.
  * Present pages are marked in "mask" bitmap and total number of such pages is returned.
  */
@@ -1068,7 +1103,7 @@ communicator_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumbe
 	for (int i = 0; i < nblocks; i++)
 	{
 		PrfHashEntry *entry;
-
+		NeonGetPageResponse* resp;
 		hashkey.buftag.blockNum = blocknum + i;
 		entry = prfh_lookup(MyPState->prf_hash, &hashkey);
 
@@ -1101,8 +1136,9 @@ communicator_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumbe
 				continue;
 			}
 			Assert(slot->response->tag == T_NeonGetPageResponse); /* checked by check_getpage_response when response was assigned to the slot */
-			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
-
+			resp = (NeonGetPageResponse*)slot->response;
+			check_page_lsn(resp);
+			memcpy(buffers[i], resp->page, BLCKSZ);
 
 			/*
 			 * With lfc_store_prefetch_result=true prefetch result is stored in LFC in prefetch_pump_state when response is received
@@ -1888,7 +1924,7 @@ communicator_init(void)
 	 * the check here. That's OK, we don't expect the logic to change in old
 	 * releases.
 	 */
-#if PG_VERSION_NUM>=150000
+#if PG_MAJORVERSION_NUM >= 15
 	if (MyNeonCounters >= &neon_per_backend_counters_shared[NUM_NEON_PERF_COUNTER_SLOTS])
 		elog(ERROR, "MyNeonCounters points past end of array");
 #endif
@@ -2227,6 +2263,7 @@ Retry:
 			case T_NeonGetPageResponse:
 			{
 				NeonGetPageResponse* getpage_resp = (NeonGetPageResponse *) resp;
+				check_page_lsn(getpage_resp);
 				memcpy(buffer, getpage_resp->page, BLCKSZ);
 
 				/*
@@ -2499,16 +2536,29 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 void
 communicator_reconfigure_timeout_if_needed(void)
 {
-	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused &&
+	bool	needs_set = (MyPState->ring_receive != MyPState->ring_unused ||
+						 (MIN_BACKEND_PREFETCH_LSN != InvalidXLogRecPtr &&
+						  MIN_BACKEND_PREFETCH_LSN != GetXLogReplayRecPtr(NULL))) &&
 						!AmPrewarmWorker && /* do not pump prefetch state in prewarm worker */
 						readahead_getpage_pull_timeout_ms > 0;
 
 	if (needs_set != timeout_set)
 	{
-		/* The background writer doens't (shouldn't) read any pages */
-		Assert(!AmBackgroundWriterProcess());
-		/* The checkpointer doens't (shouldn't) read any pages */
-		Assert(!AmCheckpointerProcess());
+		/*
+		 * The background writer/checkpointer doens't (shouldn't) read any pages.
+		 * And definitely they should run on replica.
+		 * The only cae when we can get here is replica promotion.
+		 */
+		if (AmBackgroundWriterProcess() || AmCheckpointerProcess())
+		{
+			MIN_BACKEND_PREFETCH_LSN = InvalidXLogRecPtr;
+			if (timeout_set)
+			{
+				disable_timeout(PS_TIMEOUT_ID, false);
+				timeout_set = false;
+			}
+			return;
+		}
 
 		if (unlikely(PS_TIMEOUT_ID == 0))
 		{
@@ -2541,14 +2591,6 @@ communicator_reconfigure_timeout_if_needed(void)
 static void
 pagestore_timeout_handler(void)
 {
-#if PG_MAJORVERSION_NUM <= 14
-	/*
-	 * PG14: Setting a repeating timeout is not possible, so we signal here
-	 * that the timeout has already been reset, and by telling the system
-	 * that system will re-schedule it later if we need to.
-	 */
-	timeout_set = false;
-#endif
 	timeout_signaled = true;
 	InterruptPending = true;
 }
@@ -2568,6 +2610,14 @@ communicator_processinterrupts(void)
 		if (!readpage_reentrant_guard && readahead_getpage_pull_timeout_ms > 0)
 			communicator_prefetch_pump_state();
 
+#if PG_MAJORVERSION_NUM <= 14
+		/*
+		 * PG14: Setting a repeating timeout is not possible, so we signal here
+		 * that the timeout has already been reset, and by telling the system
+		 * that system will re-schedule it later if we need to.
+		 */
+		timeout_set = false;
+#endif
 		timeout_signaled = false;
 		communicator_reconfigure_timeout_if_needed();
 	}
@@ -2576,4 +2626,29 @@ communicator_processinterrupts(void)
 		return false;
 
 	return prev_interrupt_cb();
+}
+
+PG_FUNCTION_INFO_V1(neon_communicator_min_inflight_request_lsn);
+
+Datum
+neon_communicator_min_inflight_request_lsn(PG_FUNCTION_ARGS)
+{
+	if (RecoveryInProgress())
+	{
+		/* Do not hold GC for primary */
+		PG_RETURN_INT64(UINT64_MAX);
+	}
+	else
+	{
+		XLogRecPtr min_lsn = GetXLogReplayRecPtr(NULL);
+		size_t n_procs = ProcGlobal->allProcCount;
+		for (size_t i = 0; i < n_procs; i++)
+		{
+			if (neon_per_backend_counters_shared[i].min_prefetch_lsn != InvalidXLogRecPtr)
+			{
+				min_lsn = Min(min_lsn, neon_per_backend_counters_shared[i].min_prefetch_lsn);
+			}
+		}
+		PG_RETURN_INT64(min_lsn);
+	}
 }
