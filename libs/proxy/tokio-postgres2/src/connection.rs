@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::BytesMut;
-use futures_util::{Sink, Stream, ready};
+use futures_util::{Sink, StreamExt, ready};
 use postgres_protocol2::message::backend::Message;
 use postgres_protocol2::message::frontend;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -60,50 +60,38 @@ where
         }
     }
 
-    fn poll_response(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<BackendMessage, Error>>> {
-        if let Some(messages) = self.pending_response.take() {
-            trace!("retrying pending response");
-            return Poll::Ready(Some(Ok(BackendMessage::Normal { messages })));
-        }
-
-        Pin::new(&mut self.stream)
-            .poll_next(cx)
-            .map(|o| o.map(|r| r.map_err(Error::io)))
-    }
-
     /// Read and process messages from the connection to postgres.
     /// client <- postgres
     fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<AsyncMessage, Error>> {
         loop {
-            let message = match self.poll_response(cx)? {
-                Poll::Ready(Some(message)) => message,
-                Poll::Ready(None) => return Poll::Ready(Err(Error::closed())),
-                Poll::Pending => {
-                    trace!("poll_read: waiting on response");
-                    return Poll::Pending;
-                }
-            };
-            debug_assert!(self.pending_response.is_none());
-
-            let messages = match message {
-                BackendMessage::Async(Message::NoticeResponse(body)) => {
-                    let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
-                    return Poll::Ready(Ok(AsyncMessage::Notice(error)));
-                }
-                BackendMessage::Async(Message::NotificationResponse(body)) => {
-                    let notification = Notification {
-                        process_id: body.process_id(),
-                        channel: body.channel().map_err(Error::parse)?.to_string(),
-                        payload: body.message().map_err(Error::parse)?.to_string(),
+            let messages = match self.pending_response.take() {
+                Some(messages) => messages,
+                None => {
+                    let message = match self.stream.poll_next_unpin(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(None) => return Poll::Ready(Err(Error::closed())),
+                        Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(Error::io(e))),
+                        Poll::Ready(Some(Ok(message))) => message,
                     };
-                    return Poll::Ready(Ok(AsyncMessage::Notification(notification)));
+
+                    match message {
+                        BackendMessage::Async(Message::NoticeResponse(body)) => {
+                            let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
+                            return Poll::Ready(Ok(AsyncMessage::Notice(error)));
+                        }
+                        BackendMessage::Async(Message::NotificationResponse(body)) => {
+                            let notification = Notification {
+                                process_id: body.process_id(),
+                                channel: body.channel().map_err(Error::parse)?.to_string(),
+                                payload: body.message().map_err(Error::parse)?.to_string(),
+                            };
+                            return Poll::Ready(Ok(AsyncMessage::Notification(notification)));
+                        }
+                        BackendMessage::Async(Message::ParameterStatus(_)) => continue,
+                        BackendMessage::Async(_) => unreachable!(),
+                        BackendMessage::Normal { messages } => messages,
+                    }
                 }
-                BackendMessage::Async(Message::ParameterStatus(_)) => continue,
-                BackendMessage::Async(_) => unreachable!(),
-                BackendMessage::Normal { messages } => messages,
             };
 
             match self.sender.poll_reserve(cx) {
