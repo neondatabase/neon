@@ -22,7 +22,6 @@ use crate::tls::TlsStream;
 pub struct StartupStream<S, T> {
     inner: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
     buf: BackendMessages,
-    delayed_notice: Vec<NoticeResponseBody>,
 }
 
 impl<S, T> Sink<Bytes> for StartupStream<S, T>
@@ -96,17 +95,16 @@ where
     let mut stream = StartupStream {
         inner: Framed::new(stream, PostgresCodec),
         buf: BackendMessages::empty(),
-        delayed_notice: Vec::new(),
     };
 
     startup(&mut stream, config).await?;
     authenticate(&mut stream, config).await?;
-    let (process_id, secret_key, parameters) = read_info(&mut stream).await?;
+    let (process_id, secret_key, parameters, delayed_notice) = read_info(&mut stream).await?;
 
     Ok(RawConnection {
         stream: stream.inner,
         parameters,
-        delayed_notice: stream.delayed_notice,
+        delayed_notice,
         process_id,
         secret_key,
     })
@@ -281,7 +279,7 @@ where
 
 async fn read_info<S, T>(
     stream: &mut StartupStream<S, T>,
-) -> Result<(i32, i32, HashMap<String, String>), Error>
+) -> Result<(i32, i32, HashMap<String, String>, Vec<NoticeResponseBody>), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
@@ -289,6 +287,7 @@ where
     let mut process_id = 0;
     let mut secret_key = 0;
     let mut parameters = HashMap::new();
+    let mut delayed_notice = Vec::new();
 
     loop {
         match stream.try_next().await.map_err(Error::io)? {
@@ -302,8 +301,10 @@ where
                     body.value().map_err(Error::parse)?.to_string(),
                 );
             }
-            Some(Message::NoticeResponse(body)) => stream.delayed_notice.push(body),
-            Some(Message::ReadyForQuery(_)) => return Ok((process_id, secret_key, parameters)),
+            Some(Message::NoticeResponse(body)) => delayed_notice.push(body),
+            Some(Message::ReadyForQuery(_)) => {
+                return Ok((process_id, secret_key, parameters, delayed_notice));
+            }
             Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
             Some(_) => return Err(Error::unexpected_message()),
             None => return Err(Error::closed()),
