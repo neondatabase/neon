@@ -299,18 +299,18 @@ extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockN
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
 /*
- * Relation kind enum.
+ * Relation persistence enum.
  */
 typedef enum
 {
     /* The persistence is not known */
-	RELKIND_UNKNOWN,
+	NEON_RELPERSISTENCE_UNKNOWN,
 
     /* The relation is a permanent relation that is WAL-logged normally */
-	RELKIND_PERMANENT,
+	NEON_RELPERSISTENCE_PERMANENT,
 
     /* The relation is an unlogged table/index, stored only on local disk */
-	RELKIND_UNLOGGED,
+	NEON_RELPERSISTENCE_UNLOGGED,
 
     /*
      * The relation is a permanent (index) relation, but it is being built by an in-progress
@@ -319,29 +319,29 @@ typedef enum
      * This is currently used for GiST, SP-GiST and GIN indexes, as well as the pgvector
      * extension.
      */
-	RELKIND_UNLOGGED_BUILD
-} RelKind;
+	NEON_RELPERSISTENCE_UNLOGGED_BUILD
+} NeonRelPersistence;
 
 /*
- * Entry type stored in relkind_hash. We have just one entry for the whole relation, i.e. we don't have separate entries for the individual forks.
+ * Entry type stored in relperst_hash. We have just one entry for the whole relation, i.e. we don't have separate entries for the individual forks.
  * It gets a little complicated with unlogged relations. The main fork of an unlogged relation is considered UNLOGGED, but its init-fork is
  * treated as PERMANENT. It is specially checked in neon_write.
  */
 typedef struct
 {
 	NRelFileInfo rel;
-	uint8		relkind;		/* See RelKind */
+	uint8		relperst;		/* See NeonRelPersistence */
 	uint16		access_count;
 	dlist_node	lru_node;	/* LRU list node */
-} RelKindEntry;
+} NeonRelPersistenceEntry;
 
 extern LWLockId finish_unlogged_build_lock;
 
-extern void relkind_hash_init(void);
-extern void set_cached_relkind(NRelFileInfo rinfo, RelKind relkind);
-extern RelKind get_cached_relkind(NRelFileInfo rinfo);
-extern RelKindEntry* pin_cached_relkind(NRelFileInfo rinfo, RelKind relkind);
-extern void unpin_cached_relkind(RelKindEntry* entry);
-extern void forget_cached_relkind(NRelFileInfo rinfo);
+extern void relperst_hash_init(void);
+extern void set_cached_relperst(NRelFileInfo rinfo, NeonRelPersistence relperst);
+extern NeonRelPersistence get_cached_relperst(NRelFileInfo rinfo);
+extern NeonRelPersistenceEntry* pin_cached_relperst(NRelFileInfo rinfo, NeonRelPersistence relperst);
+extern void unpin_cached_relperst(NeonRelPersistenceEntry* entry);
+extern void forget_cached_relperst(NRelFileInfo rinfo);
 
 #endif							/* PAGESTORE_CLIENT_H */
