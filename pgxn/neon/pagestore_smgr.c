@@ -101,6 +101,7 @@ typedef enum
 int debug_compare_local;
 
 static NRelFileInfo unlogged_build_rel_info;
+static NeonRelPersistenceEntry* unlogged_build_rel_entry;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
 static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
@@ -881,6 +882,7 @@ neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
 	if (!NRelFileInfoBackendIsTemp(rinfo))
 	{
 		forget_cached_relsize(InfoFromNInfoB(rinfo), forkNum);
+		forget_cached_relperst(InfoFromNInfoB(rinfo));
 	}
 }
 
@@ -1605,32 +1607,57 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 #endif
 {
 	XLogRecPtr	lsn;
+	NeonRelPersistence relperst;
+	bool is_locked = false;
+	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
 
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			/* This is a bit tricky. Check if the relation exists locally */
-			if (mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum))
+			relperst = get_cached_relperst(rinfo);
+			if (relperst == NEON_RELPERSISTENCE_UNKNOWN)
 			{
-				/* It exists locally. Guess it's unlogged then. */
+				/* We do not know relation persistence: let's determine it */
+				relperst = mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? NEON_RELPERSISTENCE_UNLOGGED : NEON_RELPERSISTENCE_PERMANENT;
+				/*
+				 * There is no lock hold between get_cached_relperst and set_cached_relperst.
+				 * We assume that multiple backends can repeat this check and get the same result (there is assert in set_cached_relperst).
+				 * And concurrent setting UNLOGGED_BUILD is not possible because only one backend can perform unlogged build.
+				 */
+				set_cached_relperst(rinfo, relperst);
+			}
+			if (relperst == NEON_RELPERSISTENCE_UNLOGGED_BUILD)
+			{
+				/* In case of unlogged build we need to avoid race condition at unlogged build end.
+				 * Obtain shared lock here to prevent backend completing unlogged build from performing cleanup amnd remvong files.
+				 */
+				LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
+				is_locked = true;
+				/*
+				 * Recheck relperst under lock - may be unlogged build is already finished
+				 */
+				relperst = get_cached_relperst(rinfo);
+			}
+			if (relperst == NEON_RELPERSISTENCE_UNLOGGED || relperst == NEON_RELPERSISTENCE_UNLOGGED_BUILD)
+			{
 #if PG_MAJORVERSION_NUM >= 17
 				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
 #else
 				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 #endif
-				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
-				 */
+			}
+			if (is_locked)
+			{
+				LWLockRelease(finish_unlogged_build_lock);
+			}
+			if (relperst == NEON_RELPERSISTENCE_UNLOGGED || relperst == NEON_RELPERSISTENCE_UNLOGGED_BUILD)
+			{
 				return;
 			}
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (RelFileInfoEquals(unlogged_build_rel_info, rinfo))
 			{
 #if PG_MAJORVERSION_NUM >= 17
 				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
@@ -1661,7 +1688,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 		 forknum, blocknum,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	lfc_write(InfoFromSMgrRel(reln), forknum, blocknum, buffer);
+	lfc_write(rinfo, forknum, blocknum, buffer);
 
 	communicator_prefetch_pump_state();
 
@@ -1686,28 +1713,52 @@ static void
 neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 const void **buffers, BlockNumber nblocks, bool skipFsync)
 {
+	NeonRelPersistence relperst;
+	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
+	bool is_locked = false;
 	switch (reln->smgr_relpersistence)
 	{
 		case 0:
-			/* This is a bit tricky. Check if the relation exists locally */
-			if (mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum))
+			if (forknum == INIT_FORKNUM)
+			{
+				break; /* init fork is always permanent */
+			}
+			relperst = get_cached_relperst(rinfo);
+			if (relperst == NEON_RELPERSISTENCE_UNKNOWN)
+			{
+				/* We do not know relation persistence: let's determine it */
+				relperst = mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? NEON_RELPERSISTENCE_UNLOGGED : NEON_RELPERSISTENCE_PERMANENT;
+				set_cached_relperst(rinfo, relperst);
+			}
+			if (relperst == NEON_RELPERSISTENCE_UNLOGGED_BUILD)
+			{
+				/* In case of unlogged build we need to avoid race condition at unlogged build end.
+				 * Obtain shared lock here to prevent backend completing unlogged build from performing cleanup amnd remvong files.
+				 */
+				LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
+				is_locked = true;
+				/*
+				 * Recheck relperst under lock - may be unlogged build is already finished
+				 */
+				relperst = get_cached_relperst(rinfo);
+			}
+			if (relperst == NEON_RELPERSISTENCE_UNLOGGED || relperst == NEON_RELPERSISTENCE_UNLOGGED_BUILD)
 			{
 				/* It exists locally. Guess it's unlogged then. */
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
-
-				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
-				 */
+			}
+			if (is_locked)
+			{
+				LWLockRelease(finish_unlogged_build_lock);
+			}
+			if (relperst == NEON_RELPERSISTENCE_UNLOGGED || relperst == NEON_RELPERSISTENCE_UNLOGGED_BUILD)
+			{
 				return;
 			}
 			break;
 
 		case RELPERSISTENCE_PERMANENT:
-			if (RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)))
+			if (RelFileInfoEquals(unlogged_build_rel_info, rinfo))
 			{
 				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
 				return;
@@ -1724,7 +1775,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 	neon_wallog_pagev(reln, forknum, blkno, nblocks, (const char **) buffers, false);
 
-	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
+	lfc_writev(rinfo, forknum, blkno, buffers, nblocks);
 
 	communicator_prefetch_pump_state();
 
@@ -1989,6 +2040,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			unlogged_build_rel_info = InfoFromSMgrRel(reln);
+			unlogged_build_rel_entry = pin_cached_relperst(unlogged_build_rel_info, NEON_RELPERSISTENCE_UNLOGGED);
 			unlogged_build_phase = UNLOGGED_BUILD_NOT_PERMANENT;
 			if (debug_compare_local)
 			{
@@ -2011,6 +2063,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 #endif
 
 	unlogged_build_rel_info = InfoFromSMgrRel(reln);
+	unlogged_build_rel_entry = pin_cached_relperst(unlogged_build_rel_info, NEON_RELPERSISTENCE_UNLOGGED_BUILD);
 	unlogged_build_phase = UNLOGGED_BUILD_PHASE_1;
 
 	/*
@@ -2024,6 +2077,15 @@ neon_start_unlogged_build(SMgrRelation reln)
 	{
 		mdcreate(reln, debug_compare_local ? INIT_FORKNUM : MAIN_FORKNUM, false);
 	}
+}
+
+static void
+unlogged_build_cleanup(void)
+{
+	NRelFileInfoInvalidate(unlogged_build_rel_info);
+	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+	unpin_cached_relperst(unlogged_build_rel_entry);
+	unlogged_build_rel_entry = NULL;
 }
 
 /*
@@ -2052,8 +2114,7 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 	 */
 	if (IsParallelWorker())
 	{
-		NRelFileInfoInvalidate(unlogged_build_rel_info);
-		unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+		unlogged_build_cleanup();
 	}
 	else
 		unlogged_build_phase = UNLOGGED_BUILD_PHASE_2;
@@ -2072,8 +2133,9 @@ static void
 neon_end_unlogged_build(SMgrRelation reln)
 {
 	NRelFileInfoBackend rinfob = InfoBFromSMgrRel(reln);
+	NRelFileInfo rinfo = InfoFromSMgrRel(reln);
 
-	Assert(RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)));
+	Assert(RelFileInfoEquals(unlogged_build_rel_info, rinfo));
 
 	ereport(SmgrTrace,
 			(errmsg(NEON_TAG "ending unlogged build of relation %u/%u/%u",
@@ -2099,21 +2161,26 @@ neon_end_unlogged_build(SMgrRelation reln)
 		recptr = GetXLogInsertRecPtr();
 
 		neon_set_lwlsn_block_range(recptr,
-								   InfoFromNInfoB(rinfob),
+								   rinfo,
 								   MAIN_FORKNUM, 0, nblocks);
 		neon_set_lwlsn_relation(recptr,
-								InfoFromNInfoB(rinfob),
+								rinfo,
 								MAIN_FORKNUM);
+
+		/* Obtain exclusive lock to prevent concrrent writes to the file while we performing cleanup */
+		LWLockAcquire(finish_unlogged_build_lock, LW_EXCLUSIVE);
+		unlogged_build_rel_entry->relperst = NEON_RELPERSISTENCE_PERMANENT;
+		LWLockRelease(finish_unlogged_build_lock);
 
 		/* Remove local copy */
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
 		{
 			neon_log(SmgrTrace, "forgetting cached relsize for %u/%u/%u.%u",
-				 RelFileInfoFmt(InfoFromNInfoB(rinfob)),
+				 RelFileInfoFmt(rinfo),
 				 forknum);
 
-			forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
-			lfc_invalidate(InfoFromNInfoB(rinfob), forknum, nblocks);
+			forget_cached_relsize(rinfo, forknum);
+			lfc_invalidate(rinfo, forknum, nblocks);
 
 			mdclose(reln, forknum);
 			if (!debug_compare_local)
@@ -2125,8 +2192,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 		if (debug_compare_local)
 			mdunlink(rinfob, INIT_FORKNUM, true);
 	}
-	NRelFileInfoInvalidate(unlogged_build_rel_info);
-	unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+	unlogged_build_cleanup();
 }
 
 #define STRPREFIX(str, prefix) (strncmp(str, prefix, strlen(prefix)) == 0)
@@ -2198,8 +2264,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 			 * Forget about any build we might have had in progress. The local
 			 * file will be unlinked by smgrDoPendingDeletes()
 			 */
-			NRelFileInfoInvalidate(unlogged_build_rel_info);
-			unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+			unlogged_build_cleanup();
 			break;
 
 		case XACT_EVENT_COMMIT:
@@ -2210,8 +2275,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 		case XACT_EVENT_PRE_PREPARE:
 			if (unlogged_build_phase != UNLOGGED_BUILD_NOT_IN_PROGRESS)
 			{
-				NRelFileInfoInvalidate(unlogged_build_rel_info);
-				unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
+				unlogged_build_cleanup();
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 (errmsg(NEON_TAG "unlogged index build was not properly finished"))));

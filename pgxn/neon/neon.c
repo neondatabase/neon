@@ -493,6 +493,7 @@ _PG_init(void)
 	/* Stage 1: Define GUCs, and other early intialization */
 	pg_init_libpagestore();
 	relsize_hash_init();
+	relperst_hash_init();
 	lfc_init();
 	pg_init_walproposer();
 	init_lwlsncache();
@@ -714,6 +715,7 @@ neon_shmem_request_hook(void)
 	NeonPerfCountersShmemRequest();
 	PagestoreShmemRequest();
 	RelsizeCacheShmemRequest();
+	RelperstCacheShmemRequest();
 	WalproposerShmemRequest();
 	LwLsnCacheShmemRequest();
 }
@@ -737,6 +739,7 @@ neon_shmem_startup_hook(void)
 	NeonPerfCountersShmemInit();
 	PagestoreShmemInit();
 	RelsizeCacheShmemInit();
+	RelperstCacheShmemInit();
 	WalproposerShmemInit();
 	LwLsnCacheShmemInit();
 
