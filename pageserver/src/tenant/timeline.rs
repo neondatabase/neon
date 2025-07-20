@@ -11,7 +11,7 @@ pub mod layer_manager;
 pub(crate) mod logical_size;
 pub mod offload;
 pub mod span;
-mod standby_horizon;
+pub(crate) mod standby_horizon;
 pub mod uninit;
 mod walreceiver;
 
@@ -1884,6 +1884,8 @@ impl Timeline {
                 .checked_add(Duration::from_secs(5 * 60))
                 .unwrap());
         }
+        let applied_gc_cutoff_lsn =
+            todo!("think about boundary conditions? we didn't have any before though");
         let length = todo!("duplicate init lease deadline logic?");
         self.standby_horizons
             .upsert_lease(lease_id, lsn, length)
@@ -3170,9 +3172,7 @@ impl Timeline {
                 l0_compaction_trigger: resources.l0_compaction_trigger,
                 gc_lock: tokio::sync::Mutex::default(),
 
-                standby_horizons: standby_horizon::Horizons::new(
-                    metrics.standby_horizon_gauge.clone(),
-                ),
+                standby_horizons: standby_horizon::Horizons::new(metrics.standby_horizon.clone()),
 
                 pagestream_throttle: resources.pagestream_throttle,
 
@@ -6554,6 +6554,7 @@ impl Timeline {
         };
 
         let mut new_gc_cutoff = space_cutoff.min(time_cutoff.unwrap_or_default());
+
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
         // TODO: revisit this once we've fully transitioned to leases. 10GiB isn't _that_ much

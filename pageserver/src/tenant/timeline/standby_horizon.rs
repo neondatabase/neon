@@ -15,18 +15,29 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use metrics::IntGauge;
+use metrics::{IntGauge, UIntGauge};
 use utils::lsn::Lsn;
+
+use crate::assert_u64_eq_usize::UsizeIsU64;
 
 pub struct Horizons {
     inner: std::sync::Mutex<Inner>,
 }
 struct Inner {
     legacy: Option<Lsn>,
-    legacy_metric: IntGauge,
     leases_by_id: HashMap<String, Lease>,
+    metrics: Metrics,
 }
 
+#[derive(Clone)]
+pub struct Metrics {
+    /// `pageserver_standby_horizon`
+    pub legacy_value: IntGauge,
+    /// `pageserver_standby_horizon_leases`
+    pub leases_count_gauge: UIntGauge,
+}
+
+#[derive(Debug)]
 struct Lease {
     valid_until: SystemTime,
     lsn: Lsn,
@@ -59,13 +70,18 @@ pub struct Mins {
 }
 
 impl Horizons {
-    pub fn new(legacy_metric: IntGauge) -> Self {
-        legacy_metric.set(Lsn::INVALID.0 as i64);
+    pub fn new(metrics: Metrics) -> Self {
+        let legacy = None;
+        metrics.legacy_value.set(Lsn::INVALID.0 as i64);
+
+        let leases_by_id = HashMap::default();
+        metrics.leases_count_gauge.set(0);
+
         Self {
             inner: std::sync::Mutex::new(Inner {
-                legacy: None,
-                legacy_metric,
-                leases_by_id: Default::default(),
+                legacy,
+                leases_by_id,
+                metrics,
             }),
         }
     }
@@ -74,7 +90,7 @@ impl Horizons {
     pub fn register_legacy_update(&self, lsn: Lsn) {
         let mut inner = self.inner.lock().unwrap();
         inner.legacy = Some(lsn);
-        inner.legacy_metric.set(lsn.0 as i64);
+        inner.metrics.legacy_value.set(lsn.0 as i64);
     }
 
     /// Get the minimum standby horizon and clear the horizon propagated via the legacy mechanism
@@ -88,7 +104,7 @@ impl Horizons {
     pub fn min_and_clear_legacy(&self) -> Mins {
         let mut inner = self.inner.lock().unwrap();
         let legacy = {
-            inner.legacy_metric.set(Lsn::INVALID.0 as i64);
+            inner.metrics.legacy_value.set(Lsn::INVALID.0 as i64);
             inner.legacy.take()
         };
 
@@ -116,13 +132,28 @@ impl Horizons {
             }
             hash_map::Entry::Vacant(entry) => entry.insert(update),
         };
-        Ok(LeaseInfo {
+        let res = LeaseInfo {
             valid_until: updated.valid_until,
-        })
+        };
+        inner.metrics.leases_count_gauge.set(inner.leases_by_id.len().into_u64());
+        Ok(res)
     }
 
     pub fn cull_leases(&self, now: SystemTime) {
         let mut inner = self.inner.lock().unwrap();
         inner.leases_by_id.retain(|_, l| l.valid_until <= now);
+    }
+
+    pub fn dump(&self) -> serde_json::Value {
+        let inner = self.inner.lock().unwrap();
+        let Inner {
+            legacy,
+            leases_by_id,
+            metrics: _,
+        } = &*inner;
+        serde_json::json!({
+            "legacy": format!("{legacy:?}"),
+            "leases_by_id": format!("{leases_by_id:?}"),
+        })
     }
 }

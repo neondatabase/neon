@@ -473,6 +473,8 @@ async fn build_timeline_info_common(
         *timeline.get_applied_gc_cutoff_lsn(),
     );
 
+    let standby_horizon = timeline.standby_horizons.dump();
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,
         timeline_id: timeline.timeline_id,
@@ -508,6 +510,7 @@ async fn build_timeline_info_common(
         is_invisible: Some(is_invisible),
 
         walreceiver_status,
+        standby_horizon,
     };
     Ok(info)
 }

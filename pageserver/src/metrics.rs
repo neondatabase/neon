@@ -39,6 +39,7 @@ use crate::tenant::mgr::TenantSlot;
 use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
 use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::throttle::ThrottleResult;
+use crate::tenant::timeline::standby_horizon;
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
 /// path. In other words, operations that directly affect that latency of user
@@ -727,6 +728,14 @@ static STANDBY_HORIZON: Lazy<IntGaugeVec> = Lazy::new(|| {
         &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
+});
+
+static STANDBY_HORIZON_LEASES: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_standby_horizon_leases",
+        "Gauge indicating current number of standby horizon leases, per timeline",
+        &["tenant_id", "shard_id", "timeline_id"]
+    ).expect("failed to define a metric")
 });
 
 static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
@@ -3229,7 +3238,7 @@ pub(crate) struct TimelineMetrics {
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
     pub layers_per_read: Histogram,
-    pub standby_horizon_gauge: IntGauge,
+    pub standby_horizon: standby_horizon::Metrics,
     pub resident_physical_size_gauge: UIntGauge,
     pub visible_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -3331,9 +3340,16 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
-        let standby_horizon_gauge = STANDBY_HORIZON
-            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
-            .unwrap();
+        let standby_horizon = standby_horizon::Metrics {
+            legacy_value: STANDBY_HORIZON
+                .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+                .unwrap(),
+            leases_count_gauge: STANDBY_HORIZON_LEASES.get_metric_with_label_values(&[
+                &tenant_id,
+                &shard_id,
+                &timeline_id,
+            ]).unwrap(),
+        };
         let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -3417,7 +3433,7 @@ impl TimelineMetrics {
             pitr_history_size,
             archival_size,
             layers_per_read,
-            standby_horizon_gauge,
+            standby_horizon,
             resident_physical_size_gauge,
             visible_physical_size_gauge,
             current_logical_size_gauge,
@@ -3561,6 +3577,7 @@ impl TimelineMetrics {
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = DISK_CONSISTENT_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = STANDBY_HORIZON_LEASES.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
             let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);

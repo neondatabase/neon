@@ -1604,6 +1604,8 @@ pub struct TimelineInfo {
 
     /// Whether the timeline is invisible in synthetic size calculations.
     pub is_invisible: Option<bool>,
+
+    pub standby_horizon: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
