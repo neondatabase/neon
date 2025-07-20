@@ -755,3 +755,64 @@ impl From<LeaseLsnResponse> for proto::LeaseLsnResponse {
         }
     }
 }
+
+pub struct LeaseStandbyHorizonRequest {
+    pub lease_id: String,
+    pub lsn: Lsn,
+}
+
+impl TryFrom<proto::LeaseStandbyHorizonRequest> for LeaseStandbyHorizonRequest {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::LeaseStandbyHorizonRequest) -> Result<Self, Self::Error> {
+        if pb.lsn == 0 {
+            return Err(ProtocolError::Missing("lsn"));
+        }
+        if pb.lease_id.len() == 0 {
+            return Err(ProtocolError::Invalid("lease_id", pb.lease_id));
+        }
+        Ok(Self {
+            lease_id: pb.lease_id,
+            lsn: Lsn(pb.lsn),
+        })
+    }
+}
+
+impl From<LeaseStandbyHorizonRequest> for proto::LeaseStandbyHorizonRequest {
+    fn from(request: LeaseStandbyHorizonRequest) -> Self {
+        Self {
+            lease_id: request.lease_id,
+            lsn: request.lsn.0,
+        }
+    }
+}
+
+/// Lease expiration time. If the lease could not be granted because the LSN has already been
+/// garbage collected, a FailedPrecondition status will be returned instead.
+pub type LeaseStandbyHorizonResponse = SystemTime;
+
+impl TryFrom<proto::LeaseStandbyHorizonResponse> for LeaseStandbyHorizonResponse {
+    type Error = ProtocolError;
+
+    fn try_from(pb: proto::LeaseStandbyHorizonResponse) -> Result<Self, Self::Error> {
+        let expiration = pb.expiration.ok_or(ProtocolError::Missing("expiration"))?;
+        UNIX_EPOCH
+            .checked_add(Duration::new(
+                expiration.seconds as u64,
+                expiration.nanos as u32,
+            ))
+            .ok_or_else(|| ProtocolError::invalid("expiration", expiration))
+    }
+}
+
+impl From<LeaseStandbyHorizonResponse> for proto::LeaseStandbyHorizonResponse {
+    fn from(response: LeaseStandbyHorizonResponse) -> Self {
+        let expiration = response.duration_since(UNIX_EPOCH).unwrap_or_default();
+        Self {
+            expiration: Some(prost_types::Timestamp {
+                seconds: expiration.as_secs() as i64,
+                nanos: expiration.subsec_nanos() as i32,
+            }),
+        }
+    }
+}

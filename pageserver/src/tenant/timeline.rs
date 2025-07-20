@@ -1858,6 +1858,15 @@ impl Timeline {
         Ok(lease)
     }
 
+    pub(crate) fn lease_standby_horizon(
+        &self,
+        lease_id: String,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<SystemTime> {
+        todo!()
+    }
+
     /// Freeze the current open in-memory layer. It will be written to disk on next iteration.
     /// Returns the flush request ID which can be awaited with wait_flush_completion().
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]

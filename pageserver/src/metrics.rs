@@ -2318,6 +2318,7 @@ pub(crate) enum ComputeCommandKind {
     Basebackup,
     Fullbackup,
     LeaseLsn,
+    LeaseStandbyHorizon,
 }
 
 pub(crate) struct ComputeCommandCounters {
