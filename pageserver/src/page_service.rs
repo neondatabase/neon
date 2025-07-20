@@ -76,6 +76,7 @@ use crate::pgdatadir_mapping::{LsnRange, Version};
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
+    debug_assert_current_span_has_tenant_id,
 };
 use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME, TaskKind};
 use crate::tenant::mgr::{
@@ -2218,12 +2219,57 @@ impl PageServerHandler {
             valid_until_str.as_deref().unwrap_or("<unknown>")
         );
 
-        let bytes = valid_until_str.as_ref().map(|x| x.as_bytes());
+        let bytes: Option<&[u8]> = valid_until_str.as_ref().map(|x| x.as_bytes());
 
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
             b"valid_until",
         )]))?
         .write_message_noflush(&BeMessage::DataRow(&[bytes]))?;
+
+        Ok(())
+    }
+
+    #[instrument(skip_all, fields(shard_id, %lsn))]
+    async fn handle_lease_standby_horizon<IO>(
+        &mut self,
+        pgb: &mut PostgresBackend<IO>,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lease_id: String,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), QueryError>
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        debug_assert_current_span_has_tenant_id();
+
+        let timeline = self
+            .timeline_handles
+            .as_mut()
+            .unwrap()
+            .get(
+                tenant_shard_id.tenant_id,
+                timeline_id,
+                ShardSelector::Known(tenant_shard_id.to_index()),
+            )
+            .await?;
+        set_tracing_field_shard_id(&timeline);
+
+        let result: Option<SystemTime> = todo!();
+
+        // Encode result as Option<millis since epoch>
+        let bytes = result.map(|t| {
+            t.duration_since(SystemTime::UNIX_EPOCH)
+                .expect("we wouldn't allow a lease at epoch, system time would be horribly off")
+                .as_millis()
+                .to_string()
+                .into_bytes()
+        });
+        pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
+            b"expiration",
+        )]))?
+        .write_message_noflush(&BeMessage::DataRow(&[bytes.as_deref()]))?;
 
         Ok(())
     }
@@ -2719,12 +2765,21 @@ struct LeaseLsnCmd {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+struct LeaseStandbyHorizonCmd {
+    tenant_shard_id: TenantShardId,
+    timeline_id: TimelineId,
+    lease_id: String,
+    lsn: Lsn,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum PageServiceCmd {
     Set,
     PageStream(PageStreamCmd),
     BaseBackup(BaseBackupCmd),
     FullBackup(FullBackupCmd),
     LeaseLsn(LeaseLsnCmd),
+    LeaseStandbyHorizon(LeaseStandbyHorizonCmd),
 }
 
 impl PageStreamCmd {
@@ -2874,6 +2929,31 @@ impl LeaseLsnCmd {
     }
 }
 
+impl LeaseStandbyHorizonCmd {
+    fn parse(query: &str) -> anyhow::Result<Self> {
+        let parameters = query.split_whitespace().collect_vec();
+        if parameters.len() != 4 {
+            bail!(
+                "invalid number of parameters for lease lsn command: {}",
+                query
+            );
+        }
+        let tenant_shard_id = TenantShardId::from_str(parameters[0])
+            .with_context(|| format!("Failed to parse tenant id from {}", parameters[0]))?;
+        let timeline_id = TimelineId::from_str(parameters[1])
+            .with_context(|| format!("Failed to parse timeline id from {}", parameters[1]))?;
+        let lease_id = parameters[2].to_string();
+        let standby_horizon = Lsn::from_str(parameters[3])
+            .with_context(|| format!("Failed to parse lsn from {}", parameters[2]))?;
+        Ok(Self {
+            tenant_shard_id,
+            timeline_id,
+            lease_id,
+            lsn: standby_horizon,
+        })
+    }
+}
+
 impl PageServiceCmd {
     fn parse(query: &str) -> anyhow::Result<Self> {
         let query = query.trim();
@@ -2898,6 +2978,10 @@ impl PageServiceCmd {
                 let cmd2 = cmd2.to_ascii_lowercase();
                 if cmd2 == "lsn" {
                     Ok(Self::LeaseLsn(LeaseLsnCmd::parse(other)?))
+                } else if cmd2 == "standby_horizon" {
+                    Ok(Self::LeaseStandbyHorizon(LeaseStandbyHorizonCmd::parse(
+                        other,
+                    )?))
                 } else {
                     bail!("invalid lease command: {cmd}");
                 }
@@ -3154,6 +3238,45 @@ where
                     }
                     Err(e) => {
                         error!("error obtaining lsn lease for {lsn}: {e:?}");
+                        pgb.write_message_noflush(&BeMessage::ErrorResponse(
+                            &e.to_string(),
+                            Some(e.pg_error_code()),
+                        ))?
+                    }
+                };
+            }
+            PageServiceCmd::LeaseStandbyHorizon(LeaseStandbyHorizonCmd {
+                tenant_shard_id,
+                timeline_id,
+                lease_id,
+                lsn,
+            }) => {
+                tracing::Span::current()
+                    .record("tenant_id", field::display(tenant_shard_id))
+                    .record("timeline_id", field::display(timeline_id));
+
+                self.check_permission(Some(tenant_shard_id.tenant_id))?;
+
+                COMPUTE_COMMANDS_COUNTERS
+                    .for_command(ComputeCommandKind::LeaseStandbyHorizon)
+                    .inc();
+
+                match self
+                    .handle_lease_standby_horizon(
+                        pgb,
+                        tenant_shard_id,
+                        timeline_id,
+                        lease_id,
+                        lsn,
+                        &ctx,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?
+                    }
+                    Err(e) => {
+                        error!("error obtaining standby_horizon lease for {lsn}: {e:?}");
                         pgb.write_message_noflush(&BeMessage::ErrorResponse(
                             &e.to_string(),
                             Some(e.pg_error_code()),
@@ -3800,6 +3923,11 @@ impl proto::PageService for GrpcPageServiceHandler {
         );
 
         Ok(tonic::Response::new(expires.into()))
+    }
+
+    #[instrument(skip_all, fields(lease_id, lsn))]
+    async fn lease_standby_horizon(&self, req: tonic::Request<proto::LeaseStandbyHorizonRequest>) -> Result<tonic::Response<proto::LeaseStandbyHorizonResponse>, tonic::Status> {
+        todo!()
     }
 }
 

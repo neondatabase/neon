@@ -70,6 +70,18 @@ service PageService {
   // Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't garbage
   // collect the LSN until the lease expires. Must be acquired on all relevant shards.
   rpc LeaseLsn (LeaseLsnRequest) returns (LeaseLsnResponse);
+
+  // Upserts a standby_horizon lease. RO replicas rely on this type of lease.
+  // In slightly more detail: RO replicas always lag to some degree behind the
+  // primary, and request pages at their respective apply LSN. The standby horizon mechanism
+  // ensures that the Pageserver does not garbage-collect old page versions in
+  // the interval between `min(valid standby horizon leases)` and the most recent page version.
+  //
+  // Each RO replica call this method continuously as it applies more WAL.
+  // It identifies its lease through an opaque "lease_id" across these requests.
+  // The response contains the lease expiration time.
+  // Status `FailedPrecondition` is returned if the lease cannot be granted.
+  rpc LeaseStandbyHorizon(LeaseStandbyHorizonRequest) returns (LeaseStandbyHorizonResponse);
 }
 
 // The LSN a request should read at.
@@ -271,4 +283,17 @@ message LeaseLsnRequest {
 message LeaseLsnResponse {
   // The lease expiration time.
   google.protobuf.Timestamp expires = 1;
+}
+
+// Request for LeaseStandbyHorizon rpc.
+// The lease_id identifies the lease in subsequent requests.
+// The lsn must be monotonic; the request will fail if it is not.
+message LeaseStandbyHorizonRequest {
+  string lease_id  = 1;
+  uint64 lsn = 2;
+}
+
+// Response for the success case of LeaseStandbyHorizon rpc.
+message LeaseStandbyHorizonResponse {
+  google.protobuf.Timestamp expiration = 1;
 }

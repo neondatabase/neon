@@ -5,10 +5,13 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use anyhow::Context;
+use chrono::Utc;
 use compute_api::spec::PageserverProtocol;
 use futures::{StreamExt, stream::FuturesUnordered};
+use postgres::SimpleQueryMessage;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{Instrument, error, info, info_span, instrument, warn};
 use utils::{backoff::retry, id::TimelineId, lsn::Lsn};
 
 use crate::{
@@ -47,57 +50,87 @@ pub fn spawn_bg_task(compute: Arc<ComputeNode>) {
 #[derive(Clone)]
 struct Reservation {
     horizon: Lsn,
-    expiration: Instant,
+    expiration: SystemTime,
 }
 
+#[instrument(name = "standby_horizon_lease", skip_all, fields(lease_id))]
 async fn bg_task(compute: Arc<ComputeNode>) {
+    // Use a lease_id that is globally unique to this process to maximize attribution precision & log correlation.
+    let lease_id = format!("v1-{}-{}", compute.params.compute_id, std::process::id());
+    tracing::Span::current().record("lease_id", tracing::field::display(&lease_id));
+
     // Wait until we have the first value.
     // Allows us to simply .unwrap() later because it never transitions back to None.
+    info!("waiting for first lease lsn to be fetched from postgres");
     let mut min_inflight_request_lsn_changed =
         compute.ro_replica.min_inflight_request_lsn.subscribe();
-    min_inflight_request_lsn_changed.mark_changed();
+    min_inflight_request_lsn_changed.mark_changed(); // it could have been set already
     min_inflight_request_lsn_changed
         .wait_for(|value| value.is_some())
         .await;
 
-    let (connstr_watch_tx, mut connstr_watch_rx) = tokio::sync::watch::channel(());
+    // React to connstring changes. Sadly there is no async API for this yet.
+    let (connstr_watch_tx, mut connstr_watch_rx) = tokio::sync::watch::channel(None);
     std::thread::spawn({
         let compute = Arc::clone(&compute);
         move || {
             loop {
-                compute
-                    .wait_timeout_while_pageserver_connstr_unchanged(Duration::from_secs(todo!()));
-                connstr_watch_tx.send_replace(());
+                compute.wait_timeout_while_pageserver_connstr_unchanged(Duration::MAX);
+                let new = compute
+                    .state
+                    .lock()
+                    .unwrap()
+                    .pspec
+                    .as_ref()
+                    .and_then(|pspec| pspec.spec.pageserver_connstring.clone());
+                connstr_watch_tx.send_if_modified(|existing| {
+                    if &new != existing {
+                        *existing = new;
+                        true
+                    } else {
+                        false
+                    }
+                });
             }
         }
     });
 
-    let mut reservation = Reservation {
-        horizon: Lsn(0),
-        expiration: Instant::now(),
+    let mut obtained = ObtainedLease {
+        lsn: Lsn(0),
+        nearest_expiration: SystemTime::UNIX_EPOCH,
     };
     loop {
+        let valid_duration = obtained
+            .nearest_expiration
+            .duration_since(SystemTime::now())
+            .unwrap_or_default();
+        // Sleep for 60 seconds less than the valid duration but no more than half of the valid duration.
+        let sleep_duration = valid_duration
+            .saturating_sub(Duration::from_secs(60))
+            .max(valid_duration / 2);
+
         tokio::select! {
-            _  = tokio::time::sleep_until(reservation.expiration.into()) => {
-                info!("updating due to expiration");
+            _  = tokio::time::sleep(sleep_duration) => {
+                info!("updating because lease is going to expire soon");
             }
             _ = connstr_watch_rx.changed() => {
                 info!("updating due to changed pageserver_connstr")
             }
             _ = async {
-                // debounce TODO make this lower in tests
+                // debounce; TODO make this lower in tests
                 tokio::time::sleep(Duration::from_secs(10));
-                // every 10 GiB TODO make this tighter in tests?
+                // every 10 GiB; TODO make this tighter in tests?
                 let max_horizon_lag = 10 * (1<<30);
-                min_inflight_request_lsn_changed.wait_for(|x| x.unwrap().0 > reservation.horizon.0 + max_horizon_lag).await
+                min_inflight_request_lsn_changed.wait_for(|x| x.unwrap().0 > obtained.lsn.0 + max_horizon_lag).await
             } => {
-                info!(%reservation.horizon, "updating due to max horizon lag");
+                info!(%obtained.lsn, "updating due to max horizon lag");
             }
         }
         // retry forever
         let compute = Arc::clone(&compute);
-        reservation = retry(
-            || attempt(&compute),
+        let lease_id = lease_id.clone();
+        obtained = retry(
+            || attempt(lease_id.clone(), &compute),
             |_| false,
             0,
             u32::MAX, // forever
@@ -111,8 +144,12 @@ async fn bg_task(compute: Arc<ComputeNode>) {
     }
 }
 
-// Returns expiration time
-async fn attempt(compute: &Arc<ComputeNode>) -> anyhow::Result<Reservation> {
+struct ObtainedLease {
+    lsn: Lsn,
+    nearest_expiration: SystemTime,
+}
+
+async fn attempt(lease_id: String, compute: &Arc<ComputeNode>) -> anyhow::Result<ObtainedLease> {
     let (shards, timeline_id) = {
         let state = compute.state.lock().unwrap();
         let pspec = state.pspec.as_ref().expect("spec must be set");
@@ -124,6 +161,7 @@ async fn attempt(compute: &Arc<ComputeNode>) -> anyhow::Result<Reservation> {
         .min_inflight_request_lsn
         .borrow()
         .expect("we only call this function once it has been transitioned to Some");
+
     let mut futs = FuturesUnordered::new();
     for connect_info in shards {
         let logging_span = info_span!(
@@ -132,42 +170,54 @@ async fn attempt(compute: &Arc<ComputeNode>) -> anyhow::Result<Reservation> {
             shard_id=%connect_info.tenant_shard_id.shard_slug(),
             timeline_id=%timeline_id,
         );
-        let logging_wrapper = |fut: Pin<Box<dyn Future<Output = anyhow::Result<Reservation>>>>| {
-            async move {
-            match fut.await {
-                Ok(v) => Ok(v),
-                Err(err) => {
-                    error!(
-                        "failed to advance standby_horizon, communicator reads from this shard may star failing: {err:?}"
-                    );
-                    Err(())
+        let logging_wrapper =
+            |fut: Pin<Box<dyn Future<Output = anyhow::Result<Option<SystemTime>>>>>| {
+                async move {
+                    // TODO: timeout?
+                    match fut.await {
+                        Ok(Some(v)) => {
+                            info!("lease obtained");
+                            Ok(Some(v))
+                        }
+                        Ok(None) => {
+                            error!("pageserver rejected our request");
+                            Ok(None)
+                        }
+                        Err(err) => {
+                            error!("communication failure: {err:?}");
+                            Err(())
+                        }
+                    }
                 }
-            }}.instrument(logging_span)
-        };
+                .instrument(logging_span)
+            };
         let fut = match PageserverProtocol::from_connstring(&connect_info.connstring)? {
-            PageserverProtocol::Libpq => {
-                logging_wrapper(Box::pin(attempt_one_libpq(connect_info, timeline_id, lsn)))
-            }
-            PageserverProtocol::Grpc => {
-                logging_wrapper(Box::pin(attempt_one_grpc(connect_info, timeline_id, lsn)))
-            }
+            PageserverProtocol::Libpq => logging_wrapper(Box::pin(attempt_one_libpq(
+                connect_info,
+                timeline_id,
+                lease_id.clone(),
+                lsn,
+            ))),
+            PageserverProtocol::Grpc => logging_wrapper(Box::pin(attempt_one_grpc(
+                connect_info,
+                timeline_id,
+                lease_id.clone(),
+                lsn,
+            ))),
         };
         futs.push(fut);
     }
     let mut errors = 0;
-    let mut min = None;
+    let mut nearest_expiration = None;
     while let Some(res) = futs.next().await {
         match res {
-            Ok(reservation) => {
-                let Reservation {
-                    horizon,
-                    expiration,
-                } = min.get_or_insert_with(|| reservation.clone());
-                *horizon = std::cmp::min(*horizon, reservation.horizon);
-                *expiration = std::cmp::min(*expiration, reservation.expiration);
+            Ok(Some(expiration)) => {
+                let nearest_expiration = nearest_expiration.get_or_insert(expiration);
+                *nearest_expiration = std::cmp::min(*nearest_expiration, expiration);
             }
-            Err(()) => {
+            Ok(None) | Err(()) => {
                 // the logging wrapper does the logging
+                errors += 1;
             }
         }
     }
@@ -176,8 +226,11 @@ async fn attempt(compute: &Arc<ComputeNode>) -> anyhow::Result<Reservation> {
             "failed to advance standby_horizon for {errors} shards, check logs for details"
         ));
     }
-    match min {
-        Some(min) => Ok(min),
+    match nearest_expiration {
+        Some(v) => Ok(ObtainedLease {
+            lsn,
+            nearest_expiration: nearest_expiration.expect("we either errors+=1 or set it"),
+        }),
         None => Err(anyhow::anyhow!("pageservers connstrings is empty")), // this probably can't happen
     }
 }
@@ -185,21 +238,67 @@ async fn attempt(compute: &Arc<ComputeNode>) -> anyhow::Result<Reservation> {
 async fn attempt_one_libpq(
     connect_info: ConnectInfo,
     timeline_id: TimelineId,
+    lease_id: String,
     lsn: Lsn,
-) -> anyhow::Result<Reservation> {
+) -> anyhow::Result<Option<SystemTime>> {
     let ConnectInfo {
         tenant_shard_id,
         connstring,
         auth,
     } = connect_info;
-    tokio_postgres::Config::from_str(&connstring)?;
-    todo!()
+    let mut config = tokio_postgres::Config::from_str(&connstring)?;
+    if let Some(auth) = auth {
+        config.password(auth);
+    }
+    let (mut client, conn) = config.connect(postgres::NoTls).await?;
+    tokio::spawn(conn);
+    let cmd = format!("lease standby_horizon {tenant_shard_id} {timeline_id} {lease_id} {lsn} ");
+    let res = client.simple_query(&cmd).await?;
+    let msg = match res.first() {
+        Some(msg) => msg,
+        None => anyhow::bail!("empty response"),
+    };
+    let row = match msg {
+        SimpleQueryMessage::Row(row) => row,
+        _ => anyhow::bail!("expected row message type"),
+    };
+
+    // Note: this will be None if a lease is explicitly not granted.
+    let Some(expiration) = row.get("expiration") else {
+        return Ok(None);
+    };
+
+    let expiration =
+        SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(u64::from_str(expiration)?));
+    Ok(expiration)
 }
 
 async fn attempt_one_grpc(
     connect_info: ConnectInfo,
     timeline_id: TimelineId,
+    lease_id: String,
     lsn: Lsn,
-) -> anyhow::Result<Reservation> {
-    todo!()
+) -> anyhow::Result<Option<SystemTime>> {
+    let ConnectInfo {
+        tenant_shard_id,
+        connstring,
+        auth,
+    } = connect_info;
+    let mut client = pageserver_page_api::Client::connect(
+        connstring.to_string(),
+        tenant_shard_id.tenant_id,
+        timeline_id,
+        tenant_shard_id.to_index(),
+        auth.map(String::from),
+        None,
+    )
+    .await?;
+
+    let req = pageserver_page_api::LeaseStandbyHorizonRequest { lease_id, lsn };
+    match client.lease_standby_horizon(req).await {
+        Ok(expires) => Ok(Some(expires)),
+        // Lease couldn't be acquired
+        Err(err) if err.code() == tonic::Code::FailedPrecondition => Ok(None),
+        Err(err) => Err(err.into()),
+    }
 }
