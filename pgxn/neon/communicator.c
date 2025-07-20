@@ -300,6 +300,7 @@ static void prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_
 static bool prefetch_wait_for(uint64 ring_index);
 static void prefetch_cleanup_trailing_unused(void);
 static inline void prefetch_set_unused(uint64 ring_index);
+static bool prefetch_flush_requests(void);
 
 static bool neon_prefetch_response_usable(neon_request_lsns *request_lsns,
 										  PrefetchRequest *slot);
@@ -469,6 +470,15 @@ communicator_prefetch_pump_state(void)
 {
 	START_PREFETCH_RECEIVE_WORK();
 
+	/*
+	 * Flush request to avoid requests pending for arbitrary long time,
+	 * pinning LSN and holding GC at PS.
+	 */
+	if (!prefetch_flush_requests())
+	{
+		END_PREFETCH_RECEIVE_WORK();
+		return;
+	}
 	while (MyPState->ring_receive != MyPState->ring_flush)
 	{
 		NeonResponse   *response;
