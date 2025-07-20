@@ -2258,9 +2258,7 @@ impl PageServerHandler {
 
         let result: Option<SystemTime> = timeline
             .lease_standby_horizon(lease_id, lsn, ctx)
-            .inspect_err(|e| {
-                warn!("{e}");
-            })
+            // logging happens inside
             .ok();
 
         // Encode result as Option<millis since epoch>
@@ -3946,7 +3944,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         // Attempt to acquire a lease. Return FailedPrecondition if the lease could not be granted.
         let expiration = match timeline.lease_standby_horizon(lease_id, lsn, &ctx) {
             Ok(expiration) => expiration,
-            Err(err) => return Err(tonic::Status::failed_precondition(format!("{err:#}"))),
+            Err(err) => return Err(tonic::Status::failed_precondition(format!("{err}"))),
         };
 
         Ok(tonic::Response::new(expiration.into()))

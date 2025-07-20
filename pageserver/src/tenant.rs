@@ -4830,6 +4830,7 @@ impl TenantShard {
                 // Cull any expired leases
                 let now = SystemTime::now();
                 target.leases.retain(|_, lease| !lease.is_expired(&now));
+                timeline.standby_horizons.cull_leases(now);
 
                 timeline
                     .metrics

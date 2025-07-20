@@ -1861,13 +1861,27 @@ impl Timeline {
         Ok(lease)
     }
 
+    #[instrument(skip(_ctx), ret(Debug), err(Debug))]
     pub(crate) fn lease_standby_horizon(
         &self,
         lease_id: String,
         lsn: Lsn,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<SystemTime> {
-        todo!()
+        if self
+            .feature_resolver
+            .evaluate_boolean("standby-horizon-leases-track-disable")
+            .is_ok()
+        {
+            // Use feature-flagging as a fail-safe in case something is wrong with the data structure (memory consumption, etc.)
+            return Ok(SystemTime::now()
+                .checked_add(Duration::from_secs(5 * 60))
+                .unwrap());
+        }
+        let length = todo!("duplicate init lease deadline logic?");
+        self.standby_horizons
+            .upsert_lease(lease_id, lsn, length)
+            .map(|lease| lease.valid_until)
     }
 
     /// Freeze the current open in-memory layer. It will be written to disk on next iteration.

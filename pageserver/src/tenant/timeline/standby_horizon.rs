@@ -10,6 +10,11 @@
 //! - legacy: as described in RFC36, replica->safekeeper->broker->pageserver
 //! - leases: TODO
 
+use std::{
+    collections::{HashMap, hash_map},
+    time::{Duration, SystemTime},
+};
+
 use metrics::IntGauge;
 use utils::lsn::Lsn;
 
@@ -18,7 +23,31 @@ pub struct Horizons {
 }
 struct Inner {
     legacy: Option<Lsn>,
-    pub legacy_metric: IntGauge,
+    legacy_metric: IntGauge,
+    leases_by_id: HashMap<String, Lease>,
+}
+
+struct Lease {
+    valid_until: SystemTime,
+    lsn: Lsn,
+}
+
+impl Lease {
+    pub fn try_update(&mut self, update: Lease) -> anyhow::Result<()> {
+        let Lease {
+            valid_until: expiration,
+            lsn,
+        } = update;
+        anyhow::ensure!(self.valid_until <= expiration);
+        anyhow::ensure!(self.lsn <= lsn);
+        *self = update;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct LeaseInfo {
+    pub valid_until: SystemTime,
 }
 
 /// Returned by [`Self::min_and_clear_legacy`].
@@ -36,6 +65,7 @@ impl Horizons {
             inner: std::sync::Mutex::new(Inner {
                 legacy: None,
                 legacy_metric,
+                leases_by_id: Default::default(),
             }),
         }
     }
@@ -62,11 +92,37 @@ impl Horizons {
             inner.legacy.take()
         };
 
-        // TODO: support leases
-        let leases = [];
-
-        let all = legacy.into_iter().chain(leases.into_iter()).min();
+        let all = legacy
+            .into_iter()
+            .chain(inner.leases_by_id.values().map(|lease| lease.lsn))
+            .min();
 
         Mins { legacy, all }
+    }
+
+    pub fn upsert_lease(
+        &self,
+        id: String,
+        lsn: Lsn,
+        length: Duration,
+    ) -> anyhow::Result<LeaseInfo> {
+        let mut inner = self.inner.lock().unwrap();
+        let valid_until = SystemTime::now() + length;
+        let update = Lease { valid_until, lsn };
+        let updated = match inner.leases_by_id.entry(id) {
+            hash_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().try_update(update)?;
+                entry.into_mut()
+            }
+            hash_map::Entry::Vacant(entry) => entry.insert(update),
+        };
+        Ok(LeaseInfo {
+            valid_until: updated.valid_until,
+        })
+    }
+
+    pub fn cull_leases(&self, now: SystemTime) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.leases_by_id.retain(|_, l| l.valid_until <= now);
     }
 }
