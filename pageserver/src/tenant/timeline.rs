@@ -1798,8 +1798,14 @@ impl Timeline {
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
         let lease = {
-            // Normalize the requested LSN to be aligned, and move to the first record
-            // if it points to the beginning of the page (header).
+            // Static (=fixed-lsn) computes request basebackup @ X
+            // but pageserver returns basebackup @ normalize_lsn(X).
+            // Once the postgres process is started, it will therefore
+            // request pages@normalize_lsn(X).
+            // But compute_ctl, which isn't aware that the requested
+            // basebackup lsn != the returned basebackup LSN, will
+            // call this API with X.
+            // So, normalize_lsn(X) here as well.
             let lsn = xlog_utils::normalize_lsn(lsn, WAL_SEGMENT_SIZE);
 
             let mut gc_info = self.gc_info.write().unwrap();
