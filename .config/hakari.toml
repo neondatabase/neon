@@ -30,6 +30,7 @@ workspace-members = [
     "vm_monitor",
     # All of these exist in libs and are not usually built independently.
     # Putting workspace hack there adds a bottleneck for cargo builds.
+    "alloc-metrics",
     "compute_api",
     "consumption_metrics",
     "desim",

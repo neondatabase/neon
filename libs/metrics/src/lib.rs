@@ -478,7 +478,7 @@ pub trait CounterPairAssoc {
 }
 
 pub struct CounterPairVec<A: CounterPairAssoc> {
-    vec: measured::metric::MetricVec<MeasuredCounterPairState, A::LabelGroupSet>,
+    pub vec: measured::metric::MetricVec<MeasuredCounterPairState, A::LabelGroupSet>,
 }
 
 impl<A: CounterPairAssoc> Default for CounterPairVec<A>
@@ -492,6 +492,17 @@ where
     }
 }
 
+impl<A: CounterPairAssoc> CounterPairVec<A>
+where
+    A::LabelGroupSet: Default,
+{
+    pub fn dense() -> Self {
+        Self {
+            vec: measured::metric::MetricVec::dense(),
+        }
+    }
+}
+
 impl<A: CounterPairAssoc> CounterPairVec<A> {
     pub fn guard(
         &self,
@@ -501,14 +512,27 @@ impl<A: CounterPairAssoc> CounterPairVec<A> {
         self.vec.get_metric(id).inc.inc();
         MeasuredCounterPairGuard { vec: &self.vec, id }
     }
+
     pub fn inc(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
         let id = self.vec.with_labels(labels);
         self.vec.get_metric(id).inc.inc();
     }
+
     pub fn dec(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
         let id = self.vec.with_labels(labels);
         self.vec.get_metric(id).dec.inc();
     }
+
+    pub fn inc_by(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>, x: u64) {
+        let id = self.vec.with_labels(labels);
+        self.vec.get_metric(id).inc.inc_by(x);
+    }
+
+    pub fn dec_by(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>, x: u64) {
+        let id = self.vec.with_labels(labels);
+        self.vec.get_metric(id).dec.inc_by(x);
+    }
+
     pub fn remove_metric(
         &self,
         labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>,
@@ -551,6 +575,24 @@ where
 pub struct MeasuredCounterPairState {
     pub inc: CounterState,
     pub dec: CounterState,
+}
+
+impl MeasuredCounterPairState {
+    pub fn inc(&self) {
+        self.inc.inc();
+    }
+
+    pub fn dec(&self) {
+        self.dec.inc();
+    }
+
+    pub fn inc_by(&self, x: u64) {
+        self.inc.inc_by(x);
+    }
+
+    pub fn dec_by(&self, x: u64) {
+        self.dec.inc_by(x);
+    }
 }
 
 impl measured::metric::MetricType for MeasuredCounterPairState {

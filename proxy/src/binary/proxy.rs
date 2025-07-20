@@ -39,7 +39,8 @@ use crate::config::{
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
-use crate::metrics::Metrics;
+pub use crate::metrics::MemoryContext;
+use crate::metrics::{Alloc, Metrics};
 use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::redis::kv_ops::RedisKVClient;
@@ -318,7 +319,7 @@ struct PgSniRouterArgs {
     dest: Option<String>,
 }
 
-pub async fn run() -> anyhow::Result<()> {
+pub async fn run(alloc: &'static Alloc) -> anyhow::Result<()> {
     let _logging_guard = crate::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
@@ -340,7 +341,7 @@ pub async fn run() -> anyhow::Result<()> {
     };
 
     let args = ProxyCliArgs::parse();
-    let config = build_config(&args)?;
+    let config = build_config(&args, alloc)?;
     let auth_backend = build_auth_backend(&args)?;
 
     match auth_backend {
@@ -589,9 +590,12 @@ pub async fn run() -> anyhow::Result<()> {
 }
 
 /// ProxyConfig is created at proxy startup, and lives forever.
-fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
+fn build_config(
+    args: &ProxyCliArgs,
+    alloc: &'static Alloc,
+) -> anyhow::Result<&'static ProxyConfig> {
     let thread_pool = ThreadPool::new(args.scram_thread_pool_size);
-    Metrics::install(thread_pool.metrics.clone());
+    Metrics::install(thread_pool.metrics.clone(), Some(alloc));
 
     let tls_config = match (&args.tls_key, &args.tls_cert) {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(

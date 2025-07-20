@@ -62,6 +62,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-metrics"
+version = "0.1.0"
+dependencies = [
+ "measured",
+ "metrics",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5301,6 +5309,7 @@ name = "proxy"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "alloc-metrics",
  "anyhow",
  "arc-swap",
  "assert-json-diff",

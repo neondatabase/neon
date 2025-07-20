@@ -10,6 +10,7 @@ testing = ["dep:tokio-postgres"]
 
 [dependencies]
 ahash.workspace = true
+alloc-metrics.workspace = true
 anyhow.workspace = true
 arc-swap.workspace = true
 async-compression.workspace = true
