@@ -65,8 +65,10 @@ dependencies = [
 name = "alloc-metrics"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "measured",
  "metrics",
+ "tikv-jemallocator",
 ]
 
 [[package]]

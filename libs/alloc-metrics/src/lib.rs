@@ -1,5 +1,6 @@
 //! Tagged allocator measurements.
 
+mod metric_vec;
 mod thread_local;
 
 use std::{
@@ -17,10 +18,12 @@ use measured::{
     label::StaticLabelSet,
     metric::{MetricEncoding, counter::CounterState, group::Encoding, name::MetricName},
 };
-use metrics::{CounterPairAssoc, CounterPairVec, MeasuredCounterPairState};
+use metrics::{CounterPairAssoc, MeasuredCounterPairState};
 use thread_local::ThreadLocal;
 
-type AllocCounter<T> = CounterPairVec<AllocPair<T>>;
+use crate::metric_vec::DenseCounterPairVec;
+
+type AllocCounter<T> = DenseCounterPairVec<AllocPair<T>, T>;
 
 pub struct TrackedAllocator<A, T: 'static + Send + Sync + FixedCardinalityLabel + LabelGroup> {
     inner: A,
@@ -79,8 +82,8 @@ where
         self.thread_state
             .get_or_init(ThreadLocal::new)
             .get_or(|| ThreadState {
-                counters: CounterPairVec::dense(),
-                global: self.global.get_or_init(CounterPairVec::dense),
+                counters: DenseCounterPairVec::default(),
+                global: self.global.get_or_init(DenseCounterPairVec::default),
             });
 
         self.thread_scope
@@ -130,12 +133,16 @@ where
         // Safety: tag_offset is inbounds of the ptr
         unsafe { ptr.add(tag_offset).cast::<T>().write(tag) }
 
-        if let Some(counters) = self.current_counters_alloc_safe() {
-            // During `Self::new`, the caller has guaranteed that tag encoding will not panic.
-            counters.inc_by(tag, layout.size() as u64);
+        let metric = if let Some(counters) = self.current_counters_alloc_safe() {
+            // safety: caller ensured that <T as FixedCardinalitySet> is implemented correctly.
+            let id = unsafe { counters.vec.try_with_labels(tag).unwrap_unchecked() };
+            counters.vec.get_metric(id)
         } else {
-            self.default_counters.inc_by(layout.size() as u64);
-        }
+            // if tag is not default, then global would have been registered, therefore tag must be default.
+            &self.default_counters
+        };
+
+        metric.inc_by(layout.size() as u64);
 
         ptr
     }
@@ -203,27 +210,30 @@ where
         // Safety: new_tag_offset is inbounds of the ptr
         unsafe { new_ptr.add(new_tag_offset).cast::<T>().write(new_tag) }
 
-        if let Some(counters) = self.current_counters_alloc_safe() {
-            if tag.encode() == new_tag.encode() {
-                let diff = usize::abs_diff(new_layout.size(), layout.size()) as u64;
-                if new_layout.size() > layout.size() {
-                    counters.inc_by(tag, diff);
-                } else {
-                    counters.dec_by(tag, diff);
-                }
-            } else {
-                counters.inc_by(new_tag, new_layout.size() as u64);
-                counters.dec_by(tag, layout.size() as u64);
-            }
+        let (new_metric, old_metric) = if let Some(counters) = self.current_counters_alloc_safe() {
+            // safety: caller ensured that <T as FixedCardinalitySet> is implemented correctly.
+            let new_id = unsafe { counters.vec.try_with_labels(new_tag).unwrap_unchecked() };
+            // safety: caller ensured that <T as FixedCardinalitySet> is implemented correctly.
+            let old_id = unsafe { counters.vec.try_with_labels(tag).unwrap_unchecked() };
+            let new_metric = counters.vec.get_metric(new_id);
+            let old_metric = counters.vec.get_metric(old_id);
+
+            (new_metric, old_metric)
         } else {
             // no tag was registered at all, therefore both tags must be default.
-            let diff = usize::abs_diff(new_layout.size(), layout.size()) as u64;
-            if new_layout.size() > layout.size() {
-                self.default_counters.inc_by(diff);
-            } else {
-                self.default_counters.dec_by(diff);
-            }
-        }
+            (&self.default_counters, &self.default_counters)
+        };
+
+        let (inc, dec) = if tag.encode() != new_tag.encode() {
+            (new_layout.size() as u64, layout.size() as u64)
+        } else if new_layout.size() > layout.size() {
+            ((new_layout.size() - layout.size()) as u64, 0)
+        } else {
+            (0, (layout.size() - new_layout.size()) as u64)
+        };
+
+        new_metric.inc.inc_by(inc);
+        old_metric.dec.inc_by(dec);
 
         new_ptr
     }
@@ -240,16 +250,19 @@ where
         // Safety: tag_offset is inbounds of the ptr
         let tag = unsafe { ptr.add(tag_offset).cast::<T>().read() };
 
-        if let Some(counters) = self.current_counters_alloc_safe() {
-            counters.dec_by(tag, layout.size() as u64);
-        } else {
-            // if tag is not default, then global would have been registered,
-            // therefore tag must be default.
-            self.default_counters.dec_by(layout.size() as u64);
-        }
-
         // Safety: caller upholds contract for us
         unsafe { self.inner.dealloc(ptr, tagged_layout) }
+
+        let metric = if let Some(counters) = self.current_counters_alloc_safe() {
+            // safety: caller ensured that <T as FixedCardinalitySet> is implemented correctly.
+            let id = unsafe { counters.vec.try_with_labels(tag).unwrap_unchecked() };
+            counters.vec.get_metric(id)
+        } else {
+            // if tag is not default, then global would have been registered, therefore tag must be default.
+            &self.default_counters
+        };
+
+        metric.dec_by(layout.size() as u64);
     }
 }
 
@@ -288,7 +301,7 @@ impl<T: 'static + FixedCardinalityLabel + LabelGroup> Drop for ThreadState<T> {
         for tag in (0..T::cardinality()).map(T::decode) {
             // load and reset the counts in the thread-local counters.
             let id = self.counters.vec.with_labels(tag);
-            let mut m = self.counters.vec.get_metric_mut(id);
+            let m = self.counters.vec.get_metric_mut(id);
             let inc = *m.inc.count.get_mut();
             let dec = *m.dec.count.get_mut();
 
@@ -308,14 +321,14 @@ where
     CounterState: MetricEncoding<Enc>,
 {
     fn collect_group_into(&self, enc: &mut Enc) -> Result<(), Enc::Err> {
-        let global = self.global.get_or_init(CounterPairVec::dense);
+        let global = self.global.get_or_init(DenseCounterPairVec::default);
 
         // iterate over all counter threads
         for s in self.thread_state.get().into_iter().flat_map(|s| s.iter()) {
             // iterate over all labels
             for tag in (0..T::cardinality()).map(T::decode) {
                 let id = s.counters.vec.with_labels(tag);
-                sample(global, &s.counters.vec.get_metric(id), tag);
+                sample(global, s.counters.vec.get_metric(id), tag);
             }
         }
 

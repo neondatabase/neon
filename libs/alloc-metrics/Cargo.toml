@@ -7,3 +7,11 @@ license.workspace = true
 [dependencies]
 metrics.workspace = true
 measured.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tikv-jemallocator.workspace = true
+
+[[bench]]
+harness = false
+name = "alloc"

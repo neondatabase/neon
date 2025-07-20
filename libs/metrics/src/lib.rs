@@ -513,21 +513,25 @@ impl<A: CounterPairAssoc> CounterPairVec<A> {
         MeasuredCounterPairGuard { vec: &self.vec, id }
     }
 
+    #[inline]
     pub fn inc(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
         let id = self.vec.with_labels(labels);
         self.vec.get_metric(id).inc.inc();
     }
 
+    #[inline]
     pub fn dec(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
         let id = self.vec.with_labels(labels);
         self.vec.get_metric(id).dec.inc();
     }
 
+    #[inline]
     pub fn inc_by(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>, x: u64) {
         let id = self.vec.with_labels(labels);
         self.vec.get_metric(id).inc.inc_by(x);
     }
 
+    #[inline]
     pub fn dec_by(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>, x: u64) {
         let id = self.vec.with_labels(labels);
         self.vec.get_metric(id).dec.inc_by(x);
@@ -578,18 +582,22 @@ pub struct MeasuredCounterPairState {
 }
 
 impl MeasuredCounterPairState {
+    #[inline]
     pub fn inc(&self) {
         self.inc.inc();
     }
 
+    #[inline]
     pub fn dec(&self) {
         self.dec.inc();
     }
 
+    #[inline]
     pub fn inc_by(&self, x: u64) {
         self.inc.inc_by(x);
     }
 
+    #[inline]
     pub fn dec_by(&self, x: u64) {
         self.dec.inc_by(x);
     }
