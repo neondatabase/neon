@@ -11,6 +11,7 @@ pub mod layer_manager;
 pub(crate) mod logical_size;
 pub mod offload;
 pub mod span;
+mod standby_horizon;
 pub mod uninit;
 mod walreceiver;
 
@@ -248,7 +249,7 @@ pub struct Timeline {
     // Atomic would be more appropriate here.
     last_freeze_ts: RwLock<Instant>,
 
-    pub(crate) standby_horizon: AtomicLsn,
+    pub(crate) standby_horizons: standby_horizon::Horizons,
 
     // WAL redo manager. `None` only for broken tenants.
     walredo_mgr: Option<Arc<super::WalRedoManager>>,
@@ -3085,8 +3086,6 @@ impl Timeline {
                 ancestor_timeline: ancestor,
                 ancestor_lsn: metadata.ancestor_lsn(),
 
-                metrics,
-
                 query_metrics: crate::metrics::SmgrQueryTimePerTimeline::new(
                     &tenant_shard_id,
                     &timeline_id,
@@ -3151,7 +3150,9 @@ impl Timeline {
                 l0_compaction_trigger: resources.l0_compaction_trigger,
                 gc_lock: tokio::sync::Mutex::default(),
 
-                standby_horizon: AtomicLsn::new(0),
+                standby_horizons: standby_horizon::Horizons::new(
+                    metrics.standby_horizon_gauge.clone(),
+                ),
 
                 pagestream_throttle: resources.pagestream_throttle,
 
@@ -3181,6 +3182,8 @@ impl Timeline {
                 basebackup_cache: resources.basebackup_cache,
 
                 feature_resolver: resources.feature_resolver.clone(),
+
+                metrics,
             };
 
             result.repartition_threshold =
@@ -6531,10 +6534,28 @@ impl Timeline {
         };
 
         let mut new_gc_cutoff = space_cutoff.min(time_cutoff.unwrap_or_default());
-        let standby_horizon = self.standby_horizon.load();
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
-        if standby_horizon != Lsn::INVALID {
+        // TODO: revisit this once we've fully transitioned to leases. 10GiB isn't _that_ much
+        // of permitted lag at high ingest rates. Yet again, unlimited lag is a DoS risk.
+        // Ideally we implement a monitoring function for RO replica lag in a higher level controller,
+        // e.g. the TBD compute manager aka endpoint controller. It would kill the replica if it's
+        // lagging too much or is otherwise unresponsive. The standby horizon leasing could
+        // then be moved into that controller, i.e., inside our trust domain. Replica can still
+        // advance existing leases, but, control over existence (create/destroy lease) would be
+        // with that controller.
+        // When solving this, solve it generically for lsn leases as well.
+        let min_standby_horizon = self.standby_horizons.min_and_clear_legacy();
+        let min_standby_horizon = if self
+            .feature_resolver
+            .evaluate_boolean("standby-horizon-leases-in-gc")
+            .is_ok()
+        {
+            min_standby_horizon.all
+        } else {
+            min_standby_horizon.legacy
+        };
+        if let Some(standby_horizon) = min_standby_horizon {
             if let Some(standby_lag) = new_gc_cutoff.checked_sub(standby_horizon) {
                 const MAX_ALLOWED_STANDBY_LAG: u64 = 10u64 << 30; // 10 GB
                 if standby_lag.0 < MAX_ALLOWED_STANDBY_LAG {
@@ -6548,14 +6569,6 @@ impl Timeline {
                 }
             }
         }
-
-        // Reset standby horizon to ignore it if it is not updated till next GC.
-        // It is an easy way to unset it when standby disappears without adding
-        // more conf options.
-        self.standby_horizon.store(Lsn::INVALID);
-        self.metrics
-            .standby_horizon_gauge
-            .set(Lsn::INVALID.0 as i64);
 
         let res = self
             .gc_timeline(

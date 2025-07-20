@@ -754,15 +754,11 @@ impl ConnectionManagerState {
             "safekeeper info update: standby_horizon(cutoff)={}",
             timeline_update.standby_horizon
         );
+        // ignore reports from safekeepers not connected to replicas
         if timeline_update.standby_horizon != 0 {
-            // ignore reports from safekeepers not connected to replicas
             self.timeline
-                .standby_horizon
-                .store(Lsn(timeline_update.standby_horizon));
-            self.timeline
-                .metrics
-                .standby_horizon_gauge
-                .set(timeline_update.standby_horizon as i64);
+                .standby_horizons
+                .register_legacy_update(Lsn(timeline_update.standby_horizon));
         }
 
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
