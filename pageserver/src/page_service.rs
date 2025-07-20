@@ -2256,7 +2256,12 @@ impl PageServerHandler {
             .await?;
         set_tracing_field_shard_id(&timeline);
 
-        let result: Option<SystemTime> = todo!();
+        let result: Option<SystemTime> = timeline
+            .lease_standby_horizon(lease_id, lsn, ctx)
+            .inspect_err(|e| {
+                warn!("{e}");
+            })
+            .ok();
 
         // Encode result as Option<millis since epoch>
         let bytes = result.map(|t| {
@@ -3926,8 +3931,25 @@ impl proto::PageService for GrpcPageServiceHandler {
     }
 
     #[instrument(skip_all, fields(lease_id, lsn))]
-    async fn lease_standby_horizon(&self, req: tonic::Request<proto::LeaseStandbyHorizonRequest>) -> Result<tonic::Response<proto::LeaseStandbyHorizonResponse>, tonic::Status> {
-        todo!()
+    async fn lease_standby_horizon(
+        &self,
+        req: tonic::Request<proto::LeaseStandbyHorizonRequest>,
+    ) -> Result<tonic::Response<proto::LeaseStandbyHorizonResponse>, tonic::Status> {
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_timeline(&timeline);
+
+        // Validate and convert the request, and decorate the span.
+        let page_api::LeaseStandbyHorizonRequest { lease_id, lsn } = req.into_inner().try_into()?;
+
+        span_record!(lease_id=%lease_id, lsn=%lsn);
+
+        // Attempt to acquire a lease. Return FailedPrecondition if the lease could not be granted.
+        let expiration = match timeline.lease_standby_horizon(lease_id, lsn, &ctx) {
+            Ok(expiration) => expiration,
+            Err(err) => return Err(tonic::Status::failed_precondition(format!("{err:#}"))),
+        };
+
+        Ok(tonic::Response::new(expiration.into()))
     }
 }
 

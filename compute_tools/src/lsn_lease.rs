@@ -5,15 +5,14 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
 use compute_api::spec::{ComputeMode, PageserverProtocol};
-use itertools::Itertools as _;
 use pageserver_page_api as page_api;
 use postgres::{NoTls, SimpleQueryMessage};
 use tracing::{info, warn};
-use utils::id::{TenantId, TimelineId};
+use utils::id::TimelineId;
 use utils::lsn::Lsn;
-use utils::shard::{ShardCount, ShardNumber, TenantShardId};
+use utils::shard::TenantShardId;
 
-use crate::compute::{ComputeNode, ParsedSpec};
+use crate::compute::ComputeNode;
 use crate::pageserver_client::{ConnectInfo, pageserver_connstrings_for_connect};
 
 /// Spawns a background thread to periodically renew LSN leases for static compute.
@@ -32,7 +31,7 @@ pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
     let span = tracing::info_span!("lsn_lease_bg_task", %tenant_id, %timeline_id, %lsn);
     thread::spawn(move || {
         let _entered = span.entered();
-        if let Err(e) = lsn_lease_bg_task(compute, tenant_id, timeline_id, lsn) {
+        if let Err(e) = lsn_lease_bg_task(compute, timeline_id, lsn) {
             // TODO: might need stronger error feedback than logging an warning.
             warn!("Exited with error: {e}");
         }
@@ -40,14 +39,9 @@ pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
 }
 
 /// Renews lsn lease periodically so static compute are not affected by GC.
-fn lsn_lease_bg_task(
-    compute: Arc<ComputeNode>,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    lsn: Lsn,
-) -> Result<()> {
+fn lsn_lease_bg_task(compute: Arc<ComputeNode>, timeline_id: TimelineId, lsn: Lsn) -> Result<()> {
     loop {
-        let valid_until = acquire_lsn_lease_with_retry(&compute, tenant_id, timeline_id, lsn)?;
+        let valid_until = acquire_lsn_lease_with_retry(&compute, timeline_id, lsn)?;
         let valid_duration = valid_until
             .duration_since(SystemTime::now())
             .unwrap_or(Duration::ZERO);
@@ -69,7 +63,6 @@ fn lsn_lease_bg_task(
 /// Returns an error if a lease is explicitly not granted. Otherwise, we keep sending requests.
 fn acquire_lsn_lease_with_retry(
     compute: &Arc<ComputeNode>,
-    tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
 ) -> Result<SystemTime> {

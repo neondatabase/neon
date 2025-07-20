@@ -2,11 +2,9 @@ use std::{
     pin::Pin,
     str::FromStr,
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
-use anyhow::Context;
-use chrono::Utc;
 use compute_api::spec::PageserverProtocol;
 use futures::{StreamExt, stream::FuturesUnordered};
 use postgres::SimpleQueryMessage;
@@ -47,12 +45,6 @@ pub fn spawn_bg_task(compute: Arc<ComputeNode>) {
     });
 }
 
-#[derive(Clone)]
-struct Reservation {
-    horizon: Lsn,
-    expiration: SystemTime,
-}
-
 #[instrument(name = "standby_horizon_lease", skip_all, fields(lease_id))]
 async fn bg_task(compute: Arc<ComputeNode>) {
     // Use a lease_id that is globally unique to this process to maximize attribution precision & log correlation.
@@ -67,7 +59,8 @@ async fn bg_task(compute: Arc<ComputeNode>) {
     min_inflight_request_lsn_changed.mark_changed(); // it could have been set already
     min_inflight_request_lsn_changed
         .wait_for(|value| value.is_some())
-        .await;
+        .await
+        .expect("we never drop the sender");
 
     // React to connstring changes. Sadly there is no async API for this yet.
     let (connstr_watch_tx, mut connstr_watch_rx) = tokio::sync::watch::channel(None);
@@ -118,7 +111,7 @@ async fn bg_task(compute: Arc<ComputeNode>) {
             }
             _ = async {
                 // debounce; TODO make this lower in tests
-                tokio::time::sleep(Duration::from_secs(10));
+                tokio::time::sleep(Duration::from_secs(10)).await;
                 // every 10 GiB; TODO make this tighter in tests?
                 let max_horizon_lag = 10 * (1<<30);
                 min_inflight_request_lsn_changed.wait_for(|x| x.unwrap().0 > obtained.lsn.0 + max_horizon_lag).await
@@ -227,9 +220,9 @@ async fn attempt(lease_id: String, compute: &Arc<ComputeNode>) -> anyhow::Result
         ));
     }
     match nearest_expiration {
-        Some(v) => Ok(ObtainedLease {
+        Some(nearest_expiration) => Ok(ObtainedLease {
             lsn,
-            nearest_expiration: nearest_expiration.expect("we either errors+=1 or set it"),
+            nearest_expiration,
         }),
         None => Err(anyhow::anyhow!("pageservers connstrings is empty")), // this probably can't happen
     }
@@ -250,7 +243,7 @@ async fn attempt_one_libpq(
     if let Some(auth) = auth {
         config.password(auth);
     }
-    let (mut client, conn) = config.connect(postgres::NoTls).await?;
+    let (client, conn) = config.connect(postgres::NoTls).await?;
     tokio::spawn(conn);
     let cmd = format!("lease standby_horizon {tenant_shard_id} {timeline_id} {lease_id} {lsn} ");
     let res = client.simple_query(&cmd).await?;

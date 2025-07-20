@@ -1,8 +1,5 @@
 use itertools::Itertools;
-use utils::{
-    id::TenantId,
-    shard::{ShardCount, ShardIndex, ShardNumber, TenantShardId},
-};
+use utils::shard::{ShardCount, ShardNumber, TenantShardId};
 
 use crate::compute::ParsedSpec;
 
@@ -12,9 +9,7 @@ pub struct ConnectInfo {
     pub auth: Option<String>,
 }
 
-pub fn pageserver_connstrings_for_connect(
-    pspec: &ParsedSpec,
-) -> Vec<ConnectInfo> {
+pub fn pageserver_connstrings_for_connect(pspec: &ParsedSpec) -> Vec<ConnectInfo> {
     let connstrings = &pspec.pageserver_connstr;
     let auth = pspec.storage_auth_token.clone();
 
