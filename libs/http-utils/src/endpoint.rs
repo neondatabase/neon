@@ -7,7 +7,7 @@ use anyhow::{Context, anyhow};
 use bytes::{Bytes, BytesMut};
 use hyper::header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE, HeaderName};
 use hyper::http::HeaderValue;
-use hyper::{Body, Method, Request, Response};
+use hyper::{Body, Request, Response};
 use jsonwebtoken::TokenData;
 use metrics::{Encoder, IntCounter, TextEncoder, register_int_counter};
 use once_cell::sync::Lazy;
@@ -18,7 +18,7 @@ use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
-use tracing::{Instrument, debug, info, info_span, warn};
+use tracing::{Instrument, info, info_span, warn};
 use utils::auth::{AuthError, Claims, SwappableJwtAuth};
 use utils::metrics_collector::{METRICS_COLLECTOR, METRICS_STALE_MILLIS};
 
@@ -81,14 +81,10 @@ where
     let path = request.uri().path();
     let request_span = info_span!("request", %method, %path, %request_id);
 
-    let log_quietly = method == Method::GET;
     async move {
         let cancellation_guard = RequestCancelled::warn_when_dropped_without_responding();
-        if log_quietly {
-            debug!("Handling request");
-        } else {
-            info!("Handling request");
-        }
+
+        info!("Handling request");
 
         // No special handling for panics here. There's a `tracing_panic_hook` from another
         // module to do that globally.
@@ -109,11 +105,7 @@ where
         match res {
             Ok(response) => {
                 let response_status = response.status();
-                if log_quietly && response_status.is_success() {
-                    debug!("Request handled, status: {response_status}");
-                } else {
-                    info!("Request handled, status: {response_status}");
-                }
+                info!("Request handled, status: {response_status}");
                 Ok(response)
             }
             Err(err) => Ok(api_error_handler(err)),
