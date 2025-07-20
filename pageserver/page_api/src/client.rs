@@ -143,6 +143,12 @@ impl Client {
         let resp = self.inner.lease_lsn(req).await?.into_inner();
         Ok(resp.try_into()?)
     }
+
+    pub async fn lease_standby_horizon(&mut self, req: LeaseStandbyHorizonRequest) -> tonic::Result<LeaseStandbyHorizonResponse> {
+        let req = proto::LeaseStandbyHorizonRequest::from(req);
+        let resp = self.inner.lease_standby_horizon(req).await?.into_inner();
+        Ok(resp.try_into()?)
+    }
 }
 
 /// Adds authentication metadata to gRPC requests.
