@@ -525,6 +525,8 @@ class NeonProject:
             self.generate_branch_name(),
         )
         self.wait()
+        # XXX do not merge, debug only
+        log.info("new_branch: %s", new_branch_def)
         new_branch = NeonBranch(
             self, self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
         )
@@ -583,8 +585,9 @@ def setup_class(
         print(f"::warning::Retried on 524 error {neon_api.retries524} times")
     if neon_api.retries4xx > 0:
         print(f"::warning::Retried on 4xx error {neon_api.retries4xx} times")
-    log.info("Removing the project %s", project.id)
-    project.delete()
+    #XXX do not merge, debug only
+    #log.info("Removing the project %s", project.id)
+    #project.delete()
 
 
 def do_action(project: NeonProject, action: str) -> bool:
