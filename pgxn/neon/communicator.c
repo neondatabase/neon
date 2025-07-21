@@ -260,7 +260,7 @@ typedef struct PrefetchState
 
 	/* the buffers */
 	prfh_hash	*prf_hash;
-	int			max_shard_no;
+	int			max_unflushed_shard_no;
 	/* Mark shards involved in prefetch */
 	uint8		shard_bitmap[(MAX_SHARDS + 7)/8];
 	PrefetchRequest prf_buffer[];	/* prefetch buffers */
@@ -481,7 +481,6 @@ communicator_prefetch_pump_state(void)
 			END_PREFETCH_RECEIVE_WORK();
 			return;
 		}
-		MyPState->ring_flush = MyPState->ring_unused;
 	}
 	while (MyPState->ring_receive != MyPState->ring_flush)
 	{
@@ -589,7 +588,7 @@ readahead_buffer_resize(int newsize, void *extra)
 	newPState->ring_last = newsize;
 	newPState->ring_unused = newsize;
 	newPState->ring_receive = newsize;
-	newPState->max_shard_no = MyPState->max_shard_no;
+	newPState->max_unflushed_shard_no = MyPState->max_unflushed_shard_no;
 	memcpy(newPState->shard_bitmap, MyPState->shard_bitmap, sizeof(MyPState->shard_bitmap));
 
 	/*
@@ -719,7 +718,7 @@ prefetch_cleanup_trailing_unused(void)
 static bool
 prefetch_flush_requests(void)
 {
-	for (shardno_t shard_no = 0; shard_no < MyPState->max_shard_no; shard_no++)
+	for (shardno_t shard_no = 0; shard_no < MyPState->max_unflushed_shard_no; shard_no++)
 	{
 		if (BITMAP_ISSET(MyPState->shard_bitmap, shard_no))
 		{
@@ -728,7 +727,8 @@ prefetch_flush_requests(void)
 			BITMAP_CLR(MyPState->shard_bitmap, shard_no);
 		}
 	}
-	MyPState->max_shard_no = 0;
+	MyPState->max_unflushed_shard_no = 0;
+	MyPState->ring_flush = MyPState->ring_unused;
 	return true;
 }
 
@@ -752,7 +752,6 @@ prefetch_wait_for(uint64 ring_index)
 	{
 		if (!prefetch_flush_requests())
 			return false;
-		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
 	Assert(MyPState->ring_unused > ring_index);
@@ -1063,7 +1062,7 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	MyPState->n_unused -= 1;
 	MyPState->ring_unused += 1;
 	BITMAP_SET(MyPState->shard_bitmap, slot->shard_no);
-	MyPState->max_shard_no = Max(slot->shard_no+1, MyPState->max_shard_no);
+	MyPState->max_unflushed_shard_no = Max(slot->shard_no+1, MyPState->max_unflushed_shard_no);
 
 	/* update slot state */
 	slot->status = PRFS_REQUESTED;
@@ -1441,7 +1440,6 @@ Retry:
 			 */
 			goto Retry;
 		}
-		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
 	return last_ring_index;
