@@ -599,6 +599,10 @@ jobs:
           submodules: true
           ref: ${{ needs.meta.outputs.sha }}
 
+      - uses: ./.github/actions/prepare-for-subzero
+        with:
+          token: ${{ secrets.CI_ACCESS_TOKEN }}
+
       - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
         with:
@@ -632,6 +636,8 @@ jobs:
             BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-bookworm
             DEBIAN_VERSION=bookworm
+          secrets: |
+            SUBZERO_ACCESS_TOKEN=${{ secrets.CI_ACCESS_TOKEN }}
           provenance: false
           push: true
           pull: true
