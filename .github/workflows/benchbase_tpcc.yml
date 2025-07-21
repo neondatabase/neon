@@ -163,8 +163,8 @@ jobs:
         
         echo "Loading ${WAREHOUSES} warehouses into database..."
         
-        # Run the loader script (creates its own results_load directory)
-        ./scripts/load_${WAREHOUSES}_warehouses.sh
+        # Run the loader script and capture output to log file while preserving stdout/stderr
+        ./scripts/load_${WAREHOUSES}_warehouses.sh 2>&1 | tee "load_${WAREHOUSES}_warehouses.log"
         
         echo "Database loading completed"
 
@@ -206,6 +206,25 @@ jobs:
         # Copy both processing scripts
         cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/generate_diagrams.py" .
         cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/upload_results_to_perf_test_results.py" .
+        
+        echo "Processing load phase metrics..."
+        
+        # Find and process load log
+        LOAD_LOG=$(find . -name "load_${WAREHOUSES}_warehouses.log" -type f | head -1)
+        if [ -n "$LOAD_LOG" ]; then
+          echo "Processing load metrics from: $LOAD_LOG"
+          python upload_results_to_perf_test_results.py \
+            --load-log "$LOAD_LOG" \
+            --run-type "load" \
+            --warehouses "${WAREHOUSES}" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
+        else
+          echo "Warning: Load log file not found: load_${WAREHOUSES}_warehouses.log"
+        fi
         
         echo "Processing warmup results..."
         
