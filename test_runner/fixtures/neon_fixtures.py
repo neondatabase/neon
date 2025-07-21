@@ -1938,7 +1938,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         timeout_in_seconds: int | None = None,
         instance_id: int | None = None,
         base_port: int | None = None,
-        handle_ps_local_disk_loss: Optional[bool] = None,
+        handle_ps_local_disk_loss: bool | None = None,
     ) -> Self:
         assert not self.running
         self.env.neon_cli.storage_controller_start(

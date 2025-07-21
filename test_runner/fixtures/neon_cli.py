@@ -400,7 +400,7 @@ class NeonLocalCli(AbstractNeonCli):
         timeout_in_seconds: int | None = None,
         instance_id: int | None = None,
         base_port: int | None = None,
-        handle_ps_local_disk_loss: Optional[bool] = None,
+        handle_ps_local_disk_loss: bool | None = None,
     ):
         cmd = ["storage_controller", "start"]
         if timeout_in_seconds is not None:
