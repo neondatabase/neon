@@ -444,6 +444,7 @@ impl RemoteTimelineClient {
         &self,
         local_metadata: &TimelineMetadata,
         rel_size_v2_status: Option<RelSizeMigration>,
+        read_only: bool,
     ) -> anyhow::Result<()> {
         // Set the maximum number of inprogress tasks to the remote storage concurrency. There's
         // certainly no point in starting more upload tasks than this.
@@ -456,6 +457,9 @@ impl RemoteTimelineClient {
         let initialized_queue =
             upload_queue.initialize_empty_remote(local_metadata, inprogress_limit)?;
         initialized_queue.dirty.rel_size_migration = rel_size_v2_status;
+        if read_only {
+            initialized_queue.dirty.read_only = Some(read_only);
+        }
         self.update_remote_physical_size_gauge(None);
         info!("initialized upload queue as empty");
         Ok(())
@@ -580,6 +584,17 @@ impl RemoteTimelineClient {
             .unwrap()
             .initialized_mut()
             .map(|q| q.clean.0.marked_invisible_at.is_some())
+            .ok()
+    }
+
+    /// Returns whether the timeline is archived.
+    /// Return None if the remote index_part hasn't been downloaded yet.
+    pub(crate) fn is_read_only(&self) -> Option<bool> {
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .initialized_mut()
+            .map(|q| q.clean.0.read_only.unwrap_or_default())
             .ok()
     }
 
