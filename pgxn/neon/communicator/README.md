@@ -49,21 +49,36 @@ slots are statically allocated for each backend, and must not be
 accessed by other backends. The worker process reads requests from the
 shared memory slots, and writes responses back to the slots.
 
-To submit an IO request, first pick one of your backend's free slots,
-and write the details of the IO request in the slot. Finally, update
-the 'state' field of the slot to Submitted. That informs the worker
-process that it can start processing the request. Once the state has
-been set to Submitted, the backend *must not* access the slot anymore,
-until the worker process sets its state to 'Completed'. In other
-words, each slot is owned by either the backend or the worker process
-at all times, and the 'state' field indicates who has ownership at the
-moment.
+Here's an example snapshot of the system, when two requests from two
+different backends are in progress:
+
+```
+Backends           Request slots          Communicator process
+---------          -------------          --------------------
+
+Backend 1          1: Idle
+                   2: Idle
+                   3: Processing          tokio task handling request 3
+
+Backend 2          4: Completed
+                   5: Processing          tokio task handling request 5
+                   6: Idle
+
+...                ...
+```
+
+To submit an IO request, the backend first picks one of its Idle
+slots, writes the IO request in the slot, and updates it to
+'Submitted' state. That transfers the ownership of the slot to the
+worker process, until the worker process marks the request as
+Completed. The worker process spawns a separate Tokio task for each
+request.
 
 To inform the worker process that a request slot has a pending IO
 request, there's a pipe shared by the worker process and all backend
-processes. After you have changed the slot's state to Submitted, write
-the index of the request slot to the pipe. This wakes up the worker
-process.
+processes. The backend writes the index of the request slot to the
+pipe after changing the slot's state to Submitted. This wakes up the
+worker process.
 
 (Note that the pipe is just used for wakeups, but the worker process
 is free to pick up Submitted IO requests even without receiving the

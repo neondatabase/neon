@@ -3,7 +3,7 @@
 
 use std::os::fd::OwnedFd;
 
-use crate::backend_comms::NeonIOHandle;
+use crate::backend_comms::NeonIORequestSlot;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{BackendCacheReadOp, IntegratedCacheReadAccess};
 use crate::neon_request::{CCachedGetPageVResult, COid};
@@ -12,7 +12,7 @@ use crate::neon_request::{NeonIORequest, NeonIOResult};
 pub struct CommunicatorBackendStruct<'t> {
     my_proc_number: i32,
 
-    neon_request_slots: &'t [NeonIOHandle],
+    neon_request_slots: &'t [NeonIORequestSlot],
 
     submission_pipe_write_fd: OwnedFd,
 
@@ -76,9 +76,6 @@ pub extern "C" fn bcomm_start_io_request(
     // Create neon request and submit it
     bs.start_neon_io_request(slot_idx, request);
 
-    // Tell the communicator about it
-    bs.submit_request(slot_idx);
-
     slot_idx
 }
 
@@ -118,9 +115,6 @@ pub extern "C" fn bcomm_start_get_page_v_request(
     // Create neon request and submit it
     bs.start_neon_io_request(slot_idx, request);
 
-    // Tell the communicator about it
-    bs.submit_request(slot_idx);
-
     slot_idx
 }
 
@@ -152,20 +146,23 @@ pub extern "C" fn bcomm_get_request_slot_status(
     bs: &mut CommunicatorBackendStruct,
     request_slot_idx: u32,
 ) -> bool {
-    use crate::backend_comms::NeonIOHandleState;
+    use crate::backend_comms::NeonIORequestSlotState;
     match bs.neon_request_slots[request_slot_idx as usize].get_state() {
-        NeonIOHandleState::Idle => false,
-        NeonIOHandleState::Filling => {
+        NeonIORequestSlotState::Idle => false,
+        NeonIORequestSlotState::Filling => {
             // 'false' would be the right result here. However, this
             // is a very transient state. The C code should never
             // leave a slot in this state, so if it sees that,
             // something's gone wrong and it's not clear what to do
             // with it.
-            panic!("unexpected Filling state in request slot {}", request_slot_idx);
-        },
-        NeonIOHandleState::Submitted => true,
-        NeonIOHandleState::Processing => true,
-        NeonIOHandleState::Completed => true,
+            panic!(
+                "unexpected Filling state in request slot {}",
+                request_slot_idx
+            );
+        }
+        NeonIORequestSlotState::Submitted => true,
+        NeonIORequestSlotState::Processing => true,
+        NeonIORequestSlotState::Completed => true,
     }
 }
 
@@ -204,11 +201,70 @@ pub extern "C" fn bcomm_cache_contains(
     )
 }
 
+#[repr(C)]
+#[derive(Clone, Debug)]
+pub struct FileCacheIterator {
+    next_bucket: u64,
+
+    pub spc_oid: COid,
+    pub db_oid: COid,
+    pub rel_number: u32,
+    pub fork_number: u8,
+    pub block_number: u32,
+}
+
+/// Iterate over LFC contents
+#[unsafe(no_mangle)]
+pub extern "C" fn bcomm_cache_iterate_begin(_bs: &mut CommunicatorBackendStruct, iter: *mut FileCacheIterator) {
+    unsafe { (*iter).next_bucket = 0 };
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn bcomm_cache_iterate_next(bs: &mut CommunicatorBackendStruct, iter: *mut FileCacheIterator) -> bool {
+    use crate::integrated_cache::GetBucketResult;
+    loop {
+        let next_bucket = unsafe { (*iter).next_bucket } as usize;
+        match bs.integrated_cache.get_bucket(next_bucket) {
+            GetBucketResult::Occupied(rel, blk) => {
+                unsafe {
+                    (*iter).spc_oid = rel.spcnode;
+                    (*iter).db_oid = rel.dbnode;
+                    (*iter).rel_number = rel.relnode;
+                    (*iter).fork_number = rel.forknum;
+                    (*iter).block_number = blk;
+
+                    (*iter).next_bucket += 1;
+                }
+                break true;
+            },
+            GetBucketResult::Vacant => {
+                unsafe {
+                    (*iter).next_bucket += 1;
+                }
+                continue;
+            }
+            GetBucketResult::OutOfBounds => {
+                break false;
+            }
+        }
+    }
+}
+
 impl<'t> CommunicatorBackendStruct<'t> {
+    /// The slot must be free, or this panics.
+    pub(crate) fn start_neon_io_request(&mut self, request_slot_idx: i32, request: &NeonIORequest) {
+        let my_proc_number = self.my_proc_number;
+
+        self.neon_request_slots[request_slot_idx as usize].submit_request(request, my_proc_number);
+
+        // Tell the communicator about it
+        self.notify_about_request(request_slot_idx);
+    }
+
     /// Send a wakeup to the communicator process
-    fn submit_request(self: &CommunicatorBackendStruct<'t>, request_slot_idx: i32) {
+    fn notify_about_request(self: &CommunicatorBackendStruct<'t>, request_slot_idx: i32) {
         // wake up communicator by writing the idx to the submission pipe
         //
+
         // This can block, if the pipe is full. That should be very rare,
         // because the communicator tries hard to drain the pipe to prevent
         // that. Also, there's a natural upper bound on how many wakeups can be
@@ -220,15 +276,5 @@ impl<'t> CommunicatorBackendStruct<'t> {
 
         let _res = nix::unistd::write(&self.submission_pipe_write_fd, &idxbuf);
         // FIXME: check result, return any errors
-    }
-
-    /// Note: there's no guarantee on when the communicator might pick it up. You should ring
-    /// the doorbell. But it might pick it up immediately.
-    ///
-    /// The slot must be free, or this panics.
-    pub(crate) fn start_neon_io_request(&mut self, request_slot_idx: i32, request: &NeonIORequest) {
-        let my_proc_number = self.my_proc_number;
-
-        self.neon_request_slots[request_slot_idx as usize].fill_request(request, my_proc_number);
     }
 }

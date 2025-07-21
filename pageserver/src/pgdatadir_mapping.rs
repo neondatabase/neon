@@ -25,9 +25,9 @@ use pageserver_api::keyspace::{KeySpaceRandomAccum, SparseKeySpace};
 use pageserver_api::models::RelSizeMigration;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::{BLCKSZ, PgMajorVersion, TimestampTz, TransactionId};
+use postgres_ffi::{BLCKSZ, PgMajorVersion, TransactionId};
 use postgres_ffi_types::forknum::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi_types::{Oid, RepOriginId};
+use postgres_ffi_types::{Oid, RepOriginId, TimestampTz};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
@@ -139,6 +139,23 @@ pub(crate) enum CollectKeySpaceError {
     PageRead(PageReconstructError),
     #[error("cancelled")]
     Cancelled,
+}
+
+impl CollectKeySpaceError {
+    pub(crate) fn is_cancel(&self) -> bool {
+        match self {
+            CollectKeySpaceError::Decode(_) => false,
+            CollectKeySpaceError::PageRead(e) => e.is_cancel(),
+            CollectKeySpaceError::Cancelled => true,
+        }
+    }
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            CollectKeySpaceError::Decode(e) => anyhow::Error::new(e),
+            CollectKeySpaceError::PageRead(e) => anyhow::Error::new(e),
+            CollectKeySpaceError::Cancelled => anyhow::Error::new(self),
+        }
+    }
 }
 
 impl From<PageReconstructError> for CollectKeySpaceError {
@@ -269,6 +286,10 @@ impl Timeline {
     /// Like [`Self::get_rel_page_at_lsn`], but returns a batch of pages.
     ///
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
+    ///
+    /// NB: the read path must be cancellation-safe. The Tonic gRPC service will drop the future
+    /// if the client goes away (e.g. due to timeout or cancellation).
+    /// TODO: verify that it actually is cancellation-safe.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
         pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, LsnRange, RequestContext)>,
@@ -796,6 +817,7 @@ impl Timeline {
         let gc_cutoff_lsn_guard = self.get_applied_gc_cutoff_lsn();
         let gc_cutoff_planned = {
             let gc_info = self.gc_info.read().unwrap();
+            info!(cutoffs=?gc_info.cutoffs, applied_cutoff=%*gc_cutoff_lsn_guard, "starting find_lsn_for_timestamp");
             gc_info.min_cutoff()
         };
         // Usually the planned cutoff is newer than the cutoff of the last gc run,

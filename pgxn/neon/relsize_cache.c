@@ -23,9 +23,7 @@
 #include "utils/dynahash.h"
 #include "utils/guc.h"
 
-#if PG_VERSION_NUM >= 150000
 #include "miscadmin.h"
-#endif
 
 typedef struct
 {
@@ -50,32 +48,23 @@ typedef struct
 								 * algorithm */
 } RelSizeHashControl;
 
-static HTAB *relsize_hash;
-static LWLockId relsize_lock;
-static int	relsize_hash_size;
-static RelSizeHashControl* relsize_ctl;
-static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook = NULL;
-static void relsize_shmem_request(void);
-#endif
-
 /*
  * Size of a cache entry is 36 bytes. So this default will take about 2.3 MB,
  * which seems reasonable.
  */
 #define DEFAULT_RELSIZE_HASH_SIZE (64 * 1024)
 
-static void
-neon_smgr_shmem_startup(void)
+static HTAB *relsize_hash;
+static LWLockId relsize_lock;
+static int	relsize_hash_size = DEFAULT_RELSIZE_HASH_SIZE;
+static RelSizeHashControl* relsize_ctl;
+
+void
+RelsizeCacheShmemInit(void)
 {
 	static HASHCTL info;
 	bool found;
 
-	if (prev_shmem_startup_hook)
-		prev_shmem_startup_hook();
-
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	relsize_ctl = (RelSizeHashControl *) ShmemInitStruct("relsize_hash", sizeof(RelSizeHashControl), &found);
 	if (!found)
 	{
@@ -86,7 +75,6 @@ neon_smgr_shmem_startup(void)
 									 relsize_hash_size, relsize_hash_size,
 									 &info,
 									 HASH_ELEM | HASH_BLOBS);
-		LWLockRelease(AddinShmemInitLock);
 		relsize_ctl->size = 0;
 		relsize_ctl->hits = 0;
 		relsize_ctl->misses = 0;
@@ -100,7 +88,7 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 {
 	bool		found = false;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (relsize_hash_size > 0)
 	{
@@ -133,7 +121,7 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 void
 set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (relsize_hash_size > 0)
 	{
@@ -183,7 +171,7 @@ set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 void
 update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (relsize_hash_size > 0)
 	{
@@ -219,7 +207,7 @@ update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 void
 forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
 {
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (relsize_hash_size > 0)
 	{
@@ -251,34 +239,15 @@ relsize_hash_init(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
-
-	if (relsize_hash_size > 0)
-	{
-#if PG_VERSION_NUM >= 150000
-		prev_shmem_request_hook = shmem_request_hook;
-		shmem_request_hook = relsize_shmem_request;
-#else
-		RequestAddinShmemSpace(hash_estimate_size(relsize_hash_size, sizeof(RelSizeEntry)));
-		RequestNamedLWLockTranche("neon_relsize", 1);
-#endif
-
-		prev_shmem_startup_hook = shmem_startup_hook;
-		shmem_startup_hook = neon_smgr_shmem_startup;
-	}
 }
 
-#if PG_VERSION_NUM >= 150000
 /*
  * shmem_request hook: request additional shared resources.  We'll allocate or
  * attach to the shared resources in neon_smgr_shmem_startup().
  */
-static void
-relsize_shmem_request(void)
+void
+RelsizeCacheShmemRequest(void)
 {
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-
 	RequestAddinShmemSpace(sizeof(RelSizeHashControl) + hash_estimate_size(relsize_hash_size, sizeof(RelSizeEntry)));
 	RequestNamedLWLockTranche("neon_relsize", 1);
 }
-#endif

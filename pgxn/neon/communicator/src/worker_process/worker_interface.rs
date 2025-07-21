@@ -10,6 +10,8 @@ use crate::init::CommunicatorInitStruct;
 use crate::worker_process::main_loop;
 use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 
+use pageserver_client_grpc::ShardStripeSize;
+
 /// Launch the communicator's tokio tasks, which do most of the work.
 ///
 /// The caller has initialized the process as a regular PostgreSQL
@@ -24,9 +26,11 @@ pub extern "C" fn communicator_worker_process_launch(
     auth_token: *const c_char,
     shard_map: *mut *mut c_char,
     nshards: u32,
+    stripe_size: u32,
     file_cache_path: *const c_char,
     initial_file_cache_size: u64,
 ) -> &'static CommunicatorWorkerProcessStruct<'static> {
+    tracing::warn!("starting threads in rust code");
     // Convert the arguments into more convenient Rust types
     let tenant_id = unsafe { CStr::from_ptr(tenant_id) }.to_str().unwrap();
     let timeline_id = unsafe { CStr::from_ptr(timeline_id) }.to_str().unwrap();
@@ -48,7 +52,7 @@ pub extern "C" fn communicator_worker_process_launch(
             Some(PathBuf::from(c_str.to_str().unwrap()))
         }
     };
-    let shard_map = parse_shard_map(nshards, shard_map);
+    let shard_map = shard_map_to_hash(nshards, shard_map);
 
     // start main loop
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -63,6 +67,11 @@ pub extern "C" fn communicator_worker_process_launch(
         timeline_id.to_string(),
         auth_token,
         shard_map,
+        if stripe_size > 0 {
+            Some(ShardStripeSize(stripe_size))
+        } else {
+            None
+        },
         initial_file_cache_size,
         file_cache_path,
     ));
@@ -84,7 +93,7 @@ pub extern "C" fn communicator_worker_process_launch(
 }
 
 /// Convert the "shard map" from an array of C strings, indexed by shard no to a rust HashMap
-fn parse_shard_map(
+fn shard_map_to_hash(
     nshards: u32,
     shard_map: *mut *mut c_char,
 ) -> HashMap<utils::shard::ShardIndex, String> {
@@ -116,6 +125,11 @@ fn parse_shard_map(
 pub extern "C" fn communicator_worker_config_reload(
     proc_handle: &'static CommunicatorWorkerProcessStruct<'static>,
     file_cache_size: u64,
+    shard_map: *mut *mut c_char,
+    nshards: u32,
 ) {
     proc_handle.cache.resize_file_cache(file_cache_size as u32);
+
+    let shard_map = shard_map_to_hash(nshards, shard_map);
+    proc_handle.update_shard_map(shard_map);
 }

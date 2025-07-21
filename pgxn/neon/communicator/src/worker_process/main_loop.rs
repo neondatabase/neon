@@ -4,7 +4,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::str::FromStr as _;
 
-use crate::backend_comms::NeonIOHandle;
+use crate::backend_comms::NeonIORequestSlot;
 use crate::file_cache::FileCache;
 use crate::global_allocator::MyAllocatorCollector;
 use crate::init::CommunicatorInitStruct;
@@ -12,7 +12,7 @@ use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
-use pageserver_client_grpc::{PageserverClient, ShardSpec};
+use pageserver_client_grpc::{PageserverClient, ShardSpec, ShardStripeSize};
 use pageserver_page_api as page_api;
 
 use metrics::{IntCounter, IntCounterVec};
@@ -24,26 +24,41 @@ use utils::id::{TenantId, TimelineId};
 
 use super::callbacks::{get_request_lsn, notify_proc};
 
-use tracing::{error, info, info_span, trace};
+use tracing::{debug, error, info, info_span, trace};
 
 use utils::lsn::Lsn;
 
 pub struct CommunicatorWorkerProcessStruct<'a> {
-    neon_request_slots: &'a [NeonIOHandle],
+    /// Tokio runtime that the main loop and any other related tasks runs in.
+    runtime: tokio::runtime::Handle,
 
+    /// Client to communicate with the pageserver
     client: PageserverClient,
 
-    pub(crate) cache: IntegratedCacheWriteAccess<'a>,
+    /// Request slots that backends use to send IO requests to the communicator.
+    neon_request_slots: &'a [NeonIORequestSlot],
 
+    /// Notification pipe. Backends use this to notify the communicator that a request is waiting to
+    /// be processed in one of the request slots.
     submission_pipe_read_fd: OwnedFd,
 
+    /// Locking table for all in-progress IO requests.
     in_progress_table: RequestInProgressTable,
 
-    // Metrics
+    /// Local File Cache, relation size tracking, last-written LSN tracking
+    pub(crate) cache: IntegratedCacheWriteAccess<'a>,
+
+    /*** Static configuration ***/
+    /// Stripe size doesn't change after startup. (The shard map is not stored here, it's passed
+    /// directly to the client)
+    stripe_size: Option<ShardStripeSize>,
+
+    /*** Metrics ***/
     request_counters: IntCounterVec,
     request_rel_exists_counter: IntCounter,
     request_rel_size_counter: IntCounter,
     request_get_pagev_counter: IntCounter,
+    request_read_slru_segment_counter: IntCounter,
     request_prefetchv_counter: IntCounter,
     request_db_size_counter: IntCounter,
     request_write_page_counter: IntCounter,
@@ -70,6 +85,7 @@ pub(super) async fn init(
     timeline_id: String,
     auth_token: Option<String>,
     shard_map: HashMap<utils::shard::ShardIndex, String>,
+    stripe_size: Option<ShardStripeSize>,
     initial_file_cache_size: u64,
     file_cache_path: Option<PathBuf>,
 ) -> CommunicatorWorkerProcessStruct<'static> {
@@ -91,11 +107,12 @@ pub(super) async fn init(
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
 
-    // TODO: plumb through the stripe size.
+    debug!("Initialised integrated cache: {cache:?}");
+
     let tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
     let timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
-    let shard_spec = ShardSpec::new(shard_map, None).expect("invalid shard spec");
-    let client = PageserverClient::new(tenant_id, timeline_id, shard_spec, auth_token)
+    let shard_spec = ShardSpec::new(shard_map, stripe_size).expect("invalid shard spec");
+    let client = PageserverClient::new(tenant_id, timeline_id, shard_spec, auth_token, None)
         .expect("could not create client");
 
     let request_counters = IntCounterVec::new(
@@ -109,6 +126,8 @@ pub(super) async fn init(
     let request_rel_exists_counter = request_counters.with_label_values(&["rel_exists"]);
     let request_rel_size_counter = request_counters.with_label_values(&["rel_size"]);
     let request_get_pagev_counter = request_counters.with_label_values(&["get_pagev"]);
+    let request_read_slru_segment_counter =
+        request_counters.with_label_values(&["read_slru_segment"]);
     let request_prefetchv_counter = request_counters.with_label_values(&["prefetchv"]);
     let request_db_size_counter = request_counters.with_label_values(&["db_size"]);
     let request_write_page_counter = request_counters.with_label_values(&["write_page"]);
@@ -146,6 +165,8 @@ pub(super) async fn init(
         request_nblocks_counters.with_label_values(&["rel_zero_extend"]);
 
     CommunicatorWorkerProcessStruct {
+        runtime: tokio::runtime::Handle::current(),
+        stripe_size,
         neon_request_slots: cis.neon_request_slots,
         client,
         cache,
@@ -157,6 +178,7 @@ pub(super) async fn init(
         request_rel_exists_counter,
         request_rel_size_counter,
         request_get_pagev_counter,
+        request_read_slru_segment_counter,
         request_prefetchv_counter,
         request_db_size_counter,
         request_write_page_counter,
@@ -179,6 +201,22 @@ pub(super) async fn init(
 }
 
 impl<'t> CommunicatorWorkerProcessStruct<'t> {
+    /// Update the configuration
+    pub(super) fn update_shard_map(
+        &self,
+        new_shard_map: HashMap<utils::shard::ShardIndex, String>,
+    ) {
+        let shard_spec =
+            ShardSpec::new(new_shard_map, self.stripe_size.clone()).expect("invalid shard spec");
+
+        {
+            let _in_runtime = self.runtime.enter();
+            if let Err(err) = self.client.update_shards(shard_spec) {
+                tracing::error!("could not update shard map: {err:?}");
+            }
+        }
+    }
+
     /// Main loop of the worker process. Receive requests from the backends and process them.
     pub(super) async fn run(&'static self) {
         let mut idxbuf: [u8; 4] = [0; 4];
@@ -259,9 +297,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
         // Is it possible that the last-written LSN is ahead of last flush LSN? Generally not, we
         // shouldn't evict a page from the buffer cache before all its modifications have been
-        // safely flushed. That's the "WAL before data" rule. However, such case does exist at index
-        // building: _bt_blwritepage logs the full page without flushing WAL before smgrextend
-        // (files are fsynced before build ends).
+        // safely flushed. That's the "WAL before data" rule. However, there are a few exceptions:
+        //
+        // - when creation an index: _bt_blwritepage logs the full page without flushing WAL before
+        // smgrextend (files are fsynced before build ends).
         //
         // XXX: If we make a request LSN greater than the current WAL flush LSN, the pageserver would
         // block waiting for the WAL arrive, until we flush it and it propagates through the
@@ -359,8 +398,14 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 {
                     Ok(nblocks) => {
                         // update the cache
-                        tracing::info!("updated relsize for {:?} in cache: {}", rel, nblocks);
-                        self.cache.remember_rel_size(&rel, nblocks);
+                        tracing::info!(
+                            "updated relsize for {:?} in cache: {}, lsn {}",
+                            rel,
+                            nblocks,
+                            read_lsn
+                        );
+                        self.cache
+                            .remember_rel_size(&rel, nblocks, not_modified_since);
 
                         NeonIOResult::RelSize(nblocks)
                     }
@@ -377,6 +422,36 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 match self.handle_get_pagev_request(req).await {
                     Ok(()) => NeonIOResult::GetPageV,
                     Err(errno) => NeonIOResult::Error(errno),
+                }
+            }
+            NeonIORequest::ReadSlruSegment(req) => {
+                self.request_read_slru_segment_counter.inc();
+                let lsn = Lsn(req.request_lsn);
+                let file_path = req.destination_file_path();
+
+                match self
+                    .client
+                    .get_slru_segment(page_api::GetSlruSegmentRequest {
+                        read_lsn: self.request_lsns(lsn),
+                        kind: req.slru_kind,
+                        segno: req.segment_number,
+                    })
+                    .await
+                {
+                    Ok(slru_bytes) => {
+                        if let Err(e) = tokio::fs::write(&file_path, &slru_bytes).await {
+                            info!("could not write slru segment to file {file_path}: {e}");
+                            return NeonIOResult::Error(e.raw_os_error().unwrap_or(libc::EIO));
+                        }
+
+                        let blocks_count = slru_bytes.len() / crate::BLCKSZ;
+
+                        NeonIOResult::ReadSlruSegment(blocks_count as _)
+                    }
+                    Err(err) => {
+                        info!("tonic error: {err:?}");
+                        NeonIOResult::Error(0)
+                    }
                 }
             }
             NeonIORequest::PrefetchV(req) => {
@@ -457,7 +532,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     .remember_page(&rel, req.block_number, req.src, Lsn(req.lsn), true)
                     .await;
                 self.cache
-                    .remember_rel_size(&req.reltag(), req.block_number + 1);
+                    .remember_rel_size(&req.reltag(), req.block_number + 1, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelZeroExtend(req) => {
@@ -466,31 +541,42 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     .inc_by(req.nblocks as u64);
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                // TODO: I think we should put the empty pages to the cache, or at least
-                // update the last-written LSN.
-                self.cache
-                    .remember_rel_size(&req.reltag(), req.block_number + req.nblocks);
+                // TODO: We could put the empty pages to the cache. Maybe have
+                // a marker on the block entries for all-zero pages, instead of
+                // actually storing the empty pages.
+                self.cache.remember_rel_size(
+                    &req.reltag(),
+                    req.block_number + req.nblocks,
+                    Lsn(req.lsn),
+                );
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelCreate(req) => {
                 self.request_rel_create_counter.inc();
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                self.cache.remember_rel_size(&req.reltag(), 0);
+                self.cache.remember_rel_size(&req.reltag(), 0, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelTruncate(req) => {
                 self.request_rel_truncate_counter.inc();
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                self.cache.remember_rel_size(&req.reltag(), req.nblocks);
+                self.cache
+                    .remember_rel_size(&req.reltag(), req.nblocks, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelUnlink(req) => {
                 self.request_rel_unlink_counter.inc();
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
-                self.cache.forget_rel(&req.reltag());
+                self.cache.forget_rel(&req.reltag(), None, Lsn(req.lsn));
+                NeonIOResult::WriteOK
+            }
+            NeonIORequest::UpdateCachedRelSize(req) => {
+                // TODO: need to grab an io-in-progress lock for this? I guess not
+                self.cache
+                    .remember_rel_size(&req.reltag(), req.nblocks, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
         }
@@ -560,7 +646,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         match self
             .client
             .get_page(page_api::GetPageRequest {
-                request_id: req.request_id,
+                request_id: req.request_id.into(),
                 request_class: page_api::GetPageClass::Normal,
                 read_lsn,
                 rel,
@@ -571,18 +657,23 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             Ok(resp) => {
                 // Write the received page images directly to the shared memory location
                 // that the backend requested.
-                if resp.page_images.len() != block_numbers.len() {
+                if resp.pages.len() != block_numbers.len() {
                     error!(
                         "received unexpected response with {} page images from pageserver for a request for {} pages",
-                        resp.page_images.len(),
+                        resp.pages.len(),
                         block_numbers.len(),
                     );
                     return Err(-1);
                 }
-                for (page_image, (blkno, _lsn, dest, _guard)) in
-                    resp.page_images.into_iter().zip(cache_misses)
+
+                info!(
+                    "received getpage response for blocks {:?} in rel {:?} lsns {}",
+                    block_numbers, rel, read_lsn
+                );
+
+                for (page, (blkno, _lsn, dest, _guard)) in resp.pages.into_iter().zip(cache_misses)
                 {
-                    let src: &[u8] = page_image.as_ref();
+                    let src: &[u8] = page.image.as_ref();
                     let len = std::cmp::min(src.len(), dest.bytes_total());
                     unsafe {
                         std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
@@ -593,7 +684,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         .remember_page(
                             &rel,
                             blkno,
-                            page_image,
+                            page.image,
                             read_lsn.not_modified_since_lsn.unwrap(),
                             false,
                         )
@@ -656,7 +747,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         match self
             .client
             .get_page(page_api::GetPageRequest {
-                request_id: req.request_id,
+                request_id: req.request_id.into(),
                 request_class: page_api::GetPageClass::Prefetch,
                 read_lsn: self.request_lsns(not_modified_since),
                 rel,
@@ -669,20 +760,18 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     "prefetch completed, remembering blocks {:?} in rel {:?} in LFC",
                     block_numbers, rel
                 );
-                if resp.page_images.len() != block_numbers.len() {
+                if resp.pages.len() != block_numbers.len() {
                     error!(
                         "received unexpected response with {} page images from pageserver for a request for {} pages",
-                        resp.page_images.len(),
+                        resp.pages.len(),
                         block_numbers.len(),
                     );
                     return Err(-1);
                 }
 
-                for (page_image, (blkno, _lsn, _guard)) in
-                    resp.page_images.into_iter().zip(cache_misses)
-                {
+                for (page, (blkno, _lsn, _guard)) in resp.pages.into_iter().zip(cache_misses) {
                     self.cache
-                        .remember_page(&rel, blkno, page_image, not_modified_since, false)
+                        .remember_page(&rel, blkno, page.image, not_modified_since, false)
                         .await;
                 }
             }

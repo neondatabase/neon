@@ -134,15 +134,6 @@ typedef struct FileCacheEntry
 #define N_COND_VARS 	64
 #define CV_WAIT_TIMEOUT	10
 
-#define MAX_PREWARM_WORKERS 8
-
-typedef struct PrewarmWorkerState
-{
-	uint32		prewarmed_pages;
-	uint32		skipped_pages;
-	TimestampTz completed;
-} PrewarmWorkerState;
-
 typedef struct FileCacheControl
 {
 	uint64		generation;		/* generation is needed to handle correct hash
@@ -162,46 +153,50 @@ typedef struct FileCacheControl
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 	dlist_head  holes;          /* double linked list of punched holes */
-	HyperLogLogState wss_estimation; /* estimation of working set size */
+
 	ConditionVariable cv[N_COND_VARS]; /* turnstile of condition variables */
-	PrewarmWorkerState prewarm_workers[MAX_PREWARM_WORKERS];
-	size_t n_prewarm_workers;
-	size_t n_prewarm_entries;
-	size_t total_prewarm_pages;
-	size_t prewarm_batch;
-	bool   prewarm_active;
-	bool   prewarm_canceled;
-	dsm_handle prewarm_lfc_state_handle;
+
+	/*
+	 * Estimation of working set size.
+	 *
+	 * This is not guarded by the lock. No locking is needed because all the
+	 * writes to the "registers" are simple 64-bit stores, to update a
+	 * timestamp. We assume that:
+	 *
+	 * - 64-bit stores are atomic. We could enforce that by using
+	 *   pg_atomic_uint64 instead of TimestampTz as the datatype in hll.h, but
+	 *   for now we just rely on it implicitly.
+	 *
+	 * - Even if they're not, and there is a race between two stores, it
+	 *   doesn't matter much which one wins because they're both updating the
+	 *   register with the current timestamp. Or you have a race between
+	 *   resetting the register and updating it, in which case it also doesn't
+	 *   matter much which one wins.
+	 *
+	 * - If they're not atomic, you might get an occasional "torn write" if
+	 *   you're really unlucky, but we tolerate that too. It just means that
+	 *   the estimate will be a little off, until the register is updated
+	 *   again.
+	 */
+	HyperLogLogState wss_estimation;
 } FileCacheControl;
-
-#define FILE_CACHE_STATE_MAGIC 0xfcfcfcfc
-
-#define FILE_CACHE_STATE_BITMAP(fcs)	((uint8*)&(fcs)->chunks[(fcs)->n_chunks])
-#define FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_chunks)	(sizeof(FileCacheState) + (n_chunks)*sizeof(BufferTag) + (((n_chunks) * lfc_blocks_per_chunk)+7)/8)
-#define FILE_CACHE_STATE_SIZE(fcs)		(sizeof(FileCacheState) + (fcs->n_chunks)*sizeof(BufferTag) + (((fcs->n_chunks) << fcs->chunk_size_log)+7)/8)
 
 static HTAB *lfc_hash;
 static int	lfc_desc = -1;
 static LWLockId lfc_lock;
 int	lfc_max_size;
 int	lfc_size_limit;
-static int	lfc_prewarm_limit;
-static int	lfc_prewarm_batch;
 static int	lfc_chunk_size_log = MAX_BLOCKS_PER_CHUNK_LOG;
 static int	lfc_blocks_per_chunk = MAX_BLOCKS_PER_CHUNK;
 char *lfc_path;
 static uint64 lfc_generation;
 static FileCacheControl *lfc_ctl;
-static bool lfc_do_prewarm;
-static shmem_startup_hook_type prev_shmem_startup_hook;
-#if PG_VERSION_NUM>=150000
-static shmem_request_hook_type prev_shmem_request_hook;
-#endif
 
 bool lfc_store_prefetch_result;
 bool lfc_prewarm_update_ws_estimation;
 
-bool AmPrewarmWorker;
+bool lfc_do_prewarm;
+bool lfc_prewarm_cancel;
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
 
@@ -230,7 +225,7 @@ lfc_switch_off(void)
 {
 	int			fd;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (LFC_ENABLED())
 	{
@@ -297,7 +292,7 @@ lfc_maybe_disabled(void)
 static bool
 lfc_ensure_opened(void)
 {
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_generation != lfc_ctl->generation)
 	{
@@ -318,20 +313,17 @@ lfc_ensure_opened(void)
 	return true;
 }
 
-static void
-lfc_shmem_startup(void)
+void
+LfcShmemInit(void)
 {
 	bool		found;
 	static HASHCTL info;
 
-	Assert(!neon_enable_new_communicator);
+	if (neon_use_communicator_worker)
+		return;
 
-	if (prev_shmem_startup_hook)
-	{
-		prev_shmem_startup_hook();
-	}
-
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	if (lfc_max_size <= 0)
+		return;
 
 	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
 	if (!found)
@@ -376,19 +368,16 @@ lfc_shmem_startup(void)
 			ConditionVariableInit(&lfc_ctl->cv[i]);
 
 	}
-	LWLockRelease(AddinShmemInitLock);
 }
 
-static void
-lfc_shmem_request(void)
+void
+LfcShmemRequest(void)
 {
-#if PG_VERSION_NUM>=150000
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-#endif
-
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
-	RequestNamedLWLockTranche("lfc_lock", 1);
+	if (lfc_max_size > 0)
+	{
+		RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
+		RequestNamedLWLockTranche("lfc_lock", 1);
+	}
 }
 
 static bool
@@ -522,7 +511,6 @@ lfc_init(void)
 	if (!process_shared_preload_libraries_in_progress)
 		neon_log(ERROR, "Neon module should be loaded via shared_preload_libraries");
 
-
 	DefineCustomBoolVariable("neon.store_prefetch_result_in_lfc",
 							"Immediately store received prefetch result in LFC",
 							NULL,
@@ -594,49 +582,13 @@ lfc_init(void)
 							lfc_check_chunk_size,
 							lfc_change_chunk_size,
 							NULL);
-
-	DefineCustomIntVariable("neon.file_cache_prewarm_limit",
-							"Maximal number of prewarmed chunks",
-							NULL,
-							&lfc_prewarm_limit,
-							INT_MAX,	/* no limit by default */
-							0,
-							INT_MAX,
-							PGC_SIGHUP,
-							0,
-							NULL,
-							NULL,
-							NULL);
-
-	DefineCustomIntVariable("neon.file_cache_prewarm_batch",
-							"Number of pages retrivied by prewarm from page server",
-							NULL,
-							&lfc_prewarm_batch,
-							64,
-							1,
-							INT_MAX,
-							PGC_SIGHUP,
-							0,
-							NULL,
-							NULL,
-							NULL);
-
-	if (lfc_max_size == 0)
-		return;
-
-	if (neon_enable_new_communicator)
-		return;
-
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = lfc_shmem_startup;
-#if PG_VERSION_NUM>=150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = lfc_shmem_request;
-#else
-	lfc_shmem_request();
-#endif
 }
 
+/*
+ * Dump a list of pages that are currently in the LFC
+ *
+ * This is used to get a snapshot that can be used to prewarm the LFC later.
+ */
 FileCacheState*
 lfc_get_state(size_t max_entries)
 {
@@ -654,7 +606,7 @@ lfc_get_state(size_t max_entries)
 		uint8* bitmap;
 		size_t n_pages = 0;
 		size_t n_entries = Min(max_entries, lfc_ctl->used - lfc_ctl->pinned);
-		size_t state_size = FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_entries);
+		size_t state_size = FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_entries, lfc_blocks_per_chunk);
 		fcs = (FileCacheState*)palloc0(state_size);
 		SET_VARSIZE(fcs, state_size);
 		fcs->magic = FILE_CACHE_STATE_MAGIC;
@@ -688,270 +640,6 @@ lfc_get_state(size_t max_entries)
 	return fcs;
 }
 
-/*
- * Prewarm LFC cache to the specified state. It uses lfc_prefetch function to load prewarmed page without hoilding shared buffer lock
- * and avoid race conditions with other backends.
- */
-void
-lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
-{
-	size_t fcs_chunk_size_log;
-	size_t n_entries;
-	size_t prewarm_batch = Min(lfc_prewarm_batch, readahead_buffer_size);
-	size_t fcs_size;
-	dsm_segment *seg;
-	BackgroundWorkerHandle* bgw_handle[MAX_PREWARM_WORKERS];
-
-	Assert(!neon_enable_new_communicator);
-
-	if (!lfc_ensure_opened())
-		return;
-
-	if (prewarm_batch == 0 || lfc_prewarm_limit == 0 || n_workers == 0)
-	{
-		elog(LOG, "LFC: prewarm is disabled");
-		return;
-	}
-
-	if (n_workers > MAX_PREWARM_WORKERS)
-	{
-		elog(ERROR, "LFC: Too much prewarm workers, maximum is %d", MAX_PREWARM_WORKERS);
-	}
-
-	if (fcs == NULL || fcs->n_chunks == 0)
-	{
-		elog(LOG, "LFC: nothing to prewarm");
-		return;
-	}
-
-	if (fcs->magic != FILE_CACHE_STATE_MAGIC)
-	{
-		elog(ERROR, "LFC: Invalid file cache state magic: %X", fcs->magic);
-	}
-
-	fcs_size = VARSIZE(fcs);
-	if (FILE_CACHE_STATE_SIZE(fcs) != fcs_size)
-	{
-		elog(ERROR, "LFC: Invalid file cache state size: %u vs. %u", (unsigned)FILE_CACHE_STATE_SIZE(fcs), VARSIZE(fcs));
-	}
-
-	fcs_chunk_size_log = fcs->chunk_size_log;
-	if (fcs_chunk_size_log > MAX_BLOCKS_PER_CHUNK_LOG)
-	{
-		elog(ERROR, "LFC: Invalid chunk size log: %u", fcs->chunk_size_log);
-	}
-
-	n_entries = Min(fcs->n_chunks, lfc_prewarm_limit);
-	Assert(n_entries != 0);
-
-	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-
-	/* Do not prewarm more entries than LFC limit */
-	if (lfc_ctl->limit <= lfc_ctl->size)
-	{
-		elog(LOG, "LFC: skip prewarm because LFC is already filled");
-		LWLockRelease(lfc_lock);
-		return;
-	}
-
-	if (lfc_ctl->prewarm_active)
-	{
-		LWLockRelease(lfc_lock);
-		elog(ERROR, "LFC: skip prewarm because another prewarm is still active");
-	}
-	lfc_ctl->n_prewarm_entries = n_entries;
-	lfc_ctl->n_prewarm_workers = n_workers;
-	lfc_ctl->prewarm_active = true;
-	lfc_ctl->prewarm_canceled = false;
-	lfc_ctl->prewarm_batch = prewarm_batch;
-	memset(lfc_ctl->prewarm_workers, 0, n_workers*sizeof(PrewarmWorkerState));
-
-	LWLockRelease(lfc_lock);
-
-	/* Calculate total number of pages to be prewarmed */
-	lfc_ctl->total_prewarm_pages = fcs->n_pages;
-
-	seg = dsm_create(fcs_size, 0);
-	memcpy(dsm_segment_address(seg), fcs, fcs_size);
-	lfc_ctl->prewarm_lfc_state_handle = dsm_segment_handle(seg);
-
-	/* Spawn background workers */
-	for (uint32 i = 0; i < n_workers; i++)
-	{
-		BackgroundWorker worker = {0};
-
-		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
-		worker.bgw_start_time = BgWorkerStart_ConsistentState;
-		worker.bgw_restart_time = BGW_NEVER_RESTART;
-		strcpy(worker.bgw_library_name, "neon");
-		strcpy(worker.bgw_function_name, "lfc_prewarm_main");
-		snprintf(worker.bgw_name, BGW_MAXLEN, "LFC prewarm worker %d", i+1);
-		strcpy(worker.bgw_type, "LFC prewarm worker");
-		worker.bgw_main_arg = Int32GetDatum(i);
-		/* must set notify PID to wait for shutdown */
-		worker.bgw_notify_pid = MyProcPid;
-
-		if (!RegisterDynamicBackgroundWorker(&worker, &bgw_handle[i]))
-		{
-			ereport(LOG,
-					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-					 errmsg("LFC: registering dynamic bgworker prewarm failed"),
-					 errhint("Consider increasing the configuration parameter \"%s\".", "max_worker_processes")));
-			n_workers = i;
-			lfc_ctl->prewarm_canceled = true;
-			break;
-		}
-	}
-
-	for (uint32 i = 0; i < n_workers; i++)
-	{
-		bool interrupted;
-		do
-		{
-			interrupted = false;
-			PG_TRY();
-			{
-				BgwHandleStatus status = WaitForBackgroundWorkerShutdown(bgw_handle[i]);
-				if (status != BGWH_STOPPED && status != BGWH_POSTMASTER_DIED)
-				{
-					elog(LOG, "LFC: Unexpected status of prewarm worker termination: %d", status);
-				}
-			}
-			PG_CATCH();
-			{
-				elog(LOG, "LFC: cancel prewarm");
-				lfc_ctl->prewarm_canceled = true;
-				interrupted = true;
-			}
-			PG_END_TRY();
-		} while (interrupted);
-
-		if (!lfc_ctl->prewarm_workers[i].completed)
-		{
-			/* Background worker doesn't set completion time: it means that it was abnormally terminated */
-			elog(LOG, "LFC: prewarm worker %d failed", i+1);
-			/* Set completion time to prevent get_prewarm_info from considering this worker as active */
-			lfc_ctl->prewarm_workers[i].completed = GetCurrentTimestamp();
-		}
-	}
-	dsm_detach(seg);
-
-	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-	lfc_ctl->prewarm_active = false;
-	LWLockRelease(lfc_lock);
-}
-
-void
-lfc_prewarm_main(Datum main_arg)
-{
-	size_t snd_idx = 0, rcv_idx = 0;
-	size_t n_sent = 0, n_received = 0;
-	size_t fcs_chunk_size_log;
-	size_t max_prefetch_pages;
-	size_t prewarm_batch;
-	size_t n_workers;
-	dsm_segment *seg;
-	FileCacheState* fcs;
-	uint8* bitmap;
-	BufferTag tag;
-	PrewarmWorkerState* ws;
-	uint32 worker_id = DatumGetInt32(main_arg);
-
-	Assert(!neon_enable_new_communicator);
-
-	AmPrewarmWorker = true;
-
-	pqsignal(SIGTERM, die);
-	BackgroundWorkerUnblockSignals();
-
-	seg = dsm_attach(lfc_ctl->prewarm_lfc_state_handle);
-	if (seg == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("could not map dynamic shared memory segment")));
-
-	fcs = (FileCacheState*) dsm_segment_address(seg);
-	prewarm_batch = lfc_ctl->prewarm_batch;
-	fcs_chunk_size_log = fcs->chunk_size_log;
-	n_workers = lfc_ctl->n_prewarm_workers;
-	max_prefetch_pages = lfc_ctl->n_prewarm_entries << fcs_chunk_size_log;
-	ws = &lfc_ctl->prewarm_workers[worker_id];
-	bitmap = FILE_CACHE_STATE_BITMAP(fcs);
-
-	/* enable prefetch in LFC */
-	lfc_store_prefetch_result = true;
-	lfc_do_prewarm = true; /* Flag for lfc_prefetch preventing replacement of existed entries if LFC cache is full */
-
-	elog(LOG, "LFC: worker %d start prewarming", worker_id);
-	while (!lfc_ctl->prewarm_canceled)
-	{
-		if (snd_idx < max_prefetch_pages)
-		{
-			if ((snd_idx >> fcs_chunk_size_log) % n_workers != worker_id)
-			{
-				/* If there are multiple workers, split chunks between them */
-				snd_idx += 1 << fcs_chunk_size_log;
-			}
-			else
-			{
-				if (BITMAP_ISSET(bitmap, snd_idx))
-				{
-					tag = fcs->chunks[snd_idx >> fcs_chunk_size_log];
-					tag.blockNum += snd_idx & ((1 << fcs_chunk_size_log) - 1);
-					if (!lfc_cache_contains(BufTagGetNRelFileInfo(tag), tag.forkNum, tag.blockNum))
-					{
-						(void)communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
-						n_sent += 1;
-					}
-					else
-					{
-						ws->skipped_pages += 1;
-						BITMAP_CLR(bitmap, snd_idx);
-					}
-				}
-				snd_idx += 1;
-			}
-		}
-		if (n_sent >= n_received + prewarm_batch || snd_idx == max_prefetch_pages)
-		{
-			if (n_received == n_sent && snd_idx == max_prefetch_pages)
-			{
-				break;
-			}
-			if ((rcv_idx >> fcs_chunk_size_log) % n_workers != worker_id)
-			{
-				/* Skip chunks processed by other workers */
-				rcv_idx += 1 << fcs_chunk_size_log;
-				continue;
-			}
-
-			/* Locate next block to prefetch */
-			while (!BITMAP_ISSET(bitmap, rcv_idx))
-			{
-				rcv_idx += 1;
-			}
-			tag = fcs->chunks[rcv_idx >> fcs_chunk_size_log];
-			tag.blockNum += rcv_idx & ((1 << fcs_chunk_size_log) - 1);
-			if (communicator_prefetch_receive(tag))
-			{
-				ws->prewarmed_pages += 1;
-			}
-			else
-			{
-				ws->skipped_pages += 1;
-			}
-			rcv_idx += 1;
-			n_received += 1;
-		}
-	}
-	/* No need to perform prefetch cleanup here because prewarm worker will be terminated and
-	 * connection to PS dropped just after return from this function.
-	 */
-	Assert(n_sent == n_received || lfc_ctl->prewarm_canceled);
-	elog(LOG, "LFC: worker %d complete prewarming: loaded %ld pages", worker_id, (long)n_received);
-	lfc_ctl->prewarm_workers[worker_id].completed = GetCurrentTimestamp();
-}
-
 void
 lfc_invalidate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks)
 {
@@ -959,7 +647,7 @@ lfc_invalidate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks)
 	FileCacheEntry *entry;
 	uint32		hash;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return;
@@ -1006,7 +694,7 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	bool		found = false;
 	uint32		hash;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return false;
@@ -1043,7 +731,7 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	uint32		hash;
 	int			i = 0;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return 0;
@@ -1152,7 +840,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	int			blocks_read = 0;
 	int			buf_offset = 0;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return -1;
@@ -1161,6 +849,13 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	tag.forkNum = forkNum;
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+
+	/* Update working set size estimate for the blocks */
+	for (int i = 0; i < nblocks; i++)
+	{
+		tag.blockNum = blkno + i;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
 
 	/*
 	 * For every chunk that has blocks we're interested in, we
@@ -1240,14 +935,6 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
-
-		/* Approximate working set for the blocks assumed in this entry */
-		for (int i = 0; i < blocks_in_chunk; i++)
-		{
-			tag.blockNum = blkno + i;
-			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-		}
-
 		if (entry == NULL)
 		{
 			/* Pages are not cached */
@@ -1465,7 +1152,7 @@ lfc_init_new_entry(FileCacheEntry* entry, uint32 hash)
 		/* Can't add this chunk - we don't have the space for it */
 		hash_search_with_hash_value(lfc_hash, &entry->key, hash,
 									HASH_REMOVE, NULL);
-		lfc_ctl->prewarm_canceled = true; /* cancel prewarm if LFC limit is reached */
+		lfc_prewarm_cancel = true; /* cancel prewarm if LFC limit is reached */
 		return false;
 	}
 
@@ -1520,15 +1207,21 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	int		chunk_offs = BLOCK_TO_CHUNK_OFF(blkno);
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return false;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	tag.forkNum = forknum;
 
-	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	/* Update working set size estimate for the blocks */
+	if (lfc_prewarm_update_ws_estimation)
+	{
+		tag.blockNum = blkno;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
 
 	tag.blockNum = blkno - chunk_offs;
 	hash = get_hash_value(lfc_hash, &tag);
@@ -1546,19 +1239,13 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	if (lwlsn > lsn)
 	{
-		elog(DEBUG1, "Skip LFC write for %d because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",
+		elog(DEBUG1, "Skip LFC write for %u because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",
 			 blkno, LSN_FORMAT_ARGS(lwlsn), LSN_FORMAT_ARGS(lsn));
 		LWLockRelease(lfc_lock);
 		return false;
 	}
 
 	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
-
-	if (lfc_prewarm_update_ws_estimation)
-	{
-		tag.blockNum = blkno;
-		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-	}
 	if (found)
 	{
 		state = GET_STATE(entry, chunk_offs);
@@ -1667,15 +1354,21 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	uint32		entry_offset;
 	int			buf_offset = 0;
 
-	Assert(!neon_enable_new_communicator);
+	Assert(!neon_use_communicator_worker);
 
 	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
 		return;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	tag.forkNum = forkNum;
 
-	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	/* Update working set size estimate for the blocks */
+	for (int i = 0; i < nblocks; i++)
+	{
+		tag.blockNum = blkno + i;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
@@ -1716,14 +1409,6 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		cv = &lfc_ctl->cv[hash % N_COND_VARS];
 
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
-
-		/* Approximate working set for the blocks assumed in this entry */
-		for (int i = 0; i < blocks_in_chunk; i++)
-		{
-			tag.blockNum = blkno + i;
-			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-		}
-
 		if (found)
 		{
 			/*
@@ -2159,136 +1844,21 @@ local_cache_pages(PG_FUNCTION_ARGS)
 		SRF_RETURN_DONE(funcctx);
 }
 
-PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
 
-Datum
-approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
+/*
+ * Internal implementation of the approximate_working_set_size_seconds()
+ * function.
+ */
+int32
+lfc_approximate_working_set_size_seconds(time_t duration, bool reset)
 {
-	if (neon_enable_new_communicator)
-		elog(ERROR, "TODO: not implemented");
-
-	if (lfc_size_limit != 0)
-	{
-		int32 dc;
-		time_t duration = PG_ARGISNULL(0) ? (time_t)-1 : PG_GETARG_INT32(0);
-		LWLockAcquire(lfc_lock, LW_SHARED);
-		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration);
-		LWLockRelease(lfc_lock);
-		PG_RETURN_INT32(dc);
-	}
-	PG_RETURN_NULL();
-}
-
-PG_FUNCTION_INFO_V1(approximate_working_set_size);
-
-Datum
-approximate_working_set_size(PG_FUNCTION_ARGS)
-{
-	if (neon_enable_new_communicator)
-		elog(ERROR, "TODO: not implemented");
-
-	if (lfc_size_limit != 0)
-	{
-		int32 dc;
-		bool reset = PG_GETARG_BOOL(0);
-		LWLockAcquire(lfc_lock, reset ? LW_EXCLUSIVE : LW_SHARED);
-		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, (time_t)-1);
-		if (reset)
-			memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
-		LWLockRelease(lfc_lock);
-		PG_RETURN_INT32(dc);
-	}
-	PG_RETURN_NULL();
-}
-
-PG_FUNCTION_INFO_V1(get_local_cache_state);
-
-Datum
-get_local_cache_state(PG_FUNCTION_ARGS)
-{
-	size_t max_entries = PG_ARGISNULL(0) ? lfc_prewarm_limit : PG_GETARG_INT32(0);
-	FileCacheState* fcs;
-
-	if (neon_enable_new_communicator)
-		elog(ERROR, "TODO: not implemented");
-
-	fcs = lfc_get_state(max_entries);
-
-	if (fcs != NULL)
-		PG_RETURN_BYTEA_P((bytea*)fcs);
-	else
-		PG_RETURN_NULL();
-}
-
-PG_FUNCTION_INFO_V1(prewarm_local_cache);
-
-Datum
-prewarm_local_cache(PG_FUNCTION_ARGS)
-{
-	bytea* state = PG_GETARG_BYTEA_PP(0);
-	uint32 n_workers =  PG_GETARG_INT32(1);
-	FileCacheState* fcs;
-
-	if (neon_enable_new_communicator)
-		elog(ERROR, "TODO: not implemented");
-
-	fcs = (FileCacheState*)state;
-	lfc_prewarm(fcs, n_workers);
-
-	PG_RETURN_NULL();
-}
-
-PG_FUNCTION_INFO_V1(get_prewarm_info);
-
-Datum
-get_prewarm_info(PG_FUNCTION_ARGS)
-{
-	Datum		values[4];
-	bool		nulls[4];
-	TupleDesc	tupdesc;
-	uint32 prewarmed_pages = 0;
-	uint32 skipped_pages = 0;
-	uint32 active_workers = 0;
-	uint32 total_pages;
-	size_t n_workers;
-
-	if (neon_enable_new_communicator)
-		elog(ERROR, "TODO: not implemented");
+	int32		dc;
 
 	if (lfc_size_limit == 0)
-		PG_RETURN_NULL();
+		return -1;
 
-	LWLockAcquire(lfc_lock, LW_SHARED);
-	if (!lfc_ctl || lfc_ctl->n_prewarm_workers == 0)
-	{
-		LWLockRelease(lfc_lock);
-		PG_RETURN_NULL();
-	}
-	n_workers = lfc_ctl->n_prewarm_workers;
-	total_pages = lfc_ctl->total_prewarm_pages;
-	for (size_t i = 0; i < n_workers; i++)
-	{
-		PrewarmWorkerState* ws = &lfc_ctl->prewarm_workers[i];
-		prewarmed_pages += ws->prewarmed_pages;
-		skipped_pages += ws->skipped_pages;
-		active_workers += ws->completed != 0;
-	}
-	LWLockRelease(lfc_lock);
-
-	tupdesc = CreateTemplateTupleDesc(4);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "total_pages", INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "prewarmed_pages", INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "skipped_pages", INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "active_workers", INT4OID, -1, 0);
-	tupdesc = BlessTupleDesc(tupdesc);
-
-	MemSet(nulls, 0, sizeof(nulls));
-
-	values[0] = Int32GetDatum(total_pages);
-	values[1] = Int32GetDatum(prewarmed_pages);
-	values[2] = Int32GetDatum(skipped_pages);
-	values[3] = Int32GetDatum(active_workers);
-
-	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+	dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration);
+	if (reset)
+		memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
+	return dc;
 }
-

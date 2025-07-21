@@ -29,6 +29,8 @@ use utils::sync::gate::Gate;
 use crate::metrics::{
     FullTimelineInfo, MISC_OPERATION_SECONDS, WAL_STORAGE_LIMIT_ERRORS, WalStorageMetrics,
 };
+
+use crate::hadron::GLOBAL_DISK_LIMIT_EXCEEDED;
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
@@ -197,7 +199,7 @@ impl StateSK {
         Ok(TimelineMembershipSwitchResponse {
             previous_conf: result.previous_conf,
             current_conf: result.current_conf,
-            term: self.state().acceptor_state.term,
+            last_log_term: self.state().acceptor_state.term,
             flush_lsn: self.flush_lsn(),
         })
     }
@@ -1081,6 +1083,11 @@ impl WalResidentTimeline {
                 );
             }
         }
+
+        if GLOBAL_DISK_LIMIT_EXCEEDED.load(Ordering::Relaxed) {
+            bail!("Global disk usage exceeded limit");
+        }
+
         Ok(())
     }
     // END HADRON

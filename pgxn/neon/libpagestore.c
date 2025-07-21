@@ -80,18 +80,12 @@ int         neon_protocol_version = 3;
 
 static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
-static int	stripe_size;
+int		neon_stripe_size;
 static int	max_sockets;
 
 static int pageserver_response_log_timeout = 10000;
 /* 2.5 minutes. A bit higher than highest default TCP retransmission timeout */
 static int pageserver_response_disconnect_timeout = 150000;
-
-typedef struct
-{
-	char		connstring[MAX_SHARDS][MAX_PAGESERVER_CONNSTRING_SIZE];
-	size_t		num_shards;
-} ShardMap;
 
 /*
  * PagestoreShmemState is kept in shared memory. It contains the connection
@@ -111,6 +105,11 @@ typedef struct
  * has changed since last access, and to detect and retry copying the value if
  * the postmaster changes the value concurrently. (Postmaster doesn't have a
  * PGPROC entry and therefore cannot use LWLocks.)
+ *
+ * stripe_size is now also part of ShardMap, although it is defined by separate GUC.
+ * Postgres doesn't provide any mechanism to enforce dependencies between GUCs,
+ * that it we we have to rely on order of GUC definition in config file.
+ * "neon.stripe_size" should be defined prior to "neon.pageserver_connstring"
  */
 typedef struct
 {
@@ -119,17 +118,13 @@ typedef struct
 	ShardMap	shard_map;
 } PagestoreShmemState;
 
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook = NULL;
-#endif
-static shmem_startup_hook_type prev_shmem_startup_hook;
 static PagestoreShmemState *pagestore_shared;
 static uint64 pagestore_local_counter = 0;
 
 typedef enum PSConnectionState {
 	PS_Disconnected,			/* no connection yet */
 	PS_Connecting_Startup,		/* connection starting up */
-	PS_Connecting_PageStream,	/* negotiating pagestream */ 
+	PS_Connecting_PageStream,	/* negotiating pagestream */
 	PS_Connected,				/* connected, pagestream established */
 } PSConnectionState;
 
@@ -193,8 +188,8 @@ PagestoreShmemIsValid(void)
  * not valid, returns false. The contents of *result are undefined in
  * that case, and must not be relied on.
  */
-static bool
-ParseShardMap(const char *connstr, ShardMap *result)
+bool
+parse_shard_map(const char *connstr, ShardMap *result)
 {
 	const char *p;
 	int			nshards = 0;
@@ -237,7 +232,10 @@ ParseShardMap(const char *connstr, ShardMap *result)
 		p = sep + 1;
 	}
 	if (result)
+	{
 		result->num_shards = nshards;
+		result->stripe_size = neon_stripe_size;
+	}
 
 	return true;
 }
@@ -248,7 +246,7 @@ CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 {
 	char	   *p = *newval;
 
-	return ParseShardMap(p, NULL);
+	return parse_shard_map(p, NULL);
 }
 
 static void
@@ -257,9 +255,15 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	/*
 	 * 'neon.pageserver_connstring' is ignored if the new communicator is used.
 	 * In that case, the shard map is loaded from 'neon.pageserver_grpc_urls'
-	 * instead.
+	 * instead, and that happens in the communicator process only.
 	 */
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
+		return;
+
+	/*
+	 * Only postmaster updates the copy in shared memory.
+	 */
+	if (!PagestoreShmemIsValid() || IsUnderPostmaster)
 		return;
 
 	AssignShardMap(newval);
@@ -272,36 +276,15 @@ CheckPageserverGrpcUrls(char **newval, void **extra, GucSource source)
 {
 	char	   *p = *newval;
 
-	return ParseShardMap(p, NULL);
+	return parse_shard_map(p, NULL);
 }
-
-static void
-AssignPageserverGrpcUrls(const char *newval, void *extra)
-{
-	/*
-	 * 'neon.pageserver_grpc-urls' is ignored if the new communicator is not
-	 * used.  In that case, the shard map is loaded from 'neon.pageserver_connstring'
-	  instead.
-	 */
-	if (!neon_enable_new_communicator)
-		return;
-
-	AssignShardMap(newval);
-}
-
 
 static void
 AssignShardMap(const char *newval)
 {
 	ShardMap	shard_map;
 
-	/*
-	 * Only postmaster updates the copy in shared memory.
-	 */
-	if (!PagestoreShmemIsValid() || IsUnderPostmaster)
-		return;
-
-	if (!ParseShardMap(newval, &shard_map))
+	if (!parse_shard_map(newval, &shard_map))
 	{
 		/*
 		 * shouldn't happen, because we already checked the value in
@@ -324,54 +307,6 @@ AssignShardMap(const char *newval)
 	}
 }
 
-/* Return a copy of the whole shard map from shared memory */
-void
-get_shard_map(char ***connstrs_p, shardno_t *num_shards_p)
-{
-	uint64		begin_update_counter;
-	uint64		end_update_counter;
-	ShardMap   *shard_map = &pagestore_shared->shard_map;
-	shardno_t	num_shards;
-	char	   *buf;
-	char	  **connstrs;
-
-	buf = palloc(MAX_SHARDS*MAX_PAGESERVER_CONNSTRING_SIZE);
-	connstrs = palloc(sizeof(char *) * MAX_SHARDS);
-
-	/*
-	 * Postmaster can update the shared memory values concurrently, in which
-	 * case we would copy a garbled mix of the old and new values. We will
-	 * detect it because the counter's won't match, and retry. But it's
-	 * important that we don't do anything within the retry-loop that would
-	 * depend on the string having valid contents.
-	 */
-	do
-	{
-		char		*p;
-
-		begin_update_counter = pg_atomic_read_u64(&pagestore_shared->begin_update_counter);
-		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
-
-		num_shards = shard_map->num_shards;
-
-		p = buf;
-		for (int i = 0; i < Min(num_shards, MAX_SHARDS); i++)
-		{
-			strlcpy(p, shard_map->connstring[i], MAX_PAGESERVER_CONNSTRING_SIZE);
-			connstrs[i] = p;
-			p += MAX_PAGESERVER_CONNSTRING_SIZE;
-		}
-
-		pg_memory_barrier();
-	}
-	while (begin_update_counter != end_update_counter
-		   || begin_update_counter != pg_atomic_read_u64(&pagestore_shared->begin_update_counter)
-		   || end_update_counter != pg_atomic_read_u64(&pagestore_shared->end_update_counter));
-
-	*connstrs_p = connstrs;
-	*num_shards_p = num_shards;
-}
-
 /*
  * Get the current number of shards, and/or the connection string for a
  * particular shard from the shard map in shared memory.
@@ -386,12 +321,13 @@ get_shard_map(char ***connstrs_p, shardno_t *num_shards_p)
  * last call, terminates all existing connections to all pageservers.
  */
 static void
-load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
+load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p, size_t* stripe_size_p)
 {
 	uint64		begin_update_counter;
 	uint64		end_update_counter;
 	ShardMap   *shard_map = &pagestore_shared->shard_map;
 	shardno_t	num_shards;
+	size_t		stripe_size;
 
 	/*
 	 * Postmaster can update the shared memory values concurrently, in which
@@ -406,6 +342,7 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 		end_update_counter = pg_atomic_read_u64(&pagestore_shared->end_update_counter);
 
 		num_shards = shard_map->num_shards;
+		stripe_size = shard_map->stripe_size;
 		if (connstr_p && shard_no < MAX_SHARDS)
 			strlcpy(connstr_p, shard_map->connstring[shard_no], MAX_PAGESERVER_CONNSTRING_SIZE);
 		pg_memory_barrier();
@@ -440,6 +377,8 @@ load_shard_map(shardno_t shard_no, char *connstr_p, shardno_t *num_shards_p)
 
 	if (num_shards_p)
 		*num_shards_p = num_shards;
+	if (stripe_size_p)
+		*stripe_size_p = stripe_size;
 }
 
 #define MB (1024*1024)
@@ -448,23 +387,24 @@ shardno_t
 get_shard_number(BufferTag *tag)
 {
 	shardno_t	n_shards;
+	size_t		stripe_size;
 	uint32		hash;
 
-	load_shard_map(0, NULL, &n_shards);
+	load_shard_map(0, NULL, &n_shards, &stripe_size);
 
 #if PG_MAJORVERSION_NUM < 16
 	hash = murmurhash32(tag->rnode.relNode);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / neon_stripe_size));
 #else
 	hash = murmurhash32(tag->relNumber);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / neon_stripe_size));
 #endif
 
 	return hash % n_shards;
 }
 
 static inline void
-CLEANUP_AND_DISCONNECT(PageServer *shard) 
+CLEANUP_AND_DISCONNECT(PageServer *shard)
 {
 	if (shard->wes_read)
 	{
@@ -486,7 +426,7 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
  * complete the connection (e.g. due to receiving an earlier cancellation
  * during connection start).
  * Returns true if successfully connected; false if the connection failed.
- * 
+ *
  * Throws errors in unrecoverable situations, or when this backend's query
  * is canceled.
  */
@@ -503,7 +443,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 	 * Note that connstr is used both during connection start, and when we
 	 * log the successful connection.
 	 */
-	load_shard_map(shard_no, connstr, NULL);
+	load_shard_map(shard_no, connstr, NULL, NULL);
 
 	switch (shard->state)
 	{
@@ -1375,18 +1315,12 @@ check_neon_id(char **newval, void **extra, GucSource source)
 	return **newval == '\0' || HexDecodeString(id, *newval, 16);
 }
 
-static Size
-PagestoreShmemSize(void)
-{
-	return add_size(sizeof(PagestoreShmemState), NeonPerfCountersShmemSize());
-}
 
-static bool
+void
 PagestoreShmemInit(void)
 {
 	bool		found;
 
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	pagestore_shared = ShmemInitStruct("libpagestore shared state",
 									   sizeof(PagestoreShmemState),
 									   &found);
@@ -1396,46 +1330,13 @@ PagestoreShmemInit(void)
 		pg_atomic_init_u64(&pagestore_shared->end_update_counter, 0);
 		memset(&pagestore_shared->shard_map, 0, sizeof(ShardMap));
 		AssignPageserverConnstring(pageserver_connstring, NULL);
-		AssignPageserverGrpcUrls(pageserver_grpc_urls, NULL);
 	}
-
-	NeonPerfCountersShmemInit();
-
-	LWLockRelease(AddinShmemInitLock);
-	return found;
 }
 
-static void
-pagestore_shmem_startup_hook(void)
+void
+PagestoreShmemRequest(void)
 {
-	if (prev_shmem_startup_hook)
-		prev_shmem_startup_hook();
-
-	PagestoreShmemInit();
-}
-
-static void
-pagestore_shmem_request(void)
-{
-#if PG_VERSION_NUM >= 150000
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-#endif
-
-	RequestAddinShmemSpace(PagestoreShmemSize());
-}
-
-static void
-pagestore_prepare_shmem(void)
-{
-#if PG_VERSION_NUM >= 150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = pagestore_shmem_request;
-#else
-	pagestore_shmem_request();
-#endif
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = pagestore_shmem_startup_hook;
+	RequestAddinShmemSpace(sizeof(PagestoreShmemState));
 }
 
 /*
@@ -1444,8 +1345,6 @@ pagestore_prepare_shmem(void)
 void
 pg_init_libpagestore(void)
 {
-	pagestore_prepare_shmem();
-
 	DefineCustomStringVariable("neon.pageserver_connstring",
 							   "connection string to the page server",
 							   NULL,
@@ -1462,7 +1361,7 @@ pg_init_libpagestore(void)
 							   "",
 							   PGC_SIGHUP,
 							   0,	/* no flags required */
-							   CheckPageserverGrpcUrls, AssignPageserverGrpcUrls, NULL);
+							   CheckPageserverGrpcUrls, NULL, NULL);
 
 	DefineCustomStringVariable("neon.timeline_id",
 							   "Neon timeline_id the server is running on",
@@ -1510,8 +1409,8 @@ pg_init_libpagestore(void)
 	DefineCustomIntVariable("neon.stripe_size",
 							"sharding stripe size",
 							NULL,
-							&stripe_size,
-							32768, 1, INT_MAX,
+							&neon_stripe_size,
+							2048, 1, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_BLOCKS,
 							NULL, NULL, NULL);
@@ -1604,8 +1503,6 @@ pg_init_libpagestore(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
-
-	relsize_hash_init();
 
 	if (page_server != NULL)
 		neon_log(ERROR, "libpagestore already loaded");

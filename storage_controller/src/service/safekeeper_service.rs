@@ -25,7 +25,8 @@ use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::PgVersionId;
 use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration};
 use safekeeper_api::models::{
-    PullTimelineRequest, TimelineMembershipSwitchRequest, TimelineMembershipSwitchResponse,
+    PullTimelineRequest, TimelineLocateResponse, TimelineMembershipSwitchRequest,
+    TimelineMembershipSwitchResponse,
 };
 use safekeeper_api::{INITIAL_TERM, Term};
 use safekeeper_client::mgmt_api;
@@ -37,21 +38,14 @@ use utils::lsn::Lsn;
 
 use super::Service;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct TimelineLocateResponse {
-    pub generation: SafekeeperGeneration,
-    pub sk_set: Vec<NodeId>,
-    pub new_sk_set: Option<Vec<NodeId>>,
-}
-
 impl Service {
-    fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, ApiError> {
+    fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, anyhow::Error> {
         let members = safekeepers
             .iter()
             .map(|sk| sk.get_safekeeper_id())
             .collect::<Vec<_>>();
 
-        MemberSet::new(members).map_err(ApiError::InternalServerError)
+        MemberSet::new(members)
     }
 
     fn get_safekeepers(&self, ids: &[i64]) -> Result<Vec<Safekeeper>, ApiError> {
@@ -86,7 +80,7 @@ impl Service {
     ) -> Result<Vec<NodeId>, ApiError> {
         let safekeepers = self.get_safekeepers(&timeline_persistence.sk_set)?;
 
-        let mset = Self::make_member_set(&safekeepers)?;
+        let mset = Self::make_member_set(&safekeepers).map_err(ApiError::InternalServerError)?;
         let mconf = safekeeper_api::membership::Configuration::new(mset);
 
         let req = safekeeper_api::models::TimelineCreateRequest {
@@ -914,13 +908,13 @@ impl Service {
                         // so it isn't counted toward the quorum.
                         if let Some(min_position) = min_position {
                             if let Ok(ok_res) = &res {
-                                if (ok_res.term, ok_res.flush_lsn) < min_position {
+                                if (ok_res.last_log_term, ok_res.flush_lsn) < min_position {
                                     // Use Error::Timeout to make this error retriable.
                                     res = Err(mgmt_api::Error::Timeout(
                                         format!(
                                         "safekeeper {} returned position {:?} which is less than minimum required position {:?}",
                                         client.node_id_label(),
-                                        (ok_res.term, ok_res.flush_lsn),
+                                        (ok_res.last_log_term, ok_res.flush_lsn),
                                         min_position
                                         )
                                     ));
@@ -1111,6 +1105,26 @@ impl Service {
             }
         }
 
+        if new_sk_set.is_empty() {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "new safekeeper set is empty"
+            )));
+        }
+
+        if new_sk_set.len() < self.config.timeline_safekeeper_count {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "new safekeeper set must have at least {} safekeepers",
+                self.config.timeline_safekeeper_count
+            )));
+        }
+
+        let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
+        let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
+        // Construct new member set in advance to validate it.
+        // E.g. validates that there is no duplicate safekeepers.
+        let new_sk_member_set =
+            Self::make_member_set(&new_safekeepers).map_err(ApiError::BadRequest)?;
+
         // TODO(diko): per-tenant lock is too wide. Consider introducing per-timeline locks.
         let _tenant_lock = trace_shared_lock(
             &self.tenant_op_locks,
@@ -1140,6 +1154,18 @@ impl Service {
             .iter()
             .map(|&id| NodeId(id as u64))
             .collect::<Vec<_>>();
+
+        // Validate that we are not migrating to a decomissioned safekeeper.
+        for sk in new_safekeepers.iter() {
+            if !cur_sk_set.contains(&sk.get_id())
+                && sk.scheduling_policy() == SkSchedulingPolicy::Decomissioned
+            {
+                return Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "safekeeper {} is decomissioned",
+                    sk.get_id()
+                )));
+            }
+        }
 
         tracing::info!(
             ?cur_sk_set,
@@ -1183,11 +1209,8 @@ impl Service {
         }
 
         let cur_safekeepers = self.get_safekeepers(&timeline.sk_set)?;
-        let cur_sk_member_set = Self::make_member_set(&cur_safekeepers)?;
-
-        let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
-        let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
-        let new_sk_member_set = Self::make_member_set(&new_safekeepers)?;
+        let cur_sk_member_set =
+            Self::make_member_set(&cur_safekeepers).map_err(ApiError::InternalServerError)?;
 
         let joint_config = membership::Configuration {
             generation,
@@ -1216,7 +1239,7 @@ impl Service {
 
         let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
         for res in results.into_iter().flatten() {
-            let sk_position = (res.term, res.flush_lsn);
+            let sk_position = (res.last_log_term, res.flush_lsn);
             if sync_position < sk_position {
                 sync_position = sk_position;
             }

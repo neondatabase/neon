@@ -22,6 +22,7 @@
 #endif
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
+#include "common/hashfn.h"
 #include "executor/instrument.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
@@ -39,7 +40,9 @@
 #include "storage/spin.h"
 #include "tcop/tcopprot.h"
 
+#include "bitmap.h"
 #include "communicator_new.h"
+#include "hll.h"
 #include "neon.h"
 #include "neon_perf_counters.h"
 #include "pagestore_client.h"
@@ -98,7 +101,19 @@ typedef struct CommunicatorShmemPerBackendData
 
 typedef struct CommunicatorShmemData
 {
-	int			dummy;
+	/*
+	 * Estimation of working set size.
+	 *
+	 * Note that this is not protected by any locks. That's sloppy, but works
+	 * fine in practice. To "add" a value to the HLL state, we just overwrite
+	 * one of the timestamps. Calculating the estimate reads all the values, but
+	 * it also doesn't depend on seeing a consistent snapshot of the values. We
+	 * could get bogus results if accessing the TimestampTz was not atomic, but
+	 * it on any 64-bit platforms we care about it is, and even if we observed a
+	 * torn read every now and then, it wouldn't affect the overall estimate
+	 * much.
+	 */
+	HyperLogLogState wss_estimation;
 
 	CommunicatorShmemPerBackendData backends[]; /* MaxProcs */
 
@@ -128,8 +143,11 @@ static bool bounce_needed(void *buffer);
 static void *bounce_buf(void);
 static void *bounce_write_if_needed(void *buffer);
 
+static void pump_logging(struct LoggingReceiver *logging);
 PGDLLEXPORT void communicator_new_bgworker_main(Datum main_arg);
 static void communicator_new_backend_exit(int code, Datum arg);
+
+static char *print_neon_io_request(NeonIORequest *request);
 
 /*
  * Request ID assignment.
@@ -168,6 +186,9 @@ pg_init_communicator_new(void)
 {
 	BackgroundWorker bgw;
 
+	if (!neon_use_communicator_worker)
+		return;
+
 	if (pageserver_connstring[0] == '\0' && pageserver_grpc_urls[0] == '\0')
 	{
 		/* running with local storage */
@@ -195,6 +216,9 @@ communicator_new_shmem_size(void)
 	size_t		size = 0;
 	int			num_request_slots;
 
+	if (!neon_use_communicator_worker)
+		return 0;
+
 	size += MAXALIGN(
 					 offsetof(CommunicatorShmemData, backends) +
 					 MaxProcs * sizeof(CommunicatorShmemPerBackendData)
@@ -209,13 +233,16 @@ communicator_new_shmem_size(void)
 }
 
 void
-communicator_new_shmem_request(void)
+CommunicatorNewShmemRequest(void)
 {
+	if (!neon_use_communicator_worker)
+		return;
+
 	RequestAddinShmemSpace(communicator_new_shmem_size());
 }
 
 void
-communicator_new_shmem_startup(void)
+CommunicatorNewShmemInit(void)
 {
 	bool		found;
 	int			pipefd[2];
@@ -225,6 +252,9 @@ communicator_new_shmem_startup(void)
 	void	   *shmem_ptr;
 	uint64		initial_file_cache_size;
 	uint64		max_file_cache_size;
+
+	if (!neon_use_communicator_worker)
+		return;
 
 	rc = pipe(pipefd);
 	if (rc != 0)
@@ -247,6 +277,9 @@ communicator_new_shmem_startup(void)
 	communicator_size = MAXALIGN(offsetof(CommunicatorShmemData, backends) + MaxProcs * sizeof(CommunicatorShmemPerBackendData));
 	shmem_ptr = (char *) shmem_ptr + communicator_size;
 	shmem_size -= communicator_size;
+
+	/* Initialize hyper-log-log structure for estimating working set size */
+	initSHLL(&communicator_shmem_ptr->wss_estimation);
 
 	for (int i = 0; i < MaxProcs; i++)
 	{
@@ -273,12 +306,10 @@ communicator_new_shmem_startup(void)
 void
 communicator_new_bgworker_main(Datum main_arg)
 {
-	char	  **connstrs;
-	shardno_t	num_shards;
-	struct LoggingState *logging;
-	char		errbuf[1000];
-	int			elevel;
+	char	  **connstrings;
+	ShardMap	shard_map;
 	uint64		file_cache_size;
+	struct LoggingReceiver *logging;
 	const struct CommunicatorWorkerProcessStruct *proc_handle;
 
 	/*
@@ -306,25 +337,63 @@ communicator_new_bgworker_main(Datum main_arg)
 
 	BackgroundWorkerUnblockSignals();
 
-	get_shard_map(&connstrs, &num_shards);
+	if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
+	{
+		/* shouldn't happen, as the GUC was verified already */
+		elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
+	}
+	connstrings = palloc(shard_map.num_shards * sizeof(char *));
+	for (int i = 0; i < shard_map.num_shards; i++)
+		connstrings[i] = shard_map.connstring[i];
 
-	logging = configure_logging();
+	/*
+	 * By default, INFO messages are not printed to the log. We want
+	 * `tracing::info!` messages emitted from the communicator to be printed,
+	 * however, so increase the log level.
+	 *
+	 * XXX: This overrides any user-set value from the config file. That's not
+	 * great, but on the other hand, there should be little reason for user to
+	 * control the verbosity of the communicator. It's not too verbose by
+	 * default.
+	 */
+	SetConfigOption("log_min_messages", "INFO", PGC_SUSET, PGC_S_OVERRIDE);
 
+	logging = communicator_worker_configure_logging();
+
+	elog(LOG, "launching worker process threads");
 	proc_handle = communicator_worker_process_launch(
 									   cis,
 									   neon_tenant,
 									   neon_timeline,
 									   neon_auth_token,
-									   connstrs,
-									   num_shards,
+									   connstrings,
+									   shard_map.num_shards,
+									   neon_stripe_size,
 									   lfc_path,
 									   file_cache_size);
+	pfree(connstrings);
 	cis = NULL;
+	if (proc_handle == NULL)
+	{
+		/*
+		 * Something went wrong. Before exiting, forward any log messages that
+		 * might've been generated during the failed launch.
+		 */
+		pump_logging(logging);
+
+		elog(PANIC, "failure launching threads");
+	}
 
 	elog(LOG, "communicator threads started");
 	for (;;)
 	{
-		int32		rc;
+		ResetLatch(MyLatch);
+
+		/*
+		 * Forward any log messages from the Rust threads into the normal
+		 * Postgres logging facility.
+		 */
+		pump_logging(logging);
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -337,39 +406,98 @@ communicator_new_bgworker_main(Datum main_arg)
 			file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
 			if (file_cache_size < 100)
 				file_cache_size = 100;
-			communicator_worker_config_reload(proc_handle, file_cache_size);
-		}
 
-		for (;;)
-		{
-			rc = pump_logging(logging, (uint8 *) errbuf, sizeof(errbuf), &elevel);
-			if (rc == 0)
+			/* Reload pageserver URLs */
+			if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
 			{
-				/* nothing to do */
-				break;
+				/* shouldn't happen, as the GUC was verified already */
+				elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
 			}
-			else if (rc == 1)
-			{
-				/* Because we don't want to exit on error */
-				if (elevel == ERROR)
-					elevel = LOG;
-				if (elevel == INFO)
-					elevel = LOG;
-				elog(elevel, "[COMMUNICATOR] %s", errbuf);
-			}
-			else if (rc == -1)
-			{
-				elog(ERROR, "logging channel was closed unexpectedly");
-			}
+			connstrings = palloc(shard_map.num_shards * sizeof(char *));
+			for (int i = 0; i < shard_map.num_shards; i++)
+				connstrings[i] = shard_map.connstring[i];
+
+			communicator_worker_config_reload(proc_handle,
+											  file_cache_size,
+											  connstrings,
+											  shard_map.num_shards);
+			pfree(connstrings);
 		}
 
 		(void) WaitLatch(MyLatch,
 						 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
 						 0,
 						 PG_WAIT_EXTENSION);
-		ResetLatch(MyLatch);
 	}
 }
+
+static void
+pump_logging(struct LoggingReceiver *logging)
+{
+	char		errbuf[1000];
+	int			elevel;
+	int32		rc;
+	static uint64_t last_dropped_event_count = 0;
+	uint64_t	dropped_event_count;
+	uint64_t	dropped_now;
+
+	for (;;)
+	{
+		rc = communicator_worker_poll_logging(logging,
+											  errbuf,
+											  sizeof(errbuf),
+											  &elevel,
+											  &dropped_event_count);
+		if (rc == 0)
+		{
+			/* nothing to do */
+			break;
+		}
+		else if (rc == 1)
+		{
+			/* Because we don't want to exit on error */
+
+			if (message_level_is_interesting(elevel))
+			{
+				/*
+				 * Prevent interrupts while cleaning up.
+				 *
+				 * (Not sure if this is required, but all the error handlers
+				 * in Postgres that are installed as sigsetjmp() targets do
+				 * this, so let's follow the example)
+				 */
+				HOLD_INTERRUPTS();
+
+				errstart(elevel, TEXTDOMAIN);
+				errmsg_internal("[COMMUNICATOR] %s", errbuf);
+				EmitErrorReport();
+				FlushErrorState();
+
+				/* Now we can allow interrupts again */
+				RESUME_INTERRUPTS();
+			}
+		}
+		else if (rc == -1)
+		{
+			elog(ERROR, "logging channel was closed unexpectedly");
+		}
+	}
+
+	/*
+	 * If the queue was full at any time since the last time we reported it,
+	 * report how many messages were lost. We do this outside the loop, so
+	 * that if the logging system is clogged, we don't exacerbate it by
+	 * printing lots of warnings about dropped messages.
+	 */
+	dropped_now = dropped_event_count - last_dropped_event_count;
+	if (dropped_now != 0)
+	{
+		elog(WARNING, "%lu communicator log messages were dropped because the log buffer was full",
+			 (unsigned long) dropped_now);
+		last_dropped_event_count = dropped_event_count;
+	}
+}
+
 
 /*
  * Callbacks from the rust code, in the communicator process.
@@ -543,6 +671,45 @@ communicator_new_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
 								blockno);
 }
 
+/* Dump a list of blocks in the LFC, for use in prewarming later */
+FileCacheState *
+communicator_new_get_lfc_state(size_t max_entries)
+{
+	struct FileCacheIterator iter;
+	FileCacheState* fcs;
+	uint8	   *bitmap;
+	/* TODO: Max(max_entries, <current # of entries in cache>) */
+	size_t		n_entries = max_entries;
+	size_t		state_size = FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_entries, 1);
+	size_t		n_pages = 0;
+
+	fcs = (FileCacheState *) palloc0(state_size);
+	SET_VARSIZE(fcs, state_size);
+	fcs->magic = FILE_CACHE_STATE_MAGIC;
+	fcs->chunk_size_log = 0;
+	fcs->n_chunks = n_entries;
+	bitmap = FILE_CACHE_STATE_BITMAP(fcs);
+
+	bcomm_cache_iterate_begin(my_bs, &iter);
+	while (n_pages < max_entries && bcomm_cache_iterate_next(my_bs, &iter))
+	{
+		BufferTag tag;
+
+		BufTagInit(tag, iter.rel_number, iter.fork_number, iter.block_number, iter.spc_oid, iter.db_oid);
+		fcs->chunks[n_pages] = tag;
+		n_pages++;
+	}
+
+	/* fill bitmap. TODO: memset would be more efficient, but this is a silly format anyway */
+	for (size_t i = 0; i < n_pages; i++)
+	{
+		BITMAP_SET(bitmap, i);
+	}
+	fcs->n_pages = n_pages;
+
+	return fcs;
+}
+
 /*
  * Drain all in-flight requests from the queue.
  *
@@ -605,7 +772,7 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 	if (request_idx == -1)
 	{
 		/* -1 means the request was satisfied immediately. */
-		elog(DEBUG4, "communicator request %lu was satisfied immediately", request->rel_exists.request_id);
+		elog(DEBUG4, "communicator request %s was satisfied immediately", print_neon_io_request(request));
 		return -1;
 	}
 	Assert(request_idx == my_next_slot_idx);
@@ -615,7 +782,8 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 	inflight_requests[num_inflight_requests] = request_idx;
 	num_inflight_requests++;
 
-	elog(LOG, "started communicator request %lu at slot %d", request->rel_exists.request_id, request_idx);
+	elog(LOG, "started communicator request %s at slot %d", print_neon_io_request(request), request_idx);
+
 	return request_idx;
 }
 
@@ -740,6 +908,19 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 		}
 	};
 
+	{
+		BufferTag tag;
+
+		CopyNRelFileInfoToBufTag(tag, rinfo);
+		tag.forkNum = forkNum;
+		for (int i = 0; i < nblocks; i++)
+		{
+			tag.blockNum = blockno;
+			addSHLL(&communicator_shmem_ptr->wss_estimation,
+					hash_bytes((uint8_t *) &tag, sizeof(tag)));
+		}
+	}
+
 	elog(DEBUG5, "getpagev called for rel %u/%u/%u.%u block %u (%u blocks)",
 		 RelFileInfoFmt(rinfo), forkNum, blockno, nblocks);
 
@@ -832,6 +1013,9 @@ retry:
 			elog(DEBUG1, "read from local cache file was superseded by concurrent update");
 			goto retry;
 		}
+
+		pgBufferUsage.file_cache.hits += nblocks;
+
 		return;
 	}
 	Assert(request_idx == my_next_slot_idx);
@@ -840,6 +1024,12 @@ retry:
 		my_next_slot_idx = my_start_slot_idx;
 	inflight_requests[num_inflight_requests] = request_idx;
 	num_inflight_requests++;
+
+	/*
+	 * XXX: If some blocks were in cache but not others, we count all blocks
+	 * as a cache miss.
+	 */
+	pgBufferUsage.file_cache.misses += nblocks;
 
 	wait_request_completion(request_idx, &result);
 	Assert(num_inflight_requests == 1);
@@ -931,10 +1121,58 @@ communicator_new_dbsize(Oid dbNode)
 }
 
 int
-communicator_new_read_slru_segment(SlruKind kind, int64 segno, void *buffer)
+communicator_new_read_slru_segment(
+	SlruKind kind,
+	uint32_t segno,
+	neon_request_lsns *request_lsns,
+	const char* path)
 {
-	/* TODO */
-	elog(ERROR, "not implemented");
+	NeonIOResult result = {};
+	NeonIORequest request = {
+		.tag = NeonIORequest_ReadSlruSegment,
+		.read_slru_segment = {
+			.request_id = assign_request_id(),
+			.slru_kind = kind,
+			.segment_number = segno,
+			.request_lsn = request_lsns->request_lsn,
+		}
+	};
+	int nblocks = -1;
+	char *temp_path = bounce_buf();
+
+	if (path == NULL) {
+		elog(ERROR, "read_slru_segment called with NULL path");
+		return -1;
+	}
+
+	strlcpy(temp_path, path, BLCKSZ);
+	request.read_slru_segment.destination_file_path.ptr = (uint8_t *) temp_path;
+
+	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u, file_path=\"%s\"",
+		kind, segno, request.read_slru_segment.destination_file_path.ptr);
+
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(request_lsns->request_lsn);
+
+	perform_request(&request, &result);
+
+	switch (result.tag)
+	{
+		case NeonIOResult_ReadSlruSegment:
+			nblocks = result.read_slru_segment;
+			break;
+		case NeonIOResult_Error:
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read slru segment, kind=%u, segno=%u: %s",
+							kind, segno, pg_strerror(result.error))));
+			break;
+		default:
+			elog(ERROR, "unexpected result for read SLRU operation: %d", result.tag);
+			break;
+	}
+
+	return nblocks;
 }
 
 /* Write requests */
@@ -1058,7 +1296,7 @@ communicator_new_rel_zeroextend(NRelFileInfo rinfo, ForkNumber forkNum, BlockNum
 }
 
 void
-communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum)
+communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr lsn)
 {
 	NeonIORequest request = {
 		.tag = NeonIORequest_RelCreate,
@@ -1068,9 +1306,13 @@ communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum)
 			.db_oid = NInfoGetDbOid(rinfo),
 			.rel_number = NInfoGetRelNumber(rinfo),
 			.fork_number = forkNum,
+			.lsn = lsn,
 		}
 	};
 	NeonIOResult result;
+
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(lsn);
 
 	perform_request(&request, &result);
 	switch (result.tag)
@@ -1090,7 +1332,7 @@ communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum)
 }
 
 void
-communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks)
+communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks, XLogRecPtr lsn)
 {
 	NeonIORequest request = {
 		.tag = NeonIORequest_RelTruncate,
@@ -1101,9 +1343,13 @@ communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 			.rel_number = NInfoGetRelNumber(rinfo),
 			.fork_number = forkNum,
 			.nblocks = nblocks,
+			.lsn = lsn,
 		}
 	};
 	NeonIOResult result;
+
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(lsn);
 
 	perform_request(&request, &result);
 	switch (result.tag)
@@ -1123,7 +1369,7 @@ communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 }
 
 void
-communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum)
+communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr lsn)
 {
 	NeonIORequest request = {
 		.tag = NeonIORequest_RelUnlink,
@@ -1133,9 +1379,13 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum)
 			.db_oid = NInfoGetDbOid(rinfo),
 			.rel_number = NInfoGetRelNumber(rinfo),
 			.fork_number = forkNum,
+			.lsn = lsn,
 		}
 	};
 	NeonIOResult result;
+
+	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
+	XLogSetAsyncXactLSN(lsn);
 
 	perform_request(&request, &result);
 	switch (result.tag)
@@ -1153,6 +1403,181 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum)
 			break;
 	}
 }
+
+void
+communicator_new_update_cached_rel_size(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks, XLogRecPtr lsn)
+{
+	NeonIORequest request = {
+		.tag = NeonIORequest_UpdateCachedRelSize,
+		.update_cached_rel_size = {
+			.request_id = assign_request_id(),
+			.spc_oid = NInfoGetSpcOid(rinfo),
+			.db_oid = NInfoGetDbOid(rinfo),
+			.rel_number = NInfoGetRelNumber(rinfo),
+			.fork_number = forkNum,
+			.nblocks = nblocks,
+			.lsn = lsn,
+		}
+	};
+	NeonIOResult result;
+
+	perform_request(&request, &result);
+	switch (result.tag)
+	{
+		case NeonIOResult_WriteOK:
+			return;
+		case NeonIOResult_Error:
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not update cached size for rel %u/%u/%u.%u: %s",
+							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+			break;
+		default:
+			elog(ERROR, "unexpected result for UpdateCachedRelSize operation: %d", result.tag);
+			break;
+	}
+}
+
+/* Debugging functions */
+
+static char *
+print_neon_io_request(NeonIORequest *request)
+{
+	static char buf[100];
+
+	switch (request->tag)
+	{
+		case NeonIORequest_Empty:
+			snprintf(buf, sizeof(buf), "Empty");
+			return buf;
+		case NeonIORequest_RelExists:
+			{
+				CRelExistsRequest *r = &request->rel_exists;
+
+				snprintf(buf, sizeof(buf), "RelExists: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+				return buf;
+			}
+		case NeonIORequest_RelSize:
+			{
+				CRelSizeRequest *r = &request->rel_size;
+
+				snprintf(buf, sizeof(buf), "RelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+				return buf;
+			}
+		case NeonIORequest_GetPageV:
+			{
+				CGetPageVRequest *r = &request->get_page_v;
+
+				snprintf(buf, sizeof(buf), "GetPageV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+				return buf;
+			}
+		case NeonIORequest_ReadSlruSegment:
+			{
+				CReadSlruSegmentRequest *r = &request->read_slru_segment;
+
+				snprintf(buf, sizeof(buf), "ReadSlruSegment: req " UINT64_FORMAT " slrukind=%u, segno=%u, lsn=%X/%X, file_path=\"%s\"",
+								r->request_id,
+								r->slru_kind,
+								r->segment_number,
+								LSN_FORMAT_ARGS(r->request_lsn),
+								r->destination_file_path.ptr);
+				return buf;
+			}
+		case NeonIORequest_PrefetchV:
+			{
+				CPrefetchVRequest *r = &request->prefetch_v;
+
+				snprintf(buf, sizeof(buf), "PrefetchV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+				return buf;
+			}
+		case NeonIORequest_DbSize:
+			{
+				CDbSizeRequest *r = &request->db_size;
+
+				snprintf(buf, sizeof(buf), "PrefetchV: req " UINT64_FORMAT " db %u",
+								r->request_id, r->db_oid);
+				return buf;
+			}
+		case NeonIORequest_WritePage:
+			{
+				CWritePageRequest *r = &request->write_page;
+
+				snprintf(buf, sizeof(buf), "WritePage: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+								LSN_FORMAT_ARGS(r->lsn));
+				return buf;
+			}
+		case NeonIORequest_RelExtend:
+			{
+				CRelExtendRequest *r = &request->rel_extend;
+
+				snprintf(buf, sizeof(buf), "RelExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+								LSN_FORMAT_ARGS(r->lsn));
+				return buf;
+			}
+		case NeonIORequest_RelZeroExtend:
+			{
+				CRelZeroExtendRequest *r = &request->rel_zero_extend;
+
+				snprintf(buf, sizeof(buf), "RelZeroExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u-%u lsn %X/%X",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks,
+								LSN_FORMAT_ARGS(r->lsn));
+				return buf;
+			}
+		case NeonIORequest_RelCreate:
+			{
+				CRelCreateRequest *r = &request->rel_create;
+
+				snprintf(buf, sizeof(buf), "RelCreate: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+				return buf;
+			}
+		case NeonIORequest_RelTruncate:
+			{
+				CRelTruncateRequest *r = &request->rel_truncate;
+
+				snprintf(buf, sizeof(buf), "RelTruncate: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->nblocks);
+				return buf;
+			}
+		case NeonIORequest_RelUnlink:
+			{
+				CRelUnlinkRequest *r = &request->rel_unlink;
+
+				snprintf(buf, sizeof(buf), "RelUnlink: req " UINT64_FORMAT " rel %u/%u/%u.%u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+				return buf;
+			}
+		case NeonIORequest_UpdateCachedRelSize:
+			{
+				CUpdateCachedRelSizeRequest *r = &request->update_cached_rel_size;
+
+				snprintf(buf, sizeof(buf), "UpdateCachedRelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u blocks: %u",
+								r->request_id,
+								r->spc_oid, r->db_oid, r->rel_number, r->fork_number,
+					r->nblocks);
+				return buf;
+			}
+	}
+	snprintf(buf, sizeof(buf), "Unknown request type %d", (int) request->tag);
+	return buf;
+}
+
 
 /*
  * The worker process can read / write shared buffers directly. But if smgrread() or
@@ -1187,4 +1612,15 @@ bounce_write_if_needed(void *buffer)
 	p = bounce_buf();
 	memcpy(p, buffer, BLCKSZ);
 	return p;
+}
+
+int32
+communicator_new_approximate_working_set_size_seconds(time_t duration, bool reset)
+{
+	int32		dc;
+
+	dc = (int32) estimateSHLL(&communicator_shmem_ptr->wss_estimation, duration);
+	if (reset)
+		memset(communicator_shmem_ptr->wss_estimation.regs, 0, sizeof(communicator_shmem_ptr->wss_estimation.regs));
+	return dc;
 }

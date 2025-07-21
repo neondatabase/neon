@@ -44,6 +44,7 @@ members = [
     "libs/walproposer",
     "libs/wal_decoder",
     "libs/postgres_initdb",
+    "libs/proxy/json",
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
@@ -204,7 +205,7 @@ tokio = { version = "1.43.1", features = ["macros"] }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "io-util", "rt"] }
 toml = "0.8"

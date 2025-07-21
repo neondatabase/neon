@@ -2,7 +2,7 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Where to install Postgres, default is ./pg_install, maybe useful for package
 # managers.
-POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
+POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install
 
 # Supported PostgreSQL versions
 POSTGRES_VERSIONS = v17 v16 v15 v14
@@ -14,7 +14,7 @@ POSTGRES_VERSIONS = v17 v16 v15 v14
 # it is derived from BUILD_TYPE.
 
 # All intermediate build artifacts are stored here.
-BUILD_DIR := build
+BUILD_DIR := $(ROOT_PROJECT_DIR)/build
 
 ICU_PREFIX_DIR := /usr/local/icu
 
@@ -212,13 +212,26 @@ neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
 		FIND_TYPEDEF=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/find_typedef \
 		INDENT=$(BUILD_DIR)/v17/src/tools/pg_bsd_indent/pg_bsd_indent \
 		PGINDENT_SCRIPT=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/pgindent/pgindent \
-		-C $(BUILD_DIR)/neon-v17 \
+		-C $(BUILD_DIR)/pgxn-v17/neon \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile pgindent
 
 
 .PHONY: setup-pre-commit-hook
 setup-pre-commit-hook:
 	ln -s -f $(ROOT_PROJECT_DIR)/pre-commit.py .git/hooks/pre-commit
+
+build-tools/node_modules: build-tools/package.json
+	cd build-tools && $(if $(CI),npm ci,npm install)
+	touch build-tools/node_modules
+
+.PHONY: lint-openapi-spec
+lint-openapi-spec: build-tools/node_modules
+	# operation-2xx-response: pageserver timeline delete returns 404 on success
+	find . -iname "openapi_spec.y*ml" -exec\
+		npx --prefix=build-tools/ redocly\
+			--skip-rule=operation-operationId --skip-rule=operation-summary --extends=minimal\
+			--skip-rule=no-server-example.com --skip-rule=operation-2xx-response\
+			lint {} \+
 
 # Targets for building PostgreSQL are defined in postgres.mk.
 #

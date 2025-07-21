@@ -11,24 +11,18 @@
 #ifndef FILE_CACHE_h
 #define FILE_CACHE_h
 
-#include "neon_pgversioncompat.h"
+#include "lfc_prewarm.h"
 
-typedef struct FileCacheState
-{
-	int32		vl_len_;		/* varlena header (do not touch directly!) */
-	uint32		magic;
-	uint32		n_chunks;
-	uint32		n_pages;
-	uint16		chunk_size_log;
-	BufferTag	chunks[FLEXIBLE_ARRAY_MEMBER];
-	/* followed by bitmap */
-} FileCacheState;
+#include "neon_pgversioncompat.h"
 
 /* GUCs */
 extern bool lfc_store_prefetch_result;
 extern int	lfc_max_size;
 extern int	lfc_size_limit;
 extern char *lfc_path;
+
+extern bool lfc_do_prewarm;
+extern bool lfc_prewarm_cancel;
 
 /* functions for local file cache */
 extern void lfc_invalidate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber nblocks);
@@ -48,9 +42,12 @@ extern void lfc_init(void);
 extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 						 const void* buffer, XLogRecPtr lsn);
 extern FileCacheState* lfc_get_state(size_t max_entries);
-extern void lfc_prewarm(FileCacheState* fcs, uint32 n_workers);
 
-PGDLLEXPORT void lfc_prewarm_main(Datum main_arg);
+extern int32 lfc_approximate_working_set_size_seconds(time_t duration, bool reset);
+
+
+extern int32 lfc_approximate_working_set_size_seconds(time_t duration, bool reset);
+
 
 static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,

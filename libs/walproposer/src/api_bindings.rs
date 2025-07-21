@@ -428,6 +428,12 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         shard_number: 0,
     };
 
+    let empty_wal_rate_limiter = crate::bindings::WalRateLimiter {
+        should_limit: crate::bindings::pg_atomic_uint32 { value: 0 },
+        sent_bytes: 0,
+        last_recorded_time_us: crate::bindings::pg_atomic_uint64 { value: 0 },
+    };
+
     crate::bindings::WalproposerShmemState {
         propEpochStartLsn: crate::bindings::pg_atomic_uint64 { value: 0 },
         donor_name: [0; 64],
@@ -441,6 +447,7 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         num_shards: 0,
         replica_promote: false,
         min_ps_feedback: empty_feedback,
+        wal_rate_limiter: empty_wal_rate_limiter,
     }
 }
 

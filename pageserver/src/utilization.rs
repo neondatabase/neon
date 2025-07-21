@@ -1,6 +1,6 @@
 //! An utilization metric which is used to decide on which pageserver to put next tenant.
 //!
-//! The metric is exposed via `GET /v1/utilization`. Refer and maintain it's openapi spec as the
+//! The metric is exposed via `GET /v1/utilization`. Refer and maintain its openapi spec as the
 //! truth.
 
 use std::path::Path;
@@ -45,9 +45,10 @@ pub(crate) fn regenerate(
     let (disk_wanted_bytes, shard_count) = tenant_manager.calculate_utilization()?;
 
     // Fetch the fraction of disk space which may be used
-    let disk_usable_pct = match conf.disk_usage_based_eviction.clone() {
-        Some(e) => e.max_usage_pct,
-        None => Percent::new(100).unwrap(),
+    let disk_usable_pct = if conf.disk_usage_based_eviction.enabled {
+        conf.disk_usage_based_eviction.max_usage_pct
+    } else {
+        Percent::new(100).unwrap()
     };
 
     // Express a static value for how many shards we may schedule on one node

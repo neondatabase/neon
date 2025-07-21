@@ -21,7 +21,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, error, info, warn};
+use tracing::{error, info, warn};
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
@@ -195,7 +195,9 @@ struct ProxyCliArgs {
     #[clap(long, default_value = config::ProjectInfoCacheOptions::CACHE_DEFAULT_OPTIONS)]
     project_info_cache: String,
     /// cache for all valid endpoints
-    #[clap(long, default_value = config::EndpointCacheConfig::CACHE_DEFAULT_OPTIONS)]
+    // TODO: remove after a couple of releases.
+    #[clap(long, default_value_t = String::new())]
+    #[deprecated]
     endpoint_cache_config: String,
     #[clap(flatten)]
     parquet_upload: ParquetUploadArgs,
@@ -520,15 +522,7 @@ pub async fn run() -> anyhow::Result<()> {
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
     }
 
-    if let Either::Left(auth::Backend::ControlPlane(api, ())) = &auth_backend
-        && let crate::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api
-        && let Some(client) = redis_client
-    {
-        // project info cache and invalidation of that cache.
-        let cache = api.caches.project_info.clone();
-        maintenance_tasks.spawn(notifications::task_main(client.clone(), cache.clone()));
-        maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
-
+    if let Some(client) = redis_client {
         // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
         // This prevents immediate exit and pod restart,
         // which can cause hammering of the redis in case of connection issues.
@@ -559,12 +553,15 @@ pub async fn run() -> anyhow::Result<()> {
             }
         }
 
-        // listen for notifications of new projects/endpoints/branches
-        let cache = api.caches.endpoints_cache.clone();
-        let span = tracing::info_span!("endpoints_cache");
-        maintenance_tasks.spawn(
-            async move { cache.do_read(client, cancellation_token.clone()).await }.instrument(span),
-        );
+        #[allow(irrefutable_let_patterns)]
+        if let Either::Left(auth::Backend::ControlPlane(api, ())) = &auth_backend
+            && let crate::control_plane::client::ControlPlaneClient::ProxyV1(api) = &**api
+        {
+            // project info cache and invalidation of that cache.
+            let cache = api.caches.project_info.clone();
+            maintenance_tasks.spawn(notifications::task_main(client, cache.clone()));
+            maintenance_tasks.spawn(async move { cache.gc_worker().await });
+        }
     }
 
     let maintenance = loop {
@@ -712,18 +709,15 @@ fn build_auth_backend(
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
-            let endpoint_cache_config: config::EndpointCacheConfig =
-                args.endpoint_cache_config.parse()?;
 
             info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
             info!(
                 "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
             );
-            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
+
             let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
                 wake_compute_cache_config,
                 project_info_cache_config,
-                endpoint_cache_config,
             )));
 
             let config::ConcurrencyLockOptions {
@@ -793,18 +787,15 @@ fn build_auth_backend(
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
-            let endpoint_cache_config: config::EndpointCacheConfig =
-                args.endpoint_cache_config.parse()?;
 
             info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
             info!(
                 "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
             );
-            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
+
             let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
                 wake_compute_cache_config,
                 project_info_cache_config,
-                endpoint_cache_config,
             )));
 
             let config::ConcurrencyLockOptions {

@@ -1,11 +1,24 @@
-pub type CLsn = u64;
+// Definitions of some core PostgreSQL datatypes.
+
+/// XLogRecPtr is defined in "access/xlogdefs.h" as:
+///
+/// ```
+/// typedef uint64 XLogRecPtr;
+/// ```
+/// cbindgen:no-export
+pub type XLogRecPtr = u64;
+
+pub type CLsn = XLogRecPtr;
 pub type COid = u32;
 
 // This conveniently matches PG_IOV_MAX
 pub const MAX_GETPAGEV_PAGES: usize = 32;
 
-use pageserver_page_api as page_api;
+use std::ffi::CStr;
 
+use pageserver_page_api::{self as page_api, SlruKind};
+
+/// Request from a Postgres backend to the communicator process
 #[allow(clippy::large_enum_variant)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -17,6 +30,7 @@ pub enum NeonIORequest {
     RelExists(CRelExistsRequest),
     RelSize(CRelSizeRequest),
     GetPageV(CGetPageVRequest),
+    ReadSlruSegment(CReadSlruSegmentRequest),
     PrefetchV(CPrefetchVRequest),
     DbSize(CDbSizeRequest),
 
@@ -28,6 +42,9 @@ pub enum NeonIORequest {
     RelCreate(CRelCreateRequest),
     RelTruncate(CRelTruncateRequest),
     RelUnlink(CRelUnlinkRequest),
+
+    // Other requests
+    UpdateCachedRelSize(CUpdateCachedRelSizeRequest),
 }
 
 #[repr(C)]
@@ -39,6 +56,9 @@ pub enum NeonIOResult {
 
     /// the result pages are written to the shared memory addresses given in the request
     GetPageV,
+    /// The result is written to the file, path to which is provided
+    /// in the request. The [`u64`] value here is the number of blocks.
+    ReadSlruSegment(u64),
 
     /// A prefetch request returns as soon as the request has been received by the communicator.
     /// It is processed in the background.
@@ -57,6 +77,10 @@ pub enum NeonIOResult {
 }
 
 impl NeonIORequest {
+    /// All requests include a unique request ID, which can be used to trace the execution
+    /// of a request all the way to the pageservers. The request ID needs to be unique
+    /// within the lifetime of the Postgres instance (but not across servers or across
+    /// restarts of the same server).
     pub fn request_id(&self) -> u64 {
         use NeonIORequest::*;
         match self {
@@ -64,6 +88,7 @@ impl NeonIORequest {
             RelExists(req) => req.request_id,
             RelSize(req) => req.request_id,
             GetPageV(req) => req.request_id,
+            ReadSlruSegment(req) => req.request_id,
             PrefetchV(req) => req.request_id,
             DbSize(req) => req.request_id,
             WritePage(req) => req.request_id,
@@ -72,10 +97,14 @@ impl NeonIORequest {
             RelCreate(req) => req.request_id,
             RelTruncate(req) => req.request_id,
             RelUnlink(req) => req.request_id,
+            UpdateCachedRelSize(req) => req.request_id,
         }
     }
 }
 
+/// Special quick result to a CGetPageVRequest request, indicating that the
+/// the requested pages are present in the local file cache. The backend can
+/// read the blocks directly from the given LFC blocks.
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CCachedGetPageVResult {
@@ -92,7 +121,7 @@ pub struct CCachedGetPageVResult {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct ShmemBuf {
-    // These fields define where the result is written. Must point into a buffer in shared memory!
+    // Pointer to where the result is written or where to read from. Must point into a buffer in shared memory!
     pub ptr: *mut u8,
 }
 
@@ -172,6 +201,28 @@ pub struct CGetPageVRequest {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct CReadSlruSegmentRequest {
+    pub request_id: u64,
+    pub slru_kind: SlruKind,
+    pub segment_number: u32,
+    pub request_lsn: CLsn,
+    /// Must be a null-terminated C string containing the file path
+    /// where the communicator will write the SLRU segment.
+    pub destination_file_path: ShmemBuf,
+}
+
+impl CReadSlruSegmentRequest {
+    /// Returns the file path where the communicator will write the
+    /// SLRU segment.
+    pub(crate) fn destination_file_path(&self) -> String {
+        unsafe { CStr::from_ptr(self.destination_file_path.as_mut_ptr() as *const _) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct CPrefetchVRequest {
     pub request_id: u64,
     pub spc_oid: COid,
@@ -187,7 +238,6 @@ pub struct CPrefetchVRequest {
 pub struct CDbSizeRequest {
     pub request_id: u64,
     pub db_oid: COid,
-    pub request_lsn: CLsn,
 }
 
 #[repr(C)]
@@ -201,7 +251,7 @@ pub struct CWritePageRequest {
     pub block_number: u32,
     pub lsn: CLsn,
 
-    // These fields define where the result is written. Must point into a buffer in shared memory!
+    // `src` defines the new page contents. Must point into a buffer in shared memory!
     pub src: ShmemBuf,
 }
 
@@ -216,7 +266,7 @@ pub struct CRelExtendRequest {
     pub block_number: u32,
     pub lsn: CLsn,
 
-    // These fields define page contents. Must point into a buffer in shared memory!
+    // `src` defines the new page contents. Must point into a buffer in shared memory!
     pub src: ShmemBuf,
 }
 
@@ -241,6 +291,7 @@ pub struct CRelCreateRequest {
     pub db_oid: COid,
     pub rel_number: u32,
     pub fork_number: u8,
+    pub lsn: CLsn,
 }
 
 #[repr(C)]
@@ -252,6 +303,7 @@ pub struct CRelTruncateRequest {
     pub rel_number: u32,
     pub fork_number: u8,
     pub nblocks: u32,
+    pub lsn: CLsn,
 }
 
 #[repr(C)]
@@ -262,8 +314,7 @@ pub struct CRelUnlinkRequest {
     pub db_oid: COid,
     pub rel_number: u32,
     pub fork_number: u8,
-    pub block_number: u32,
-    pub nblocks: u32,
+    pub lsn: CLsn,
 }
 
 impl CRelExistsRequest {
@@ -366,6 +417,29 @@ impl CRelTruncateRequest {
 }
 
 impl CRelUnlinkRequest {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
+            spcnode: self.spc_oid,
+            dbnode: self.db_oid,
+            relnode: self.rel_number,
+            forknum: self.fork_number,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CUpdateCachedRelSizeRequest {
+    pub request_id: u64,
+    pub spc_oid: COid,
+    pub db_oid: COid,
+    pub rel_number: u32,
+    pub fork_number: u8,
+    pub nblocks: u32,
+    pub lsn: CLsn,
+}
+
+impl CUpdateCachedRelSizeRequest {
     pub fn reltag(&self) -> page_api::RelTag {
         page_api::RelTag {
             spcnode: self.spc_oid,

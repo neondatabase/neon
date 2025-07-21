@@ -1427,6 +1427,7 @@ dependencies = [
  "p256 0.13.2",
  "pageserver_page_api",
  "postgres",
+ "postgres-types",
  "postgres_initdb",
  "postgres_versioninfo",
  "regex",
@@ -1950,6 +1951,7 @@ dependencies = [
  "diesel_derives",
  "itoa",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -3582,6 +3584,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "json"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "itoa",
+ "ryu",
+]
+
+[[package]]
 name = "json-structural-diff"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4403,6 +4414,7 @@ dependencies = [
  "pageserver_client",
  "pageserver_client_grpc",
  "pageserver_page_api",
+ "pprof",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -4431,6 +4443,7 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "remote_storage",
+ "serde",
  "serde_json",
  "svg_fmt",
  "thiserror 1.0.69",
@@ -4448,6 +4461,7 @@ dependencies = [
  "arc-swap",
  "async-compression",
  "async-stream",
+ "base64 0.22.1",
  "bincode",
  "bit_field",
  "byteorder",
@@ -4609,30 +4623,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
- "async-trait",
  "bytes",
- "chrono",
  "compute_api",
- "dashmap 5.5.0",
  "futures",
- "http 1.1.0",
- "hyper 1.6.0",
- "hyper-util",
- "metrics",
  "pageserver_api",
  "pageserver_page_api",
- "priority-queue",
- "rand 0.8.5",
- "scopeguard",
- "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
- "tower 0.4.13",
  "tracing",
  "utils",
- "uuid",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -5249,17 +5251,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "priority-queue"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5676d703dda103cbb035b653a9f11448c0a7216c7926bd35fcb5865475d0c970"
-dependencies = [
- "autocfg",
- "equivalent",
- "indexmap 2.9.0",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.94"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5428,6 +5419,7 @@ dependencies = [
  "async-trait",
  "atomic-take",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-iam",
  "aws-sigv4",
  "base64 0.22.1",
@@ -5467,6 +5459,7 @@ dependencies = [
  "itoa",
  "jose-jwa",
  "jose-jwk",
+ "json",
  "lasso",
  "measured",
  "metrics",
@@ -5892,6 +5885,8 @@ dependencies = [
  "azure_identity",
  "azure_storage",
  "azure_storage_blobs",
+ "base64 0.22.1",
+ "byteorder",
  "bytes",
  "camino",
  "camino-tempfile",
@@ -6383,6 +6378,7 @@ dependencies = [
  "itertools 0.10.5",
  "jsonwebtoken",
  "metrics",
+ "nix 0.30.1",
  "once_cell",
  "pageserver_api",
  "parking_lot 0.12.1",
@@ -6390,6 +6386,7 @@ dependencies = [
  "postgres-protocol",
  "postgres_backend",
  "postgres_ffi",
+ "postgres_ffi_types",
  "postgres_versioninfo",
  "pprof",
  "pq_proto",
@@ -6434,7 +6431,7 @@ dependencies = [
  "anyhow",
  "const_format",
  "pageserver_api",
- "postgres_ffi",
+ "postgres_ffi_types",
  "postgres_versioninfo",
  "pq_proto",
  "serde",
@@ -7113,6 +7110,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "utils",
+ "uuid",
  "workspace_hack",
 ]
 
@@ -7176,6 +7174,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "reqwest",
+ "safekeeper_api",
  "serde_json",
  "storage_controller_client",
  "tokio",
@@ -7755,6 +7754,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -8408,6 +8408,7 @@ dependencies = [
  "tracing-error",
  "tracing-subscriber",
  "tracing-utils",
+ "uuid",
  "walkdir",
 ]
 
@@ -8955,8 +8956,10 @@ dependencies = [
  "fail",
  "form_urlencoded",
  "futures-channel",
+ "futures-core",
  "futures-executor",
  "futures-io",
+ "futures-sink",
  "futures-util",
  "generic-array",
  "getrandom 0.2.11",
@@ -9025,7 +9028,6 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
- "uuid",
  "zeroize",
  "zstd",
  "zstd-safe",

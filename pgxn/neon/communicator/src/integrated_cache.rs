@@ -46,6 +46,7 @@ pub struct IntegratedCacheInitStruct<'t> {
 }
 
 /// Represents write-access to the integrated cache. This is used by the communicator process.
+#[derive(Debug)]
 pub struct IntegratedCacheWriteAccess<'t> {
     relsize_cache: neon_shmem::hash::HashMapAccess<'t, RelKey, RelEntry>,
     block_map: neon_shmem::hash::HashMapAccess<'t, BlockKey, BlockEntry>,
@@ -192,6 +193,10 @@ struct RelEntry {
     /// cached size of the relation
     /// u32::MAX means 'not known' (that's InvalidBlockNumber in Postgres)
     nblocks: AtomicU32,
+
+    /// This is the last time the "metadata" of this relation changed, not
+    /// the contents of the blocks. That is, the size of the relation.
+    lw_lsn: AtomicLsn,
 }
 
 impl std::fmt::Debug for RelEntry {
@@ -338,7 +343,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         CacheResult::NotFound(lsn)
     }
 
-    pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32) {
+    pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32, lsn: Lsn) {
         match self.relsize_cache.entry(RelKey::from(rel)) {
             Entry::Vacant(e) => {
                 tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
@@ -346,12 +351,14 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 _ = e
                     .insert(RelEntry {
                         nblocks: AtomicU32::new(nblocks),
+                        lw_lsn: AtomicLsn::new(lsn.0),
                     })
                     .expect("out of memory");
             }
             Entry::Occupied(e) => {
                 tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
                 e.get().nblocks.store(nblocks, Ordering::Relaxed);
+                e.get().lw_lsn.store(lsn);
             }
         };
     }
@@ -515,9 +522,12 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     }
 
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
-    pub fn forget_rel(&'t self, rel: &RelTag) {
+    pub fn forget_rel(&'t self, rel: &RelTag, _nblocks: Option<u32>, flush_lsn: Lsn) {
         tracing::info!("forgetting rel entry for {rel:?}");
         self.relsize_cache.remove(&RelKey::from(rel));
+
+        // update with flush LSN
+        let _ = self.global_lw_lsn.fetch_max(flush_lsn.0, Ordering::Relaxed);
 
         // also forget all cached blocks for the relation
         // FIXME
@@ -749,6 +759,12 @@ fn get_rel_size(
     }
 }
 
+pub enum GetBucketResult {
+    Occupied(RelTag, u32),
+    Vacant,
+    OutOfBounds,
+}
+
 /// Accessor for other backends
 ///
 /// This allows backends to read pages from the cache directly, on their own, without making a
@@ -771,6 +787,21 @@ impl<'t> IntegratedCacheReadAccess<'t> {
             .get(&BlockKey::from((rel, block_number)))
             .is_some()
     }
+
+    pub fn get_bucket(&self, bucket_no: usize) -> GetBucketResult {
+        match self.block_map.get_at_bucket(bucket_no).as_deref() {
+            None => {
+                // free bucket, or out of bounds
+                if bucket_no >= self.block_map.get_num_buckets() {
+                    GetBucketResult::OutOfBounds
+                } else {
+                    GetBucketResult::Vacant
+                }
+            }
+            Some((key, _)) => GetBucketResult::Occupied(key.rel, key.block_number),
+        }
+    }
+
 }
 
 pub struct BackendCacheReadOp<'t> {

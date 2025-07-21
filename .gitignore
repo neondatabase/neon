@@ -16,6 +16,7 @@ neon.iml
 /integration_tests/.neon
 compaction-suite-results.*
 pgxn/neon/communicator/communicator_bindings.h
+docker-compose/docker-compose-parallel.yml
 
 # Coverage
 *.profraw
@@ -29,3 +30,6 @@ pgxn/neon/communicator/communicator_bindings.h
 
 # pgindent typedef lists
 *.list
+
+# Node
+**/node_modules/

@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use compute_api::spec::PageserverProtocol;
+use compute_api::spec::PageserverShardInfo;
 use control_plane::endpoint::{
     ComputeControlPlane, EndpointStatus, PageserverConnectionInfo, PageserverShardConnectionInfo,
 };
@@ -13,7 +15,7 @@ use futures::StreamExt;
 use hyper::StatusCode;
 use pageserver_api::config::DEFAULT_GRPC_LISTEN_PORT;
 use pageserver_api::controller_api::AvailabilityZone;
-use pageserver_api::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
+use pageserver_api::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize, TenantShardId};
 use postgres_connection::parse_host_port;
 use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
@@ -507,7 +509,16 @@ impl ApiMethod for ComputeHookTenant {
             if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("Reconfiguring pageservers for endpoint {endpoint_name}");
 
-                let mut shard_conninfos = HashMap::new();
+                let shard_count = ShardCount(shards.len().try_into().expect("too many shards"));
+
+                let mut shard_infos: HashMap<ShardIndex, PageserverShardInfo> = HashMap::new();
+
+                let prefer_protocol = if endpoint.grpc {
+                    PageserverProtocol::Grpc
+                } else {
+                    PageserverProtocol::Libpq
+                };
+
                 for shard in shards.iter() {
                     let ps_conf = env
                         .get_pageserver_conf(shard.node_id)
@@ -528,19 +539,31 @@ impl ApiMethod for ComputeHookTenant {
                         None
                     };
                     let pageserver = PageserverShardConnectionInfo {
+                        id: Some(shard.node_id.to_string()),
                         libpq_url,
                         grpc_url,
                     };
-                    shard_conninfos.insert(shard.shard_number.0 as u32, pageserver);
+                    let shard_info = PageserverShardInfo {
+                        pageservers: vec![pageserver],
+                    };
+                    shard_infos.insert(
+                        ShardIndex {
+                            shard_number: shard.shard_number,
+                            shard_count,
+                        },
+                        shard_info,
+                    );
                 }
 
                 let pageserver_conninfo = PageserverConnectionInfo {
-                    shards: shard_conninfos,
-                    prefer_grpc: endpoint.grpc,
+                    shard_count: ShardCount::unsharded(),
+                    stripe_size: stripe_size.map(|val| val.0),
+                    shards: shard_infos,
+                    prefer_protocol,
                 };
 
                 endpoint
-                    .reconfigure_pageservers(pageserver_conninfo, *stripe_size)
+                    .reconfigure_pageservers(&pageserver_conninfo)
                     .await
                     .map_err(NotifyError::NeonLocal)?;
             }
@@ -824,6 +847,7 @@ impl ComputeHook {
                 let send_locked = tokio::select! {
                     guard = send_lock.lock_owned() => {guard},
                     _ = cancel.cancelled() => {
+                        tracing::info!("Notification cancelled while waiting for lock");
                         return Err(NotifyError::ShuttingDown)
                     }
                 };
@@ -865,11 +889,32 @@ impl ComputeHook {
             let notify_url = compute_hook_url.as_ref().unwrap();
             self.do_notify(notify_url, &request, cancel).await
         } else {
-            self.do_notify_local::<M>(&request).await.map_err(|e| {
+            match self.do_notify_local::<M>(&request).await.map_err(|e| {
                 // This path is for testing only, so munge the error into our prod-style error type.
-                tracing::error!("neon_local notification hook failed: {e}");
-                NotifyError::Fatal(StatusCode::INTERNAL_SERVER_ERROR)
-            })
+                if e.to_string().contains("refresh-configuration-pending") {
+                    // If the error message mentions "refresh-configuration-pending", it means the compute node
+                    // rejected our notification request because it already trying to reconfigure itself. We
+                    // can proceed with the rest of the reconcliation process as the compute node already
+                    // discovers the need to reconfigure and will eventually update its configuration once
+                    // we update the pageserver mappings. In fact, it is important that we continue with
+                    // reconcliation to make sure we update the pageserver mappings to unblock the compute node.
+                    tracing::info!("neon_local notification hook failed: {e}");
+                    tracing::info!("Notification failed likely due to compute node self-reconfiguration, will retry.");
+                    Ok(())
+                } else {
+                    tracing::error!("neon_local notification hook failed: {e}");
+                    Err(NotifyError::Fatal(StatusCode::INTERNAL_SERVER_ERROR))
+                }
+            }) {
+                // Compute node accepted the notification request. Ok to proceed.
+                Ok(_) => Ok(()),
+                // Compute node rejected our request but it is already self-reconfiguring. Ok to proceed.
+                Err(Ok(_)) => Ok(()),
+                // Fail the reconciliation attempt in all other cases. Recall that this whole code path involving
+                // neon_local is for testing only. In production we always retry failed reconcliations so we
+                // don't have any deadends here.
+                Err(Err(e)) => Err(e),
+            }
         };
 
         match result {

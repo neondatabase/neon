@@ -16,6 +16,7 @@ futures.workspace = true
 hdrhistogram.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
+pprof.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -30,9 +31,9 @@ metrics.workspace = true
 tonic.workspace = true
 url.workspace = true
 
+pageserver_api.workspace = true
 pageserver_client.workspace = true
 pageserver_client_grpc.workspace = true
-pageserver_api.workspace = true
 pageserver_page_api.workspace = true
 utils = { path = "../../libs/utils/" }
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

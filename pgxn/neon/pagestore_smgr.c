@@ -502,6 +502,60 @@ nm_adjust_lsn(XLogRecPtr lsn)
 	return lsn;
 }
 
+/*
+ * Get a LSN to use to stamp an operation like relation create or truncate.
+ * On operations on individual pages we use the LSN of the page, but when
+ * e.g. smgrcreate() is called, we have to do something else.
+ */
+XLogRecPtr
+neon_get_write_lsn(void)
+{
+	XLogRecPtr	lsn;
+
+	if (RecoveryInProgress())
+	{
+		/*
+		 * FIXME: v14 doesn't have GetCurrentReplayRecPtr(). Options:
+		 * - add it in our fork
+		 * - store a magic value that means that you must use
+		 *   current latest possible LSN at the time that the request
+		 *   on this thing is made again (or some other recent enough
+		 *   lsn).
+		 */
+#if PG_VERSION_NUM >= 150000
+		lsn = GetCurrentReplayRecPtr(NULL);
+#else
+		lsn = GetXLogReplayRecPtr(NULL); /* FIXME: this is wrong, see above */
+#endif
+	}
+	else
+		lsn = GetXLogInsertRecPtr();
+
+	/*
+	 * If the insert LSN points to just after page header, round it down to
+	 * the beginning of the page, because the page header might not have been
+	 * inserted to the WAL yet, and if we tried to flush it, the WAL flushing
+	 * code gets upset.
+	 */
+	{
+		int			segoff;
+
+		segoff = XLogSegmentOffset(lsn, wal_segment_size);
+		if (segoff == SizeOfXLogLongPHD)
+		{
+			lsn = lsn - segoff;
+		}
+		else
+		{
+			int			offset = lsn % XLOG_BLCKSZ;
+
+			if (offset == SizeOfXLogShortPHD)
+				lsn = lsn - offset;
+		}
+	}
+
+	return lsn;
+}
 
 /*
  * Return LSN for requesting pages and number of blocks from page server
@@ -768,7 +822,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 		return false;
 	}
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 		return communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum);
 	else
 	{
@@ -822,37 +876,44 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 		 RelFileInfoFmt(InfoFromSMgrRel(reln)),
 		 forkNum);
 
-	if (neon_enable_new_communicator)
+	/*
+	 * Newly created relation is empty, remember that in the relsize cache.
+	 *
+	 * Note that in REDO, this is called to make sure the relation fork
+	 * exists, but it does not truncate the relation. So, we can only update
+	 * the relsize if it didn't exist before.
+	 *
+	 * Also, in redo, we must make sure to update the cached size of the
+	 * relation, as that is the primary source of truth for REDO's file length
+	 * considerations, and as file extension isn't (perfectly) logged, we need
+	 * to take care of that before we hit file size checks.
+	 *
+	 * FIXME: This is currently not just an optimization, but required for
+	 * correctness. Postgres can call smgrnblocks() on the newly-created
+	 * relation. Currently, we don't call SetLastWrittenLSN() when a new
+	 * relation created, so if we didn't remember the size in the relsize
+	 * cache, we might call smgrnblocks() on the newly-created relation before
+	 * the creation WAL record has been received by the page server.
+	 *
+	 * XXX: with the new communicator, similar considerations apply. However,
+	 * during replay, neon_get_write_lsn() returns the (end-)LSN of the record
+	 * that's being replayed, so we should not have the correctness issue
+	 * mentioned in previous paragraph.
+	 */
+	if (neon_use_communicator_worker)
 	{
+		XLogRecPtr	lsn = neon_get_write_lsn();
+
 		if (isRedo)
 		{
 			if (!communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum))
-				communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
+				communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum, lsn);
 		}
 		else
-			communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum);
+			communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum, lsn);
 	}
 	else
 	{
-		/*
-		 * Newly created relation is empty, remember that in the relsize cache.
-		 *
-		 * Note that in REDO, this is called to make sure the relation fork
-		 * exists, but it does not truncate the relation. So, we can only update
-		 * the relsize if it didn't exist before.
-		 *
-		 * Also, in redo, we must make sure to update the cached size of the
-		 * relation, as that is the primary source of truth for REDO's file length
-		 * considerations, and as file extension isn't (perfectly) logged, we need
-		 * to take care of that before we hit file size checks.
-		 *
-		 * FIXME: This is currently not just an optimization, but required for
-		 * correctness. Postgres can call smgrnblocks() on the newly-created
-		 * relation. Currently, we don't call SetLastWrittenLSN() when a new
-		 * relation created, so if we didn't remember the size in the relsize
-		 * cache, we might call smgrnblocks() on the newly-created relation before
-		 * the creation WAL record hass been received by the page server.
-		 */
 		if (isRedo)
 		{
 			update_cached_relsize(InfoFromSMgrRel(reln), forkNum, 0);
@@ -900,9 +961,11 @@ neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
 
 	if (!NRelFileInfoBackendIsTemp(rinfo))
 	{
-		if (neon_enable_new_communicator)
+		if (neon_use_communicator_worker)
 		{
-			communicator_new_rel_unlink(InfoFromNInfoB(rinfo), forkNum);
+			XLogRecPtr	lsn = neon_get_write_lsn();
+
+			communicator_new_rel_unlink(InfoFromNInfoB(rinfo), forkNum, lsn);
 		}
 		else
 			forget_cached_relsize(InfoFromNInfoB(rinfo), forkNum);
@@ -992,7 +1055,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		// FIXME: this can pass lsn == invalid. Is that ok?
 		communicator_new_rel_extend(InfoFromSMgrRel(reln), forkNum, blkno, (const void *) buffer, lsn);
@@ -1119,7 +1182,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber start_block,
 
 		lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
 
-		if (!neon_enable_new_communicator)
+		if (!neon_use_communicator_worker)
 		{
 			for (int i = 0; i < count; i++)
 			{
@@ -1135,7 +1198,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber start_block,
 
 	Assert(lsn != 0);
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		communicator_new_rel_zeroextend(InfoFromSMgrRel(reln), forkNum, start_block, nblocks, lsn);
 	}
@@ -1203,7 +1266,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		communicator_new_prefetch_register_bufferv(InfoFromSMgrRel(reln), forknum, blocknum, nblocks);
 		return false;
@@ -1213,7 +1276,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	tag.dbOid = reln->smgr_rlocator.locator.dbOid;
 	tag.relNumber = reln->smgr_rlocator.locator.relNumber;
 	tag.forkNum = forknum;
-	
+
 	while (nblocks > 0)
 	{
 		int		iterblocks = Min(nblocks, PG_IOV_MAX);
@@ -1235,7 +1298,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		blocknum += iterblocks;
 	}
 
-	if (!neon_enable_new_communicator)
+	if (!neon_use_communicator_worker)
 		communicator_prefetch_pump_state();
 
 	return false;
@@ -1263,7 +1326,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		communicator_new_prefetch_register_bufferv(InfoFromSMgrRel(reln), forknum, blocknum, 1);
 	}
@@ -1325,7 +1388,7 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 	 */
 	neon_log(SmgrTrace, "writeback noop");
 
-	if (!neon_enable_new_communicator)
+	if (!neon_use_communicator_worker)
 		communicator_prefetch_pump_state();
 
 	if (debug_compare_local)
@@ -1343,7 +1406,7 @@ void
 neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				 neon_request_lsns request_lsns, void *buffer)
 {
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		// FIXME: request_lsns is ignored. That affects the neon_test_utils callers.
 		// Add the capability to specify the LSNs explicitly, for the sake of neon_test_utils ?
@@ -1476,7 +1539,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		communicator_new_read_at_lsnv(InfoFromSMgrRel(reln), forkNum, blkno,
 									  (void *) &buffer, 1);
@@ -1587,12 +1650,12 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				 nblocks, PG_IOV_MAX);
 
 	/* Try to read PS results if they are available */
-	if (!neon_enable_new_communicator)
+	if (!neon_use_communicator_worker)
 		communicator_prefetch_pump_state();
 
 	memset(read_pages, 0, sizeof(read_pages));
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		communicator_new_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum,
 									  buffers, nblocks);
@@ -1601,7 +1664,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	{
 		neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, blocknum,
 							  request_lsns, nblocks);
-		
+
 		prefetch_result = communicator_prefetch_lookupv(InfoFromSMgrRel(reln), forknum,
 														blocknum, request_lsns, nblocks,
 														buffers, read_pages);
@@ -1748,7 +1811,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 		 forknum, blocknum,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		communicator_new_write_page(InfoFromSMgrRel(reln), forknum, blocknum, buffer, lsn);
 	}
@@ -1818,7 +1881,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 	neon_wallog_pagev(reln, forknum, blkno, nblocks, (const char **) buffers, false);
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		for (int i = 0; i < nblocks; i++)
 		{
@@ -1873,7 +1936,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		n_blocks = communicator_new_rel_nblocks(InfoFromSMgrRel(reln), forknum);
 	}
@@ -1913,7 +1976,7 @@ neon_dbsize(Oid dbNode)
 	neon_request_lsns request_lsns;
 	NRelFileInfo dummy_node = {0};
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		db_size = communicator_new_dbsize(dbNode);
 	}
@@ -1960,9 +2023,11 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, Blo
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
-		communicator_new_rel_truncate(InfoFromSMgrRel(reln), forknum, nblocks);
+		XLogRecPtr	lsn = neon_get_write_lsn();
+
+		communicator_new_rel_truncate(InfoFromSMgrRel(reln), forknum, nblocks, lsn);
 	}
 	else
 	{
@@ -2039,7 +2104,7 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 
 	neon_log(SmgrTrace, "[NEON_SMGR] immedsync noop");
 
-	if (!neon_enable_new_communicator)
+	if (!neon_use_communicator_worker)
 		communicator_prefetch_pump_state();
 
 	if (debug_compare_local)
@@ -2226,12 +2291,15 @@ neon_end_unlogged_build(SMgrRelation reln)
 		nblocks = mdnblocks(reln, MAIN_FORKNUM);
 		recptr = GetXLogInsertRecPtr();
 
-		neon_set_lwlsn_block_range(recptr,
-								   InfoFromNInfoB(rinfob),
-								   MAIN_FORKNUM, 0, nblocks);
-		neon_set_lwlsn_relation(recptr,
-								InfoFromNInfoB(rinfob),
-								MAIN_FORKNUM);
+		if (!neon_use_communicator_worker)
+		{
+			neon_set_lwlsn_block_range(recptr,
+									   InfoFromNInfoB(rinfob),
+									   MAIN_FORKNUM, 0, nblocks);
+			neon_set_lwlsn_relation(recptr,
+									InfoFromNInfoB(rinfob),
+									MAIN_FORKNUM);
+		}
 
 		/* Remove local copy */
 		for (int forknum = 0; forknum <= MAX_FORKNUM; forknum++)
@@ -2240,8 +2308,11 @@ neon_end_unlogged_build(SMgrRelation reln)
 				 RelFileInfoFmt(InfoFromNInfoB(rinfob)),
 				 forknum);
 
-			// FIXME: also do this with the new communicator
-			if (!neon_enable_new_communicator)
+			if (neon_use_communicator_worker)
+			{
+				communicator_new_update_cached_rel_size(InfoFromSMgrRel(reln), forknum, nblocks, recptr);
+			}
+			else
 			{
 				forget_cached_relsize(InfoFromNInfoB(rinfob), forknum);
 				lfc_invalidate(InfoFromNInfoB(rinfob), forknum, nblocks);
@@ -2313,8 +2384,8 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	request_lsns.not_modified_since = not_modified_since;
 	request_lsns.effective_request_lsn = request_lsn;
 
-	if (neon_enable_new_communicator)
-		n_blocks = communicator_new_read_slru_segment(kind, segno, buffer);
+	if (neon_use_communicator_worker)
+		n_blocks = communicator_new_read_slru_segment(kind, (uint32_t)segno, &request_lsns, path);
 	else
 		n_blocks = communicator_read_slru_segment(kind, segno, &request_lsns, buffer);
 
@@ -2353,7 +2424,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 			}
 			break;
 	}
-	if (!neon_enable_new_communicator)
+	if (!neon_use_communicator_worker)
 		communicator_reconfigure_timeout_if_needed();
 }
 
@@ -2412,7 +2483,7 @@ smgr_init_neon(void)
 
 	smgr_init_standard();
 	neon_init();
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 		communicator_new_init();
 	else
 		communicator_init();
@@ -2427,7 +2498,7 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 	/* This is only used in WAL replay */
 	Assert(RecoveryInProgress());
 
-	if (neon_enable_new_communicator)
+	if (neon_use_communicator_worker)
 	{
 		relsize = communicator_new_rel_nblocks(rinfo, forknum);
 
@@ -2606,7 +2677,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 		 * We should perform this check after assigning LwLSN to prevent
 		 * prefetching of some older version of the page by some other backend.
 		 */
-		if (neon_enable_new_communicator)
+		if (neon_use_communicator_worker)
 			no_redo_needed = communicator_new_cache_contains(rinfo, forknum, blkno);
 		else
 			no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);

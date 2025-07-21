@@ -23,6 +23,7 @@
 #include "replication/walsender.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
+#include "storage/ipc.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
 #include "utils/builtins.h"
@@ -52,7 +53,6 @@ PG_MODULE_MAGIC;
 void		_PG_init(void);
 
 
-bool neon_enable_new_communicator;
 static int  running_xacts_overflow_policy;
 static bool monitor_query_exec_time = false;
 
@@ -63,12 +63,13 @@ static void neon_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void neon_ExecutorEnd(QueryDesc *queryDesc);
 
 static shmem_startup_hook_type prev_shmem_startup_hook;
-#if PG_VERSION_NUM>=150000
-static shmem_request_hook_type prev_shmem_request_hook;
+static void neon_shmem_startup_hook(void);
+static void neon_shmem_request_hook(void);
+
+#if PG_MAJORVERSION_NUM >= 15
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
 #endif
 
-static void neon_shmem_request(void);
-static void neon_shmem_startup_hook(void);
 
 #if PG_MAJORVERSION_NUM >= 17
 uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
@@ -458,33 +459,56 @@ _PG_init(void)
 	load_file("$libdir/neon_rmgr", false);
 #endif
 
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = neon_shmem_startup_hook;
-#if PG_VERSION_NUM>=150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = neon_shmem_request;
-#else
-	neon_shmem_request();
-#endif
-
 	DefineCustomBoolVariable(
-							"neon.enable_new_communicator",
-							"Enables new communicator implementation",
+							"neon.use_communicator_worker",
+							"Uses the communicator worker implementation",
 							NULL,
-							&neon_enable_new_communicator,
+							&neon_use_communicator_worker,
 							true,
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
 
+	/*
+	 * Initializing a pre-loaded Postgres extension happens in three stages:
+	 *
+	 * 1. _PG_init() is called early at postmaster startup. In this stage, no
+	 *    shared memory has been allocated yet. Core Postgres GUCs have been
+	 *    initialized from the config files, but notably, MaxBackends has not
+	 *    calculated yet. In this stage, we must register any extension GUCs
+	 *    and can do other early initialization that doesn't depend on shared
+	 *    memory. In this stage we must also register "shmem request" and
+	 *    "shmem starutup" hooks, to be called in stages 2 and 3.
+	 *
+	 * 2. After MaxBackends have been calculated, the "shmem request" hooks
+	 *    are called. The hooks can reserve shared memory by calling
+	 *    RequestAddinShmemSpace and RequestNamedLWLockTranche().  The "shmem
+	 *    request hooks" are a new mechanism in Postgres v15. In v14 and
+	 *    below, you had to make those Requests in stage 1 already, which
+	 *    means they could not depend on MaxBackends. (See hack in
+	 *    NeonPerfCountersShmemRequest())
+	 *
+	 * 3. After some more runtime-computed GUCs that affect the amount of
+	 *    shared memory needed have been calculated, the "shmem startup" hooks
+	 *    are called. In this stage, we allocate any shared memory, LWLocks
+	 *    and other shared resources.
+	 *
+	 * Here, in the 'neon' extension, we register just one shmem request hook
+	 * and one startup hook, which call into functions in all the subsystems
+	 * that are part of the extension. On v14, the ShmemRequest functions are
+	 * called in stage 1, and on v15 onwards they are called in stage 2.
+	 */
+
+	/* Stage 1: Define GUCs, and other early intialization */
 	pg_init_libpagestore();
+	relsize_hash_init();
 	lfc_init();
+	pg_init_prewarm();
 	pg_init_walproposer();
 	init_lwlsncache();
 
 	pg_init_communicator();
-	if (neon_enable_new_communicator)
-		pg_init_communicator_new();
+	pg_init_communicator_new();
 
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
@@ -565,6 +589,15 @@ _PG_init(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomStringVariable(
+							"neon.privileged_role_name",
+							"Name of the 'weak' superuser role, which we give to the users",
+							NULL,
+							&privileged_role_name,
+							"neon_superuser",
+							PGC_POSTMASTER, 0, NULL, NULL, NULL);
+
 	/*
 	 * Important: This must happen after other parts of the extension are
 	 * loaded, otherwise any settings to GUCs that were set before the
@@ -574,6 +607,22 @@ _PG_init(void)
 
 	ReportSearchPath();
 
+	/*
+	 * Register initialization hooks for stage 2. (On v14, there's no "shmem
+	 * request" hooks, so call the ShmemRequest functions immediately.)
+	 */
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = neon_shmem_request_hook;
+#else
+	neon_shmem_request_hook();
+#endif
+
+	/* Register hooks for stage 3 */
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = neon_shmem_startup_hook;
+
+	/* Other misc initialization */
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = neon_ExecutorStart;
 	prev_ExecutorEnd = ExecutorEnd_hook;
@@ -583,6 +632,8 @@ _PG_init(void)
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
 PG_FUNCTION_INFO_V1(backpressure_throttling_time);
+PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
+PG_FUNCTION_INFO_V1(approximate_working_set_size);
 
 Datum
 pg_cluster_size(PG_FUNCTION_ARGS)
@@ -629,23 +680,87 @@ backpressure_throttling_time(PG_FUNCTION_ARGS)
 	PG_RETURN_UINT64(BackpressureThrottlingTime());
 }
 
-static void
-neon_shmem_request(void)
+Datum
+approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
 {
-#if PG_VERSION_NUM>=150000
+	time_t		duration;
+	int32		dc;
+
+	duration = PG_ARGISNULL(0) ? (time_t) -1 : PG_GETARG_INT32(0);
+
+	if (neon_use_communicator_worker)
+		dc = communicator_new_approximate_working_set_size_seconds(duration, false);
+	else
+		dc = lfc_approximate_working_set_size_seconds(duration, false);
+	if (dc < 0)
+		PG_RETURN_NULL();
+	else
+		PG_RETURN_INT32(dc);
+}
+
+Datum
+approximate_working_set_size(PG_FUNCTION_ARGS)
+{
+	bool		reset = PG_GETARG_BOOL(0);
+	int32		dc;
+
+	if (neon_use_communicator_worker)
+		dc = communicator_new_approximate_working_set_size_seconds(-1, reset);
+	else
+		dc = lfc_approximate_working_set_size_seconds(-1, reset);
+	if (dc < 0)
+		PG_RETURN_NULL();
+	else
+		PG_RETURN_INT32(dc);
+}
+
+/*
+ * Initialization stage 2: make requests for the amount of shared memory we
+ * will need.
+ *
+ * For a high-level explanation of the initialization process, see _PG_init().
+ */
+static void
+neon_shmem_request_hook(void)
+{
+#if PG_VERSION_NUM >= 150000
 	if (prev_shmem_request_hook)
 		prev_shmem_request_hook();
 #endif
 
-	communicator_new_shmem_request();
+	LfcShmemRequest();
+	PrewarmShmemRequest();
+	NeonPerfCountersShmemRequest();
+	PagestoreShmemRequest();
+	RelsizeCacheShmemRequest();
+	WalproposerShmemRequest();
+	LwLsnCacheShmemRequest();
+	CommunicatorNewShmemRequest();
 }
 
+
+/*
+ * Initialization stage 3: Initialize shared memory.
+ *
+ * For a high-level explanation of the initialization process, see _PG_init().
+ */
 static void
 neon_shmem_startup_hook(void)
 {
 	/* Initialize */
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+	LfcShmemInit();
+	PrewarmShmemInit();
+	NeonPerfCountersShmemInit();
+	PagestoreShmemInit();
+	RelsizeCacheShmemInit();
+	WalproposerShmemInit();
+	LwLsnCacheShmemInit();
+	CommunicatorNewShmemInit();
 
 #if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");
@@ -660,7 +775,7 @@ neon_shmem_startup_hook(void)
 	WAIT_EVENT_NEON_WAL_DL = WaitEventExtensionNew("Neon/WAL_Download");
 #endif
 
-	communicator_new_shmem_startup();
+	LWLockRelease(AddinShmemInitLock);
 }
 
 /*

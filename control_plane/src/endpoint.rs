@@ -32,11 +32,12 @@
 //!     config.json                 - passed to `compute_ctl`
 //!     pgdata/
 //!         postgresql.conf       - copy of postgresql.conf created by `compute_ctl`
-//!         zenith.signal
+//!         neon.signal
+//!         zenith.signal         - copy of neon.signal, for backward compatibility
 //!         <other PostgreSQL files>
 //! ```
 //!
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -56,8 +57,8 @@ use compute_api::responses::{
     TlsConfig,
 };
 use compute_api::spec::{
-    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PgIdent,
-    RemoteExtSpec, Role,
+    Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PageserverProtocol,
+    PageserverShardInfo, PgIdent, RemoteExtSpec, Role,
 };
 
 // re-export these, because they're used in the reconfigure() function
@@ -68,7 +69,6 @@ use jsonwebtoken::jwk::{
     OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
 };
 use nix::sys::signal::{Signal, kill};
-use pageserver_api::shard::ShardStripeSize;
 use pem::Pem;
 use reqwest::header::CONTENT_TYPE;
 use safekeeper_api::PgMajorVersion;
@@ -79,6 +79,10 @@ use spki::der::Decode;
 use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::shard::{ShardIndex, ShardNumber};
+
+use pageserver_api::config::DEFAULT_GRPC_LISTEN_PORT as DEFAULT_PAGESERVER_GRPC_PORT;
+use postgres_connection::parse_host_port;
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
@@ -101,6 +105,7 @@ pub struct EndpointConf {
     features: Vec<ComputeFeature>,
     cluster: Option<Cluster>,
     compute_ctl_config: ComputeCtlConfig,
+    privileged_role_name: Option<String>,
 }
 
 //
@@ -201,6 +206,7 @@ impl ComputeControlPlane {
         grpc: bool,
         skip_pg_catalog_updates: bool,
         drop_subscriptions_before_start: bool,
+        privileged_role_name: Option<String>,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
@@ -238,6 +244,7 @@ impl ComputeControlPlane {
             features: vec![],
             cluster: None,
             compute_ctl_config: compute_ctl_config.clone(),
+            privileged_role_name: privileged_role_name.clone(),
         });
 
         ep.create_endpoint_dir()?;
@@ -259,6 +266,7 @@ impl ComputeControlPlane {
                 features: vec![],
                 cluster: None,
                 compute_ctl_config,
+                privileged_role_name,
             })?,
         )?;
         std::fs::write(
@@ -334,6 +342,9 @@ pub struct Endpoint {
 
     /// The compute_ctl config for the endpoint's compute.
     compute_ctl_config: ComputeCtlConfig,
+
+    /// The name of the privileged role for the endpoint.
+    privileged_role_name: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -384,7 +395,6 @@ pub struct EndpointStartArgs {
     pub safekeepers: Vec<NodeId>,
     pub pageserver_conninfo: PageserverConnectionInfo,
     pub remote_ext_base_url: Option<String>,
-    pub shard_stripe_size: usize,
     pub create_test_user: bool,
     pub start_timeout: Duration,
     pub autoprewarm: bool,
@@ -434,6 +444,7 @@ impl Endpoint {
             features: conf.features,
             cluster: conf.cluster,
             compute_ctl_config: conf.compute_ctl_config,
+            privileged_role_name: conf.privileged_role_name,
         })
     }
 
@@ -466,7 +477,7 @@ impl Endpoint {
         conf.append("max_connections", "100");
         conf.append("wal_level", "logical");
         // wal_sender_timeout is the maximum time to wait for WAL replication.
-        // It also defines how often the walreciever will send a feedback message to the wal sender.
+        // It also defines how often the walreceiver will send a feedback message to the wal sender.
         conf.append("wal_sender_timeout", "5s");
         conf.append("listen_addresses", &self.pg_address.ip().to_string());
         conf.append("port", &self.pg_address.port().to_string());
@@ -715,6 +726,46 @@ impl Endpoint {
             remote_extensions = None;
         };
 
+        // For the sake of backwards-compatibility, also fill in 'pageserver_connstring'
+        //
+        // XXX: I believe this is not really needed, except to make
+        // test_forward_compatibility happy.
+        //
+        // Use a closure so that we can conviniently return None in the middle of the
+        // loop.
+        let pageserver_connstring = (|| {
+            let num_shards = if args.pageserver_conninfo.shard_count.is_unsharded() {
+                1
+            } else {
+                args.pageserver_conninfo.shard_count.0
+            };
+            let mut connstrings = Vec::new();
+            for shard_no in 0..num_shards {
+                let shard_index = ShardIndex {
+                    shard_count: args.pageserver_conninfo.shard_count,
+                    shard_number: ShardNumber(shard_no),
+                };
+                let shard = args
+                    .pageserver_conninfo
+                    .shards
+                    .get(&shard_index)
+                    .expect(&format!(
+                        "shard {} not found in pageserver_connection_info",
+                        shard_index
+                    ));
+                let pageserver = shard
+                    .pageservers
+                    .first()
+                    .expect("must have at least one pageserver");
+                if let Some(libpq_url) = &pageserver.libpq_url {
+                    connstrings.push(libpq_url.clone());
+                } else {
+                    return None;
+                }
+            }
+            Some(connstrings.join(","))
+        })();
+
         // Create config file
         let config = {
             let mut spec = ComputeSpec {
@@ -759,13 +810,14 @@ impl Endpoint {
                 branch_id: None,
                 endpoint_id: Some(self.endpoint_id.clone()),
                 mode: self.mode,
-                pageserver_connection_info: Some(args.pageserver_conninfo),
+                pageserver_connection_info: Some(args.pageserver_conninfo.clone()),
+                pageserver_connstring,
                 safekeepers_generation: args.safekeepers_generation.map(|g| g.into_inner()),
                 safekeeper_connstrings,
                 storage_auth_token: args.auth_token.clone(),
                 remote_extensions,
                 pgbouncer_settings: None,
-                shard_stripe_size: Some(args.shard_stripe_size),
+                shard_stripe_size: args.pageserver_conninfo.stripe_size, // redundant with pageserver_connection_info.stripe_size
                 local_proxy_config: None,
                 reconfigure_concurrency: self.reconfigure_concurrency,
                 drop_subscriptions_before_start: self.drop_subscriptions_before_start,
@@ -861,6 +913,10 @@ impl Endpoint {
             cmd.arg("--dev");
         }
 
+        if let Some(privileged_role_name) = self.privileged_role_name.clone() {
+            cmd.args(["--privileged-role-name", &privileged_role_name]);
+        }
+
         let child = cmd.spawn()?;
         // set up a scopeguard to kill & wait for the child in case we panic or bail below
         let child = scopeguard::guard(child, |mut child| {
@@ -914,7 +970,8 @@ impl Endpoint {
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
-                        | ComputeStatus::TerminationPending { .. }
+                        | ComputeStatus::TerminationPendingFast
+                        | ComputeStatus::TerminationPendingImmediate
                         | ComputeStatus::Terminated => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
@@ -972,8 +1029,7 @@ impl Endpoint {
 
     pub async fn reconfigure(
         &self,
-        pageserver_conninfo: Option<PageserverConnectionInfo>,
-        stripe_size: Option<ShardStripeSize>,
+        pageserver_conninfo: Option<&PageserverConnectionInfo>,
         safekeepers: Option<Vec<NodeId>>,
         safekeeper_generation: Option<SafekeeperGeneration>,
     ) -> Result<()> {
@@ -995,10 +1051,8 @@ impl Endpoint {
                 !pageserver_conninfo.shards.is_empty(),
                 "no pageservers provided"
             );
-            spec.pageserver_connection_info = Some(pageserver_conninfo);
-        }
-        if stripe_size.is_some() {
-            spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
+            spec.pageserver_connection_info = Some(pageserver_conninfo.clone());
+            spec.shard_stripe_size = pageserver_conninfo.stripe_size;
         }
 
         // If safekeepers are not specified, don't change them.
@@ -1047,11 +1101,9 @@ impl Endpoint {
 
     pub async fn reconfigure_pageservers(
         &self,
-        pageservers: PageserverConnectionInfo,
-        stripe_size: Option<ShardStripeSize>,
+        pageservers: &PageserverConnectionInfo,
     ) -> Result<()> {
-        self.reconfigure(Some(pageservers), stripe_size, None, None)
-            .await
+        self.reconfigure(Some(pageservers), None, None).await
     }
 
     pub async fn reconfigure_safekeepers(
@@ -1059,7 +1111,7 @@ impl Endpoint {
         safekeepers: Vec<NodeId>,
         generation: SafekeeperGeneration,
     ) -> Result<()> {
-        self.reconfigure(None, None, Some(safekeepers), Some(generation))
+        self.reconfigure(None, Some(safekeepers), Some(generation))
             .await
     }
 
@@ -1114,4 +1166,69 @@ impl Endpoint {
             db_name
         )
     }
+}
+
+pub fn pageserver_conf_to_shard_conn_info(
+    conf: &crate::local_env::PageServerConf,
+) -> Result<PageserverShardConnectionInfo> {
+    let libpq_url = {
+        let (host, port) = parse_host_port(&conf.listen_pg_addr)?;
+        let port = port.unwrap_or(5432);
+        Some(format!("postgres://no_user@{host}:{port}"))
+    };
+    let grpc_url = if let Some(grpc_addr) = &conf.listen_grpc_addr {
+        let (host, port) = parse_host_port(grpc_addr)?;
+        let port = port.unwrap_or(DEFAULT_PAGESERVER_GRPC_PORT);
+        Some(format!("grpc://no_user@{host}:{port}"))
+    } else {
+        None
+    };
+    Ok(PageserverShardConnectionInfo {
+        id: Some(conf.id.to_string()),
+        libpq_url,
+        grpc_url,
+    })
+}
+
+pub fn tenant_locate_response_to_conn_info(
+    response: &pageserver_api::controller_api::TenantLocateResponse,
+) -> Result<PageserverConnectionInfo> {
+    let mut shards = HashMap::new();
+    for shard in response.shards.iter() {
+        tracing::info!("parsing {}", shard.listen_pg_addr);
+        let libpq_url = {
+            let host = &shard.listen_pg_addr;
+            let port = shard.listen_pg_port;
+            Some(format!("postgres://no_user@{host}:{port}"))
+        };
+        let grpc_url = if let Some(grpc_addr) = &shard.listen_grpc_addr {
+            let host = grpc_addr;
+            let port = shard.listen_grpc_port.expect("no gRPC port");
+            Some(format!("grpc://no_user@{host}:{port}"))
+        } else {
+            None
+        };
+
+        let shard_info = PageserverShardInfo {
+            pageservers: vec![PageserverShardConnectionInfo {
+                id: Some(shard.node_id.to_string()),
+                libpq_url,
+                grpc_url,
+            }],
+        };
+
+        shards.insert(shard.shard_id.to_index(), shard_info);
+    }
+
+    let stripe_size = if response.shard_params.count.is_unsharded() {
+        None
+    } else {
+        Some(response.shard_params.stripe_size.0)
+    };
+    Ok(PageserverConnectionInfo {
+        shard_count: response.shard_params.count,
+        stripe_size,
+        shards,
+        prefer_protocol: PageserverProtocol::default(),
+    })
 }

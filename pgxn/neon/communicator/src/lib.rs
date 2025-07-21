@@ -1,9 +1,7 @@
-//!
 //! Three main parts:
 //! - async tokio communicator core, which receives requests and processes them.
 //! - Main loop and requests queues, which routes requests from backends to the core
 //! - the per-backend glue code, which submits requests
-//!
 
 mod backend_comms;
 
@@ -23,5 +21,5 @@ mod worker_process;
 
 mod global_allocator;
 
-// FIXME get this from postgres headers somehow
+// FIXME: get this from postgres headers somehow
 pub const BLCKSZ: usize = 8192;

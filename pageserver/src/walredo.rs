@@ -147,6 +147,16 @@ pub enum RedoAttemptType {
     GcCompaction,
 }
 
+impl std::fmt::Display for RedoAttemptType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RedoAttemptType::ReadPage => write!(f, "read page"),
+            RedoAttemptType::LegacyCompaction => write!(f, "legacy compaction"),
+            RedoAttemptType::GcCompaction => write!(f, "gc compaction"),
+        }
+    }
+}
+
 ///
 /// Public interface of WAL redo manager
 ///
@@ -199,6 +209,7 @@ impl PostgresRedoManager {
                         self.conf.wal_redo_timeout,
                         pg_version,
                         max_retry_attempts,
+                        redo_attempt_type,
                     )
                     .await
                 };
@@ -221,6 +232,7 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
                 max_retry_attempts,
+                redo_attempt_type,
             )
             .await
         }
@@ -445,6 +457,7 @@ impl PostgresRedoManager {
         wal_redo_timeout: Duration,
         pg_version: PgMajorVersion,
         max_retry_attempts: u32,
+        redo_attempt_type: RedoAttemptType,
     ) -> Result<Bytes, Error> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
 
@@ -485,17 +498,28 @@ impl PostgresRedoManager {
                 );
 
                 if let Err(e) = result.as_ref() {
-                    error!(
-                        "error applying {} WAL records {}..{} ({} bytes) to key {key}, from base image with LSN {} to reconstruct page image at LSN {} n_attempts={}: {:?}",
-                        records.len(),
-                        records.first().map(|p| p.0).unwrap_or(Lsn(0)),
-                        records.last().map(|p| p.0).unwrap_or(Lsn(0)),
-                        nbytes,
-                        base_img_lsn,
-                        lsn,
-                        n_attempts,
-                        e,
-                    );
+                    macro_rules! message {
+                        ($level:tt) => {
+                            $level!(
+                                "error applying {} WAL records {}..{} ({} bytes) to key {} during {}, from base image with LSN {} to reconstruct page image at LSN {} n_attempts={}: {:?}",
+                                records.len(),
+                                records.first().map(|p| p.0).unwrap_or(Lsn(0)),
+                                records.last().map(|p| p.0).unwrap_or(Lsn(0)),
+                                nbytes,
+                                key,
+                                redo_attempt_type,
+                                base_img_lsn,
+                                lsn,
+                                n_attempts,
+                                e,
+                            )
+                        }
+                    }
+                    match redo_attempt_type {
+                        RedoAttemptType::ReadPage => message!(error),
+                        RedoAttemptType::LegacyCompaction => message!(error),
+                        RedoAttemptType::GcCompaction => message!(warn),
+                    }
                 }
 
                 result.map_err(Error::Other)
@@ -567,21 +591,54 @@ impl PostgresRedoManager {
 }
 
 #[cfg(test)]
+pub(crate) mod harness {
+    use super::PostgresRedoManager;
+    use crate::config::PageServerConf;
+    use utils::{id::TenantId, shard::TenantShardId};
+
+    pub struct RedoHarness {
+        // underscored because unused, except for removal at drop
+        _repo_dir: camino_tempfile::Utf8TempDir,
+        pub manager: PostgresRedoManager,
+        tenant_shard_id: TenantShardId,
+    }
+
+    impl RedoHarness {
+        pub fn new() -> anyhow::Result<Self> {
+            crate::tenant::harness::setup_logging();
+
+            let repo_dir = camino_tempfile::tempdir()?;
+            let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
+            let conf = Box::leak(Box::new(conf));
+            let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
+
+            let manager = PostgresRedoManager::new(conf, tenant_shard_id);
+
+            Ok(RedoHarness {
+                _repo_dir: repo_dir,
+                manager,
+                tenant_shard_id,
+            })
+        }
+        pub fn span(&self) -> tracing::Span {
+            tracing::info_span!("RedoHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
     use bytes::Bytes;
     use pageserver_api::key::Key;
-    use pageserver_api::shard::TenantShardId;
     use postgres_ffi::PgMajorVersion;
     use tracing::Instrument;
-    use utils::id::TenantId;
     use utils::lsn::Lsn;
     use wal_decoder::models::record::NeonWalRecord;
 
-    use super::PostgresRedoManager;
-    use crate::config::PageServerConf;
     use crate::walredo::RedoAttemptType;
+    use crate::walredo::harness::RedoHarness;
 
     #[tokio::test]
     async fn test_ping() {
@@ -691,34 +748,5 @@ mod tests {
                 }
             )
         ]
-    }
-
-    struct RedoHarness {
-        // underscored because unused, except for removal at drop
-        _repo_dir: camino_tempfile::Utf8TempDir,
-        manager: PostgresRedoManager,
-        tenant_shard_id: TenantShardId,
-    }
-
-    impl RedoHarness {
-        fn new() -> anyhow::Result<Self> {
-            crate::tenant::harness::setup_logging();
-
-            let repo_dir = camino_tempfile::tempdir()?;
-            let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
-            let conf = Box::leak(Box::new(conf));
-            let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
-
-            let manager = PostgresRedoManager::new(conf, tenant_shard_id);
-
-            Ok(RedoHarness {
-                _repo_dir: repo_dir,
-                manager,
-                tenant_shard_id,
-            })
-        }
-        fn span(&self) -> tracing::Span {
-            tracing::info_span!("RedoHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
-        }
     }
 }

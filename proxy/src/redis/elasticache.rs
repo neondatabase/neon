@@ -9,10 +9,12 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
+use aws_credential_types::provider::error::CredentialsError;
 use aws_sdk_iam::config::ProvideCredentials;
 use aws_sigv4::http_request::{
-    self, SignableBody, SignableRequest, SignatureLocation, SigningSettings,
+    self, SignableBody, SignableRequest, SignatureLocation, SigningError, SigningSettings,
 };
+use aws_sigv4::sign::v4::signing_params::BuildError;
 use tracing::info;
 
 #[derive(Debug)]
@@ -38,6 +40,18 @@ impl AWSIRSAConfig {
             action: "connect".to_string(),
         }
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum CredentialsProviderError {
+    #[error(transparent)]
+    AwsCredentials(#[from] CredentialsError),
+    #[error(transparent)]
+    AwsSigv4Build(#[from] BuildError),
+    #[error(transparent)]
+    AwsSigv4Singing(#[from] SigningError),
+    #[error(transparent)]
+    Http(#[from] http::Error),
 }
 
 /// Credentials provider for AWS elasticache authentication.
@@ -92,7 +106,9 @@ impl CredentialsProvider {
         })
     }
 
-    pub(crate) async fn provide_credentials(&self) -> anyhow::Result<(String, String)> {
+    pub(crate) async fn provide_credentials(
+        &self,
+    ) -> Result<(String, String), CredentialsProviderError> {
         let aws_credentials = self
             .credentials_provider
             .provide_credentials()
