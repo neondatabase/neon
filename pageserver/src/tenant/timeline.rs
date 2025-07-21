@@ -6796,7 +6796,7 @@ impl Timeline {
                 const MAX_ALLOWED_STANDBY_LAG: u64 = 10u64 << 30; // 10 GB
                 if standby_lag.0 < MAX_ALLOWED_STANDBY_LAG {
                     new_gc_cutoff = Lsn::min(standby_horizon, new_gc_cutoff);
-                    trace!("holding off GC for standby apply LSN {}", standby_horizon);
+                    info!("holding off GC for standby apply LSN {}", standby_horizon);
                 } else {
                     warn!(
                         "standby is lagging for more than {}MB, not holding gc for it",
