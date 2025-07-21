@@ -24,7 +24,7 @@ use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
 
-use crate::metrics::MISC_OPERATION_SECONDS;
+use crate::metrics::{MISC_OPERATION_SECONDS, PROPOSER_ACCEPTOR_MESSAGES_TOTAL};
 use crate::state::TimelineState;
 use crate::{control_file, wal_storage};
 
@@ -938,7 +938,7 @@ where
         &mut self,
         msg: &ProposerAcceptorMessage,
     ) -> Result<Option<AcceptorProposerMessage>> {
-        match msg {
+        let res = match msg {
             ProposerAcceptorMessage::Greeting(msg) => self.handle_greeting(msg).await,
             ProposerAcceptorMessage::VoteRequest(msg) => self.handle_vote_request(msg).await,
             ProposerAcceptorMessage::Elected(msg) => self.handle_elected(msg).await,
@@ -949,7 +949,20 @@ where
                 self.handle_append_request(msg, false).await
             }
             ProposerAcceptorMessage::FlushWAL => self.handle_flush().await,
-        }
+        };
+
+        // BEGIN HADRON
+        match &res {
+            Ok(_) => PROPOSER_ACCEPTOR_MESSAGES_TOTAL
+                .with_label_values(&["success"])
+                .inc(),
+            Err(_) => PROPOSER_ACCEPTOR_MESSAGES_TOTAL
+                .with_label_values(&["error"])
+                .inc(),
+        };
+
+        res
+        // END HADRON
     }
 
     /// Handle initial message from proposer: check its sanity and send my

@@ -26,7 +26,9 @@ use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
 use utils::{backoff, pausable_failpoint};
 
-use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
+use crate::metrics::{
+    BACKED_UP_SEGMENTS, BACKUP_ERRORS, BACKUP_REELECT_LEADER_COUNT, WAL_BACKUP_TASKS,
+};
 use crate::timeline::WalResidentTimeline;
 use crate::timeline_manager::{Manager, StateSnapshot};
 use crate::{SafeKeeperConf, WAL_BACKUP_RUNTIME};
@@ -70,8 +72,9 @@ pub(crate) async fn update_task(
     need_backup: bool,
     state: &StateSnapshot,
 ) {
-    let (offloader, election_dbg_str) =
-        determine_offloader(&state.peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
+    /* BEGIN_HADRON */
+    let (offloader, election_dbg_str) = hadron_determine_offloader(mgr, state);
+    /* END_HADRON */
     let elected_me = Some(mgr.conf.my_id) == offloader;
 
     let should_task_run = need_backup && elected_me;
@@ -127,6 +130,70 @@ async fn shut_down_task(entry: &mut Option<WalBackupTaskHandle>) {
     }
 }
 
+/* BEGIN_HADRON */
+// On top of the neon determine_offloader, we also check if the current offloader is lagging behind too much.
+// If it is, we re-elect a new offloader. This mitigates the below issue. It also helps distribute the load across SKs.
+//
+// We observe that the offloader fails to upload a segment due to race conditions on XLOG SWITCH and PG start streaming WALs.
+// wal_backup task continously failing to upload a full segment while the segment remains partial on the disk.
+// The consequence is that commit_lsn for all SKs move forward but backup_lsn stays the same. Then, all SKs run out of disk space.
+// See go/sk-ood-xlog-switch for more details.
+//
+// To mitigate this issue, we will re-elect a new offloader if the current offloader is lagging behind too much.
+// Each SK makes the decision locally but they are aware of each other's commit and backup lsns.
+//
+// determine_offloader will pick a SK. say SK-1.
+// Each SK checks
+// -- if commit_lsn - back_lsn > threshold,
+// -- -- remove SK-1 from the candidate and call determine_offloader again.
+// SK-1 will step down and all SKs will elect the same leader again.
+// After the backup is caught up, the leader will become SK-1 again.
+fn hadron_determine_offloader(mgr: &Manager, state: &StateSnapshot) -> (Option<NodeId>, String) {
+    let mut offloader: Option<NodeId>;
+    let mut election_dbg_str: String;
+    let caughtup_peers_count: usize;
+    (offloader, election_dbg_str, caughtup_peers_count) =
+        determine_offloader(&state.peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
+
+    if offloader.is_none()
+        || caughtup_peers_count <= 1
+        || mgr.conf.max_reelect_offloader_lag_bytes == 0
+    {
+        return (offloader, election_dbg_str);
+    }
+
+    let offloader_sk_id = offloader.unwrap();
+
+    let backup_lag = state.commit_lsn.checked_sub(state.backup_lsn);
+    if backup_lag.is_none() {
+        debug!("Backup lag is None. Skipping re-election.");
+        return (offloader, election_dbg_str);
+    }
+
+    let backup_lag = backup_lag.unwrap().0;
+
+    if backup_lag < mgr.conf.max_reelect_offloader_lag_bytes {
+        return (offloader, election_dbg_str);
+    }
+
+    info!(
+        "Electing a new leader: Backup lag is too high backup lsn lag {} threshold {}: {}",
+        backup_lag, mgr.conf.max_reelect_offloader_lag_bytes, election_dbg_str
+    );
+    BACKUP_REELECT_LEADER_COUNT.inc();
+    // Remove the current offloader if lag is too high.
+    let new_peers: Vec<_> = state
+        .peers
+        .iter()
+        .filter(|p| p.sk_id != offloader_sk_id)
+        .cloned()
+        .collect();
+    (offloader, election_dbg_str, _) =
+        determine_offloader(&new_peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
+    (offloader, election_dbg_str)
+}
+/* END_HADRON */
+
 /// The goal is to ensure that normally only one safekeepers offloads. However,
 /// it is fine (and inevitable, as s3 doesn't provide CAS) that for some short
 /// time we have several ones as they PUT the same files. Also,
@@ -141,13 +208,13 @@ fn determine_offloader(
     wal_backup_lsn: Lsn,
     ttid: TenantTimelineId,
     conf: &SafeKeeperConf,
-) -> (Option<NodeId>, String) {
+) -> (Option<NodeId>, String, usize) {
     // TODO: remove this once we fill newly joined safekeepers since backup_lsn.
     let capable_peers = alive_peers
         .iter()
         .filter(|p| p.local_start_lsn <= wal_backup_lsn);
     match capable_peers.clone().map(|p| p.commit_lsn).max() {
-        None => (None, "no connected peers to elect from".to_string()),
+        None => (None, "no connected peers to elect from".to_string(), 0),
         Some(max_commit_lsn) => {
             let threshold = max_commit_lsn
                 .checked_sub(conf.max_offloader_lag_bytes)
@@ -175,6 +242,7 @@ fn determine_offloader(
                     capable_peers_dbg,
                     caughtup_peers.len()
                 ),
+                caughtup_peers.len(),
             )
         }
     }
@@ -345,6 +413,8 @@ async fn backup_lsn_range(
     if parallel_jobs < 1 {
         anyhow::bail!("parallel_jobs must be >= 1");
     }
+
+    pausable_failpoint!("backup-lsn-range-pausable");
 
     let remote_timeline_path = &timeline.remote_path;
     let start_lsn = *backup_lsn;

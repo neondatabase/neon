@@ -33,11 +33,13 @@ use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 
 use crate::debug_dump::TimelineDigestRequest;
+use crate::hadron::{get_filesystem_capacity, get_filesystem_usage};
 use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::DeleteOrExclude;
 use crate::{
     GlobalTimelines, SafeKeeperConf, copy_timeline, debug_dump, patch_control_file, pull_timeline,
 };
+use serde_json::json;
 
 /// Healthcheck handler.
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -125,6 +127,21 @@ async fn utilization_handler(request: Request<Body>) -> Result<Response<Body>, A
     let global_timelines = get_global_timelines(&request);
     let utilization = global_timelines.get_timeline_counts();
     json_response(StatusCode::OK, utilization)
+}
+
+/// Returns filesystem capacity and current utilization for the safekeeper data directory.
+async fn filesystem_usage_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let conf = get_conf(&request);
+    let path = conf.workdir.as_std_path();
+    let capacity = get_filesystem_capacity(path).map_err(ApiError::InternalServerError)?;
+    let usage = get_filesystem_usage(path);
+    let resp = json!({
+        "data_dir": path,
+        "capacity_bytes": capacity,
+        "usage_bytes": usage,
+    });
+    json_response(StatusCode::OK, resp)
 }
 
 /// List all (not deleted) timelines.
@@ -241,9 +258,14 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
             ApiError::InternalServerError(anyhow::anyhow!("failed to parse CA certs: {e}"))
         })?;
 
-    let resp =
-        pull_timeline::handle_request(data, conf.sk_auth_token.clone(), ca_certs, global_timelines)
-            .await?;
+    let resp = pull_timeline::handle_request(
+        data,
+        conf.sk_auth_token.clone(),
+        ca_certs,
+        global_timelines,
+        false,
+    )
+    .await?;
     json_response(StatusCode::OK, resp)
 }
 
@@ -699,6 +721,11 @@ pub fn make_router(
         }))
     }
 
+    let force_metric_collection_on_scrape = conf.force_metric_collection_on_scrape;
+
+    let prometheus_metrics_handler_wrapper =
+        move |req| prometheus_metrics_handler(req, force_metric_collection_on_scrape);
+
     // NB: on any changes do not forget to update the OpenAPI spec
     // located nearby (/safekeeper/src/http/openapi_spec.yaml).
     let auth = conf.http_auth.clone();
@@ -706,7 +733,9 @@ pub fn make_router(
         .data(conf)
         .data(global_timelines)
         .data(auth)
-        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/metrics", move |r| {
+            request_span(r, prometheus_metrics_handler_wrapper)
+        })
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| request_span(r, status_handler))
@@ -718,6 +747,11 @@ pub fn make_router(
             })
         })
         .get("/v1/utilization", |r| request_span(r, utilization_handler))
+        /* BEGIN_HADRON */
+        .get("/v1/debug/filesystem_usage", |r| {
+            request_span(r, filesystem_usage_handler)
+        })
+        /* END_HADRON */
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
         })

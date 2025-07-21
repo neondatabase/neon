@@ -16,7 +16,7 @@ use tokio::sync::mpsc::error::SendError;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::{Instrument, error, info, info_span};
-use utils::critical;
+use utils::critical_timeline;
 use utils::lsn::Lsn;
 use utils::postgres_client::{Compression, InterpretedFormat};
 use wal_decoder::models::{InterpretedWalRecord, InterpretedWalRecords};
@@ -268,6 +268,8 @@ impl InterpretedWalReader {
 
         let (shard_notification_tx, shard_notification_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        let ttid = wal_stream.ttid;
+
         let reader = InterpretedWalReader {
             wal_stream,
             shard_senders: HashMap::from([(
@@ -300,7 +302,11 @@ impl InterpretedWalReader {
                     .inspect_err(|err| match err {
                         // TODO: we may want to differentiate these errors further.
                         InterpretedWalReaderError::Decode(_) => {
-                            critical!("failed to decode WAL record: {err:?}");
+                            critical_timeline!(
+                                ttid.tenant_id,
+                                ttid.timeline_id,
+                                "failed to read WAL record: {err:?}"
+                            );
                         }
                         err => error!("failed to read WAL record: {err}"),
                     })
@@ -363,9 +369,14 @@ impl InterpretedWalReader {
             metric.dec();
         }
 
+        let ttid = self.wal_stream.ttid;
         match self.run_impl(start_pos).await {
             Err(err @ InterpretedWalReaderError::Decode(_)) => {
-                critical!("failed to decode WAL record: {err:?}");
+                critical_timeline!(
+                    ttid.tenant_id,
+                    ttid.timeline_id,
+                    "failed to decode WAL record: {err:?}"
+                );
             }
             Err(err) => error!("failed to read WAL record: {err}"),
             Ok(()) => info!("interpreted wal reader exiting"),
@@ -550,6 +561,20 @@ impl InterpretedWalReader {
                         // Update internal and external state, then reset the WAL stream
                         // if required.
                         let senders = self.shard_senders.entry(shard_id).or_default();
+
+                        // Clean up any shard senders that have dropped out before adding the new
+                        // one. This avoids a build up of dead senders.
+                        senders.retain(|sender| {
+                            let closed = sender.tx.is_closed();
+
+                            if closed {
+                                let sender_id = ShardSenderId::new(shard_id, sender.sender_id);
+                                tracing::info!("Removed shard sender {}", sender_id);
+                            }
+
+                            !closed
+                        });
+
                         let new_sender_id = match senders.last() {
                             Some(sender) => sender.sender_id.next(),
                             None => SenderId::first()
@@ -717,7 +742,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
 
-    use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
+    use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardIdentity};
     use postgres_ffi::{MAX_SEND_SIZE, PgMajorVersion};
     use tokio::sync::mpsc::error::TryRecvError;
     use utils::id::{NodeId, TenantTimelineId};
@@ -761,19 +786,13 @@ mod tests {
             MAX_SEND_SIZE,
         );
 
-        let shard_0 = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_0 =
+            ShardIdentity::new(ShardNumber(0), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
-        let shard_1 = ShardIdentity::new(
-            ShardNumber(1),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_1 =
+            ShardIdentity::new(ShardNumber(1), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
         let mut shards = HashMap::new();
 
@@ -781,7 +800,7 @@ mod tests {
             let shard_id = ShardIdentity::new(
                 ShardNumber(shard_number),
                 ShardCount(SHARD_COUNT),
-                ShardStripeSize::default(),
+                DEFAULT_STRIPE_SIZE,
             )
             .unwrap();
             let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(MSG_COUNT * 2);
@@ -909,12 +928,9 @@ mod tests {
             MAX_SEND_SIZE,
         );
 
-        let shard_0 = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_0 =
+            ShardIdentity::new(ShardNumber(0), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
         struct Sender {
             tx: Option<tokio::sync::mpsc::Sender<Batch>>,
@@ -1063,19 +1079,13 @@ mod tests {
             WAL_READER_BATCH_SIZE,
         );
 
-        let shard_0 = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_0 =
+            ShardIdentity::new(ShardNumber(0), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
-        let shard_1 = ShardIdentity::new(
-            ShardNumber(1),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_1 =
+            ShardIdentity::new(ShardNumber(1), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
         let mut shards = HashMap::new();
 
@@ -1083,7 +1093,7 @@ mod tests {
             let shard_id = ShardIdentity::new(
                 ShardNumber(shard_number),
                 ShardCount(SHARD_COUNT),
-                ShardStripeSize::default(),
+                DEFAULT_STRIPE_SIZE,
             )
             .unwrap();
             let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(MSG_COUNT * 2);

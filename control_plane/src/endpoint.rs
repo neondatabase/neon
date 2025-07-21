@@ -32,7 +32,8 @@
 //!     config.json                 - passed to `compute_ctl`
 //!     pgdata/
 //!         postgresql.conf       - copy of postgresql.conf created by `compute_ctl`
-//!         zenith.signal
+//!         neon.signal
+//!         zenith.signal         - copy of neon.signal, for backward compatibility
 //!         <other PostgreSQL files>
 //! ```
 //!
@@ -64,7 +65,6 @@ use jsonwebtoken::jwk::{
     OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
 };
 use nix::sys::signal::{Signal, kill};
-use pageserver_api::shard::ShardStripeSize;
 use pem::Pem;
 use reqwest::header::CONTENT_TYPE;
 use safekeeper_api::PgMajorVersion;
@@ -76,6 +76,7 @@ use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::shard::ShardStripeSize;
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
@@ -98,6 +99,7 @@ pub struct EndpointConf {
     features: Vec<ComputeFeature>,
     cluster: Option<Cluster>,
     compute_ctl_config: ComputeCtlConfig,
+    privileged_role_name: Option<String>,
 }
 
 //
@@ -198,6 +200,7 @@ impl ComputeControlPlane {
         grpc: bool,
         skip_pg_catalog_updates: bool,
         drop_subscriptions_before_start: bool,
+        privileged_role_name: Option<String>,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
@@ -235,6 +238,7 @@ impl ComputeControlPlane {
             features: vec![],
             cluster: None,
             compute_ctl_config: compute_ctl_config.clone(),
+            privileged_role_name: privileged_role_name.clone(),
         });
 
         ep.create_endpoint_dir()?;
@@ -256,6 +260,7 @@ impl ComputeControlPlane {
                 features: vec![],
                 cluster: None,
                 compute_ctl_config,
+                privileged_role_name,
             })?,
         )?;
         std::fs::write(
@@ -331,6 +336,9 @@ pub struct Endpoint {
 
     /// The compute_ctl config for the endpoint's compute.
     compute_ctl_config: ComputeCtlConfig,
+
+    /// The name of the privileged role for the endpoint.
+    privileged_role_name: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -371,6 +379,22 @@ impl std::fmt::Display for EndpointTerminateMode {
             EndpointTerminateMode::ImmediateTerminate => "immediate-terminate",
         })
     }
+}
+
+pub struct EndpointStartArgs {
+    pub auth_token: Option<String>,
+    pub endpoint_storage_token: String,
+    pub endpoint_storage_addr: String,
+    pub safekeepers_generation: Option<SafekeeperGeneration>,
+    pub safekeepers: Vec<NodeId>,
+    pub pageservers: Vec<(PageserverProtocol, Host, u16)>,
+    pub remote_ext_base_url: Option<String>,
+    pub shard_stripe_size: usize,
+    pub create_test_user: bool,
+    pub start_timeout: Duration,
+    pub autoprewarm: bool,
+    pub offload_lfc_interval_seconds: Option<std::num::NonZeroU64>,
+    pub dev: bool,
 }
 
 impl Endpoint {
@@ -415,6 +439,7 @@ impl Endpoint {
             features: conf.features,
             cluster: conf.cluster,
             compute_ctl_config: conf.compute_ctl_config,
+            privileged_role_name: conf.privileged_role_name,
         })
     }
 
@@ -447,7 +472,7 @@ impl Endpoint {
         conf.append("max_connections", "100");
         conf.append("wal_level", "logical");
         // wal_sender_timeout is the maximum time to wait for WAL replication.
-        // It also defines how often the walreciever will send a feedback message to the wal sender.
+        // It also defines how often the walreceiver will send a feedback message to the wal sender.
         conf.append("wal_sender_timeout", "5s");
         conf.append("listen_addresses", &self.pg_address.ip().to_string());
         conf.append("port", &self.pg_address.port().to_string());
@@ -677,21 +702,7 @@ impl Endpoint {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn start(
-        &self,
-        auth_token: &Option<String>,
-        endpoint_storage_token: String,
-        endpoint_storage_addr: String,
-        safekeepers_generation: Option<SafekeeperGeneration>,
-        safekeepers: Vec<NodeId>,
-        pageservers: Vec<(PageserverProtocol, Host, u16)>,
-        remote_ext_base_url: Option<&String>,
-        shard_stripe_size: usize,
-        create_test_user: bool,
-        start_timeout: Duration,
-        dev: bool,
-    ) -> Result<()> {
+    pub async fn start(&self, args: EndpointStartArgs) -> Result<()> {
         if self.status() == EndpointStatus::Running {
             anyhow::bail!("The endpoint is already running");
         }
@@ -704,10 +715,10 @@ impl Endpoint {
             std::fs::remove_dir_all(self.pgdata())?;
         }
 
-        let pageserver_connstring = Self::build_pageserver_connstr(&pageservers);
+        let pageserver_connstring = Self::build_pageserver_connstr(&args.pageservers);
         assert!(!pageserver_connstring.is_empty());
 
-        let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
+        let safekeeper_connstrings = self.build_safekeepers_connstrs(args.safekeepers)?;
 
         // check for file remote_extensions_spec.json
         // if it is present, read it and pass to compute_ctl
@@ -735,7 +746,7 @@ impl Endpoint {
                     cluster_id: None, // project ID: not used
                     name: None,       // project name: not used
                     state: None,
-                    roles: if create_test_user {
+                    roles: if args.create_test_user {
                         vec![Role {
                             name: PgIdent::from_str("test").unwrap(),
                             encrypted_password: None,
@@ -744,7 +755,7 @@ impl Endpoint {
                     } else {
                         Vec::new()
                     },
-                    databases: if create_test_user {
+                    databases: if args.create_test_user {
                         vec![Database {
                             name: PgIdent::from_str("neondb").unwrap(),
                             owner: PgIdent::from_str("test").unwrap(),
@@ -766,20 +777,21 @@ impl Endpoint {
                 endpoint_id: Some(self.endpoint_id.clone()),
                 mode: self.mode,
                 pageserver_connstring: Some(pageserver_connstring),
-                safekeepers_generation: safekeepers_generation.map(|g| g.into_inner()),
+                safekeepers_generation: args.safekeepers_generation.map(|g| g.into_inner()),
                 safekeeper_connstrings,
-                storage_auth_token: auth_token.clone(),
+                storage_auth_token: args.auth_token.clone(),
                 remote_extensions,
                 pgbouncer_settings: None,
-                shard_stripe_size: Some(shard_stripe_size),
+                shard_stripe_size: Some(args.shard_stripe_size),
                 local_proxy_config: None,
                 reconfigure_concurrency: self.reconfigure_concurrency,
                 drop_subscriptions_before_start: self.drop_subscriptions_before_start,
                 audit_log_level: ComputeAudit::Disabled,
                 logs_export_host: None::<String>,
-                endpoint_storage_addr: Some(endpoint_storage_addr),
-                endpoint_storage_token: Some(endpoint_storage_token),
-                autoprewarm: false,
+                endpoint_storage_addr: Some(args.endpoint_storage_addr),
+                endpoint_storage_token: Some(args.endpoint_storage_token),
+                autoprewarm: args.autoprewarm,
+                offload_lfc_interval_seconds: args.offload_lfc_interval_seconds,
                 suspend_timeout_seconds: -1, // Only used in neon_local.
             };
 
@@ -791,7 +803,7 @@ impl Endpoint {
                 debug!("spec.cluster {:?}", spec.cluster);
 
                 // fill missing fields again
-                if create_test_user {
+                if args.create_test_user {
                     spec.cluster.roles.push(Role {
                         name: PgIdent::from_str("test").unwrap(),
                         encrypted_password: None,
@@ -826,7 +838,7 @@ impl Endpoint {
         // Launch compute_ctl
         let conn_str = self.connstr("cloud_admin", "postgres");
         println!("Starting postgres node at '{conn_str}'");
-        if create_test_user {
+        if args.create_test_user {
             let conn_str = self.connstr("test", "neondb");
             println!("Also at '{conn_str}'");
         }
@@ -858,12 +870,16 @@ impl Endpoint {
         .stderr(logfile.try_clone()?)
         .stdout(logfile);
 
-        if let Some(remote_ext_base_url) = remote_ext_base_url {
-            cmd.args(["--remote-ext-base-url", remote_ext_base_url]);
+        if let Some(remote_ext_base_url) = args.remote_ext_base_url {
+            cmd.args(["--remote-ext-base-url", &remote_ext_base_url]);
         }
 
-        if dev {
+        if args.dev {
             cmd.arg("--dev");
+        }
+
+        if let Some(privileged_role_name) = self.privileged_role_name.clone() {
+            cmd.args(["--privileged-role-name", &privileged_role_name]);
         }
 
         let child = cmd.spawn()?;
@@ -894,10 +910,11 @@ impl Endpoint {
                 Ok(state) => {
                     match state.status {
                         ComputeStatus::Init => {
-                            if Instant::now().duration_since(start_at) > start_timeout {
+                            let timeout = args.start_timeout;
+                            if Instant::now().duration_since(start_at) > timeout {
                                 bail!(
                                     "compute startup timed out {:?}; still in Init state",
-                                    start_timeout
+                                    timeout
                                 );
                             }
                             // keep retrying
@@ -918,16 +935,18 @@ impl Endpoint {
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
-                        | ComputeStatus::TerminationPending { .. }
+                        | ComputeStatus::TerminationPendingFast
+                        | ComputeStatus::TerminationPendingImmediate
                         | ComputeStatus::Terminated => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
                     }
                 }
                 Err(e) => {
-                    if Instant::now().duration_since(start_at) > start_timeout {
+                    if Instant::now().duration_since(start_at) > args.start_timeout {
                         return Err(e).context(format!(
-                            "timed out {start_timeout:?} waiting to connect to compute_ctl HTTP",
+                            "timed out {:?} waiting to connect to compute_ctl HTTP",
+                            args.start_timeout
                         ));
                     }
                 }

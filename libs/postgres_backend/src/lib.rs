@@ -78,7 +78,13 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(
         e.kind(),
-        BrokenPipe | ConnectionRefused | ConnectionAborted | ConnectionReset | TimedOut
+        HostUnreachable
+            | NetworkUnreachable
+            | BrokenPipe
+            | ConnectionRefused
+            | ConnectionAborted
+            | ConnectionReset
+            | TimedOut,
     )
 }
 
@@ -743,7 +749,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 trace!("got query {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
                     match e {
-                        QueryError::Shutdown => return Ok(ProcessMsgResult::Break),
+                        err @ QueryError::Shutdown => {
+                            // Notify postgres of the connection shutdown at the libpq
+                            // protocol level. This avoids postgres having to tell apart
+                            // from an idle connection and a stale one, which is bug prone.
+                            let shutdown_error = short_error(&err);
+                            self.write_message_noflush(&BeMessage::ErrorResponse(
+                                &shutdown_error,
+                                Some(err.pg_error_code()),
+                            ))?;
+
+                            return Ok(ProcessMsgResult::Break);
+                        }
                         QueryError::SimulatedConnectionError => {
                             return Err(QueryError::SimulatedConnectionError);
                         }

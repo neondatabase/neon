@@ -1,5 +1,4 @@
 pub(crate) mod common;
-pub(crate) mod endpoints;
 pub(crate) mod project_info;
 mod timed_lru;
 

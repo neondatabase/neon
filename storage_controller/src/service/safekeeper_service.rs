@@ -25,7 +25,8 @@ use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::PgVersionId;
 use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration};
 use safekeeper_api::models::{
-    PullTimelineRequest, TimelineMembershipSwitchRequest, TimelineMembershipSwitchResponse,
+    PullTimelineRequest, TimelineLocateResponse, TimelineMembershipSwitchRequest,
+    TimelineMembershipSwitchResponse,
 };
 use safekeeper_api::{INITIAL_TERM, Term};
 use safekeeper_client::mgmt_api;
@@ -37,21 +38,14 @@ use utils::lsn::Lsn;
 
 use super::Service;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct TimelineLocateResponse {
-    pub generation: SafekeeperGeneration,
-    pub sk_set: Vec<NodeId>,
-    pub new_sk_set: Option<Vec<NodeId>>,
-}
-
 impl Service {
-    fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, ApiError> {
+    fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, anyhow::Error> {
         let members = safekeepers
             .iter()
             .map(|sk| sk.get_safekeeper_id())
             .collect::<Vec<_>>();
 
-        MemberSet::new(members).map_err(ApiError::InternalServerError)
+        MemberSet::new(members)
     }
 
     fn get_safekeepers(&self, ids: &[i64]) -> Result<Vec<Safekeeper>, ApiError> {
@@ -86,7 +80,7 @@ impl Service {
     ) -> Result<Vec<NodeId>, ApiError> {
         let safekeepers = self.get_safekeepers(&timeline_persistence.sk_set)?;
 
-        let mset = Self::make_member_set(&safekeepers)?;
+        let mset = Self::make_member_set(&safekeepers).map_err(ApiError::InternalServerError)?;
         let mconf = safekeeper_api::membership::Configuration::new(mset);
 
         let req = safekeeper_api::models::TimelineCreateRequest {
@@ -236,40 +230,30 @@ impl Service {
         F: std::future::Future<Output = mgmt_api::Result<T>> + Send + 'static,
         T: Sync + Send + 'static,
     {
+        let target_sk_count = safekeepers.len();
+
+        if target_sk_count == 0 {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "timeline configured without any safekeepers"
+            )));
+        }
+
+        if target_sk_count < self.config.timeline_safekeeper_count {
+            tracing::warn!(
+                "running a quorum operation with {} safekeepers, which is less than configured {} safekeepers per timeline",
+                target_sk_count,
+                self.config.timeline_safekeeper_count
+            );
+        }
+
         let results = self
             .tenant_timeline_safekeeper_op(safekeepers, op, timeout)
             .await?;
 
         // Now check if quorum was reached in results.
 
-        let target_sk_count = safekeepers.len();
-        let quorum_size = match target_sk_count {
-            0 => {
-                return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                    "timeline configured without any safekeepers",
-                )));
-            }
-            1 | 2 => {
-                #[cfg(feature = "testing")]
-                {
-                    // In test settings, it is allowed to have one or two safekeepers
-                    target_sk_count
-                }
-                #[cfg(not(feature = "testing"))]
-                {
-                    // The region is misconfigured: we need at least three safekeepers to be configured
-                    // in order to schedule work to them
-                    tracing::warn!(
-                        "couldn't find at least 3 safekeepers for timeline, found: {:?}",
-                        target_sk_count
-                    );
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                        "couldn't find at least 3 safekeepers to put timeline to"
-                    )));
-                }
-            }
-            _ => target_sk_count / 2 + 1,
-        };
+        let quorum_size = target_sk_count / 2 + 1;
+
         let success_count = results.iter().filter(|res| res.is_ok()).count();
         if success_count < quorum_size {
             // Failure
@@ -815,7 +799,7 @@ impl Service {
                         Safekeeper::from_persistence(
                             crate::persistence::SafekeeperPersistence::from_upsert(
                                 record,
-                                SkSchedulingPolicy::Pause,
+                                SkSchedulingPolicy::Activating,
                             ),
                             CancellationToken::new(),
                             use_https,
@@ -856,27 +840,36 @@ impl Service {
             .await?;
         let node_id = NodeId(id as u64);
         // After the change has been persisted successfully, update the in-memory state
-        {
-            let mut locked = self.inner.write().unwrap();
-            let mut safekeepers = (*locked.safekeepers).clone();
-            let sk = safekeepers
-                .get_mut(&node_id)
-                .ok_or(DatabaseError::Logical("Not found".to_string()))?;
-            sk.set_scheduling_policy(scheduling_policy);
+        self.set_safekeeper_scheduling_policy_in_mem(node_id, scheduling_policy)
+            .await
+    }
 
-            match scheduling_policy {
-                SkSchedulingPolicy::Active => {
-                    locked
-                        .safekeeper_reconcilers
-                        .start_reconciler(node_id, self);
-                }
-                SkSchedulingPolicy::Decomissioned | SkSchedulingPolicy::Pause => {
-                    locked.safekeeper_reconcilers.stop_reconciler(node_id);
-                }
+    pub(crate) async fn set_safekeeper_scheduling_policy_in_mem(
+        self: &Arc<Service>,
+        node_id: NodeId,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> Result<(), DatabaseError> {
+        let mut locked = self.inner.write().unwrap();
+        let mut safekeepers = (*locked.safekeepers).clone();
+        let sk = safekeepers
+            .get_mut(&node_id)
+            .ok_or(DatabaseError::Logical("Not found".to_string()))?;
+        sk.set_scheduling_policy(scheduling_policy);
+
+        match scheduling_policy {
+            SkSchedulingPolicy::Active => {
+                locked
+                    .safekeeper_reconcilers
+                    .start_reconciler(node_id, self);
             }
-
-            locked.safekeepers = Arc::new(safekeepers);
+            SkSchedulingPolicy::Decomissioned
+            | SkSchedulingPolicy::Pause
+            | SkSchedulingPolicy::Activating => {
+                locked.safekeeper_reconcilers.stop_reconciler(node_id);
+            }
         }
+
+        locked.safekeepers = Arc::new(safekeepers);
         Ok(())
     }
 
@@ -915,13 +908,13 @@ impl Service {
                         // so it isn't counted toward the quorum.
                         if let Some(min_position) = min_position {
                             if let Ok(ok_res) = &res {
-                                if (ok_res.term, ok_res.flush_lsn) < min_position {
+                                if (ok_res.last_log_term, ok_res.flush_lsn) < min_position {
                                     // Use Error::Timeout to make this error retriable.
                                     res = Err(mgmt_api::Error::Timeout(
                                         format!(
                                         "safekeeper {} returned position {:?} which is less than minimum required position {:?}",
                                         client.node_id_label(),
-                                        (ok_res.term, ok_res.flush_lsn),
+                                        (ok_res.last_log_term, ok_res.flush_lsn),
                                         min_position
                                         )
                                     ));
@@ -1110,6 +1103,26 @@ impl Service {
             }
         }
 
+        if new_sk_set.is_empty() {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "new safekeeper set is empty"
+            )));
+        }
+
+        if new_sk_set.len() < self.config.timeline_safekeeper_count {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "new safekeeper set must have at least {} safekeepers",
+                self.config.timeline_safekeeper_count
+            )));
+        }
+
+        let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
+        let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
+        // Construct new member set in advance to validate it.
+        // E.g. validates that there is no duplicate safekeepers.
+        let new_sk_member_set =
+            Self::make_member_set(&new_safekeepers).map_err(ApiError::BadRequest)?;
+
         // TODO(diko): per-tenant lock is too wide. Consider introducing per-timeline locks.
         let _tenant_lock = trace_shared_lock(
             &self.tenant_op_locks,
@@ -1139,6 +1152,18 @@ impl Service {
             .iter()
             .map(|&id| NodeId(id as u64))
             .collect::<Vec<_>>();
+
+        // Validate that we are not migrating to a decomissioned safekeeper.
+        for sk in new_safekeepers.iter() {
+            if !cur_sk_set.contains(&sk.get_id())
+                && sk.scheduling_policy() == SkSchedulingPolicy::Decomissioned
+            {
+                return Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "safekeeper {} is decomissioned",
+                    sk.get_id()
+                )));
+            }
+        }
 
         tracing::info!(
             ?cur_sk_set,
@@ -1182,11 +1207,8 @@ impl Service {
         }
 
         let cur_safekeepers = self.get_safekeepers(&timeline.sk_set)?;
-        let cur_sk_member_set = Self::make_member_set(&cur_safekeepers)?;
-
-        let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
-        let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
-        let new_sk_member_set = Self::make_member_set(&new_safekeepers)?;
+        let cur_sk_member_set =
+            Self::make_member_set(&cur_safekeepers).map_err(ApiError::InternalServerError)?;
 
         let joint_config = membership::Configuration {
             generation,
@@ -1215,7 +1237,7 @@ impl Service {
 
         let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
         for res in results.into_iter().flatten() {
-            let sk_position = (res.term, res.flush_lsn);
+            let sk_position = (res.last_log_term, res.flush_lsn);
             if sync_position < sk_position {
                 sync_position = sk_position;
             }

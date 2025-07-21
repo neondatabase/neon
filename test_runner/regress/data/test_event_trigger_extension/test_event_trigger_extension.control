@@ -1,0 +1,8 @@
+default_version = '1.0'
+comment = 'Test extension with Event Trigger'
+
+# make sure the extension objects are owned by the bootstrap user
+# to check that the SECURITY DEFINER event trigger function is still
+# called during non-superuser DDL events.
+superuser = true
+trusted = true

@@ -145,9 +145,13 @@ pub struct PageServerConf {
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
 
-    pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
+    pub disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
 
+    // The number of allowed failures in remote storage operations.
     pub test_remote_failures: u64,
+    // The probability of failure in remote storage operations. Only works when test_remote_failures > 1.
+    // Use 100 for 100% failure, 0 for no failure.
+    pub test_remote_failures_probability: u64,
 
     pub ondemand_download_behavior_treat_error_as_warn: bool,
 
@@ -248,6 +252,14 @@ pub struct PageServerConf {
     pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
 
     pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
+
+    /// Defines what is a big tenant for the purpose of image layer generation.
+    /// See Timeline::should_check_if_image_layers_required
+    pub image_layer_generation_large_timeline_threshold: Option<u64>,
+
+    /// Controls whether to collect all metrics on each scrape or to return potentially stale
+    /// results.
+    pub force_metric_collection_on_scrape: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -392,6 +404,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval,
             disk_usage_based_eviction,
             test_remote_failures,
+            test_remote_failures_probability,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
             control_plane_api,
@@ -427,6 +440,8 @@ impl PageServerConf {
             posthog_config,
             timeline_import_config,
             basebackup_cache_config,
+            image_layer_generation_large_timeline_threshold,
+            force_metric_collection_on_scrape,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -461,6 +476,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval,
             disk_usage_based_eviction,
             test_remote_failures,
+            test_remote_failures_probability,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
             control_plane_api: control_plane_api
@@ -484,6 +500,8 @@ impl PageServerConf {
             dev_mode,
             timeline_import_config,
             basebackup_cache_config,
+            image_layer_generation_large_timeline_threshold,
+            force_metric_collection_on_scrape,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -625,7 +643,7 @@ impl PageServerConf {
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
         let pg_distrib_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
-        let config_toml = pageserver_api::config::ConfigToml {
+        let mut config_toml = pageserver_api::config::ConfigToml {
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             pg_distrib_dir: Some(pg_distrib_dir),
@@ -637,6 +655,15 @@ impl PageServerConf {
             control_plane_api: Some(Url::parse("http://localhost:6666").unwrap()),
             ..Default::default()
         };
+
+        // Test authors tend to forget about the default 10min initial lease deadline
+        // when writing tests, which turns their immediate gc requests via mgmt API
+        // into no-ops. Override the binary default here, such that there is no initial
+        // lease deadline by default in tests. Tests that care can always override it
+        // themselves.
+        // Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
+        config_toml.tenant_config.lsn_lease_length = Duration::from_secs(0);
+
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
     }
 }
@@ -697,9 +724,12 @@ impl ConfigurableSemaphore {
 #[cfg(test)]
 mod tests {
 
+    use std::time::Duration;
+
     use camino::Utf8PathBuf;
+    use pageserver_api::config::{DiskUsageEvictionTaskConfig, EvictionOrder};
     use rstest::rstest;
-    use utils::id::NodeId;
+    use utils::{id::NodeId, serde_percent::Percent};
 
     use super::PageServerConf;
 
@@ -797,5 +827,71 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
+    }
+
+    #[rstest]
+    #[
+        case::omit_the_whole_config(
+            DiskUsageEvictionTaskConfig {
+                max_usage_pct: Percent::new(80).unwrap(),
+                min_avail_bytes: 2_000_000_000,
+                period: Duration::from_secs(60),
+                eviction_order: Default::default(),
+                #[cfg(feature = "testing")]
+                mock_statvfs: None,
+                enabled: true,
+            },
+        r#"
+            control_plane_api = "http://localhost:6666"
+        "#,
+    )]
+    #[
+        case::omit_enabled_field(
+            DiskUsageEvictionTaskConfig {
+                max_usage_pct: Percent::new(80).unwrap(),
+                min_avail_bytes: 1_000_000_000,
+                period: Duration::from_secs(60),
+                eviction_order: EvictionOrder::RelativeAccessed {
+                    highest_layer_count_loses_first: true,
+                },
+                #[cfg(feature = "testing")]
+                mock_statvfs: None,
+                enabled: true,
+            },
+        r#"
+            control_plane_api = "http://localhost:6666"
+            disk_usage_based_eviction = { max_usage_pct = 80, min_avail_bytes = 1000000000, period = "60s" }
+        "#,
+    )]
+    #[case::disabled(
+        DiskUsageEvictionTaskConfig {
+            max_usage_pct: Percent::new(80).unwrap(),
+            min_avail_bytes: 2_000_000_000,
+            period: Duration::from_secs(60),
+            eviction_order: EvictionOrder::RelativeAccessed {
+                highest_layer_count_loses_first: true,
+            },
+            #[cfg(feature = "testing")]
+            mock_statvfs: None,
+            enabled: false,
+        },
+        r#"
+            control_plane_api = "http://localhost:6666"
+            disk_usage_based_eviction = { enabled = false }
+        "#
+    )]
+    fn test_config_disk_usage_based_eviction_is_valid(
+        #[case] expected_disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
+        #[case] input: &str,
+    ) {
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("disk_usage_based_eviction is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        let config = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir).unwrap();
+        let disk_usage_based_eviction = config.disk_usage_based_eviction;
+        assert_eq!(
+            expected_disk_usage_based_eviction,
+            disk_usage_based_eviction
+        );
     }
 }

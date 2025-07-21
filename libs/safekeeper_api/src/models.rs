@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::TimestampTz;
+use postgres_ffi_types::TimestampTz;
 use postgres_versioninfo::PgVersionId;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -11,7 +11,7 @@ use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
 
-use crate::membership::Configuration;
+use crate::membership::{Configuration, SafekeeperGeneration};
 use crate::{ServerInfo, Term};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -221,7 +221,7 @@ pub struct TimelineMembershipSwitchRequest {
 pub struct TimelineMembershipSwitchResponse {
     pub previous_conf: Configuration,
     pub current_conf: Configuration,
-    pub term: Term,
+    pub last_log_term: Term,
     pub flush_lsn: Lsn,
 }
 
@@ -315,4 +315,13 @@ pub struct PullTimelineResponse {
     /// None if no pull happened because the timeline already exists.
     pub safekeeper_host: Option<String>,
     // TODO: add more fields?
+}
+
+/// Response to a timeline locate request.
+/// Storcon-only API.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TimelineLocateResponse {
+    pub generation: SafekeeperGeneration,
+    pub sk_set: Vec<NodeId>,
+    pub new_sk_set: Option<Vec<NodeId>>,
 }

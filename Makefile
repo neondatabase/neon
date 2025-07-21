@@ -2,7 +2,7 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Where to install Postgres, default is ./pg_install, maybe useful for package
 # managers.
-POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
+POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install
 
 # Supported PostgreSQL versions
 POSTGRES_VERSIONS = v17 v16 v15 v14
@@ -14,7 +14,7 @@ POSTGRES_VERSIONS = v17 v16 v15 v14
 # it is derived from BUILD_TYPE.
 
 # All intermediate build artifacts are stored here.
-BUILD_DIR := build
+BUILD_DIR := $(ROOT_PROJECT_DIR)/build
 
 ICU_PREFIX_DIR := /usr/local/icu
 
@@ -30,11 +30,18 @@ ifeq ($(BUILD_TYPE),release)
 	PG_CFLAGS += -O2 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
 	CARGO_PROFILE ?= --profile=release
+	# NEON_CARGO_ARTIFACT_TARGET_DIR is the directory where `cargo build` places
+	# the final build artifacts. There is unfortunately no easy way of changing
+	# it to a fully predictable path, nor to extract the path with a simple
+	# command. See https://github.com/rust-lang/cargo/issues/9661 and
+	# https://github.com/rust-lang/cargo/issues/6790.
+	NEON_CARGO_ARTIFACT_TARGET_DIR = $(ROOT_PROJECT_DIR)/target/release
 else ifeq ($(BUILD_TYPE),debug)
 	PG_CONFIGURE_OPTS = --enable-debug --with-openssl --enable-cassert --enable-depend
 	PG_CFLAGS += -O0 -g3 $(CFLAGS)
 	PG_LDFLAGS = $(LDFLAGS)
 	CARGO_PROFILE ?= --profile=dev
+	NEON_CARGO_ARTIFACT_TARGET_DIR = $(ROOT_PROJECT_DIR)/target/debug
 else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
@@ -102,7 +109,7 @@ all: neon postgres-install neon-pg-ext
 
 ### Neon Rust bits
 #
-# The 'postgres_ffi' depends on the Postgres headers.
+# The 'postgres_ffi' crate depends on the Postgres headers.
 .PHONY: neon
 neon: postgres-headers-install walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
@@ -115,10 +122,13 @@ cargo-target-dir:
 	test -e target/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > target/CACHEDIR.TAG
 
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-install-%
+neon-pg-ext-%: postgres-install-% cargo-target-dir
 	+@echo "Compiling neon-specific Postgres extensions for $*"
 	mkdir -p $(BUILD_DIR)/pgxn-$*
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config COPT='$(COPT)' \
+	$(MAKE) PG_CONFIG="$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config" COPT='$(COPT)' \
+		NEON_CARGO_ARTIFACT_TARGET_DIR="$(NEON_CARGO_ARTIFACT_TARGET_DIR)" \
+		CARGO_BUILD_FLAGS="$(CARGO_BUILD_FLAGS)" \
+		CARGO_PROFILE="$(CARGO_PROFILE)" \
 		-C $(BUILD_DIR)/pgxn-$*\
 		-f $(ROOT_PROJECT_DIR)/pgxn/Makefile  install
 
@@ -202,13 +212,26 @@ neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
 		FIND_TYPEDEF=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/find_typedef \
 		INDENT=$(BUILD_DIR)/v17/src/tools/pg_bsd_indent/pg_bsd_indent \
 		PGINDENT_SCRIPT=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/pgindent/pgindent \
-		-C $(BUILD_DIR)/neon-v17 \
+		-C $(BUILD_DIR)/pgxn-v17/neon \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile pgindent
 
 
 .PHONY: setup-pre-commit-hook
 setup-pre-commit-hook:
 	ln -s -f $(ROOT_PROJECT_DIR)/pre-commit.py .git/hooks/pre-commit
+
+build-tools/node_modules: build-tools/package.json
+	cd build-tools && $(if $(CI),npm ci,npm install)
+	touch build-tools/node_modules
+
+.PHONY: lint-openapi-spec
+lint-openapi-spec: build-tools/node_modules
+	# operation-2xx-response: pageserver timeline delete returns 404 on success
+	find . -iname "openapi_spec.y*ml" -exec\
+		npx --prefix=build-tools/ redocly\
+			--skip-rule=operation-operationId --skip-rule=operation-summary --extends=minimal\
+			--skip-rule=no-server-example.com --skip-rule=operation-2xx-response\
+			lint {} \+
 
 # Targets for building PostgreSQL are defined in postgres.mk.
 #

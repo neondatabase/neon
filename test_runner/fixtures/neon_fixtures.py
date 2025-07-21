@@ -728,7 +728,7 @@ class NeonEnvBuilder:
         # NB: neon_local rewrites postgresql.conf on each start based on neon_local config. No need to patch it.
         # However, in this new NeonEnv, the pageservers and safekeepers listen on different ports, and the storage
         # controller will currently reject re-attach requests from them because the NodeMetadata isn't identical.
-        # So, from_repo_dir patches up the the storcon database.
+        # So, from_repo_dir patches up the storcon database.
         patch_script_path = self.repo_dir / "storage_controller_db.startup.sql"
         assert not patch_script_path.exists()
         patch_script = ""
@@ -1315,6 +1315,14 @@ class NeonEnv:
             # This feature is pending rollout.
             # tenant_config["rel_size_v2_enabled"] = True
 
+            # Test authors tend to forget about the default 10min initial lease deadline
+            # when writing tests, which turns their immediate gc requests via mgmt API
+            # into no-ops. Override the binary default here, such that there is no initial
+            # lease deadline by default in tests. Tests that care can always override it
+            # themselves.
+            # Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
+            tenant_config["lsn_lease_length"] = "0s"
+
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
                     self.pageserver_remote_storage
@@ -1787,6 +1795,33 @@ def neon_env_builder(
         record_property("preserve_database_files", builder.preserve_database_files)
 
 
+@pytest.fixture(scope="function")
+def neon_env_builder_local(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+    pg_distrib_dir: Path,
+) -> NeonEnvBuilder:
+    """
+    Fixture to create a Neon environment for test with its own pg_install copy.
+
+    This allows the test to edit the list of available extensions in the
+    local instance of Postgres used for the test, and install extensions via
+    downloading them when a remote extension is tested, for instance, or
+    copying files around for local extension testing.
+    """
+    test_local_pginstall = test_output_dir / "pg_install"
+    log.info(f"copy {pg_distrib_dir} to {test_local_pginstall}")
+
+    # We can't copy only the version that we are currently testing because other
+    # binaries like the storage controller need specific Postgres versions.
+    shutil.copytree(pg_distrib_dir, test_local_pginstall)
+
+    neon_env_builder.pg_distrib_dir = test_local_pginstall
+    log.info(f"local neon_env_builder.pg_distrib_dir: {neon_env_builder.pg_distrib_dir}")
+
+    return neon_env_builder
+
+
 @dataclass
 class PageserverPort:
     pg: int
@@ -1867,6 +1902,7 @@ class PageserverSchedulingPolicy(StrEnum):
     FILLING = "Filling"
     PAUSE = "Pause"
     PAUSE_FOR_RESTART = "PauseForRestart"
+    DELETING = "Deleting"
 
 
 class StorageControllerLeadershipStatus(StrEnum):
@@ -2075,11 +2111,30 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
-    def node_delete(self, node_id):
-        log.info(f"node_delete({node_id})")
+    def node_delete_old(self, node_id):
+        log.info(f"node_delete_old({node_id})")
         self.request(
             "DELETE",
             f"{self.api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_delete(self, node_id, force: bool = False):
+        log.info(f"node_delete({node_id})")
+        query = f"{self.api}/control/v1/node/{node_id}/delete"
+        if force:
+            query += "?force=true"
+        self.request(
+            "PUT",
+            query,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def cancel_node_delete(self, node_id):
+        log.info(f"cancel_node_delete({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.api}/control/v1/node/{node_id}/delete",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2285,6 +2340,20 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/tenant/{tenant_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    # HADRON
+    def tenant_timeline_describe(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ):
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/tenant/{tenant_id}/timeline/{timeline_id}",
             headers=self.headers(TokenScope.ADMIN),
         )
         response.raise_for_status()
@@ -4258,6 +4327,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
     ) -> Self:
         """
         Create a new Postgres endpoint.
@@ -4285,6 +4355,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             update_catalog=update_catalog,
+            privileged_role_name=privileged_role_name,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = self.env.repo_dir / path
@@ -4345,6 +4416,8 @@ class Endpoint(PgProtocol, LogUtils):
         basebackup_request_tries: int | None = None,
         timeout: str | None = None,
         env: dict[str, str] | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> Self:
         """
         Start the Postgres instance.
@@ -4369,6 +4442,8 @@ class Endpoint(PgProtocol, LogUtils):
             basebackup_request_tries=basebackup_request_tries,
             timeout=timeout,
             env=env,
+            autoprewarm=autoprewarm,
+            offload_lfc_interval_seconds=offload_lfc_interval_seconds,
         )
         self._running.release(1)
         self.log_config_value("shared_buffers")
@@ -4584,6 +4659,8 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         basebackup_request_tries: int | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> Self:
         """
         Create an endpoint, apply config, and start Postgres.
@@ -4604,6 +4681,8 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
+            autoprewarm=autoprewarm,
+            offload_lfc_interval_seconds=offload_lfc_interval_seconds,
         )
 
         return self
@@ -4688,6 +4767,8 @@ class EndpointFactory:
         remote_ext_base_url: str | None = None,
         pageserver_id: int | None = None,
         basebackup_request_tries: int | None = None,
+        autoprewarm: bool = False,
+        offload_lfc_interval_seconds: int | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4709,6 +4790,8 @@ class EndpointFactory:
             remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
             basebackup_request_tries=basebackup_request_tries,
+            autoprewarm=autoprewarm,
+            offload_lfc_interval_seconds=offload_lfc_interval_seconds,
         )
 
     def create(
@@ -4722,6 +4805,7 @@ class EndpointFactory:
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4745,6 +4829,7 @@ class EndpointFactory:
             config_lines=config_lines,
             pageserver_id=pageserver_id,
             update_catalog=update_catalog,
+            privileged_role_name=privileged_role_name,
         )
 
     def stop_all(self, fail_on_error=True) -> Self:
@@ -5331,6 +5416,7 @@ SKIP_FILES = frozenset(
     (
         "pg_internal.init",
         "pg.log",
+        "neon.signal",
         "zenith.signal",
         "pg_hba.conf",
         "postgresql.conf",

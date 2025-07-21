@@ -236,13 +236,13 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 	bool		save_neon_test_evict;
 
 	/*
-	 * Temporarily set the zenith_test_evict GUC, so that when we pin and
+	 * Temporarily set the neon_test_evict GUC, so that when we pin and
 	 * unpin a buffer, the buffer is evicted. We use that hack to evict all
 	 * buffers, as there is no explicit "evict this buffer" function in the
 	 * buffer manager.
 	 */
-	save_neon_test_evict = zenith_test_evict;
-	zenith_test_evict = true;
+	save_neon_test_evict = neon_test_evict;
+	neon_test_evict = true;
 	PG_TRY();
 	{
 		/* Scan through all the buffers */
@@ -273,7 +273,7 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 
 			/*
 			 * Pin the buffer, and release it again. Because we have
-			 * zenith_test_evict==true, this will evict the page from the
+			 * neon_test_evict==true, this will evict the page from the
 			 * buffer cache if no one else is holding a pin on it.
 			 */
 			if (isvalid)
@@ -286,7 +286,7 @@ clear_buffer_cache(PG_FUNCTION_ARGS)
 	PG_FINALLY();
 	{
 		/* restore the GUC */
-		zenith_test_evict = save_neon_test_evict;
+		neon_test_evict = save_neon_test_evict;
 	}
 	PG_END_TRY();
 

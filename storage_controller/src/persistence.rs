@@ -635,18 +635,23 @@ impl Persistence {
         let updated = self
             .with_measured_conn(DatabaseOperation::ReAttach, move |conn| {
                 Box::pin(async move {
-                    // Check if the node is not marked as deleted
-                    let deleted_node: i64 = nodes
+                    let node: Option<NodePersistence> = nodes
                         .filter(node_id.eq(input_node_id.0 as i64))
-                        .filter(lifecycle.eq(String::from(NodeLifecycle::Deleted)))
-                        .count()
-                        .get_result(conn)
-                        .await?;
-                    if deleted_node > 0 {
-                        return Err(DatabaseError::Logical(format!(
-                            "Node {input_node_id} is marked as deleted, re-attach is not allowed"
-                        )));
-                    }
+                        .first::<NodePersistence>(conn)
+                        .await
+                        .optional()?;
+
+                    // Check if the node is not marked as deleted
+                    match node {
+                        Some(node) if matches!(NodeLifecycle::from_str(&node.lifecycle), Ok(NodeLifecycle::Deleted)) => {
+                            return Err(DatabaseError::Logical(format!(
+                                "Node {input_node_id} is marked as deleted, re-attach is not allowed"
+                            )));
+                        }
+                        _ => {
+                            // go through
+                        }
+                    };
 
                     let rows_updated = diesel::update(tenant_shards)
                         .filter(generation_pageserver.eq(input_node_id.0 as i64))
@@ -664,21 +669,23 @@ impl Persistence {
                         .load(conn)
                         .await?;
 
-                    // If the node went through a drain and restart phase before re-attaching,
-                    // then reset it's node scheduling policy to active.
-                    diesel::update(nodes)
-                        .filter(node_id.eq(input_node_id.0 as i64))
-                        .filter(
-                            scheduling_policy
-                                .eq(String::from(NodeSchedulingPolicy::PauseForRestart))
-                                .or(scheduling_policy
-                                    .eq(String::from(NodeSchedulingPolicy::Draining)))
-                                .or(scheduling_policy
-                                    .eq(String::from(NodeSchedulingPolicy::Filling))),
-                        )
-                        .set(scheduling_policy.eq(String::from(NodeSchedulingPolicy::Active)))
-                        .execute(conn)
-                        .await?;
+                    if let Some(node) = node {
+                        let old_scheduling_policy =
+                            NodeSchedulingPolicy::from_str(&node.scheduling_policy).unwrap();
+                        let new_scheduling_policy = match old_scheduling_policy {
+                            NodeSchedulingPolicy::Active => NodeSchedulingPolicy::Active,
+                            NodeSchedulingPolicy::PauseForRestart => NodeSchedulingPolicy::Active,
+                            NodeSchedulingPolicy::Draining => NodeSchedulingPolicy::Active,
+                            NodeSchedulingPolicy::Filling => NodeSchedulingPolicy::Active,
+                            NodeSchedulingPolicy::Pause => NodeSchedulingPolicy::Pause,
+                            NodeSchedulingPolicy::Deleting => NodeSchedulingPolicy::Pause,
+                        };
+                        diesel::update(nodes)
+                            .filter(node_id.eq(input_node_id.0 as i64))
+                            .set(scheduling_policy.eq(String::from(new_scheduling_policy)))
+                            .execute(conn)
+                            .await?;
+                    }
 
                     Ok(updated)
                 })
@@ -1383,6 +1390,48 @@ impl Persistence {
                 }
 
                 Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Activate the given safekeeper, ensuring that there is no TOCTOU.
+    /// Returns `Some` if the safekeeper has indeed been activating (or already active). Other states return `None`.
+    pub(crate) async fn activate_safekeeper(&self, id_: i64) -> Result<Option<()>, DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| {
+            Box::pin(async move {
+                #[derive(Insertable, AsChangeset)]
+                #[diesel(table_name = crate::schema::safekeepers)]
+                struct UpdateSkSchedulingPolicy<'a> {
+                    id: i64,
+                    scheduling_policy: &'a str,
+                }
+                let scheduling_policy_active = String::from(SkSchedulingPolicy::Active);
+                let scheduling_policy_activating = String::from(SkSchedulingPolicy::Activating);
+
+                let rows_affected = diesel::update(
+                    safekeepers.filter(id.eq(id_)).filter(
+                        scheduling_policy
+                            .eq(scheduling_policy_activating)
+                            .or(scheduling_policy.eq(&scheduling_policy_active)),
+                    ),
+                )
+                .set(scheduling_policy.eq(&scheduling_policy_active))
+                .execute(conn)
+                .await?;
+
+                if rows_affected == 0 {
+                    return Ok(Some(()));
+                }
+                if rows_affected != 1 {
+                    return Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({rows_affected})",
+                    )));
+                }
+
+                Ok(Some(()))
             })
         })
         .await

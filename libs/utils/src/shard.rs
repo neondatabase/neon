@@ -25,6 +25,12 @@ pub struct ShardIndex {
     pub shard_count: ShardCount,
 }
 
+/// Stripe size as number of pages.
+///
+/// NB: don't implement Default, so callers don't lazily use it by mistake. See DEFAULT_STRIPE_SIZE.
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardStripeSize(pub u32);
+
 /// Formatting helper, for generating the `shard_id` label in traces.
 pub struct ShardSlug<'a>(&'a TenantShardId);
 
@@ -166,6 +172,18 @@ impl TenantShardId {
 }
 
 impl std::fmt::Display for ShardNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::Display for ShardCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::Display for ShardStripeSize {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }

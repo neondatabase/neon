@@ -8,6 +8,7 @@ members = [
     "pageserver/compaction",
     "pageserver/ctl",
     "pageserver/client",
+    "pageserver/client_grpc",
     "pageserver/pagebench",
     "pageserver/page_api",
     "proxy",
@@ -42,10 +43,12 @@ members = [
     "libs/walproposer",
     "libs/wal_decoder",
     "libs/postgres_initdb",
+    "libs/proxy/json",
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
+    "pgxn/neon/communicator",
 ]
 
 [workspace.package]
@@ -127,6 +130,7 @@ jemalloc_pprof = { version = "0.7", features = ["symbolize", "flamegraph"] }
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
+lock_api = "0.4.13"
 md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
@@ -162,7 +166,7 @@ reqwest-middleware = "0.4"
 reqwest-retry = "0.7"
 routerify = "3"
 rpds = "0.13"
-rustc-hash = "1.1.0"
+rustc-hash = "2.1.1"
 rustls = { version = "0.23.16", default-features = false }
 rustls-pemfile = "2"
 rustls-pki-types = "1.11"
@@ -198,7 +202,7 @@ tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.g
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "io-util", "rt"] }
 toml = "0.8"
@@ -255,9 +259,11 @@ desim = { version = "0.1", path = "./libs/desim" }
 endpoint_storage = { version = "0.0.1", path = "./endpoint_storage/" }
 http-utils = { version = "0.1", path = "./libs/http-utils/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
+neon-shmem = { version = "0.1", path = "./libs/neon-shmem/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
+pageserver_client_grpc = { path = "./pageserver/client_grpc" }
 pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 pageserver_page_api = { path = "./pageserver/page_api" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
@@ -284,6 +290,7 @@ walproposer = { version = "0.1", path = "./libs/walproposer/" }
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
+cbindgen = "0.29.0"
 criterion = "0.5.1"
 rcgen = "0.13"
 rstest = "0.18"

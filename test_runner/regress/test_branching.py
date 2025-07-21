@@ -416,6 +416,8 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
         # timeline creation (uploads). mask it out here to avoid flakyness.
         del success_result["remote_consistent_lsn_visible"]
         del repeat_result["remote_consistent_lsn_visible"]
+        del success_result["walreceiver_status"]
+        del repeat_result["walreceiver_status"]
         assert repeat_result == success_result
     finally:
         env.pageserver.stop(immediate=True)

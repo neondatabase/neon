@@ -46,19 +46,48 @@ pub struct ExtensionInstallResponse {
     pub version: ExtVersion,
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+/// Status of the LFC prewarm process. The same state machine is reused for
+/// both autoprewarm (prewarm after compute/Postgres start using the previously
+/// stored LFC state) and explicit prewarming via API.
+#[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcPrewarmState {
+    /// Default value when compute boots up.
     #[default]
     NotPrewarmed,
+    /// Prewarming thread is active and loading pages into LFC.
     Prewarming,
+    /// We found requested LFC state in the endpoint storage and
+    /// completed prewarming successfully.
     Completed,
-    Failed {
-        error: String,
-    },
+    /// Unexpected error happened during prewarming. Note, `Not Found 404`
+    /// response from the endpoint storage is explicitly excluded here
+    /// because it can normally happen on the first compute start,
+    /// since LFC state is not available yet.
+    Failed { error: String },
+    /// We tried to fetch the corresponding LFC state from the endpoint storage,
+    /// but received `Not Found 404`. This should normally happen only during the
+    /// first endpoint start after creation with `autoprewarm: true`.
+    ///
+    /// During the orchestrated prewarm via API, when a caller explicitly
+    /// provides the LFC state key to prewarm from, it's the caller responsibility
+    /// to handle this status as an error state in this case.
+    Skipped,
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+impl Display for LfcPrewarmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LfcPrewarmState::NotPrewarmed => f.write_str("NotPrewarmed"),
+            LfcPrewarmState::Prewarming => f.write_str("Prewarming"),
+            LfcPrewarmState::Completed => f.write_str("Completed"),
+            LfcPrewarmState::Skipped => f.write_str("Skipped"),
+            LfcPrewarmState::Failed { error } => write!(f, "Error({error})"),
+        }
+    }
+}
+
+#[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcOffloadState {
     #[default]
@@ -68,6 +97,23 @@ pub enum LfcOffloadState {
     Failed {
         error: String,
     },
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+/// Response of /promote
+pub enum PromoteState {
+    NotPromoted,
+    Completed,
+    Failed { error: String },
+}
+
+#[derive(Deserialize, Serialize, Default, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+/// Result of /safekeepers_lsn
+pub struct SafekeepersLsn {
+    pub safekeepers: String,
+    pub wal_flush_lsn: utils::lsn::Lsn,
 }
 
 /// Response of the /status API
@@ -93,6 +139,15 @@ pub enum TerminateMode {
     Immediate,
 }
 
+impl From<TerminateMode> for ComputeStatus {
+    fn from(mode: TerminateMode) -> Self {
+        match mode {
+            TerminateMode::Fast => ComputeStatus::TerminationPendingFast,
+            TerminateMode::Immediate => ComputeStatus::TerminationPendingImmediate,
+        }
+    }
+}
+
 #[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeStatus {
@@ -113,7 +168,9 @@ pub enum ComputeStatus {
     // control-plane to terminate it.
     Failed,
     // Termination requested
-    TerminationPending { mode: TerminateMode },
+    TerminationPendingFast,
+    // Termination requested, without waiting 30s before returning from /terminate
+    TerminationPendingImmediate,
     // Terminated Postgres
     Terminated,
 }
@@ -132,7 +189,10 @@ impl Display for ComputeStatus {
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),
             ComputeStatus::Failed => f.write_str("failed"),
-            ComputeStatus::TerminationPending { .. } => f.write_str("termination-pending"),
+            ComputeStatus::TerminationPendingFast => f.write_str("termination-pending-fast"),
+            ComputeStatus::TerminationPendingImmediate => {
+                f.write_str("termination-pending-immediate")
+            }
             ComputeStatus::Terminated => f.write_str("terminated"),
         }
     }

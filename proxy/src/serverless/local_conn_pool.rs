@@ -249,11 +249,10 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
             }
 
             // remove from connection pool
-            if let Some(pool) = pool.clone().upgrade() {
-                if pool.global_pool.write().remove_client(db_user.clone(), conn_id) {
+            if let Some(pool) = pool.clone().upgrade()
+                && pool.global_pool.write().remove_client(db_user.clone(), conn_id) {
                     info!("closed connection removed");
                 }
-            }
 
             Poll::Ready(())
         }).await;

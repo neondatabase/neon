@@ -69,22 +69,6 @@ impl Hash for ShardIdentity {
     }
 }
 
-/// Stripe size in number of pages
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
-pub struct ShardStripeSize(pub u32);
-
-impl Default for ShardStripeSize {
-    fn default() -> Self {
-        DEFAULT_STRIPE_SIZE
-    }
-}
-
-impl std::fmt::Display for ShardStripeSize {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
 /// Layout version: for future upgrades where we might change how the key->shard mapping works
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
 pub struct ShardLayout(u8);
@@ -332,7 +316,11 @@ fn hash_combine(mut a: u32, mut b: u32) -> u32 {
 ///
 /// The mapping of key to shard is not stable across changes to ShardCount: this is intentional
 /// and will be handled at higher levels when shards are split.
-fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Key) -> ShardNumber {
+pub fn key_to_shard_number(
+    count: ShardCount,
+    stripe_size: ShardStripeSize,
+    key: &Key,
+) -> ShardNumber {
     // Fast path for un-sharded tenants or broadcast keys
     if count < ShardCount(2) || key_is_shard0(key) {
         return ShardNumber(0);

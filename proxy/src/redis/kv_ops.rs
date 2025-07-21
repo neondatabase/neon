@@ -2,9 +2,18 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use redis::aio::ConnectionLike;
-use redis::{Cmd, FromRedisValue, Pipeline, RedisResult};
+use redis::{Cmd, FromRedisValue, Pipeline, RedisError, RedisResult};
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
+use crate::redis::connection_with_credentials_provider::ConnectionProviderError;
+
+#[derive(thiserror::Error, Debug)]
+pub enum RedisKVClientError {
+    #[error(transparent)]
+    Redis(#[from] RedisError),
+    #[error(transparent)]
+    ConnectionProvider(#[from] ConnectionProviderError),
+}
 
 pub struct RedisKVClient {
     client: ConnectionWithCredentialsProvider,
@@ -32,12 +41,13 @@ impl RedisKVClient {
         Self { client }
     }
 
-    pub async fn try_connect(&mut self) -> anyhow::Result<()> {
+    pub async fn try_connect(&mut self) -> Result<(), RedisKVClientError> {
         self.client
             .connect()
             .boxed()
             .await
             .inspect_err(|e| tracing::error!("failed to connect to redis: {e}"))
+            .map_err(Into::into)
     }
 
     pub(crate) fn credentials_refreshed(&self) -> bool {
@@ -47,7 +57,7 @@ impl RedisKVClient {
     pub(crate) async fn query<T: FromRedisValue>(
         &mut self,
         q: &impl Queryable,
-    ) -> anyhow::Result<T> {
+    ) -> Result<T, RedisKVClientError> {
         let e = match q.query(&mut self.client).await {
             Ok(t) => return Ok(t),
             Err(e) => e,

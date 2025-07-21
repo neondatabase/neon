@@ -32,15 +32,16 @@ use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::walrecord::*;
 use postgres_ffi::{
-    PgMajorVersion, TimestampTz, TransactionId, dispatch_pgversion, enum_pgversion,
-    enum_pgversion_dispatch, fsm_logical_to_physical, pg_constants,
+    PgMajorVersion, TransactionId, dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch,
+    fsm_logical_to_physical, pg_constants,
 };
+use postgres_ffi_types::TimestampTz;
 use postgres_ffi_types::forknum::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use tracing::*;
 use utils::bin_ser::{DeserializeError, SerializeError};
 use utils::lsn::Lsn;
 use utils::rate_limit::RateLimit;
-use utils::{critical, failpoint_support};
+use utils::{critical_timeline, failpoint_support};
 use wal_decoder::models::record::NeonWalRecord;
 use wal_decoder::models::*;
 
@@ -418,18 +419,30 @@ impl WalIngest {
         // as there has historically been cases where PostgreSQL has cleared spurious VM pages. See:
         // https://github.com/neondatabase/neon/pull/10634.
         let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
-            critical!("clear_vm_bits for unknown VM relation {vm_rel}");
+            critical_timeline!(
+                modification.tline.tenant_shard_id,
+                modification.tline.timeline_id,
+                "clear_vm_bits for unknown VM relation {vm_rel}"
+            );
             return Ok(());
         };
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
-                critical!("new_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
+                critical_timeline!(
+                    modification.tline.tenant_shard_id,
+                    modification.tline.timeline_id,
+                    "new_vm_blk {blknum} not in {vm_rel} of size {vm_size}"
+                );
                 new_vm_blk = None;
             }
         }
         if let Some(blknum) = old_vm_blk {
             if blknum >= vm_size {
-                critical!("old_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
+                critical_timeline!(
+                    modification.tline.tenant_shard_id,
+                    modification.tline.timeline_id,
+                    "old_vm_blk {blknum} not in {vm_rel} of size {vm_size}"
+                );
                 old_vm_blk = None;
             }
         }
@@ -1057,7 +1070,7 @@ impl WalIngest {
         // NB: In PostgreSQL, the next-multi-xid stored in the control file is allowed to
         // go to 0, and it's fixed up by skipping to FirstMultiXactId in functions that
         // read it, like GetNewMultiXactId(). This is different from how nextXid is
-        // incremented! nextXid skips over < FirstNormalTransactionId when the the value
+        // incremented! nextXid skips over < FirstNormalTransactionId when the value
         // is stored, so it's never 0 in a checkpoint.
         //
         // I don't know why it's done that way, it seems less error-prone to skip over 0

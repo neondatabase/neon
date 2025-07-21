@@ -43,7 +43,7 @@ use crate::controller_upcall_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
-use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
+use crate::metrics::{LOCAL_DATA_LOSS_SUSPECTED, TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
@@ -328,7 +328,7 @@ fn emergency_generations(
                     LocationMode::Attached(alc) => TenantStartupMode::Attached((
                         alc.attach_mode,
                         alc.generation,
-                        ShardStripeSize::default(),
+                        lc.shard.stripe_size,
                     )),
                     LocationMode::Secondary(_) => TenantStartupMode::Secondary,
                 },
@@ -538,6 +538,21 @@ pub async fn init_tenant_mgr(
     // Determine which tenants are to be secondary or attached, and in which generation
     let tenant_modes = init_load_generations(conf, &tenant_configs, resources, cancel).await?;
 
+    // Hadron local SSD check: Raise an alert if our local filesystem does not contain any tenants but the re-attach request returned tenants.
+    // This can happen if the PS suffered a Kubernetes node failure resulting in loss of all local data, but recovered quickly on another node
+    // so the Storage Controller has not had the time to move tenants out.
+    let data_loss_suspected = if let Some(tenant_modes) = &tenant_modes {
+        tenant_configs.is_empty() && !tenant_modes.is_empty()
+    } else {
+        false
+    };
+    if data_loss_suspected {
+        tracing::error!(
+            "Local data loss suspected: no tenants found on local filesystem, but re-attach request returned tenants"
+        );
+    }
+    LOCAL_DATA_LOSS_SUSPECTED.set(if data_loss_suspected { 1 } else { 0 });
+
     tracing::info!(
         "Attaching {} tenants at startup, warming up {} at a time",
         tenant_configs.len(),
@@ -664,7 +679,7 @@ pub async fn init_tenant_mgr(
                     tenant_shard_id,
                     &tenant_dir_path,
                     resources.clone(),
-                    AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
+                    AttachedTenantConf::new(conf, location_conf.tenant_conf, attached_conf),
                     shard_identity,
                     Some(init_order.clone()),
                     SpawnMode::Lazy,
@@ -842,8 +857,11 @@ impl TenantManager {
                             // take our fast path and just provide the updated configuration
                             // to the tenant.
                             tenant.set_new_location_config(
-                                AttachedTenantConf::try_from(new_location_config.clone())
-                                    .map_err(UpsertLocationError::BadRequest)?,
+                                AttachedTenantConf::try_from(
+                                    self.conf,
+                                    new_location_config.clone(),
+                                )
+                                .map_err(UpsertLocationError::BadRequest)?,
                             );
 
                             Some(FastPathModified::Attached(tenant.clone()))
@@ -1046,7 +1064,7 @@ impl TenantManager {
                 // Testing hack: if we are configured with no control plane, then drop the generation
                 // from upserts.  This enables creating generation-less tenants even though neon_local
                 // always uses generations when calling the location conf API.
-                let attached_conf = AttachedTenantConf::try_from(new_location_config)
+                let attached_conf = AttachedTenantConf::try_from(self.conf, new_location_config)
                     .map_err(UpsertLocationError::BadRequest)?;
 
                 let tenant = tenant_spawn(
@@ -1250,7 +1268,7 @@ impl TenantManager {
             tenant_shard_id,
             &tenant_path,
             self.resources.clone(),
-            AttachedTenantConf::try_from(config)?,
+            AttachedTenantConf::try_from(self.conf, config)?,
             shard_identity,
             None,
             SpawnMode::Eager,
@@ -1659,6 +1677,8 @@ impl TenantManager {
 
         // Phase 6: Release the InProgress on the parent shard
         drop(parent_slot_guard);
+
+        utils::pausable_failpoint!("shard-split-post-finish-pause");
 
         Ok(child_shards)
     }
@@ -2131,7 +2151,7 @@ impl TenantManager {
                 tenant_shard_id,
                 &tenant_path,
                 self.resources.clone(),
-                AttachedTenantConf::try_from(config).map_err(Error::DetachReparent)?,
+                AttachedTenantConf::try_from(self.conf, config).map_err(Error::DetachReparent)?,
                 shard_identity,
                 None,
                 SpawnMode::Eager,

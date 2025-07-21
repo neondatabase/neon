@@ -209,9 +209,9 @@ def test_ancestor_detach_branched_from(
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
-    # because we do the fullbackup from ancestor at the branch_lsn, the zenith.signal is always different
-    # as there is always "PREV_LSN: invalid" for "before"
-    skip_files = {"zenith.signal"}
+    # because we do the fullbackup from ancestor at the branch_lsn, the neon.signal and/or zenith.signal is always
+    # different as there is always "PREV_LSN: invalid" for "before"
+    skip_files = {"zenith.signal", "neon.signal"}
 
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, skip_files)
 
@@ -767,7 +767,7 @@ def test_compaction_induced_by_detaches_in_history(
         env.pageserver, env.initial_tenant, branch_timeline_id, branch_lsn, fullbackup_after
     )
 
-    # we don't need to skip any files, because zenith.signal will be identical
+    # we don't need to skip any files, because neon.signal will be identical
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
 
 
@@ -1887,6 +1887,31 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
         ["pg_replslot/test_slot_restore/state"]
     )
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+
+
+def test_detach_ancestors_with_no_writes(
+    neon_env_builder: NeonEnvBuilder,
+):
+    env = neon_env_builder.init_start()
+
+    endpoint = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_1', 'pgoutput')"
+    )
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.stop()
+
+    for i in range(0, 5):
+        if i == 0:
+            ancestor_name = "main"
+        else:
+            ancestor_name = f"b{i}"
+
+        tlid = env.create_branch(f"b{i + 1}", ancestor_branch_name=ancestor_name)
+
+        client = env.pageserver.http_client()
+        client.detach_ancestor(tenant_id=env.initial_tenant, timeline_id=tlid)
 
 
 # TODO:

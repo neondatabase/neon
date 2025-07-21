@@ -181,9 +181,13 @@ pub struct ComputeSpec {
     /// JWT for authorizing requests to endpoint storage service
     pub endpoint_storage_token: Option<String>,
 
-    /// Download LFC state from endpoint_storage and pass it to Postgres on startup
     #[serde(default)]
+    /// Download LFC state from endpoint storage and pass it to Postgres on compute startup
     pub autoprewarm: bool,
+
+    #[serde(default)]
+    /// Upload LFC state to endpoint storage periodically. Default value (None) means "don't upload"
+    pub offload_lfc_interval_seconds: Option<std::num::NonZeroU64>,
 
     /// Suspend timeout in seconds.
     ///
@@ -438,7 +442,7 @@ pub struct JwksSettings {
 }
 
 /// Protocol used to connect to a Pageserver. Parsed from the connstring scheme.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PageserverProtocol {
     /// The original protocol based on libpq and COPY. Uses postgresql:// or postgres:// scheme.
     #[default]
