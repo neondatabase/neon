@@ -400,6 +400,14 @@ static uint64
 backpressure_lag_impl(void)
 {
 	struct WalproposerShmemState* state = NULL;
+
+	/* BEGIN_HADRON */
+	if(max_cluster_size < 0){
+		// if max cluster size is not set, then we don't apply backpressure because we're reconfiguring PG
+		return 0;
+	}
+	/* END_HADRON */
+
 	if (max_replication_apply_lag > 0 || max_replication_flush_lag > 0 || max_replication_write_lag > 0)
 	{
 		XLogRecPtr	writePtr;
