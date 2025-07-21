@@ -1370,9 +1370,9 @@ impl Timeline {
         let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: u64 = 0;
-        for (spcnode, dbnode) in dbdir.dbdirs.keys() {
+        for &(spcnode, dbnode) in dbdir.dbdirs.keys() {
             for rel in self
-                .list_rels(*spcnode, *dbnode, Version::at(lsn), ctx)
+                .list_rels(spcnode, dbnode, Version::at(lsn), ctx)
                 .await?
             {
                 if self.cancel.is_cancelled() {
@@ -2077,18 +2077,14 @@ impl DatadirModification<'_> {
             (true, RelSizeMigration::Legacy) => {
                 // The first time we enable it, we need to persist it in `index_part.json`
                 // The caller should update the reldir status once the initialization is done.
-                if is_create && !self.is_importing_pgdata {
-                    Ok(RelDirMode {
-                        current_status: RelSizeMigration::Legacy,
-                        initialize: true,
-                    })
-                } else {
-                    // Only initialize the v2 keyspace on new relation creation.
-                    Ok(RelDirMode {
-                        current_status: RelSizeMigration::Legacy,
-                        initialize: false,
-                    })
-                }
+                //
+                // Only initialize the v2 keyspace on new relation creation. No initialization
+                // during `timeline_create` (TODO: fix this, we should allow, but currently it
+                // hits consistency issues).
+                Ok(RelDirMode {
+                    current_status: RelSizeMigration::Legacy,
+                    initialize: is_create && !self.is_importing_pgdata,
+                })
             }
             (true, status @ RelSizeMigration::Migrating | status @ RelSizeMigration::Migrated) => {
                 // index_part already persisted that the timeline has enabled rel_size_v2
@@ -2132,6 +2128,8 @@ impl DatadirModification<'_> {
             }
 
             // Create RelDirectory in v1 keyspace. TODO: if we have fully migrated to v2, no need to create this directory.
+            // Some code path relies on this directory to be present. We should remove it once we starts to set tenants to
+            // `RelSizeMigration::Migrated` state (currently we don't, all tenants will have `RelSizeMigration::Migrating`).
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
             })?;
@@ -2252,9 +2250,7 @@ impl DatadirModification<'_> {
         tracing::info!("initializing rel_size_v2 keyspace");
         let mut rel_cnt = 0;
         // relmap_exists (the value of dbdirs hashmap) does not affect the migration: we need to copy things over anyways
-        for (spcnode, dbnode) in dbdir.dbdirs.keys() {
-            let spcnode = *spcnode;
-            let dbnode = *dbnode;
+        for &(spcnode, dbnode) in dbdir.dbdirs.keys() {
             let rel_dir_key = rel_dir_to_key(spcnode, dbnode);
             let rel_dir = RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?;
             for (relnode, forknum) in rel_dir.rels {
