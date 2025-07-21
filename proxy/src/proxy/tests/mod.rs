@@ -24,13 +24,13 @@ use crate::context::RequestContext;
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
-use crate::error::{ErrorKind, ReportableError};
+use crate::error::ErrorKind;
 use crate::pglb::ERR_INSECURE_CONNECTION;
 use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
 use crate::proxy::connect_compute::{ConnectMechanism, connect_to_compute};
-use crate::proxy::retry::{ShouldRetryWakeCompute, retry_after};
+use crate::proxy::retry::retry_after;
 use crate::stream::{PqStream, Stream};
 use crate::tls::client_config::compute_client_config_with_certs;
 use crate::tls::server_config::CertResolver;
@@ -430,71 +430,37 @@ impl TestConnectMechanism {
 #[derive(Debug)]
 struct TestConnection;
 
-#[derive(Debug)]
-struct TestConnectError {
-    retryable: bool,
-    wakeable: bool,
-    kind: crate::error::ErrorKind,
-}
-
-impl ReportableError for TestConnectError {
-    fn get_error_kind(&self) -> crate::error::ErrorKind {
-        self.kind
-    }
-}
-
-impl std::fmt::Display for TestConnectError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-
-impl std::error::Error for TestConnectError {}
-
-impl CouldRetry for TestConnectError {
-    fn could_retry(&self) -> bool {
-        self.retryable
-    }
-}
-impl ShouldRetryWakeCompute for TestConnectError {
-    fn should_retry_wake_compute(&self) -> bool {
-        self.wakeable
-    }
-}
-
 #[async_trait]
 impl ConnectMechanism for TestConnectMechanism {
     type Connection = TestConnection;
-    type ConnectError = TestConnectError;
-    type Error = anyhow::Error;
 
     async fn connect_once(
         &self,
         _ctx: &RequestContext,
         _node_info: &control_plane::CachedNodeInfo,
         _config: &ComputeConfig,
-    ) -> Result<Self::Connection, Self::ConnectError> {
+    ) -> Result<Self::Connection, compute::ConnectionError> {
         let mut counter = self.counter.lock().unwrap();
         let action = self.sequence[*counter];
         *counter += 1;
         match action {
             ConnectAction::Connect => Ok(TestConnection),
-            ConnectAction::Retry => Err(TestConnectError {
+            ConnectAction::Retry => Err(compute::ConnectionError::TestError {
                 retryable: true,
                 wakeable: true,
                 kind: ErrorKind::Compute,
             }),
-            ConnectAction::RetryNoWake => Err(TestConnectError {
+            ConnectAction::RetryNoWake => Err(compute::ConnectionError::TestError {
                 retryable: true,
                 wakeable: false,
                 kind: ErrorKind::Compute,
             }),
-            ConnectAction::Fail => Err(TestConnectError {
+            ConnectAction::Fail => Err(compute::ConnectionError::TestError {
                 retryable: false,
                 wakeable: true,
                 kind: ErrorKind::Compute,
             }),
-            ConnectAction::FailNoWake => Err(TestConnectError {
+            ConnectAction::FailNoWake => Err(compute::ConnectionError::TestError {
                 retryable: false,
                 wakeable: false,
                 kind: ErrorKind::Compute,
