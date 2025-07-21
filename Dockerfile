@@ -67,7 +67,8 @@ RUN --mount=type=secret,uid=1000,id=SUBZERO_ACCESS_TOKEN \
     set -e \
     && if [ -s /run/secrets/SUBZERO_ACCESS_TOKEN ]; then \
         export CARGO_NET_GIT_FETCH_WITH_CLI=true && \
-        git config --global url."https://$(cat /run/secrets/SUBZERO_ACCESS_TOKEN)@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero"; \
+        git config --global url."https://$(cat /run/secrets/SUBZERO_ACCESS_TOKEN)@github.com/neondatabase/subzero".insteadOf "https://github.com/neondatabase/subzero" && \
+        cargo add -p proxy subzero-core --git https://github.com/neondatabase/subzero --rev 396264617e78e8be428682f87469bb25429af88a; \
     fi \
     && cargo chef prepare --recipe-path recipe.json
 
@@ -94,6 +95,8 @@ RUN --mount=type=secret,uid=1000,id=SUBZERO_ACCESS_TOKEN \
 # layer, and the cargo dependencies built in the previous step.
 COPY --chown=nonroot --from=pg-build /home/nonroot/pg_install/ pg_install
 COPY --chown=nonroot . .
+COPY --chown=nonroot --from=plan     /home/nonroot/proxy/Cargo.toml         proxy/Cargo.toml
+COPY --chown=nonroot --from=plan     /home/nonroot/Cargo.lock               Cargo.lock
 
 RUN  --mount=type=secret,uid=1000,id=SUBZERO_ACCESS_TOKEN \
     set -e \
