@@ -69,13 +69,18 @@ def test_perf_many_relations(remote_compare: RemoteCompare, num_relations: int):
             )
 
 
-def test_perf_simple_many_relations_reldir_v2(
-    neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker
+@pytest.mark.parametrize(
+    "reldir,num_relations",
+    [("v1", 10000), ("v1v2", 10000), ("v2", 10000), ("v2", 100000)],
+    ids=["v1-small", "v1v2-small", "v2-small", "v2-large"],
+)
+def test_perf_simple_many_relations_reldir(
+    neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker, reldir: str, num_relations: int
 ):
     """
     Test creating many relations in a single database.
     """
-    env = neon_env_builder.init_start(initial_tenant_conf={"rel_size_v2_enabled": "true"})
+    env = neon_env_builder.init_start(initial_tenant_conf={"rel_size_v2_enabled": reldir != "v1"})
     ep = env.endpoints.create_start(
         "main",
         config_lines=[
@@ -85,14 +90,37 @@ def test_perf_simple_many_relations_reldir_v2(
         ],
     )
 
-    assert (
-        env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
-            "rel_size_migration"
-        ]
-        != "legacy"
-    )
+    ep.safe_psql("CREATE TABLE IF NOT EXISTS initial_table (v1 int)")
 
-    n = 100000
+    if reldir == "v1":
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            == "legacy"
+        )
+    elif reldir == "v1v2":
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            == "migrating"
+        )
+    elif reldir == "v2":
+        # only read/write to the v2 keyspace
+        env.pageserver.http_client().timeline_patch_index_part(
+            env.initial_tenant, env.initial_timeline, {"rel_size_migration": "migrated"}
+        )
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            == "migrated"
+        )
+    else:
+        raise AssertionError(f"Invalid reldir config: {reldir}")
+
+    n = num_relations
     step = 5000
     # Create many relations
     log.info(f"Creating {n} relations...")
