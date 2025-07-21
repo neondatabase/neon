@@ -308,39 +308,39 @@ def parse_load_log(log_file_path, scalefactor):
     try:
         with open(log_file_path) as f:
             log_content = f.read()
-        
+
         # Regex patterns to match the timestamp lines
-        loading_pattern = r'\[INFO \] (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}.*Loading data into TPCC database'
-        finished_pattern = r'\[INFO \] (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}.*Finished loading data into TPCC database'
-        
+        loading_pattern = r"\[INFO \] (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}.*Loading data into TPCC database"
+        finished_pattern = r"\[INFO \] (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}.*Finished loading data into TPCC database"
+
         loading_match = re.search(loading_pattern, log_content)
         finished_match = re.search(finished_pattern, log_content)
-        
+
         if not loading_match or not finished_match:
             print(f"Warning: Could not find loading timestamps in log file {log_file_path}")
             return None
-        
+
         # Parse timestamps
         loading_time = datetime.strptime(loading_match.group(1), "%Y-%m-%d %H:%M:%S")
         finished_time = datetime.strptime(finished_match.group(1), "%Y-%m-%d %H:%M:%S")
-        
+
         # Calculate duration in seconds
         duration_seconds = (finished_time - loading_time).total_seconds()
-        
+
         # Calculate throughput: scalefactor/warehouses: 10 warehouses is approx. 1 GB of data
         load_throughput = (scalefactor * 1024 / 10.0) / duration_seconds
-        
+
         # Convert end time to UTC timestamp for database
         finished_time_utc = finished_time.replace(tzinfo=timezone.utc).isoformat()
-        
+
         print(f"Load metrics: Duration={duration_seconds}s, Throughput={load_throughput:.2f} MB/s")
-        
+
         return {
             "duration_seconds": duration_seconds,
             "throughput_mb_per_sec": load_throughput,
-            "end_timestamp": finished_time_utc
+            "end_timestamp": finished_time_utc,
         }
-        
+
     except FileNotFoundError:
         print(f"Warning: Load log file not found: {log_file_path}")
         return None
@@ -354,7 +354,7 @@ def insert_load_metrics(conn, load_metrics, suit, revision, platform, labels_jso
     if not load_metrics:
         print("No load metrics to insert")
         return
-        
+
     load_metrics_data = [
         {
             "suit": suit,
@@ -365,7 +365,7 @@ def insert_load_metrics(conn, load_metrics, suit, revision, platform, labels_jso
             "metric_unit": "seconds",
             "metric_report_type": "lower_is_better",
             "recorded_at_timestamp": load_metrics["end_timestamp"],
-            "labels": labels_json
+            "labels": labels_json,
         },
         {
             "suit": suit,
@@ -376,10 +376,10 @@ def insert_load_metrics(conn, load_metrics, suit, revision, platform, labels_jso
             "metric_unit": "MB/second",
             "metric_report_type": "higher_is_better",
             "recorded_at_timestamp": load_metrics["end_timestamp"],
-            "labels": labels_json
-        }
+            "labels": labels_json,
+        },
     ]
-    
+
     insert_query = """
     INSERT INTO perf_test_results 
     (suit, revision, platform, metric_name, metric_value, metric_unit, 
@@ -387,13 +387,13 @@ def insert_load_metrics(conn, load_metrics, suit, revision, platform, labels_jso
     VALUES (%(suit)s, %(revision)s, %(platform)s, %(metric_name)s, %(metric_value)s, 
             %(metric_unit)s, %(metric_report_type)s, %(recorded_at_timestamp)s, %(labels)s)
     """
-    
+
     try:
         with conn.cursor() as cursor:
             cursor.executemany(insert_query, load_metrics_data)
         conn.commit()
         print(f"Successfully inserted {len(load_metrics_data)} load metrics into perf_test_results")
-        
+
     except Exception as e:
         conn.rollback()
         print(f"Error inserting load metrics into database: {e}")
@@ -445,28 +445,28 @@ def main():
 
     args = parser.parse_args()
 
-        # Validate inputs
+    # Validate inputs
     if args.summary_json and not Path(args.summary_json).exists():
         print(f"Error: Summary JSON file does not exist: {args.summary_json}")
         sys.exit(1)
-    
+
     if not args.summary_json and not args.load_log:
         print("Error: Either summary JSON or load log file must be provided")
         sys.exit(1)
-    
+
     if len(args.revision) != 40:
         print(f"Warning: Revision should be 40 characters, got {len(args.revision)}")
-    
+
     # Load and process summary data if provided
     summary_data = None
     metrics = []
-    
+
     if args.summary_json:
         summary_data = load_summary_json(args.summary_json)
         metrics = extract_metrics(summary_data)
         if not metrics:
             print("Warning: No metrics found in summary JSON")
-    
+
     # Build common data for all metrics
     if summary_data:
         scalefactor = summary_data.get("scalefactor", "unknown")
@@ -477,7 +477,7 @@ def main():
         scalefactor = args.warehouses if args.warehouses else "unknown"
         terminals = "unknown"
         labels = {"project_id": args.project_id}
-    
+
     suit = build_suit_name(scalefactor, terminals, args.run_type, args.min_cu, args.max_cu)
     platform = f"prod-us-east-2-{args.project_id}"
 
@@ -485,7 +485,7 @@ def main():
     current_timestamp_ms = None
     start_timestamp_ms = None
     recorded_at = None
-    
+
     if summary_data:
         current_timestamp_ms = summary_data.get("Current Timestamp (milliseconds)")
         start_timestamp_ms = summary_data.get("Start timestamp (milliseconds)")
@@ -498,14 +498,16 @@ def main():
 
         if not start_timestamp_ms:
             print("Warning: No start timestamp found in JSON, CSV upload may be incorrect")
-            start_timestamp_ms = current_timestamp_ms or datetime.now(timezone.utc).timestamp() * 1000
+            start_timestamp_ms = (
+                current_timestamp_ms or datetime.now(timezone.utc).timestamp() * 1000
+            )
 
     # Prepare metrics data for database insertion (only if we have summary metrics)
     metrics_data = []
     if metrics and recorded_at:
         for metric_name, metric_value in metrics:
             metric_info = get_metric_info(metric_name)
-            
+
             row = {
                 "suit": suit,
                 "revision": args.revision,
@@ -518,7 +520,7 @@ def main():
                 "labels": json.dumps(labels),  # Convert to JSON string for JSONB column
             }
             metrics_data.append(row)
-    
+
     print(f"Prepared {len(metrics_data)} summary metrics for upload to database")
     print(f"Suit: {suit}")
     print(f"Platform: {platform}")
@@ -526,7 +528,7 @@ def main():
     # Connect to database and insert metrics
     try:
         conn = psycopg2.connect(args.connection_string)
-        
+
         # Insert summary metrics into perf_test_results (if any)
         if metrics_data:
             insert_metrics(conn, metrics_data)
@@ -536,15 +538,15 @@ def main():
         # Process and insert detailed CSV results if provided
         if args.results_csv:
             print(f"Processing detailed CSV results from: {args.results_csv}")
-            
+
             # Create table if it doesn't exist
             create_benchbase_results_details_table(conn)
-            
+
             # Process CSV data
             csv_data = process_csv_results(
                 args.results_csv, start_timestamp_ms, suit, args.revision, platform
             )
-            
+
             # Insert CSV data
             if csv_data:
                 insert_csv_results(conn, csv_data)
@@ -552,22 +554,24 @@ def main():
                 print("No CSV data to upload")
         else:
             print("No CSV file provided, skipping detailed results upload")
-        
+
         # Process and insert load metrics if provided
         if args.load_log:
             print(f"Processing load metrics from: {args.load_log}")
-            
+
             # Parse load log and extract metrics
             load_metrics = parse_load_log(args.load_log, scalefactor)
-            
+
             # Insert load metrics
             if load_metrics:
-                insert_load_metrics(conn, load_metrics, suit, args.revision, platform, json.dumps(labels))
+                insert_load_metrics(
+                    conn, load_metrics, suit, args.revision, platform, json.dumps(labels)
+                )
             else:
                 print("No load metrics to upload")
         else:
             print("No load log file provided, skipping load metrics upload")
-        
+
         conn.close()
         print("Database upload completed successfully")
 
