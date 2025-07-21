@@ -430,7 +430,6 @@ impl TestConnectMechanism {
 #[derive(Debug)]
 struct TestConnection;
 
-#[async_trait]
 impl ConnectMechanism for TestConnectMechanism {
     type Connection = TestConnection;
 

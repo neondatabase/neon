@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use tokio::time;
 use tracing::{debug, info, warn};
 
@@ -33,7 +32,6 @@ pub(crate) fn invalidate_cache(node_info: control_plane::CachedNodeInfo) -> Node
     node_info.invalidate()
 }
 
-#[async_trait]
 pub(crate) trait ConnectMechanism {
     type Connection;
     async fn connect_once(
@@ -58,7 +56,6 @@ pub enum TlsNegotiation {
     Postgres,
 }
 
-#[async_trait]
 impl ConnectMechanism for TcpMechanism {
     type Connection = ComputeConnection;
 
