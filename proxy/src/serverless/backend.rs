@@ -1,17 +1,11 @@
-use std::io;
-use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use jose_jwk::jose_b64;
-use postgres_client::config::SslMode;
+use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use rand_core::OsRng;
-use rustls::pki_types::{DnsName, ServerName};
-use tokio::net::{TcpStream, lookup_host};
-use tokio_rustls::TlsConnector;
 use tracing::field::display;
 use tracing::{debug, info};
 
@@ -27,19 +21,17 @@ use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
-use crate::config::{ComputeConfig, ProxyConfig};
+use crate::config::ProxyConfig;
 use crate::context::RequestContext;
-use crate::control_plane::CachedNodeInfo;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
-use crate::control_plane::locks::ApiLocks;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
 use crate::pqproto::StartupMessageParams;
-use crate::proxy::connect_compute::{self, ConnectMechanism, TcpMechanism};
+use crate::proxy::connect_compute;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
-use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
+use crate::types::{EndpointId, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool:
@@ -198,7 +190,7 @@ impl PoolingBackend {
 
         let mut node = connect_compute::connect_to_compute(
             ctx,
-            &TcpMechanism {
+            &connect_compute::TcpMechanism {
                 locks: &self.config.connect_compute_locks,
                 tls: connect_compute::TlsNegotiation::Direct,
             },
@@ -257,19 +249,42 @@ impl PoolingBackend {
             )),
             options: conn_info.user_info.options.clone(),
         });
-        connect_compute::connect_to_compute(
+
+        let node = connect_compute::connect_to_compute(
             ctx,
-            &HyperMechanism {
-                conn_id,
-                conn_info,
-                pool: self.http_conn_pool.clone(),
+            &connect_compute::TcpMechanism {
                 locks: &self.config.connect_compute_locks,
+                tls: connect_compute::TlsNegotiation::Direct,
             },
             &backend,
             self.config.wake_compute_retry_config,
             &self.config.connect_to_compute,
         )
-        .await
+        .await?;
+
+        let stream = match node.stream.into_framed().into_inner() {
+            MaybeTlsStream::Raw(s) => Box::pin(s) as AsyncRW,
+            MaybeTlsStream::Tls(s) => Box::pin(s) as AsyncRW,
+        };
+
+        let (client, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .timer(TokioTimer::new())
+            .keep_alive_interval(Duration::from_secs(20))
+            .keep_alive_while_idle(true)
+            .keep_alive_timeout(Duration::from_secs(5))
+            .handshake(TokioIo::new(stream))
+            .await
+            .map_err(LocalProxyConnError::H2)?;
+
+        Ok(poll_http2_client(
+            self.http_conn_pool.clone(),
+            ctx,
+            &conn_info,
+            client,
+            connection,
+            conn_id,
+            node.aux.clone(),
+        ))
     }
 
     /// Connect to postgres over localhost.
@@ -440,8 +455,6 @@ impl From<compute::PostgresError> for HttpConnError {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LocalProxyConnError {
-    #[error("error with connection to local-proxy")]
-    Io(#[source] std::io::Error),
     #[error("could not establish h2 connection")]
     H2(#[from] hyper::Error),
 }
@@ -520,7 +533,6 @@ impl ShouldRetryWakeCompute for HttpConnError {
 impl ReportableError for LocalProxyConnError {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
-            LocalProxyConnError::Io(_) => ErrorKind::Compute,
             LocalProxyConnError::H2(_) => ErrorKind::Compute,
         }
     }
@@ -535,7 +547,6 @@ impl UserFacingError for LocalProxyConnError {
 impl CouldRetry for LocalProxyConnError {
     fn could_retry(&self) -> bool {
         match self {
-            LocalProxyConnError::Io(_) => false,
             LocalProxyConnError::H2(_) => false,
         }
     }
@@ -543,142 +554,7 @@ impl CouldRetry for LocalProxyConnError {
 impl ShouldRetryWakeCompute for LocalProxyConnError {
     fn should_retry_wake_compute(&self) -> bool {
         match self {
-            LocalProxyConnError::Io(_) => false,
             LocalProxyConnError::H2(_) => false,
         }
     }
-}
-
-struct HyperMechanism {
-    pool: Arc<GlobalConnPool<LocalProxyClient, HttpConnPool<LocalProxyClient>>>,
-    conn_info: ConnInfo,
-    conn_id: uuid::Uuid,
-
-    /// connect_to_compute concurrency lock
-    locks: &'static ApiLocks<Host>,
-}
-
-#[async_trait]
-impl ConnectMechanism for HyperMechanism {
-    type Connection = http_conn_pool::Client<LocalProxyClient>;
-    type ConnectError = HttpConnError;
-    type Error = HttpConnError;
-
-    async fn connect_once(
-        &self,
-        ctx: &RequestContext,
-        node_info: &CachedNodeInfo,
-        config: &ComputeConfig,
-    ) -> Result<Self::Connection, Self::ConnectError> {
-        let host_addr = node_info.conn_info.host_addr;
-        let host = &node_info.conn_info.host;
-        let permit = self.locks.get_permit(host).await?;
-
-        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-
-        let tls = if node_info.conn_info.ssl_mode == SslMode::Disable {
-            None
-        } else {
-            Some(&config.tls)
-        };
-
-        let port = node_info.conn_info.port;
-        let res = connect_http2(host_addr, host, port, config.timeout, tls).await;
-        drop(pause);
-        let (client, connection) = permit.release_result(res)?;
-
-        tracing::Span::current().record(
-            "compute_id",
-            tracing::field::display(&node_info.aux.compute_id),
-        );
-
-        if let Some(query_id) = ctx.get_testodrome_id() {
-            info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
-        }
-
-        Ok(poll_http2_client(
-            self.pool.clone(),
-            ctx,
-            &self.conn_info,
-            client,
-            connection,
-            self.conn_id,
-            node_info.aux.clone(),
-        ))
-    }
-}
-
-async fn connect_http2(
-    host_addr: Option<IpAddr>,
-    host: &str,
-    port: u16,
-    timeout: Duration,
-    tls: Option<&Arc<rustls::ClientConfig>>,
-) -> Result<
-    (
-        http_conn_pool::LocalProxyClient,
-        http_conn_pool::LocalProxyConnection,
-    ),
-    LocalProxyConnError,
-> {
-    let addrs = match host_addr {
-        Some(addr) => vec![SocketAddr::new(addr, port)],
-        None => lookup_host((host, port))
-            .await
-            .map_err(LocalProxyConnError::Io)?
-            .collect(),
-    };
-    let mut last_err = None;
-
-    let mut addrs = addrs.into_iter();
-    let stream = loop {
-        let Some(addr) = addrs.next() else {
-            return Err(last_err.unwrap_or_else(|| {
-                LocalProxyConnError::Io(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "could not resolve any addresses",
-                ))
-            }));
-        };
-
-        match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
-            Ok(Ok(stream)) => {
-                stream.set_nodelay(true).map_err(LocalProxyConnError::Io)?;
-                break stream;
-            }
-            Ok(Err(e)) => {
-                last_err = Some(LocalProxyConnError::Io(e));
-            }
-            Err(e) => {
-                last_err = Some(LocalProxyConnError::Io(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    e,
-                )));
-            }
-        }
-    };
-
-    let stream = if let Some(tls) = tls {
-        let host = DnsName::try_from(host)
-            .map_err(io::Error::other)
-            .map_err(LocalProxyConnError::Io)?
-            .to_owned();
-        let stream = TlsConnector::from(tls.clone())
-            .connect(ServerName::DnsName(host), stream)
-            .await
-            .map_err(LocalProxyConnError::Io)?;
-        Box::pin(stream) as AsyncRW
-    } else {
-        Box::pin(stream) as AsyncRW
-    };
-
-    let (client, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-        .timer(TokioTimer::new())
-        .keep_alive_interval(Duration::from_secs(20))
-        .keep_alive_while_idle(true)
-        .keep_alive_timeout(Duration::from_secs(5))
-        .handshake(TokioIo::new(stream))
-        .await?;
-
-    Ok((client, connection))
 }
