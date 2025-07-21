@@ -705,7 +705,7 @@ impl From<GetRelSizeResponse> for proto::GetRelSizeResponse {
     fn from(resp: GetRelSizeResponse) -> Self {
         Self {
             num_blocks: resp.unwrap_or_default(),
-            missing: resp.is_some(),
+            missing: resp.is_none(),
         }
     }
 }
