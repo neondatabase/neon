@@ -439,7 +439,8 @@ impl TenantFeatureResolver {
             if let Some(ref mut remote_size_mb) = remote_size_mb {
                 *remote_size_mb += size as f64 / 1024.0 / 1024.0;
             }
-            if let Some((db_count, rel_count)) = *timeline.db_rel_count.load().as_ref() {
+            if let Some(data) = timeline.db_rel_count.load_full() {
+                let (db_count, rel_count) = *data.as_ref();
                 if db_count_max.is_none() {
                     db_count_max = Some(db_count);
                 }

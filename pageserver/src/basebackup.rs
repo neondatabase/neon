@@ -463,7 +463,7 @@ where
 
         self.timeline
             .db_rel_count
-            .store(Arc::new(Some((dbdir_cnt, rel_cnt))));
+            .store(Some(Arc::new((dbdir_cnt, rel_cnt))));
 
         let start_time = Instant::now();
         let aux_files = self
