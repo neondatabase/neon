@@ -470,14 +470,18 @@ communicator_prefetch_pump_state(void)
 {
 	START_PREFETCH_RECEIVE_WORK();
 
-	/*
-	 * Flush request to avoid requests pending for arbitrary long time,
-	 * pinning LSN and holding GC at PS.
-	 */
-	if (!prefetch_flush_requests())
+	if (MyPState->ring_receive == MyPState->ring_flush && MyPState->ring_flush < MyPState->ring_unused)
 	{
-		END_PREFETCH_RECEIVE_WORK();
-		return;
+		/*
+		 * Flush request to avoid requests pending for arbitrary long time,
+		 * pinning LSN and holding GC at PS.
+		 */
+		if (!prefetch_flush_requests())
+		{
+			END_PREFETCH_RECEIVE_WORK();
+			return;
+		}
+		MyPState->ring_flush = MyPState->ring_unused;
 	}
 	while (MyPState->ring_receive != MyPState->ring_flush)
 	{
