@@ -30,6 +30,11 @@ pub(super) fn callback_set_my_latch() {
     unsafe { callback_set_my_latch_unsafe() };
 }
 
+pub(super) fn callback_get_lfc_metrics() -> LfcMetrics {
+    unsafe { callback_get_lfc_metrics_unsafe() }
+}
+
+/// Return type of the callback_get_lfc_metrics() function.
 #[repr(C)]
 pub struct LfcMetrics {
     pub lfc_cache_size_limit: i64,
@@ -43,8 +48,4 @@ pub struct LfcMetrics {
     // Index 0 is the size of the working set accessed within last 1 minute,
     // index 59 is the size of the working set accessed within last 60 minutes.
     pub lfc_approximate_working_set_size_windows: [i64; 60],
-}
-
-pub(super) fn callback_get_lfc_metrics() -> LfcMetrics {
-    unsafe { callback_get_lfc_metrics_unsafe() }
 }
