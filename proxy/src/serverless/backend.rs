@@ -29,7 +29,6 @@ use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::connect_compute;
-use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, LOCAL_PROXY_SUFFIX};
 
@@ -503,33 +502,6 @@ impl UserFacingError for HttpConnError {
     }
 }
 
-impl CouldRetry for HttpConnError {
-    fn could_retry(&self) -> bool {
-        match self {
-            HttpConnError::ConnectError(p) => p.could_retry(),
-            HttpConnError::PostgresConnectionError(e) => e.could_retry(),
-            HttpConnError::LocalProxyConnectionError(e) => e.could_retry(),
-            HttpConnError::ComputeCtl(_) => false,
-            HttpConnError::ConnectionClosedAbruptly(_) => false,
-            HttpConnError::JwtPayloadError(_) => false,
-            HttpConnError::GetAuthInfo(_) => false,
-            HttpConnError::AuthError(_) => false,
-            HttpConnError::WakeCompute(_) => false,
-            HttpConnError::TooManyConnectionAttempts(_) => false,
-        }
-    }
-}
-impl ShouldRetryWakeCompute for HttpConnError {
-    fn should_retry_wake_compute(&self) -> bool {
-        match self {
-            HttpConnError::PostgresConnectionError(e) => e.should_retry_wake_compute(),
-            // we never checked cache validity
-            HttpConnError::TooManyConnectionAttempts(_) => false,
-            _ => true,
-        }
-    }
-}
-
 impl ReportableError for LocalProxyConnError {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
@@ -541,20 +513,5 @@ impl ReportableError for LocalProxyConnError {
 impl UserFacingError for LocalProxyConnError {
     fn to_string_client(&self) -> String {
         "Could not establish HTTP connection to the database".to_string()
-    }
-}
-
-impl CouldRetry for LocalProxyConnError {
-    fn could_retry(&self) -> bool {
-        match self {
-            LocalProxyConnError::H2(_) => false,
-        }
-    }
-}
-impl ShouldRetryWakeCompute for LocalProxyConnError {
-    fn should_retry_wake_compute(&self) -> bool {
-        match self {
-            LocalProxyConnError::H2(_) => false,
-        }
     }
 }

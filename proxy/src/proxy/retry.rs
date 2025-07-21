@@ -31,18 +31,6 @@ impl CouldRetry for io::Error {
     }
 }
 
-impl CouldRetry for postgres_client::error::DbError {
-    fn could_retry(&self) -> bool {
-        use postgres_client::error::SqlState;
-        matches!(
-            self.code(),
-            &SqlState::CONNECTION_FAILURE
-                | &SqlState::CONNECTION_EXCEPTION
-                | &SqlState::CONNECTION_DOES_NOT_EXIST
-                | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
-        )
-    }
-}
 impl ShouldRetryWakeCompute for postgres_client::error::DbError {
     fn should_retry_wake_compute(&self) -> bool {
         use postgres_client::error::SqlState;
@@ -73,17 +61,6 @@ impl ShouldRetryWakeCompute for postgres_client::error::DbError {
     }
 }
 
-impl CouldRetry for postgres_client::Error {
-    fn could_retry(&self) -> bool {
-        if let Some(io_err) = self.source().and_then(|x| x.downcast_ref()) {
-            io::Error::could_retry(io_err)
-        } else if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
-            postgres_client::error::DbError::could_retry(db_err)
-        } else {
-            false
-        }
-    }
-}
 impl ShouldRetryWakeCompute for postgres_client::Error {
     fn should_retry_wake_compute(&self) -> bool {
         if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
