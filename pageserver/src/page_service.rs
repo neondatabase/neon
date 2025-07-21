@@ -1636,9 +1636,10 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        Self::handle_get_nblocks_request(&shard, &req, &ctx)
+                        Self::handle_get_nblocks_request(&shard, &req, false, &ctx)
                             .instrument(span.clone())
                             .await
+                            .map(|msg| msg.expect("allow_missing=false"))
                             .map(|msg| (PagestreamBeMessage::Nblocks(msg), timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
@@ -2303,12 +2304,16 @@ impl PageServerHandler {
         Ok(PagestreamExistsResponse { req: *req, exists })
     }
 
+    /// If `allow_missing` is true, returns None instead of Err on missing relations. Otherwise,
+    /// never returns None. It is only supported by the gRPC protocol, so we pass it separately to
+    /// avoid changing the libpq protocol types.
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_nblocks_request(
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
+        allow_missing: bool,
         ctx: &RequestContext,
-    ) -> Result<PagestreamNblocksResponse, PageStreamError> {
+    ) -> Result<Option<PagestreamNblocksResponse>, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -2320,20 +2325,25 @@ impl PageServerHandler {
         .await?;
 
         let n_blocks = timeline
-            .get_rel_size(
+            .get_rel_size_in_reldir(
                 req.rel,
                 Version::LsnRange(LsnRange {
                     effective_lsn: lsn,
                     request_lsn: req.hdr.request_lsn,
                 }),
+                None,
+                allow_missing,
                 ctx,
             )
             .await?;
+        let Some(n_blocks) = n_blocks else {
+            return Ok(None);
+        };
 
-        Ok(PagestreamNblocksResponse {
+        Ok(Some(PagestreamNblocksResponse {
             req: *req,
             n_blocks,
-        })
+        }))
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -3539,39 +3549,6 @@ impl proto::PageService for GrpcPageServiceHandler {
     type GetPagesStream =
         Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
 
-    #[instrument(skip_all, fields(rel, lsn))]
-    async fn check_rel_exists(
-        &self,
-        req: tonic::Request<proto::CheckRelExistsRequest>,
-    ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
-        let received_at = extract::<ReceivedAt>(&req).0;
-        let timeline = self.get_request_timeline(&req).await?;
-        let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
-
-        // Validate the request, decorate the span, and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&timeline)?;
-        let req: page_api::CheckRelExistsRequest = req.into_inner().try_into()?;
-
-        span_record!(rel=%req.rel, lsn=%req.read_lsn);
-
-        let req = PagestreamExistsRequest {
-            hdr: Self::make_hdr(req.read_lsn, None),
-            rel: req.rel,
-        };
-
-        // Execute the request and convert the response.
-        let _timer = Self::record_op_start_and_throttle(
-            &timeline,
-            metrics::SmgrQueryType::GetRelExists,
-            received_at,
-        )
-        .await?;
-
-        let resp = PageServerHandler::handle_get_rel_exists_request(&timeline, &req, &ctx).await?;
-        let resp: page_api::CheckRelExistsResponse = resp.exists;
-        Ok(tonic::Response::new(resp.into()))
-    }
-
     #[instrument(skip_all, fields(lsn))]
     async fn get_base_backup(
         &self,
@@ -3798,7 +3775,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         Ok(tonic::Response::new(Box::pin(resps)))
     }
 
-    #[instrument(skip_all, fields(rel, lsn))]
+    #[instrument(skip_all, fields(rel, lsn, allow_missing))]
     async fn get_rel_size(
         &self,
         req: tonic::Request<proto::GetRelSizeRequest>,
@@ -3810,8 +3787,9 @@ impl proto::PageService for GrpcPageServiceHandler {
         // Validate the request, decorate the span, and convert it to a Pagestream request.
         Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetRelSizeRequest = req.into_inner().try_into()?;
+        let allow_missing = req.allow_missing;
 
-        span_record!(rel=%req.rel, lsn=%req.read_lsn);
+        span_record!(rel=%req.rel, lsn=%req.read_lsn, allow_missing=%req.allow_missing);
 
         let req = PagestreamNblocksRequest {
             hdr: Self::make_hdr(req.read_lsn, None),
@@ -3826,8 +3804,11 @@ impl proto::PageService for GrpcPageServiceHandler {
         )
         .await?;
 
-        let resp = PageServerHandler::handle_get_nblocks_request(&timeline, &req, &ctx).await?;
-        let resp: page_api::GetRelSizeResponse = resp.n_blocks;
+        let resp =
+            PageServerHandler::handle_get_nblocks_request(&timeline, &req, allow_missing, &ctx)
+                .await?;
+        let resp: page_api::GetRelSizeResponse = resp.map(|resp| resp.n_blocks);
+
         Ok(tonic::Response::new(resp.into()))
     }
 
