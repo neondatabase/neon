@@ -3749,7 +3749,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         let req: page_api::GetRelSizeRequest = req.into_inner().try_into()?;
         let allow_missing = req.allow_missing;
 
-        span_record!(rel=%req.rel, lsn=%req.read_lsn, allow_missing=%allow_missing);
+        span_record!(rel=%req.rel, lsn=%req.read_lsn, allow_missing=%req.allow_missing);
 
         let req = PagestreamNblocksRequest {
             hdr: Self::make_hdr(req.read_lsn, None),
