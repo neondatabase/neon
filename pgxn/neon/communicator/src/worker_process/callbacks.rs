@@ -45,6 +45,6 @@ pub struct LfcMetrics {
     pub lfc_approximate_working_set_size_windows: [i64; 60],
 }
 
-pub fn callback_get_lfc_metrics() -> LfcMetrics {
+pub(super) fn callback_get_lfc_metrics() -> LfcMetrics {
     unsafe { callback_get_lfc_metrics_unsafe() }
 }
