@@ -48,7 +48,7 @@ mod cancel_token;
 mod client;
 mod codec;
 pub mod config;
-mod connect;
+pub mod connect;
 pub mod connect_raw;
 mod connect_socket;
 mod connect_tls;
