@@ -2422,12 +2422,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
-name = "foldhash"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
 name = "form_urlencoded"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2793,16 +2787,6 @@ name = "hashbrown"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
-
-[[package]]
-name = "hashbrown"
-version = "0.15.4"
-source = "git+https://github.com/quantumish/hashbrown.git?rev=6610e6d#6610e6d2b1f288ef7b0709a3efefbc846395dc5e"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash",
-]
 
 [[package]]
 name = "hashlink"
@@ -3863,7 +3847,7 @@ dependencies = [
  "prometheus",
  "rand 0.8.5",
  "rand_distr 0.4.3",
- "twox-hash 1.6.3",
+ "twox-hash",
 ]
 
 [[package]]
@@ -3950,22 +3934,15 @@ checksum = "e5ce46fe64a9d73be07dcbe690a38ce1b293be448fd8ce1e6c1b8062c9f72c6a"
 name = "neon-shmem"
 version = "0.1.0"
 dependencies = [
- "ahash",
- "criterion",
- "foldhash",
- "hashbrown 0.15.4",
  "libc",
  "lock_api",
  "nix 0.30.1",
  "rand 0.9.1",
  "rand_distr 0.5.1",
  "rustc-hash 2.1.1",
- "seahash",
  "tempfile",
  "thiserror 1.0.69",
- "twox-hash 2.1.1",
  "workspace_hack",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -4559,7 +4536,7 @@ dependencies = [
  "tower 0.5.2",
  "tracing",
  "tracing-utils",
- "twox-hash 1.6.3",
+ "twox-hash",
  "url",
  "utils",
  "uuid",
@@ -4783,7 +4760,7 @@ dependencies = [
  "paste",
  "seq-macro",
  "thrift",
- "twox-hash 1.6.3",
+ "twox-hash",
  "zstd",
  "zstd-sys",
 ]
@@ -5517,7 +5494,7 @@ dependencies = [
  "reqwest-tracing",
  "rsa",
  "rstest",
- "rustc-hash 1.1.0",
+ "rustc-hash 2.1.1",
  "rustls 0.23.27",
  "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.1.1",
@@ -6527,12 +6504,6 @@ name = "sd-notify"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "621e3680f3e07db4c9c2c3fb07c6223ab2fab2e54bd3c04c3ae037990f428c32"
-
-[[package]]
-name = "seahash"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "sec1"
@@ -8255,15 +8226,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "twox-hash"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b907da542cbced5261bd3256de1b3a1bf340a3d37f93425a07362a1d687de56"
-dependencies = [
- "rand 0.9.1",
-]
-
-[[package]]
 name = "typed-json"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9127,12 +9089,6 @@ name = "xmlparser"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d25c75bf9ea12c4040a97f829154768bbbce366287e2dc044af160cd79a13fd"
-
-[[package]]
-name = "xxhash-rust"
-version = "0.8.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yasna"

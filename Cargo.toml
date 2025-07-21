@@ -131,6 +131,7 @@ jemalloc_pprof = { version = "0.7", features = ["symbolize", "flamegraph"] }
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
+lock_api = "0.4.13"
 md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
@@ -167,7 +168,7 @@ reqwest-middleware = "0.4"
 reqwest-retry = "0.7"
 routerify = "3"
 rpds = "0.13"
-rustc-hash = "1.1.0"
+rustc-hash = "2.1.1"
 rustls = { version = "0.23.16", default-features = false }
 rustls-pemfile = "2"
 rustls-pki-types = "1.11"
