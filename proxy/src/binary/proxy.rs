@@ -14,7 +14,7 @@ use arc_swap::ArcSwapOption;
 use camino::Utf8PathBuf;
 use futures::future::Either;
 use itertools::{Itertools, Position};
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
 #[cfg(any(test, feature = "testing"))]
@@ -547,7 +547,7 @@ pub async fn run() -> anyhow::Result<()> {
                             attempt.into_inner()
                         );
                     }
-                    let jitter = thread_rng().gen_range(0..100);
+                    let jitter = rand::rng().random_range(0..100);
                     tokio::time::sleep(Duration::from_millis(1000 + jitter)).await;
                 }
             }

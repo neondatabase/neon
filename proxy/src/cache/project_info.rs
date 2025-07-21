@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clashmap::ClashMap;
 use clashmap::mapref::one::Ref;
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
@@ -343,7 +343,7 @@ impl ProjectInfoCacheImpl {
     }
 
     fn gc(&self) {
-        let shard = thread_rng().gen_range(0..self.project2ep.shards().len());
+        let shard = rand::rng().random_range(0..self.project2ep.shards().len());
         debug!(shard, "project_info_cache: performing epoch reclamation");
 
         // acquire a random shard lock
