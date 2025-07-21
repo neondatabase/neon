@@ -448,6 +448,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
+    #[expect(dead_code)]
     feature_resolver: Arc<TenantFeatureResolver>,
 }
 
