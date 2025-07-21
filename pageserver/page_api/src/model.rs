@@ -692,7 +692,10 @@ impl From<GetRelSizeRequest> for proto::GetRelSizeRequest {
     }
 }
 
-/// The size of a relation, or None if `allow_missing=true` and the relation does not exist.
+/// The size of a relation as number of blocks, or None if `allow_missing=true` and the relation
+/// does not exist.
+///
+/// INVARIANT: never None if `allow_missing=false` (returns `NotFound` error instead).
 pub type GetRelSizeResponse = Option<u32>;
 
 impl From<proto::GetRelSizeResponse> for GetRelSizeResponse {
