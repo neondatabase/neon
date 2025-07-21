@@ -510,7 +510,7 @@ where
     /// # Panics
     /// Panics if called on a map initialized with [`HashMapInit::with_fixed`] or if `num_buckets` is
     /// greater than the number of buckets in the map.
-    pub fn begin_shrink(&mut self, num_buckets: u32) {
+    pub fn begin_shrink(&self, num_buckets: u32) {
         let mut map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
         assert!(
             num_buckets <= map.get_num_buckets() as u32,

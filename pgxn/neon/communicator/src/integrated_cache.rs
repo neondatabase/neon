@@ -639,7 +639,49 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 );
             }
         } else {
-            // TODO: Shrinking not implemented yet
+            // Don't hold lock for longer than necessary.
+			{  
+				let mut clock_hand = self.clock_hand.lock().unwrap();
+				
+				// Make sure the clock hand resets properly.
+				// TODO(quantumish): confirm this is expected behavior?
+				if *clock_hand > num_blocks as usize {
+					*clock_hand = num_blocks as usize - 1;
+				}
+				self.block_map.begin_shrink(num_blocks);
+			}
+
+			// Evict everything in to-be-shrinked space
+			// TODO(quantumish): consider moving ahead of clock hand?
+			for i in num_blocks..old_num_blocks {
+				let Some(entry) = self.block_map.entry_at_bucket(i as usize) else {
+					continue;
+				};
+				let old = entry.get();
+				if old.pinned.load(Ordering::Relaxed) != 0 {
+					tracing::warn!(
+						"could not shrink file cache to {} blocks (old size {}): entry {} is pinned",
+						num_blocks,
+						old_num_blocks,
+						i
+					);
+					return;
+				}
+				_ = self.global_lw_lsn.fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
+				old.cache_block.store(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+				entry.remove();
+				// TODO(quantumish): is this expected behavior?
+				self.page_evictions_counter.inc();
+			}
+
+			if let Err(err) = self.block_map.finish_shrink() {
+				tracing::warn!(
+                    "could not shrink file cache to {} blocks (old size {}): {}",
+                    num_blocks,
+                    old_num_blocks,
+                    err
+                );
+			}
         }
     }
 
