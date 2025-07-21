@@ -8,7 +8,6 @@ pub use crate::client::{Client, SocketConfig};
 pub use crate::config::Config;
 pub use crate::connect_raw::RawConnection;
 pub use crate::connection::Connection;
-use crate::error::DbError;
 pub use crate::error::Error;
 pub use crate::generic_client::GenericClient;
 pub use crate::query::RowStream;
@@ -91,21 +90,6 @@ impl Notification {
     pub fn payload(&self) -> &str {
         &self.payload
     }
-}
-
-/// An asynchronous message from the server.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum AsyncMessage {
-    /// A notice.
-    ///
-    /// Notices use the same format as errors, but aren't "errors" per-se.
-    Notice(DbError),
-    /// A notification.
-    ///
-    /// Connections can subscribe to notifications with the `LISTEN` command.
-    Notification(Notification),
 }
 
 /// Message returned by the `SimpleQuery` stream.
