@@ -31,10 +31,7 @@ pub struct TrackedAllocator<A, T: 'static + Send + Sync + FixedCardinalityLabel 
     /// Default tag to use if this thread is not registered.
     default_tag: T,
 
-    /// Current memory context for this thread.
-    thread_scope: OnceLock<ThreadLocal<Cell<T>>>,
-    /// per thread state containing low contention counters for faster allocations.
-    thread_state: OnceLock<ThreadLocal<ThreadState<T>>>,
+    thread: OnceLock<RegisteredThread<T>>,
 
     /// where thread alloc data is eventually saved to, even if threads are shutdown.
     global: OnceLock<AllocCounter<T>>,
@@ -59,8 +56,7 @@ where
                     count: AtomicU64::new(0),
                 },
             },
-            thread_scope: OnceLock::new(),
-            thread_state: OnceLock::new(),
+            thread: OnceLock::new(),
             global: OnceLock::new(),
         }
     }
@@ -77,73 +73,71 @@ where
     }
 
     fn register_thread_inner(&'static self) -> &'static Cell<T> {
-        self.thread_state
-            .get_or_init(ThreadLocal::new)
-            .get_or(|| ThreadState {
-                counters: AllocCounter::default(),
-                global: self.global.get_or_init(AllocCounter::default),
-            });
+        let thread = self.thread.get_or_init(|| RegisteredThread {
+            scope: ThreadLocal::new(),
+            state: ThreadLocal::new(),
+        });
 
-        self.thread_scope
-            .get_or_init(ThreadLocal::new)
-            .get_or(|| Cell::new(self.default_tag))
+        thread.state.get_or(|| ThreadState {
+            counters: AllocCounter::new(),
+            global: self.global.get_or_init(AllocCounter::new),
+        });
+
+        thread.scope.get_or(|| Cell::new(self.default_tag))
     }
 
     fn current_counters_alloc_safe(&self) -> Option<&AllocCounter<T>> {
         // We are being very careful here to not allocate or panic.
-        self.thread_state
+        self.thread
             .get()
-            .and_then(ThreadLocal::get)
+            .and_then(|s| s.state.get())
             .map(|s| &s.counters)
             .or_else(|| self.global.get())
     }
 
     fn current_tag_alloc_safe(&self) -> T {
         // We are being very careful here to not allocate or panic.
-        self.thread_scope
+        self.thread
             .get()
-            .and_then(ThreadLocal::get)
+            .and_then(|s| s.scope.get())
             .map_or(self.default_tag, Cell::get)
     }
 }
 
-impl<A, T> TrackedAllocator<A, T>
-where
-    T: 'static + Send + Sync + FixedCardinalityLabel + LabelGroup,
-{
-    unsafe fn alloc_inner(&self, layout: Layout, alloc: impl FnOnce(Layout) -> *mut u8) -> *mut u8 {
-        let Ok((tagged_layout, tag_offset)) = layout.extend(Layout::new::<T>()) else {
-            return std::ptr::null_mut();
-        };
-        let tagged_layout = tagged_layout.pad_to_align();
+macro_rules! alloc {
+    ($alloc_fn:ident) => {
+        unsafe fn $alloc_fn(&self, layout: Layout) -> *mut u8 {
+            let Ok((tagged_layout, tag_offset)) = layout.extend(Layout::new::<T>()) else {
+                return std::ptr::null_mut();
+            };
+            let tagged_layout = tagged_layout.pad_to_align();
 
-        // Safety: The layout is not zero-sized.
-        let ptr = alloc(tagged_layout);
+            // Safety: The layout is not zero-sized.
+            let ptr = unsafe { self.inner.$alloc_fn(tagged_layout) };
 
-        // allocation failed.
-        if ptr.is_null() {
-            return ptr;
+            // allocation failed.
+            if ptr.is_null() {
+                return ptr;
+            }
+
+            let tag = self.current_tag_alloc_safe();
+
+            // Allocation successful. Write our tag
+            // Safety: tag_offset is inbounds of the ptr
+            unsafe { ptr.add(tag_offset).cast::<T>().write(tag) }
+
+            let metric = if let Some(counters) = self.current_counters_alloc_safe() {
+                counters.vec.get_metric(tag)
+            } else {
+                // if tag is not default, then global would have been registered, therefore tag must be default.
+                &self.default_counters
+            };
+
+            metric.inc.count.fetch_add(layout.size() as u64, Relaxed);
+
+            ptr
         }
-
-        let tag = self.current_tag_alloc_safe();
-
-        // Allocation successful. Write our tag
-        // Safety: tag_offset is inbounds of the ptr
-        unsafe { ptr.add(tag_offset).cast::<T>().write(tag) }
-
-        let metric = if let Some(counters) = self.current_counters_alloc_safe() {
-            // safety: caller ensured that <T as FixedCardinalitySet> is implemented correctly.
-            let id = unsafe { counters.vec.try_with_labels(tag).unwrap_unchecked() };
-            counters.vec.get_metric(id)
-        } else {
-            // if tag is not default, then global would have been registered, therefore tag must be default.
-            &self.default_counters
-        };
-
-        metric.inc_by(layout.size() as u64);
-
-        ptr
-    }
+    };
 }
 
 // We will tag our allocation by adding `T` to the end of the layout.
@@ -156,19 +150,8 @@ where
     A: GlobalAlloc,
     T: 'static + Send + Sync + FixedCardinalityLabel + LabelGroup,
 {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // safety: same as caller
-        unsafe { self.alloc_inner(layout, |tagged_layout| self.inner.alloc(tagged_layout)) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // safety: same as caller
-        unsafe {
-            self.alloc_inner(layout, |tagged_layout| {
-                self.inner.alloc_zeroed(tagged_layout)
-            })
-        }
-    }
+    alloc!(alloc);
+    alloc!(alloc_zeroed);
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // SAFETY: the caller must ensure that the `new_size` does not overflow.
@@ -209,12 +192,8 @@ where
         unsafe { new_ptr.add(new_tag_offset).cast::<T>().write(new_tag) }
 
         let (new_metric, old_metric) = if let Some(counters) = self.current_counters_alloc_safe() {
-            // safety: caller ensured that <T as FixedCardinalitySet> is implemented correctly.
-            let new_id = unsafe { counters.vec.try_with_labels(new_tag).unwrap_unchecked() };
-            // safety: caller ensured that <T as FixedCardinalitySet> is implemented correctly.
-            let old_id = unsafe { counters.vec.try_with_labels(tag).unwrap_unchecked() };
-            let new_metric = counters.vec.get_metric(new_id);
-            let old_metric = counters.vec.get_metric(old_id);
+            let new_metric = counters.vec.get_metric(new_tag);
+            let old_metric = counters.vec.get_metric(tag);
 
             (new_metric, old_metric)
         } else {
@@ -230,8 +209,8 @@ where
             (0, (layout.size() - new_layout.size()) as u64)
         };
 
-        new_metric.inc.inc_by(inc);
-        old_metric.dec.inc_by(dec);
+        new_metric.inc.count.fetch_add(inc, Relaxed);
+        old_metric.dec.count.fetch_add(dec, Relaxed);
 
         new_ptr
     }
@@ -252,15 +231,13 @@ where
         unsafe { self.inner.dealloc(ptr, tagged_layout) }
 
         let metric = if let Some(counters) = self.current_counters_alloc_safe() {
-            // safety: caller ensured that <T as FixedCardinalitySet> is implemented correctly.
-            let id = unsafe { counters.vec.try_with_labels(tag).unwrap_unchecked() };
-            counters.vec.get_metric(id)
+            counters.vec.get_metric(tag)
         } else {
             // if tag is not default, then global would have been registered, therefore tag must be default.
             &self.default_counters
         };
 
-        metric.dec_by(layout.size() as u64);
+        metric.dec.count.fetch_add(layout.size() as u64, Relaxed);
     }
 }
 
@@ -287,6 +264,13 @@ impl<T: FixedCardinalityLabel + LabelGroup> CounterPairAssoc for AllocPair<T> {
     type LabelGroupSet = StaticLabelSet<T>;
 }
 
+struct RegisteredThread<T: 'static + Send + Sync + FixedCardinalityLabel + LabelGroup> {
+    /// Current memory context for this thread.
+    scope: ThreadLocal<Cell<T>>,
+    /// per thread state containing low contention counters for faster allocations.
+    state: ThreadLocal<ThreadState<T>>,
+}
+
 struct ThreadState<T: 'static + FixedCardinalityLabel + LabelGroup> {
     counters: AllocCounter<T>,
     global: &'static AllocCounter<T>,
@@ -298,14 +282,12 @@ impl<T: 'static + FixedCardinalityLabel + LabelGroup> Drop for ThreadState<T> {
         // iterate over all labels
         for tag in (0..T::cardinality()).map(T::decode) {
             // load and reset the counts in the thread-local counters.
-            let id = self.counters.vec.with_labels(tag);
-            let m = self.counters.vec.get_metric_mut(id);
+            let m = self.counters.vec.get_metric_mut(tag);
             let inc = *m.inc.count.get_mut();
             let dec = *m.dec.count.get_mut();
 
             // add the counts into the global counters.
-            let id = self.global.vec.with_labels(tag);
-            let m = self.global.vec.get_metric(id);
+            let m = self.global.vec.get_metric(tag);
             m.inc.count.fetch_add(inc, Relaxed);
             m.dec.count.fetch_add(dec, Relaxed);
         }
@@ -319,14 +301,13 @@ where
     CounterState: MetricEncoding<Enc>,
 {
     fn collect_group_into(&self, enc: &mut Enc) -> Result<(), Enc::Err> {
-        let global = self.global.get_or_init(AllocCounter::default);
+        let global = self.global.get_or_init(AllocCounter::new);
 
         // iterate over all counter threads
-        for s in self.thread_state.get().into_iter().flat_map(|s| s.iter()) {
+        for s in self.thread.get().into_iter().flat_map(|s| s.state.iter()) {
             // iterate over all labels
             for tag in (0..T::cardinality()).map(T::decode) {
-                let id = s.counters.vec.with_labels(tag);
-                sample(global, s.counters.vec.get_metric(id), tag);
+                sample(global, s.counters.vec.get_metric(tag), tag);
             }
         }
 
@@ -346,8 +327,7 @@ fn sample<T: FixedCardinalityLabel + LabelGroup>(
     let dec = local.dec.count.swap(0, Relaxed);
 
     // add the counts into the global counters.
-    let id = global.vec.with_labels(tag);
-    let m = global.vec.get_metric(id);
+    let m = global.vec.get_metric(tag);
     m.inc.count.fetch_add(inc, Relaxed);
     m.dec.count.fetch_add(dec, Relaxed);
 }

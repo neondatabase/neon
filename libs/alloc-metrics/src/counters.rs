@@ -16,9 +16,9 @@ pub struct DenseCounterPairVec<
 }
 
 impl<A: CounterPairAssoc<LabelGroupSet = StaticLabelSet<L>>, L: FixedCardinalityLabel + LabelGroup>
-    Default for DenseCounterPairVec<A, L>
+    DenseCounterPairVec<A, L>
 {
-    fn default() -> Self {
+    pub fn new() -> Self {
         Self {
             vec: DenseMetricVec::new(),
             _marker: PhantomData,
