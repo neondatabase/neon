@@ -412,7 +412,7 @@ def main():
         "--run-type",
         type=str,
         required=True,
-        choices=["warmup", "opt-rate", "ramp-up"],
+        choices=["warmup", "opt-rate", "ramp-up", "load"],
         help="Type of benchmark run",
     )
     parser.add_argument("--min-cu", type=float, required=True, help="Minimum compute units")
