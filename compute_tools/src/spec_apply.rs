@@ -412,7 +412,7 @@ impl ComputeNode {
                 0..10 => limit,
                 10..30 => 10,
                 30..300 => limit / 3,
-				300.. => 100
+                300.. => 100,
             })
             // If we didn't find max_connections, default to 10 concurrent connections.
             .unwrap_or(10)
