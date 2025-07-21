@@ -97,8 +97,6 @@ class NeonBranch:
         )
         self.benchmark: subprocess.Popen[Any] | None = None
         self.updated_at: datetime = datetime.fromisoformat(branch["branch"]["updated_at"])
-        # XXX for debug only, remove before merge
-        log.info("%s", branch["branch"])
         self.parent_timestamp: datetime = (
             datetime.fromisoformat(branch["branch"]["parent_timestamp"])
             if "parent_timestamp" in branch["branch"]
