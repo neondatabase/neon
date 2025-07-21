@@ -775,6 +775,11 @@ pub async fn copy_s3_segments(
                     match storage.copy_object(&from, &to, &cancel).await {
                         Ok(()) => return Ok(()),
                         Err(e) => {
+                            if cancel.is_cancelled() {
+                                // Don't retry if cancellation was requested
+                                return Err(e);
+                            }
+
                             retry_count += 1;
                             if retry_count >= MAX_RETRIES {
                                 error!(
