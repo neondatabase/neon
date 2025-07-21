@@ -20,8 +20,15 @@ pub(super) fn init(
     tenant_id: Option<&str>,
     timeline_id: Option<&str>,
 ) -> Result<&'static CommunicatorWorkerProcessStruct, String> {
-    let _tenant_id = tenant_id.map(|s| TenantId::from_str(s).expect("invalid tenant ID"));
-    let _timeline_id = timeline_id.map(|s| TimelineId::from_str(s).expect("invalid timeline ID"));
+    // The caller validated these already
+    let _tenant_id = tenant_id
+        .map(|s| TenantId::from_str(s))
+        .transpose()
+        .map_err(|e| format!("invalid tenant ID: {e}"))?;
+    let _timeline_id = timeline_id
+        .map(|s| TimelineId::from_str(s))
+        .transpose()
+        .map_err(|e| format!("invalid timeline ID: {e}"))?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
