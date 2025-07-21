@@ -64,7 +64,7 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
+pub(super) const HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
 where
