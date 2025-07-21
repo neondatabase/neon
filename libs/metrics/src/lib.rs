@@ -619,9 +619,9 @@ impl<A: CounterPairAssoc> Drop for MeasuredCounterPairGuard<'_, A> {
 }
 
 /// [`MetricEncoding`] for [`MeasuredCounterPairState`] that only writes the inc counter to the inner encoder.
-struct Inc<T>(T);
+pub struct Inc<T>(pub T);
 /// [`MetricEncoding`] for [`MeasuredCounterPairState`] that only writes the dec counter to the inner encoder.
-struct Dec<T>(T);
+pub struct Dec<T>(pub T);
 
 impl<T: Encoding> Encoding for Inc<T> {
     type Err = T::Err;

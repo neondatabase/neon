@@ -68,6 +68,7 @@ dependencies = [
  "criterion",
  "measured",
  "metrics",
+ "thread_local",
  "tikv-jemallocator",
 ]
 
@@ -7343,12 +7344,10 @@ dependencies = [
 
 [[package]]
 name = "thread_local"
-version = "1.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fdd6f064ccff2d6567adcb3873ca630700f00b5ad3f060c25b5dcfd9a4ce152"
+version = "1.1.9"
+source = "git+https://github.com/conradludgate/thread_local-rs?branch=no-tls-destructor-get#f9ca3d375745c14a632ae3ffe6a7a646dc8421a0"
 dependencies = [
  "cfg-if",
- "once_cell",
 ]
 
 [[package]]

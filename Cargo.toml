@@ -195,6 +195,7 @@ sync_wrapper = "0.1.2"
 tar = "0.4"
 test-context = "0.3"
 thiserror = "1.0"
+thread_local = "1.1.9"
 tikv-jemallocator = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 tokio = { version = "1.43.1", features = ["macros"] }
@@ -302,6 +303,9 @@ tonic-build = "0.13.1"
 
 # Needed to get `tokio-postgres-rustls` to depend on our fork.
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }
+
+# Needed to fix a bug in alloc-metrics
+thread_local = { git = "https://github.com/conradludgate/thread_local-rs", branch = "no-tls-destructor-get" }
 
 ################# Binary contents sections
 

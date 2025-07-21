@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 metrics.workspace = true
 measured.workspace = true
+thread_local.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

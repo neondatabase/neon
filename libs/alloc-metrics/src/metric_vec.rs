@@ -1,16 +1,12 @@
 //! Dense metric vec
 
-use std::marker::PhantomData;
-
 use measured::{
     FixedCardinalityLabel, LabelGroup,
     label::{LabelGroupSet, StaticLabelSet},
     metric::{
-        MetricEncoding, MetricFamilyEncoding, MetricType, counter::CounterState, group::Encoding,
-        name::MetricNameEncoder,
+        MetricEncoding, MetricFamilyEncoding, MetricType, group::Encoding, name::MetricNameEncoder,
     },
 };
-use metrics::{CounterPairAssoc, MeasuredCounterPairState};
 
 pub struct DenseMetricVec<M: MetricType, L: FixedCardinalityLabel + LabelGroup> {
     metrics: VecInner<M>,
@@ -73,11 +69,6 @@ impl<M: MetricType, L: FixedCardinalityLabel + LabelGroup> DenseMetricVec<M, L> 
         }
     }
 
-    // /// View the metric metadata
-    // pub fn metadata(&self) -> &M::Metadata {
-    //     &self.metadata
-    // }
-
     /// Get an identifier for the specific metric identified by this label group
     ///
     /// # Panics
@@ -130,131 +121,5 @@ impl<M: MetricEncoding<T>, L: FixedCardinalityLabel + LabelGroup, T: Encoding>
             }
         }
         Ok(())
-    }
-}
-
-pub struct DenseCounterPairVec<
-    A: CounterPairAssoc<LabelGroupSet = StaticLabelSet<L>>,
-    L: FixedCardinalityLabel + LabelGroup,
-> {
-    pub vec: DenseMetricVec<MeasuredCounterPairState, L>,
-    pub _marker: PhantomData<A>,
-}
-
-impl<A: CounterPairAssoc<LabelGroupSet = StaticLabelSet<L>>, L: FixedCardinalityLabel + LabelGroup>
-    Default for DenseCounterPairVec<A, L>
-{
-    fn default() -> Self {
-        Self {
-            vec: DenseMetricVec::new(),
-            _marker: PhantomData,
-        }
-    }
-}
-
-// impl<A: CounterPairAssoc<LabelGroupSet = StaticLabelSet<L>>, L: FixedCardinalityLabel + LabelGroup>
-//     DenseCounterPairVec<A, L>
-// {
-//     #[inline]
-//     pub fn inc(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
-//         let id = self.vec.with_labels(labels);
-//         self.vec.get_metric(id).inc.inc();
-//     }
-
-//     #[inline]
-//     pub fn dec(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
-//         let id = self.vec.with_labels(labels);
-//         self.vec.get_metric(id).dec.inc();
-//     }
-
-//     #[inline]
-//     pub fn inc_by(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>, x: u64) {
-//         let id = self.vec.with_labels(labels);
-//         self.vec.get_metric(id).inc.inc_by(x);
-//     }
-
-//     #[inline]
-//     pub fn dec_by(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>, x: u64) {
-//         let id = self.vec.with_labels(labels);
-//         self.vec.get_metric(id).dec.inc_by(x);
-//     }
-// }
-
-impl<T, A, L> ::measured::metric::group::MetricGroup<T> for DenseCounterPairVec<A, L>
-where
-    T: ::measured::metric::group::Encoding,
-    ::measured::metric::counter::CounterState: ::measured::metric::MetricEncoding<T>,
-    A: CounterPairAssoc<LabelGroupSet = StaticLabelSet<L>>,
-    L: FixedCardinalityLabel + LabelGroup,
-{
-    fn collect_group_into(&self, enc: &mut T) -> Result<(), T::Err> {
-        // write decrement first to avoid a race condition where inc - dec < 0
-        T::write_help(enc, A::DEC_NAME, A::DEC_HELP)?;
-        self.vec
-            .collect_family_into(A::DEC_NAME, &mut Dec(&mut *enc))?;
-
-        T::write_help(enc, A::INC_NAME, A::INC_HELP)?;
-        self.vec
-            .collect_family_into(A::INC_NAME, &mut Inc(&mut *enc))?;
-
-        Ok(())
-    }
-}
-
-/// [`MetricEncoding`] for [`MeasuredCounterPairState`] that only writes the inc counter to the inner encoder.
-struct Inc<T>(T);
-/// [`MetricEncoding`] for [`MeasuredCounterPairState`] that only writes the dec counter to the inner encoder.
-struct Dec<T>(T);
-
-impl<T: Encoding> Encoding for Inc<T> {
-    type Err = T::Err;
-
-    fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
-        self.0.write_help(name, help)
-    }
-}
-
-impl<T: Encoding> MetricEncoding<Inc<T>> for MeasuredCounterPairState
-where
-    CounterState: MetricEncoding<T>,
-{
-    fn write_type(name: impl MetricNameEncoder, enc: &mut Inc<T>) -> Result<(), T::Err> {
-        CounterState::write_type(name, &mut enc.0)
-    }
-    fn collect_into(
-        &self,
-        metadata: &(),
-        labels: impl LabelGroup,
-        name: impl MetricNameEncoder,
-        enc: &mut Inc<T>,
-    ) -> Result<(), T::Err> {
-        self.inc.collect_into(metadata, labels, name, &mut enc.0)
-    }
-}
-
-impl<T: Encoding> Encoding for Dec<T> {
-    type Err = T::Err;
-
-    fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
-        self.0.write_help(name, help)
-    }
-}
-
-/// Write the dec counter to the encoder
-impl<T: Encoding> MetricEncoding<Dec<T>> for MeasuredCounterPairState
-where
-    CounterState: MetricEncoding<T>,
-{
-    fn write_type(name: impl MetricNameEncoder, enc: &mut Dec<T>) -> Result<(), T::Err> {
-        CounterState::write_type(name, &mut enc.0)
-    }
-    fn collect_into(
-        &self,
-        metadata: &(),
-        labels: impl LabelGroup,
-        name: impl MetricNameEncoder,
-        enc: &mut Dec<T>,
-    ) -> Result<(), T::Err> {
-        self.dec.collect_into(metadata, labels, name, &mut enc.0)
     }
 }

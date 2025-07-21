@@ -1,7 +1,7 @@
 //! Tagged allocator measurements.
 
+mod counters;
 mod metric_vec;
-mod thread_local;
 
 use std::{
     alloc::{GlobalAlloc, Layout},
@@ -21,9 +21,7 @@ use measured::{
 use metrics::{CounterPairAssoc, MeasuredCounterPairState};
 use thread_local::ThreadLocal;
 
-use crate::metric_vec::DenseCounterPairVec;
-
-type AllocCounter<T> = DenseCounterPairVec<AllocPair<T>, T>;
+type AllocCounter<T> = counters::DenseCounterPairVec<AllocPair<T>, T>;
 
 pub struct TrackedAllocator<A, T: 'static + Send + Sync + FixedCardinalityLabel + LabelGroup> {
     inner: A,
@@ -82,8 +80,8 @@ where
         self.thread_state
             .get_or_init(ThreadLocal::new)
             .get_or(|| ThreadState {
-                counters: DenseCounterPairVec::default(),
-                global: self.global.get_or_init(DenseCounterPairVec::default),
+                counters: AllocCounter::default(),
+                global: self.global.get_or_init(AllocCounter::default),
             });
 
         self.thread_scope
@@ -321,7 +319,7 @@ where
     CounterState: MetricEncoding<Enc>,
 {
     fn collect_group_into(&self, enc: &mut Enc) -> Result<(), Enc::Err> {
-        let global = self.global.get_or_init(DenseCounterPairVec::default);
+        let global = self.global.get_or_init(AllocCounter::default);
 
         // iterate over all counter threads
         for s in self.thread_state.get().into_iter().flat_map(|s| s.iter()) {
@@ -401,6 +399,67 @@ deallocated_bytes{memory_context="test"} 8
 # TYPE allocated_bytes counter
 allocated_bytes{memory_context="root"} 4
 allocated_bytes{memory_context="test"} 8
+"#
+        );
+    }
+
+    #[test]
+    fn unregistered_thread() {
+        // Safety: `MemoryContext` upholds the safety requirements.
+        static GLOBAL: TrackedAllocator<System, MemoryContext> =
+            unsafe { TrackedAllocator::new(System, MemoryContext::Root) };
+
+        GLOBAL.register_thread();
+
+        // unregistered thread
+        std::thread::spawn(|| {
+            let ptr = unsafe { GLOBAL.alloc(Layout::for_value(&[0_i32])) };
+            unsafe { GLOBAL.dealloc(ptr, Layout::for_value(&[0_i32])) };
+        })
+        .join()
+        .unwrap();
+
+        let mut text = BufferedTextEncoder::new();
+        GLOBAL.collect_group_into(&mut text).unwrap();
+        let text = String::from_utf8(text.finish().into()).unwrap();
+        assert_eq!(
+            text,
+            r#"# HELP deallocated_bytes total number of bytes deallocated
+# TYPE deallocated_bytes counter
+deallocated_bytes{memory_context="root"} 4
+deallocated_bytes{memory_context="test"} 0
+
+# HELP allocated_bytes total number of bytes allocated
+# TYPE allocated_bytes counter
+allocated_bytes{memory_context="root"} 4
+allocated_bytes{memory_context="test"} 0
+"#
+        );
+    }
+
+    #[test]
+    fn fully_unregistered() {
+        // Safety: `MemoryContext` upholds the safety requirements.
+        static GLOBAL: TrackedAllocator<System, MemoryContext> =
+            unsafe { TrackedAllocator::new(System, MemoryContext::Root) };
+
+        let ptr = unsafe { GLOBAL.alloc(Layout::for_value(&[0_i32])) };
+        unsafe { GLOBAL.dealloc(ptr, Layout::for_value(&[0_i32])) };
+
+        let mut text = BufferedTextEncoder::new();
+        GLOBAL.collect_group_into(&mut text).unwrap();
+        let text = String::from_utf8(text.finish().into()).unwrap();
+        assert_eq!(
+            text,
+            r#"# HELP deallocated_bytes total number of bytes deallocated
+# TYPE deallocated_bytes counter
+deallocated_bytes{memory_context="root"} 4
+deallocated_bytes{memory_context="test"} 0
+
+# HELP allocated_bytes total number of bytes allocated
+# TYPE allocated_bytes counter
+allocated_bytes{memory_context="root"} 4
+allocated_bytes{memory_context="test"} 0
 "#
         );
     }
