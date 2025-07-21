@@ -94,6 +94,9 @@ class NeonBranch:
     def __init__(self, project, branch: dict[str, Any], is_reset=False):
         self.id: str = branch["branch"]["id"]
         self.desc = branch
+        self.name: str | None = None
+        if "name" in branch["branch"]:
+            self.name = branch["branch"]["name"]
         self.project: NeonProject = project
         self.neon_api: NeonAPI = project.neon_api
         self.project_id: str = branch["branch"]["project_id"]
@@ -137,10 +140,10 @@ class NeonBranch:
 
     def __str__(self):
         """
-        Prints the branch's name with all the predecessors
+        Prints the branch's id with all the predecessors
         (r) means the branch is a reset one
         """
-        return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''}, parent: {self.parent}"
+        return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''} {f'({self.name})' if self.name else ''}, parent: {self.parent}"
 
     def random_time(self) -> datetime:
         min_time = max(
@@ -366,6 +369,11 @@ class NeonProject:
             log.info("No leaf branches found")
         return target
 
+    def get_random_parent_branch(self) -> NeonBranch:
+        return self.branches[
+            random.choice(list(set(self.branches.keys()) - self.reset_branches))
+        ]
+
     def generate_branch_name(self) -> str:
         self.branch_num += 1
         return f"branch{self.branch_num}"
@@ -506,7 +514,7 @@ class NeonProject:
         Creates a new Neon branch for the current project, then restores the snapshot
         with the given id
         """
-        target_branch = self.create_branch()
+        target_branch = self.get_random_parent_branch().create_child_branch()
         if not target_branch:
             return None
         self.snapshots[snapshot_id].restored = True
@@ -517,18 +525,17 @@ class NeonProject:
             self.generate_branch_name(),
         )
         self.wait()
-        NeonBranch(
-            self,
-            self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["parent_id"]),
-            is_reset=True,
-        )
         new_branch = NeonBranch(
             self, self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
         )
+        target_branch_def = self.neon_api.get_branch_details(self.id, target_branch.id)
+        if "name" in target_branch_def["branch"]:
+            target_branch.name = target_branch_def["branch"]["name"]
         if new_branch.connection_parameters is None:
             if not new_branch.endpoints:
-                for ep in self.neon_api.get_endpoints(self.id)["endpoints"]:
-                    NeonEndpoint(self, ep)
+                for ep in self.neon_api.get_branch_endpoints(self.id, new_branch.id)["endpoints"]:
+                    if ep["id"] not in self.endpoints:
+                        NeonEndpoint(self, ep)
             new_branch.connection_parameters = self.connection_parameters.copy()
             for ep in new_branch.endpoints.values():
                 if ep.type == "read_write":
@@ -588,9 +595,7 @@ def do_action(project: NeonProject, action: str) -> bool:
     if action == "new_branch" or action == "new_branch_random_time":
         use_random_time: bool = action == "new_branch_random_time"
         log.info("Trying to create a new branch %s", "random time" if use_random_time else "")
-        parent = project.branches[
-            random.choice(list(set(project.branches.keys()) - project.reset_branches))
-        ]
+        parent = project.get_random_parent_branch()
         child = parent.create_child_branch(parent.random_time() if use_random_time else None)
         if child is None:
             return False
