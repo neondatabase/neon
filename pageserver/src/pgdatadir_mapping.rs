@@ -286,6 +286,10 @@ impl Timeline {
     /// Like [`Self::get_rel_page_at_lsn`], but returns a batch of pages.
     ///
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
+    ///
+    /// NB: the read path must be cancellation-safe. The Tonic gRPC service will drop the future
+    /// if the client goes away (e.g. due to timeout or cancellation).
+    /// TODO: verify that it actually is cancellation-safe.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
         pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, LsnRange, RequestContext)>,
