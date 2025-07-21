@@ -829,6 +829,7 @@ impl Timeline {
         let gc_cutoff_lsn_guard = self.get_applied_gc_cutoff_lsn();
         let gc_cutoff_planned = {
             let gc_info = self.gc_info.read().unwrap();
+            info!(cutoffs=?gc_info.cutoffs, applied_cutoff=%*gc_cutoff_lsn_guard, "starting find_lsn_for_timestamp");
             gc_info.min_cutoff()
         };
         // Usually the planned cutoff is newer than the cutoff of the last gc run,

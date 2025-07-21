@@ -74,11 +74,19 @@ const DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL: u64 = 3600;
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
+#[derive(Clone, Debug)]
 pub struct ComputeNodeParams {
     /// The ID of the compute
     pub compute_id: String,
-    // Url type maintains proper escaping
+
+    /// Url type maintains proper escaping
     pub connstr: url::Url,
+
+    /// The name of the 'weak' superuser role, which we give to the users.
+    /// It follows the allow list approach, i.e., we take a standard role
+    /// and grant it extra permissions with explicit GRANTs here and there,
+    /// and core patches.
+    pub privileged_role_name: String,
 
     pub resize_swap_on_bind: bool,
     pub set_disk_quota_for_fs: Option<String>,
@@ -1389,6 +1397,7 @@ impl ComputeNode {
         self.create_pgdata()?;
         config::write_postgres_conf(
             pgdata_path,
+            &self.params,
             &pspec.spec,
             self.params.internal_http_port,
             tls_config,
@@ -1737,6 +1746,7 @@ impl ComputeNode {
         }
 
         // Run migrations separately to not hold up cold starts
+        let params = self.params.clone();
         tokio::spawn(async move {
             let mut conf = conf.as_ref().clone();
             conf.application_name("compute_ctl:migrations");
@@ -1748,7 +1758,7 @@ impl ComputeNode {
                             eprintln!("connection error: {e}");
                         }
                     });
-                    if let Err(e) = handle_migrations(&mut client).await {
+                    if let Err(e) = handle_migrations(params, &mut client).await {
                         error!("Failed to run migrations: {}", e);
                     }
                 }
@@ -1827,6 +1837,7 @@ impl ComputeNode {
         let pgdata_path = Path::new(&self.params.pgdata);
         config::write_postgres_conf(
             pgdata_path,
+            &self.params,
             &spec,
             self.params.internal_http_port,
             tls_config,
@@ -2439,14 +2450,31 @@ LIMIT 100",
     pub fn spawn_lfc_offload_task(self: &Arc<Self>, interval: Duration) {
         self.terminate_lfc_offload_task();
         let secs = interval.as_secs();
-        info!("spawning lfc offload worker with {secs}s interval");
         let this = self.clone();
+
+        info!("spawning LFC offload worker with {secs}s interval");
         let handle = spawn(async move {
             let mut interval = time::interval(interval);
             interval.tick().await; // returns immediately
             loop {
                 interval.tick().await;
-                this.offload_lfc_async().await;
+
+                let prewarm_state = this.state.lock().unwrap().lfc_prewarm_state.clone();
+                // Do not offload LFC state if we are currently prewarming or any issue occurred.
+                // If we'd do that, we might override the LFC state in endpoint storage with some
+                // incomplete state. Imagine a situation:
+                // 1. Endpoint started with `autoprewarm: true`
+                // 2. While prewarming is not completed, we upload the new incomplete state
+                // 3. Compute gets interrupted and restarts
+                // 4. We start again and try to prewarm with the state from 2. instead of the previous complete state
+                if matches!(
+                    prewarm_state,
+                    LfcPrewarmState::Completed
+                        | LfcPrewarmState::NotPrewarmed
+                        | LfcPrewarmState::Skipped
+                ) {
+                    this.offload_lfc_async().await;
+                }
             }
         });
         *self.lfc_offload_task.lock().unwrap() = Some(handle);

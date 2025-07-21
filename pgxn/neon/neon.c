@@ -22,6 +22,7 @@
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "storage/proc.h"
+#include "storage/ipc.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
 #include "utils/builtins.h"
@@ -59,11 +60,15 @@ static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static void neon_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void neon_ExecutorEnd(QueryDesc *queryDesc);
 
-#if PG_MAJORVERSION_NUM >= 16
 static shmem_startup_hook_type prev_shmem_startup_hook;
-
 static void neon_shmem_startup_hook(void);
+static void neon_shmem_request_hook(void);
+
+#if PG_MAJORVERSION_NUM >= 15
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
 #endif
+
+
 #if PG_MAJORVERSION_NUM >= 17
 uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
 uint32		WAIT_EVENT_NEON_LFC_READ;
@@ -450,15 +455,44 @@ _PG_init(void)
 	 */
 #if PG_VERSION_NUM >= 160000
 	load_file("$libdir/neon_rmgr", false);
-
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = neon_shmem_startup_hook;
 #endif
 
 	/* dummy call to a Rust function in the communicator library, to check that it works */
 	(void) communicator_dummy(123);
 
+	/*
+	 * Initializing a pre-loaded Postgres extension happens in three stages:
+	 *
+	 * 1. _PG_init() is called early at postmaster startup. In this stage, no
+	 *    shared memory has been allocated yet. Core Postgres GUCs have been
+	 *    initialized from the config files, but notably, MaxBackends has not
+	 *    calculated yet. In this stage, we must register any extension GUCs
+	 *    and can do other early initialization that doesn't depend on shared
+	 *    memory. In this stage we must also register "shmem request" and
+	 *    "shmem starutup" hooks, to be called in stages 2 and 3.
+	 *
+	 * 2. After MaxBackends have been calculated, the "shmem request" hooks
+	 *    are called. The hooks can reserve shared memory by calling
+	 *    RequestAddinShmemSpace and RequestNamedLWLockTranche().  The "shmem
+	 *    request hooks" are a new mechanism in Postgres v15. In v14 and
+	 *    below, you had to make those Requests in stage 1 already, which
+	 *    means they could not depend on MaxBackends. (See hack in
+	 *    NeonPerfCountersShmemRequest())
+	 *
+	 * 3. After some more runtime-computed GUCs that affect the amount of
+	 *    shared memory needed have been calculated, the "shmem startup" hooks
+	 *    are called. In this stage, we allocate any shared memory, LWLocks
+	 *    and other shared resources.
+	 *
+	 * Here, in the 'neon' extension, we register just one shmem request hook
+	 * and one startup hook, which call into functions in all the subsystems
+	 * that are part of the extension. On v14, the ShmemRequest functions are
+	 * called in stage 1, and on v15 onwards they are called in stage 2.
+	 */
+
+	/* Stage 1: Define GUCs, and other early intialization */
 	pg_init_libpagestore();
+	relsize_hash_init();
 	lfc_init();
 	pg_init_walproposer();
 	init_lwlsncache();
@@ -543,6 +577,15 @@ _PG_init(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+	DefineCustomStringVariable(
+							"neon.privileged_role_name",
+							"Name of the 'weak' superuser role, which we give to the users",
+							NULL,
+							&privileged_role_name,
+							"neon_superuser",
+							PGC_POSTMASTER, 0, NULL, NULL, NULL);
+
 	/*
 	 * Important: This must happen after other parts of the extension are
 	 * loaded, otherwise any settings to GUCs that were set before the
@@ -552,6 +595,22 @@ _PG_init(void)
 
 	ReportSearchPath();
 
+	/*
+	 * Register initialization hooks for stage 2. (On v14, there's no "shmem
+	 * request" hooks, so call the ShmemRequest functions immediately.)
+	 */
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = neon_shmem_request_hook;
+#else
+	neon_shmem_request_hook();
+#endif
+
+	/* Register hooks for stage 3 */
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = neon_shmem_startup_hook;
+
+	/* Other misc initialization */
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = neon_ExecutorStart;
 	prev_ExecutorEnd = ExecutorEnd_hook;
@@ -637,13 +696,49 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(dc);
 }
 
-#if PG_MAJORVERSION_NUM >= 16
+/*
+ * Initialization stage 2: make requests for the amount of shared memory we
+ * will need.
+ *
+ * For a high-level explanation of the initialization process, see _PG_init().
+ */
+static void
+neon_shmem_request_hook(void)
+{
+#if PG_VERSION_NUM >= 150000
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+#endif
+
+	LfcShmemRequest();
+	NeonPerfCountersShmemRequest();
+	PagestoreShmemRequest();
+	RelsizeCacheShmemRequest();
+	WalproposerShmemRequest();
+	LwLsnCacheShmemRequest();
+}
+
+
+/*
+ * Initialization stage 3: Initialize shared memory.
+ *
+ * For a high-level explanation of the initialization process, see _PG_init().
+ */
 static void
 neon_shmem_startup_hook(void)
 {
 	/* Initialize */
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+	LfcShmemInit();
+	NeonPerfCountersShmemInit();
+	PagestoreShmemInit();
+	RelsizeCacheShmemInit();
+	WalproposerShmemInit();
+	LwLsnCacheShmemInit();
 
 #if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");
@@ -657,8 +752,9 @@ neon_shmem_startup_hook(void)
 	WAIT_EVENT_NEON_PS_READ = WaitEventExtensionNew("Neon/PS_ReadIO");
 	WAIT_EVENT_NEON_WAL_DL = WaitEventExtensionNew("Neon/WAL_Download");
 #endif
+
+	LWLockRelease(AddinShmemInitLock);
 }
-#endif
 
 /*
  * ExecutorStart hook: start up tracking if needed
