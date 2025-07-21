@@ -85,23 +85,6 @@ where
 
         thread.scope.get_or(|| Cell::new(self.default_tag))
     }
-
-    fn current_counters_alloc_safe(&self) -> Option<&AllocCounter<T>> {
-        // We are being very careful here to not allocate or panic.
-        self.thread
-            .get()
-            .and_then(|s| s.state.get())
-            .map(|s| &s.counters)
-            .or_else(|| self.global.get())
-    }
-
-    fn current_tag_alloc_safe(&self) -> T {
-        // We are being very careful here to not allocate or panic.
-        self.thread
-            .get()
-            .and_then(|s| s.scope.get())
-            .map_or(self.default_tag, Cell::get)
-    }
 }
 
 macro_rules! alloc {
@@ -120,16 +103,19 @@ macro_rules! alloc {
                 return ptr;
             }
 
-            let tag = self.current_tag_alloc_safe();
+            // We are being very careful here to not allocate or panic.
+            let thread = self.thread.get().map(|s| (s.scope.get(), s.state.get()));
+            let tag = thread.and_then(|t| t.0).map_or(self.default_tag, Cell::get);
 
             // Allocation successful. Write our tag
             // Safety: tag_offset is inbounds of the ptr
             unsafe { ptr.add(tag_offset).cast::<T>().write(tag) }
 
-            let metric = if let Some(counters) = self.current_counters_alloc_safe() {
+            let counters = thread.and_then(|t| t.1).map(|s| &s.counters);
+            let metric = if let Some(counters) = counters {
                 counters.vec.get_metric(tag)
             } else {
-                // if tag is not default, then global would have been registered, therefore tag must be default.
+                // if tag is not default, then the thread state would have been registered, therefore tag must be default.
                 &self.default_counters
             };
 
@@ -185,13 +171,17 @@ where
             return new_ptr;
         }
 
-        let new_tag = self.current_tag_alloc_safe();
+        // We are being very careful here to not allocate or panic.
+        let thread = self.thread.get().map(|s| (s.scope.get(), s.state.get()));
+        let new_tag = thread.and_then(|t| t.0).map_or(self.default_tag, Cell::get);
 
         // Allocation successful. Write our tag
         // Safety: new_tag_offset is inbounds of the ptr
         unsafe { new_ptr.add(new_tag_offset).cast::<T>().write(new_tag) }
 
-        let (new_metric, old_metric) = if let Some(counters) = self.current_counters_alloc_safe() {
+        let counters = thread.and_then(|t| t.1).map(|s| &s.counters);
+        let counters = counters.or_else(|| self.global.get());
+        let (new_metric, old_metric) = if let Some(counters) = counters {
             let new_metric = counters.vec.get_metric(new_tag);
             let old_metric = counters.vec.get_metric(tag);
 
@@ -230,7 +220,12 @@ where
         // Safety: caller upholds contract for us
         unsafe { self.inner.dealloc(ptr, tagged_layout) }
 
-        let metric = if let Some(counters) = self.current_counters_alloc_safe() {
+        // We are being very careful here to not allocate or panic.
+        let thread = self.thread.get().map(|s| (s.scope.get(), s.state.get()));
+        let counters = thread.and_then(|t| t.1).map(|s| &s.counters);
+        let counters = counters.or_else(|| self.global.get());
+
+        let metric = if let Some(counters) = counters {
             counters.vec.get_metric(tag)
         } else {
             // if tag is not default, then global would have been registered, therefore tag must be default.
