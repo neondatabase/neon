@@ -99,6 +99,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut attempt = 0;
     let connect = TcpMechanism {
         locks: &config.connect_compute_locks,
+        tls: connect_compute::TlsNegotiation::Postgres,
     };
     let backend = auth::Backend::ControlPlane(cplane, creds.info);
 

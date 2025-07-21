@@ -25,6 +25,7 @@ use crate::control_plane::messages::MetricsAuxInfo;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::pqproto::StartupMessageParams;
+use crate::proxy::connect_compute::TlsNegotiation;
 use crate::proxy::neon_option;
 use crate::types::Host;
 
@@ -256,6 +257,7 @@ impl ConnectInfo {
     async fn connect_raw(
         &self,
         config: &ComputeConfig,
+        tls: TlsNegotiation,
     ) -> Result<(SocketAddr, MaybeTlsStream<TcpStream, RustlsStream>), TlsError> {
         let timeout = config.timeout;
 
@@ -298,7 +300,7 @@ impl ConnectInfo {
         match connect_once(&*addrs).await {
             Ok((sockaddr, stream)) => Ok((
                 sockaddr,
-                tls::connect_tls(stream, self.ssl_mode, config, host).await?,
+                tls::connect_tls(stream, self.ssl_mode, config, host, tls).await?,
             )),
             Err(err) => {
                 warn!("couldn't connect to compute node at {host}:{port}: {err}");
@@ -329,9 +331,10 @@ impl ConnectInfo {
         ctx: &RequestContext,
         aux: &MetricsAuxInfo,
         config: &ComputeConfig,
+        tls: TlsNegotiation,
     ) -> Result<ComputeConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream) = self.connect_raw(config).await?;
+        let (socket_addr, stream) = self.connect_raw(config, tls).await?;
         drop(pause);
 
         tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));

@@ -51,6 +51,15 @@ pub(crate) trait ConnectMechanism {
 pub(crate) struct TcpMechanism {
     /// connect_to_compute concurrency lock
     pub(crate) locks: &'static ApiLocks<Host>,
+    pub(crate) tls: TlsNegotiation,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TlsNegotiation {
+    /// TLS is assumed
+    Direct,
+    /// We must ask for TLS using the postgres SSLRequest message
+    Postgres,
 }
 
 #[async_trait]
@@ -70,7 +79,13 @@ impl ConnectMechanism for TcpMechanism {
         config: &ComputeConfig,
     ) -> Result<ComputeConnection, Self::Error> {
         let permit = self.locks.get_permit(&node_info.conn_info.host).await?;
-        permit.release_result(node_info.connect(ctx, config).await)
+
+        permit.release_result(
+            node_info
+                .conn_info
+                .connect(ctx, &node_info.aux, config, self.tls)
+                .await,
+        )
     }
 }
 

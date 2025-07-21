@@ -17,7 +17,6 @@ use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::{AuthError, IpPattern, check_peer_addr_is_in_list};
 use crate::cache::{Cached, TimedLru};
-use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt};
@@ -70,16 +69,6 @@ pub(crate) struct NodeInfo {
 
     /// Labels for proxy's metrics.
     pub(crate) aux: MetricsAuxInfo,
-}
-
-impl NodeInfo {
-    pub(crate) async fn connect(
-        &self,
-        ctx: &RequestContext,
-        config: &ComputeConfig,
-    ) -> Result<compute::ComputeConnection, compute::ConnectionError> {
-        self.conn_info.connect(ctx, &self.aux, config).await
-    }
 }
 
 #[derive(Copy, Clone, Default, Debug)]
