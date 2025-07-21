@@ -21,8 +21,9 @@ use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
 use super::http_conn_pool::{self, HttpConnPool, LocalProxyClient, poll_http2_client};
 use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
-use crate::auth::backend::{ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo};
+use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
 use crate::auth::{self, AuthError};
+use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
@@ -34,7 +35,8 @@ use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
-use crate::proxy::connect_compute::ConnectMechanism;
+use crate::pqproto::StartupMessageParams;
+use crate::proxy::connect_compute::{self, ConnectMechanism, TcpMechanism};
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
@@ -186,20 +188,47 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
         let backend = self.auth_backend.as_ref().map(|()| keys.info);
-        crate::proxy::connect_compute::connect_to_compute(
+
+        let mut params = StartupMessageParams::default();
+        params.insert("database", &conn_info.dbname);
+        params.insert("user", &conn_info.user_info.user);
+
+        let mut auth_info = compute::AuthInfo::with_auth_keys(keys.keys);
+        auth_info.set_startup_params(&params, true);
+
+        let mut node = connect_compute::connect_to_compute(
             ctx,
-            &TokioMechanism {
-                conn_id,
-                conn_info,
-                pool: self.pool.clone(),
+            &TcpMechanism {
                 locks: &self.config.connect_compute_locks,
-                keys: keys.keys,
+                tls: connect_compute::TlsNegotiation::Direct,
             },
             &backend,
             self.config.wake_compute_retry_config,
             &self.config.connect_to_compute,
         )
-        .await
+        .await?;
+
+        auth_info.authenticate(ctx, &mut node).await?;
+
+        let (client, connection) = postgres_client::connect::managed(
+            node.stream,
+            Some(node.socket_addr.ip()),
+            postgres_client::config::Host::Tcp(node.hostname.to_string()),
+            node.socket_addr.port(),
+            node.ssl_mode,
+            Some(self.config.connect_to_compute.timeout),
+        )
+        .await?;
+
+        Ok(poll_client(
+            self.pool.clone(),
+            ctx,
+            conn_info,
+            client,
+            connection,
+            conn_id,
+            node.aux,
+        ))
     }
 
     // Wake up the destination if needed
@@ -228,7 +257,7 @@ impl PoolingBackend {
             )),
             options: conn_info.user_info.options.clone(),
         });
-        crate::proxy::connect_compute::connect_to_compute(
+        connect_compute::connect_to_compute(
             ctx,
             &HyperMechanism {
                 conn_id,
@@ -380,6 +409,8 @@ fn create_random_jwk() -> (SigningKey, jose_jwk::Key) {
 pub(crate) enum HttpConnError {
     #[error("pooled connection closed at inconsistent state")]
     ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
+    #[error("could not connect to compute")]
+    ConnectError(#[from] compute::ConnectionError),
     #[error("could not connect to postgres in compute")]
     PostgresConnectionError(#[from] postgres_client::Error),
     #[error("could not connect to local-proxy in compute")]
@@ -399,6 +430,14 @@ pub(crate) enum HttpConnError {
     TooManyConnectionAttempts(#[from] ApiLockError),
 }
 
+impl From<compute::PostgresError> for HttpConnError {
+    fn from(value: compute::PostgresError) -> Self {
+        match value {
+            compute::PostgresError::Postgres(error) => Self::PostgresConnectionError(error),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LocalProxyConnError {
     #[error("error with connection to local-proxy")]
@@ -410,6 +449,7 @@ pub(crate) enum LocalProxyConnError {
 impl ReportableError for HttpConnError {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
+            HttpConnError::ConnectError(_) => ErrorKind::Compute,
             HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
             HttpConnError::PostgresConnectionError(p) => {
                 if p.as_db_error().is_some() {
@@ -434,6 +474,7 @@ impl ReportableError for HttpConnError {
 impl UserFacingError for HttpConnError {
     fn to_string_client(&self) -> String {
         match self {
+            HttpConnError::ConnectError(p) => p.to_string_client(),
             HttpConnError::ConnectionClosedAbruptly(_) => self.to_string(),
             HttpConnError::PostgresConnectionError(p) => p.to_string(),
             HttpConnError::LocalProxyConnectionError(p) => p.to_string(),
@@ -452,6 +493,7 @@ impl UserFacingError for HttpConnError {
 impl CouldRetry for HttpConnError {
     fn could_retry(&self) -> bool {
         match self {
+            HttpConnError::ConnectError(p) => p.could_retry(),
             HttpConnError::PostgresConnectionError(e) => e.could_retry(),
             HttpConnError::LocalProxyConnectionError(e) => e.could_retry(),
             HttpConnError::ComputeCtl(_) => false,
@@ -504,67 +546,6 @@ impl ShouldRetryWakeCompute for LocalProxyConnError {
             LocalProxyConnError::Io(_) => false,
             LocalProxyConnError::H2(_) => false,
         }
-    }
-}
-
-struct TokioMechanism {
-    pool: Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
-    conn_info: ConnInfo,
-    conn_id: uuid::Uuid,
-    keys: ComputeCredentialKeys,
-
-    /// connect_to_compute concurrency lock
-    locks: &'static ApiLocks<Host>,
-}
-
-#[async_trait]
-impl ConnectMechanism for TokioMechanism {
-    type Connection = Client<postgres_client::Client>;
-    type ConnectError = HttpConnError;
-    type Error = HttpConnError;
-
-    async fn connect_once(
-        &self,
-        ctx: &RequestContext,
-        node_info: &CachedNodeInfo,
-        compute_config: &ComputeConfig,
-    ) -> Result<Self::Connection, Self::ConnectError> {
-        let permit = self.locks.get_permit(&node_info.conn_info.host).await?;
-
-        let mut config = node_info.conn_info.to_postgres_client_config();
-        let config = config
-            .user(&self.conn_info.user_info.user)
-            .dbname(&self.conn_info.dbname)
-            .connect_timeout(compute_config.timeout);
-
-        if let ComputeCredentialKeys::AuthKeys(auth_keys) = self.keys {
-            config.auth_keys(auth_keys);
-        }
-
-        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let res = config.connect(compute_config).await;
-        drop(pause);
-        let (client, connection) = permit.release_result(res)?;
-
-        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
-        tracing::Span::current().record(
-            "compute_id",
-            tracing::field::display(&node_info.aux.compute_id),
-        );
-
-        if let Some(query_id) = ctx.get_testodrome_id() {
-            info!("latency={}, query_id={}", ctx.get_proxy_latency(), query_id);
-        }
-
-        Ok(poll_client(
-            self.pool.clone(),
-            ctx,
-            self.conn_info.clone(),
-            client,
-            connection,
-            self.conn_id,
-            node_info.aux.clone(),
-        ))
     }
 }
 
