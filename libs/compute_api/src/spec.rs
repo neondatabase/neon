@@ -250,9 +250,9 @@ pub struct PageserverConnectionInfo {
 
 /// Extract PageserverConnectionInfo from a comma-separated list of libpq connection strings.
 ///
-/// This is used for backwards-compatilibity, to parse the legacy [ComputeSpec::pageserver_connstr]
-/// field, or the 'neon.pageserver_connstring' GUC. Nowadays, the 'pageserver_connection_info' field
-/// should be used instead.
+/// This is used for backwards-compatilibity, to parse the legacy
+/// [ComputeSpec::pageserver_connstring] field, or the 'neon.pageserver_connstring' GUC. Nowadays,
+/// the 'pageserver_connection_info' field should be used instead.
 impl PageserverConnectionInfo {
     pub fn from_connstr(
         connstr: &str,
