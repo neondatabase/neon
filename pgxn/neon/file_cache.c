@@ -1534,127 +1534,43 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	LWLockRelease(lfc_lock);
 }
 
-typedef struct
+/*
+ * Return an array of LfcStatsEntrys, terminated by an entry with NULL name
+ */
+LfcStatsEntry *
+get_lfc_stats(void)
 {
-	TupleDesc	tupdesc;
-} NeonGetStatsCtx;
+	LfcStatsEntry *entries;
+	int			i = 0;
 
-#define NUM_NEON_GET_STATS_COLS	2
+#define NUM_ENTRIES 10
+	entries = palloc(sizeof(LfcStatsEntry) * (NUM_ENTRIES + 1));
 
-PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
-Datum
-neon_get_lfc_stats(PG_FUNCTION_ARGS)
-{
-	FuncCallContext *funcctx;
-	NeonGetStatsCtx *fctx;
-	MemoryContext oldcontext;
-	TupleDesc	tupledesc;
-	Datum		result;
-	HeapTuple	tuple;
-	char const *key;
-	uint64		value = 0;
-	Datum		values[NUM_NEON_GET_STATS_COLS];
-	bool		nulls[NUM_NEON_GET_STATS_COLS];
+	entries[i++] = (LfcStatsEntry) {"file_cache_chunk_size_pages", lfc_ctl == NULL,
+									lfc_ctl ? lfc_blocks_per_chunk : 0 };
+	entries[i++] = (LfcStatsEntry) {"file_cache_misses", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->misses : 0};
+	entries[i++] = (LfcStatsEntry) {"file_cache_hits", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->hits : 0 };
+	entries[i++] = (LfcStatsEntry) {"file_cache_used", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->used : 0 };
+	entries[i++] = (LfcStatsEntry) {"file_cache_writes", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->writes : 0 };
+	entries[i++] = (LfcStatsEntry) {"file_cache_size", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->size : 0 };
+	entries[i++] = (LfcStatsEntry) {"file_cache_used_pages", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->used_pages : 0 };
+	entries[i++] = (LfcStatsEntry) {"file_cache_evicted_pages", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->evicted_pages : 0 };
+	entries[i++] = (LfcStatsEntry) {"file_cache_limit", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->limit : 0 };
+	entries[i++] = (LfcStatsEntry) {"file_cache_chunks_pinned", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->pinned : 0 };
+	entries[i++] = (LfcStatsEntry) { NULL, false, 0 };
+	Assert(i <= NUM_ENTRIES);
 
-	if (SRF_IS_FIRSTCALL())
-	{
-		funcctx = SRF_FIRSTCALL_INIT();
-
-		/* Switch context when allocating stuff to be used in later calls */
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-		/* Create a user function context for cross-call persistence */
-		fctx = (NeonGetStatsCtx *) palloc(sizeof(NeonGetStatsCtx));
-
-		/* Construct a tuple descriptor for the result rows. */
-		tupledesc = CreateTemplateTupleDesc(NUM_NEON_GET_STATS_COLS);
-
-		TupleDescInitEntry(tupledesc, (AttrNumber) 1, "lfc_key",
-						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "lfc_value",
-						   INT8OID, -1, 0);
-
-		fctx->tupdesc = BlessTupleDesc(tupledesc);
-		funcctx->user_fctx = fctx;
-
-		/* Return to original context when allocating transient memory */
-		MemoryContextSwitchTo(oldcontext);
-	}
-
-	funcctx = SRF_PERCALL_SETUP();
-
-	/* Get the saved state */
-	fctx = (NeonGetStatsCtx *) funcctx->user_fctx;
-
-	switch (funcctx->call_cntr)
-	{
-		case 0:
-			key = "file_cache_misses";
-			if (lfc_ctl)
-				value = lfc_ctl->misses;
-			break;
-		case 1:
-			key = "file_cache_hits";
-			if (lfc_ctl)
-				value = lfc_ctl->hits;
-			break;
-		case 2:
-			key = "file_cache_used";
-			if (lfc_ctl)
-				value = lfc_ctl->used;
-			break;
-		case 3:
-			key = "file_cache_writes";
-			if (lfc_ctl)
-				value = lfc_ctl->writes;
-			break;
-		case 4:
-			key = "file_cache_size";
-			if (lfc_ctl)
-				value = lfc_ctl->size;
-			break;
-		case 5:
-			key = "file_cache_used_pages";
-			if (lfc_ctl)
-				value = lfc_ctl->used_pages;
-			break;
-		case 6:
-			key = "file_cache_evicted_pages";
-			if (lfc_ctl)
-				value = lfc_ctl->evicted_pages;
-			break;
-		case 7:
-			key = "file_cache_limit";
-			if (lfc_ctl)
-				value = lfc_ctl->limit;
-			break;
-		case 8:
-			key = "file_cache_chunk_size_pages";
-			value = lfc_blocks_per_chunk;
-			break;
-		case 9:
-			key = "file_cache_chunks_pinned";
-			if (lfc_ctl)
-				value = lfc_ctl->pinned;
-			break;
-		default:
-			SRF_RETURN_DONE(funcctx);
-	}
-	values[0] = PointerGetDatum(cstring_to_text(key));
-	nulls[0] = false;
-	if (lfc_ctl)
-	{
-		nulls[1] = false;
-		values[1] = Int64GetDatum(value);
-	}
-	else
-		nulls[1] = true;
-
-	tuple = heap_form_tuple(fctx->tupdesc, values, nulls);
-	result = HeapTupleGetDatum(tuple);
-	SRF_RETURN_NEXT(funcctx, result);
+	return entries;
 }
-
 
 /*
  * Function returning data from the local file cache

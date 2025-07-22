@@ -84,5 +84,10 @@ extern void WalproposerShmemInit(void);
 extern void LwLsnCacheShmemInit(void);
 extern void NeonPerfCountersShmemInit(void);
 
+typedef struct LfcStatsEntry {
+	const char *metric_name;
+	bool		isnull;
+	uint64		value;
+} LfcStatsEntry;
 
 #endif							/* NEON_H */

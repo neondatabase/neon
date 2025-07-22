@@ -12,11 +12,11 @@
 #ifndef COMMUNICATOR_NEW_H
 #define COMMUNICATOR_NEW_H
 
-#include "lfc_prewarm.h"
-#include "neon_pgversioncompat.h"
-
 #include "storage/buf_internals.h"
 
+#include "lfc_prewarm.h"
+#include "neon.h"
+#include "neon_pgversioncompat.h"
 #include "pagestore_client.h"
 
 /* initialization at postmaster startup */
@@ -60,7 +60,7 @@ extern void communicator_new_update_cached_rel_size(NRelFileInfo rinfo, ForkNumb
 
 /* other functions */
 extern int32 communicator_new_approximate_working_set_size_seconds(time_t duration, bool reset);
-
 extern FileCacheState *communicator_new_get_lfc_state(size_t max_entries);
+extern LfcStatsEntry *communicator_new_get_lfc_stats(void);
 
 #endif							/* COMMUNICATOR_NEW_H */

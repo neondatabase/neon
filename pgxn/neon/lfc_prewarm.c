@@ -541,7 +541,6 @@ lfc_prewarm_with_async_requests(FileCacheState *fcs)
 		request_startblkno = request_endblkno = InvalidBlockNumber;
 	}
 
-	Assert(prewarm_ctl->prewarm_canceled);
 	elog(LOG, "LFC: complete prewarming: loaded %lu pages", (unsigned long) prewarm_ctl->prewarmed_pages);
 	prewarm_ctl->completed = GetCurrentTimestamp();
 

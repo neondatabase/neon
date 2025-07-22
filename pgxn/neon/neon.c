@@ -713,6 +713,39 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(dc);
 }
 
+PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
+Datum
+neon_get_lfc_stats(PG_FUNCTION_ARGS)
+{
+#define NUM_NEON_GET_STATS_COLS	2
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	LfcStatsEntry *entries;
+	LfcStatsEntry *entry;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (neon_use_communicator_worker)
+		entries = communicator_new_get_lfc_stats();
+	else
+		entries = get_lfc_stats();
+
+	entry = entries;
+	while (entry->metric_name != NULL)
+	{
+		Datum		values[NUM_NEON_GET_STATS_COLS];
+		bool		nulls[NUM_NEON_GET_STATS_COLS];
+
+		values[0] = CStringGetTextDatum(entry->metric_name);
+		nulls[1] = entry->isnull;
+		values[1] = Int64GetDatum(entry->isnull ? 0 : entry->value);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		entry++;
+	}
+
+	PG_RETURN_VOID();
+}
+
+
 /*
  * Initialization stage 2: make requests for the amount of shared memory we
  * will need.

@@ -1345,3 +1345,22 @@ communicator_new_approximate_working_set_size_seconds(time_t duration, bool rese
 		memset(communicator_shmem_ptr->wss_estimation.regs, 0, sizeof(communicator_shmem_ptr->wss_estimation.regs));
 	return dc;
 }
+
+
+/*
+ * Return an array of LfcStatsEntrys, terminated by an entry with NULL name
+ */
+LfcStatsEntry *
+communicator_new_get_lfc_stats(void)
+{
+	LfcStatsEntry *entries;
+	int			i = 0;
+
+	// TODO
+#define NUM_ENTRIES 0
+	entries = palloc(sizeof(LfcStatsEntry) * (NUM_ENTRIES + 1));
+	entries[i++] = (LfcStatsEntry) { NULL, false, 0 };
+	Assert(i <= NUM_ENTRIES);
+
+	return entries;
+}
