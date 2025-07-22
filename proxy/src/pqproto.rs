@@ -313,6 +313,14 @@ impl WriteBuf {
         self.0.set_position(0);
     }
 
+    /// Shrinks the buffer if efficient to do so, and returns the remaining size.
+    pub fn occupied_len(&mut self) -> usize {
+        if self.should_shrink() {
+            self.shrink();
+        }
+        self.0.get_mut().len()
+    }
+
     /// Write a raw message to the internal buffer.
     ///
     /// The size_hint value is only a hint for reserving space. It's ok if it's incorrect, since

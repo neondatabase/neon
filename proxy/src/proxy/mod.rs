@@ -239,6 +239,9 @@ pub(crate) async fn forward_compute_params_to_client(
     let mut secret_key = 0;
 
     let err = loop {
+        // if the client buffer is too large, let's write out some bytes now to save some space
+        client.write_if_full().await?;
+
         let msg = match compute.try_next().await {
             Ok(msg) => msg,
             Err(e) => break postgres_client::Error::io(e),
