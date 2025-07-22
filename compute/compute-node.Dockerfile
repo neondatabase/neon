@@ -1483,6 +1483,38 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_partman.control
 
 #########################################################################################
+# Layer "pg_tracing"
+# compile pg_tracing extension
+#
+#########################################################################################
+FROM build-deps AS pg_tracing-src
+ARG PG_VERSION
+WORKDIR /ext-src
+RUN case "${PG_VERSION:?}" in \
+      "v14" | "v15") \
+        echo "pg_tracing not supported on this PostgreSQL version." && exit 0 \
+	;; \
+      *) \
+      ;; \
+    esac && \
+    wget https://github.com/DataDog/pg_tracing/archive/refs/tags/v0.1.3.tar.gz -O pg_tracing.tar.gz && \
+    echo "d0a7cca7279bb29601ba6c4c1aaeb3a44d71e6afa3b78aae1e3b7269e688f907 pg_tracing.tar.gz" | sha256sum --check && \
+    mkdir pg_tracing-src && cd pg_tracing-src && tar xzf ../pg_tracing.tar.gz --strip-components=1 -C .
+
+FROM pg-build AS pg_tracing-build
+COPY --from=pg_tracing-src /ext-src/ /ext-src/
+WORKDIR /ext-src/pg_tracing-src
+RUN case "${PG_VERSION:?}" in \
+      "v14" | "v15") \
+        echo "pg_tracing not supported on this PostgreSQL version." && exit 0 \
+        ;; \
+      *) \
+      ;; \
+    esac && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install
+
+#########################################################################################
 #
 # Layer "pg_mooncake"
 # compile pg_mooncake extension
@@ -1707,6 +1739,7 @@ COPY --from=wal2json-build /usr/local/pgsql /usr/local/pgsql
 COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg_tracing-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1900,6 +1933,7 @@ COPY --from=pg_semver-src /ext-src/ /ext-src/
 #COPY --from=wal2json-src /ext-src/ /ext-src/
 COPY --from=pg_ivm-src /ext-src/ /ext-src/
 COPY --from=pg_partman-src /ext-src/ /ext-src/
+COPY --from=pg_tracing-src /ext-src/ /ext-src/
 #COPY --from=pg_mooncake-src /ext-src/ /ext-src/
 COPY --from=pg_repack-src /ext-src/ /ext-src/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
