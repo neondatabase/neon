@@ -247,11 +247,6 @@ impl AuthInfo {
         tmp_config.authenticate(&mut compute.stream).await?;
         drop(pause);
 
-        // let (process_id, secret_key, parameters, delayed_notice) =
-        //     postgres_client::connect_raw::read_info(&mut compute.stream).await?;
-
-        // tracing::Span::current().record("pid", tracing::field::display(process_id));
-
         Ok(())
     }
 }
