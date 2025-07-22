@@ -370,9 +370,7 @@ class NeonProject:
         return target
 
     def get_random_parent_branch(self) -> NeonBranch:
-        return self.branches[
-            random.choice(list(set(self.branches.keys()) - self.reset_branches))
-        ]
+        return self.branches[random.choice(list(set(self.branches.keys()) - self.reset_branches))]
 
     def generate_branch_name(self) -> str:
         self.branch_num += 1
@@ -526,11 +524,10 @@ class NeonProject:
         )
         self.wait()
         new_branch_def = self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
+        new_branch_def["branch"].pop("parent_id")
         # XXX do not merge, debug only
         log.info("new_branch: %s", new_branch_def)
-        new_branch = NeonBranch(
-            self, new_branch_def
-        )
+        new_branch = NeonBranch(self, new_branch_def)
         target_branch_def = self.neon_api.get_branch_details(self.id, target_branch.id)
         if "name" in target_branch_def["branch"]:
             target_branch.name = target_branch_def["branch"]["name"]
