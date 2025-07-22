@@ -40,7 +40,8 @@ use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
-    pub(crate) http_conn_pool: Arc<GlobalConnPool<LocalProxyClient, HttpConnPool<LocalProxyClient>>>,
+    pub(crate) http_conn_pool:
+        Arc<GlobalConnPool<LocalProxyClient, HttpConnPool<LocalProxyClient>>>,
     pub(crate) local_pool: Arc<LocalConnPool<postgres_client::Client>>,
     pub(crate) pool:
         Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
@@ -632,7 +633,13 @@ async fn connect_http2(
     port: u16,
     timeout: Duration,
     tls: Option<&Arc<rustls::ClientConfig>>,
-) -> Result<(http_conn_pool::LocalProxyClient, http_conn_pool::LocalProxyConnection), LocalProxyConnError> {
+) -> Result<
+    (
+        http_conn_pool::LocalProxyClient,
+        http_conn_pool::LocalProxyConnection,
+    ),
+    LocalProxyConnError,
+> {
     let addrs = match host_addr {
         Some(addr) => vec![SocketAddr::new(addr, port)],
         None => lookup_host((host, port))
