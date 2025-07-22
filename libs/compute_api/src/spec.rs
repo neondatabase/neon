@@ -240,6 +240,10 @@ pub struct PageserverConnectionInfo {
 
     pub shards: HashMap<ShardIndex, PageserverShardInfo>,
 
+    /// If the compute supports both protocols, this indicates which one it should use.  The compute
+    /// may use other available protocols too, if it doesn't support the preferred one. The URL's
+    /// for the protocol specified here must be present for all shards, i.e. do not mark a protocol
+    /// as preferred if it cannot actually be used with all the pageservers.
     #[serde(default)]
     pub prefer_protocol: PageserverProtocol,
 }
