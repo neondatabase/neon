@@ -32,10 +32,10 @@ impl Delay {
     /// Generate a random delay in range [min, max]. Return None if the
     /// message should be dropped.
     pub fn delay(&self, rng: &mut StdRng) -> Option<u64> {
-        if rng.gen_bool(self.fail_prob) {
+        if rng.random_bool(self.fail_prob) {
             return None;
         }
-        Some(rng.gen_range(self.min..=self.max))
+        Some(rng.random_range(self.min..=self.max))
     }
 }
 

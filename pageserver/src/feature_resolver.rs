@@ -155,7 +155,7 @@ impl FeatureResolver {
                     );
 
                     let tenant_properties = PerTenantProperties {
-                        remote_size_mb: Some(rand::thread_rng().gen_range(100.0..1000000.00)),
+                        remote_size_mb: Some(rand::rng().random_range(100.0..1000000.00)),
                     }
                     .into_posthog_properties();
 

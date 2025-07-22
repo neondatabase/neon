@@ -203,12 +203,12 @@ impl fmt::Display for CancelKeyData {
     }
 }
 
-use rand::distributions::{Distribution, Standard};
-impl Distribution<CancelKeyData> for Standard {
+use rand::distr::{Distribution, StandardUniform};
+impl Distribution<CancelKeyData> for StandardUniform {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> CancelKeyData {
         CancelKeyData {
-            backend_pid: rng.r#gen(),
-            cancel_key: rng.r#gen(),
+            backend_pid: rng.random(),
+            cancel_key: rng.random(),
         }
     }
 }
