@@ -215,11 +215,17 @@ pub struct FileCacheIterator {
 
 /// Iterate over LFC contents
 #[unsafe(no_mangle)]
-pub extern "C" fn bcomm_cache_iterate_begin(_bs: &mut CommunicatorBackendStruct, iter: *mut FileCacheIterator) {
+pub extern "C" fn bcomm_cache_iterate_begin(
+    _bs: &mut CommunicatorBackendStruct,
+    iter: *mut FileCacheIterator,
+) {
     unsafe { (*iter).next_bucket = 0 };
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn bcomm_cache_iterate_next(bs: &mut CommunicatorBackendStruct, iter: *mut FileCacheIterator) -> bool {
+pub extern "C" fn bcomm_cache_iterate_next(
+    bs: &mut CommunicatorBackendStruct,
+    iter: *mut FileCacheIterator,
+) -> bool {
     use crate::integrated_cache::GetBucketResult;
     loop {
         let next_bucket = unsafe { (*iter).next_bucket } as usize;
@@ -235,7 +241,7 @@ pub extern "C" fn bcomm_cache_iterate_next(bs: &mut CommunicatorBackendStruct, i
                     (*iter).next_bucket += 1;
                 }
                 break true;
-            },
+            }
             GetBucketResult::Vacant => {
                 unsafe {
                     (*iter).next_bucket += 1;

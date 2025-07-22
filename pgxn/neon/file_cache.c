@@ -52,6 +52,8 @@
 #include "pagestore_client.h"
 #include "communicator.h"
 
+#include "communicator/communicator_bindings.h"
+
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "LFC: assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
 /*
@@ -1861,4 +1863,35 @@ lfc_approximate_working_set_size_seconds(time_t duration, bool reset)
 	if (reset)
 		memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
 	return dc;
+}
+
+/*
+ * Get metrics, for the built-in metrics exporter that's part of the communicator
+ * process.
+ *
+ * NB: This is called from a Rust tokio task inside the communicator process.
+ * Acquiring lwlocks, elog(), allocating memory or anything else non-trivial
+ * is strictly prohibited here!
+ */
+struct LfcMetrics
+callback_get_lfc_metrics_unsafe(void)
+{
+	struct LfcMetrics result = {
+		.lfc_cache_size_limit = (int64) lfc_size_limit * 1024 * 1024,
+		.lfc_hits = lfc_ctl ? lfc_ctl->hits : 0,
+		.lfc_misses = lfc_ctl ? lfc_ctl->misses : 0,
+		.lfc_used = lfc_ctl ? lfc_ctl->used : 0,
+		.lfc_writes = lfc_ctl ? lfc_ctl->writes : 0,
+	};
+
+	if (lfc_ctl)
+	{
+		for (int minutes = 1; minutes <= 60; minutes++)
+		{
+			result.lfc_approximate_working_set_size_windows[minutes - 1] =
+				lfc_approximate_working_set_size_seconds(minutes * 60, false);
+		}
+	}
+
+	return result;
 }

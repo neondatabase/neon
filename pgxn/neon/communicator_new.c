@@ -42,6 +42,7 @@
 
 #include "bitmap.h"
 #include "communicator_new.h"
+#include "communicator_process.h"
 #include "hll.h"
 #include "neon.h"
 #include "neon_perf_counters.h"
@@ -62,7 +63,6 @@ extern char *lfc_path;
 
 #define MaxProcs (MaxBackends + NUM_AUXILIARY_PROCS)
 
-static CommunicatorInitStruct *cis;
 static CommunicatorBackendStruct *my_bs;
 
 static File cache_file = 0;
@@ -143,8 +143,6 @@ static bool bounce_needed(void *buffer);
 static void *bounce_buf(void);
 static void *bounce_write_if_needed(void *buffer);
 
-static void pump_logging(struct LoggingReceiver *logging);
-PGDLLEXPORT void communicator_new_bgworker_main(Datum main_arg);
 static void communicator_new_backend_exit(int code, Datum arg);
 
 static char *print_neon_io_request(NeonIORequest *request);
@@ -181,43 +179,11 @@ assign_request_id(void)
 
 /**** Initialization functions. These run in postmaster ****/
 
-void
-pg_init_communicator_new(void)
-{
-	BackgroundWorker bgw;
-
-	if (!neon_use_communicator_worker)
-		return;
-
-	if (pageserver_connstring[0] == '\0' && pageserver_grpc_urls[0] == '\0')
-	{
-		/* running with local storage */
-		return;
-	}
-
-	/* Initialize the background worker process */
-	memset(&bgw, 0, sizeof(bgw));
-	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS;
-	bgw.bgw_start_time = BgWorkerStart_PostmasterStart;
-	snprintf(bgw.bgw_library_name, BGW_MAXLEN, "neon");
-	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "communicator_new_bgworker_main");
-	snprintf(bgw.bgw_name, BGW_MAXLEN, "Storage communicator process");
-	snprintf(bgw.bgw_type, BGW_MAXLEN, "Storage communicator process");
-	bgw.bgw_restart_time = 5;
-	bgw.bgw_notify_pid = 0;
-	bgw.bgw_main_arg = (Datum) 0;
-
-	RegisterBackgroundWorker(&bgw);
-}
-
 static size_t
 communicator_new_shmem_size(void)
 {
 	size_t		size = 0;
 	int			num_request_slots;
-
-	if (!neon_use_communicator_worker)
-		return 0;
 
 	size += MAXALIGN(
 					 offsetof(CommunicatorShmemData, backends) +
@@ -235,9 +201,6 @@ communicator_new_shmem_size(void)
 void
 CommunicatorNewShmemRequest(void)
 {
-	if (!neon_use_communicator_worker)
-		return;
-
 	RequestAddinShmemSpace(communicator_new_shmem_size());
 }
 
@@ -253,8 +216,7 @@ CommunicatorNewShmemInit(void)
 	uint64		initial_file_cache_size;
 	uint64		max_file_cache_size;
 
-	if (!neon_use_communicator_worker)
-		return;
+	/* FIXME: much of this could be skipped if !neon_use_communicator_worker */
 
 	rc = pipe(pipefd);
 	if (rc != 0)
@@ -302,203 +264,6 @@ CommunicatorNewShmemInit(void)
 
 /**** Worker process functions. These run in the communicator worker process ****/
 
-/* Entry point for the communicator bgworker process */
-void
-communicator_new_bgworker_main(Datum main_arg)
-{
-	char	  **connstrings;
-	ShardMap	shard_map;
-	uint64		file_cache_size;
-	struct LoggingReceiver *logging;
-	const struct CommunicatorWorkerProcessStruct *proc_handle;
-
-	/*
-	 * Pretend that this process is a WAL sender. That affects the shutdown
-	 * sequence: WAL senders are shut down last, after the final checkpoint
-	 * has been written. That's what we want for the communicator process too
-	 */
-	am_walsender = true;
-	MarkPostmasterChildWalSender();
-
-	/* lfc_size_limit is in MBs */
-	file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
-	if (file_cache_size < 100)
-		file_cache_size = 100;
-
-	/* Establish signal handlers. */
-	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
-	/*
-	 * Postmaster sends us SIGUSR2 when all regular backends and bgworkers
-	 * have exited, and it's time for us to exit too
-	 */
-	pqsignal(SIGUSR2, die);
-	pqsignal(SIGHUP, SignalHandlerForConfigReload);
-	pqsignal(SIGTERM, die);
-
-	BackgroundWorkerUnblockSignals();
-
-	if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
-	{
-		/* shouldn't happen, as the GUC was verified already */
-		elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
-	}
-	connstrings = palloc(shard_map.num_shards * sizeof(char *));
-	for (int i = 0; i < shard_map.num_shards; i++)
-		connstrings[i] = shard_map.connstring[i];
-
-	/*
-	 * By default, INFO messages are not printed to the log. We want
-	 * `tracing::info!` messages emitted from the communicator to be printed,
-	 * however, so increase the log level.
-	 *
-	 * XXX: This overrides any user-set value from the config file. That's not
-	 * great, but on the other hand, there should be little reason for user to
-	 * control the verbosity of the communicator. It's not too verbose by
-	 * default.
-	 */
-	SetConfigOption("log_min_messages", "INFO", PGC_SUSET, PGC_S_OVERRIDE);
-
-	logging = communicator_worker_configure_logging();
-
-	elog(LOG, "launching worker process threads");
-	proc_handle = communicator_worker_process_launch(
-									   cis,
-									   neon_tenant,
-									   neon_timeline,
-									   neon_auth_token,
-									   connstrings,
-									   shard_map.num_shards,
-									   neon_stripe_size,
-									   lfc_path,
-									   file_cache_size);
-	pfree(connstrings);
-	cis = NULL;
-	if (proc_handle == NULL)
-	{
-		/*
-		 * Something went wrong. Before exiting, forward any log messages that
-		 * might've been generated during the failed launch.
-		 */
-		pump_logging(logging);
-
-		elog(PANIC, "failure launching threads");
-	}
-
-	elog(LOG, "communicator threads started");
-	for (;;)
-	{
-		ResetLatch(MyLatch);
-
-		/*
-		 * Forward any log messages from the Rust threads into the normal
-		 * Postgres logging facility.
-		 */
-		pump_logging(logging);
-
-		CHECK_FOR_INTERRUPTS();
-
-		if (ConfigReloadPending)
-		{
-			ConfigReloadPending = false;
-			ProcessConfigFile(PGC_SIGHUP);
-
-			/* lfc_size_limit is in MBs */
-			file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
-			if (file_cache_size < 100)
-				file_cache_size = 100;
-
-			/* Reload pageserver URLs */
-			if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
-			{
-				/* shouldn't happen, as the GUC was verified already */
-				elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
-			}
-			connstrings = palloc(shard_map.num_shards * sizeof(char *));
-			for (int i = 0; i < shard_map.num_shards; i++)
-				connstrings[i] = shard_map.connstring[i];
-
-			communicator_worker_config_reload(proc_handle,
-											  file_cache_size,
-											  connstrings,
-											  shard_map.num_shards);
-			pfree(connstrings);
-		}
-
-		(void) WaitLatch(MyLatch,
-						 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
-						 0,
-						 PG_WAIT_EXTENSION);
-	}
-}
-
-static void
-pump_logging(struct LoggingReceiver *logging)
-{
-	char		errbuf[1000];
-	int			elevel;
-	int32		rc;
-	static uint64_t last_dropped_event_count = 0;
-	uint64_t	dropped_event_count;
-	uint64_t	dropped_now;
-
-	for (;;)
-	{
-		rc = communicator_worker_poll_logging(logging,
-											  errbuf,
-											  sizeof(errbuf),
-											  &elevel,
-											  &dropped_event_count);
-		if (rc == 0)
-		{
-			/* nothing to do */
-			break;
-		}
-		else if (rc == 1)
-		{
-			/* Because we don't want to exit on error */
-
-			if (message_level_is_interesting(elevel))
-			{
-				/*
-				 * Prevent interrupts while cleaning up.
-				 *
-				 * (Not sure if this is required, but all the error handlers
-				 * in Postgres that are installed as sigsetjmp() targets do
-				 * this, so let's follow the example)
-				 */
-				HOLD_INTERRUPTS();
-
-				errstart(elevel, TEXTDOMAIN);
-				errmsg_internal("[COMMUNICATOR] %s", errbuf);
-				EmitErrorReport();
-				FlushErrorState();
-
-				/* Now we can allow interrupts again */
-				RESUME_INTERRUPTS();
-			}
-		}
-		else if (rc == -1)
-		{
-			elog(ERROR, "logging channel was closed unexpectedly");
-		}
-	}
-
-	/*
-	 * If the queue was full at any time since the last time we reported it,
-	 * report how many messages were lost. We do this outside the loop, so
-	 * that if the logging system is clogged, we don't exacerbate it by
-	 * printing lots of warnings about dropped messages.
-	 */
-	dropped_now = dropped_event_count - last_dropped_event_count;
-	if (dropped_now != 0)
-	{
-		elog(WARNING, "%lu communicator log messages were dropped because the log buffer was full",
-			 (unsigned long) dropped_now);
-		last_dropped_event_count = dropped_event_count;
-	}
-}
-
-
 /*
  * Callbacks from the rust code, in the communicator process.
  *
@@ -512,45 +277,6 @@ notify_proc_unsafe(int procno)
 {
 	SetLatch(&communicator_shmem_ptr->backends[procno].io_completion_latch);
 
-}
-
-void
-callback_set_my_latch_unsafe(void)
-{
-	SetLatch(MyLatch);
-}
-
-/*
- * FIXME: The logic from neon_get_request_lsns() needs to go here, except for
- * the last-written LSN cache stuff, which is managed by the rust code now.
- */
-uint64_t
-callback_get_request_lsn_unsafe(void)
-{
-	/*
-	 * NB: be very careful with what you do here! This is called from tokio
-	 * threads, so anything tha tries to take LWLocks is unsafe, for example.
-	 *
-	 * RecoveryInProgress() is OK
-	 */
-	if (RecoveryInProgress())
-	{
-		XLogRecPtr	replay_lsn = GetXLogReplayRecPtr(NULL);
-
-		return replay_lsn;
-	}
-	else
-	{
-		XLogRecPtr	flushlsn;
-
-#if PG_VERSION_NUM >= 150000
-		flushlsn = GetFlushRecPtr(NULL);
-#else
-		flushlsn = GetFlushRecPtr();
-#endif
-
-		return flushlsn;
-	}
 }
 
 /**** Backend functions. These run in each backend ****/
@@ -779,6 +505,7 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 	my_next_slot_idx++;
 	if (my_next_slot_idx == my_end_slot_idx)
 		my_next_slot_idx = my_start_slot_idx;
+
 	inflight_requests[num_inflight_requests] = request_idx;
 	num_inflight_requests++;
 
@@ -856,13 +583,14 @@ bool
 communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum)
 {
 	NeonIORequest request = {
-		.tag = NeonIORequest_RelExists,
-		.rel_exists = {
+		.tag = NeonIORequest_RelSize,
+		.rel_size = {
 			.request_id = assign_request_id(),
 			.spc_oid = NInfoGetSpcOid(rinfo),
 			.db_oid = NInfoGetDbOid(rinfo),
 			.rel_number = NInfoGetRelNumber(rinfo),
 			.fork_number = forkNum,
+			.allow_missing = true,
 		}
 	};
 	NeonIOResult result;
@@ -870,8 +598,8 @@ communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum)
 	perform_request(&request, &result);
 	switch (result.tag)
 	{
-		case NeonIOResult_RelExists:
-			return result.rel_exists;
+		case NeonIOResult_RelSize:
+			return result.rel_size != InvalidBlockNumber;
 		case NeonIOResult_Error:
 			ereport(ERROR,
 					(errcode_for_file_access(),
@@ -879,7 +607,7 @@ communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum)
 							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
 			break;
 		default:
-			elog(ERROR, "unexpected result for RelExists operation: %d", result.tag);
+			elog(ERROR, "unexpected result for RelSize operation: %d", result.tag);
 			break;
 	}
 }
@@ -1067,6 +795,7 @@ communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forkNum)
 			.db_oid = NInfoGetDbOid(rinfo),
 			.rel_number = NInfoGetRelNumber(rinfo),
 			.fork_number = forkNum,
+			.allow_missing = false,
 		}
 	};
 	NeonIOResult result;
@@ -1450,22 +1179,14 @@ print_neon_io_request(NeonIORequest *request)
 		case NeonIORequest_Empty:
 			snprintf(buf, sizeof(buf), "Empty");
 			return buf;
-		case NeonIORequest_RelExists:
-			{
-				CRelExistsRequest *r = &request->rel_exists;
-
-				snprintf(buf, sizeof(buf), "RelExists: req " UINT64_FORMAT " rel %u/%u/%u.%u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
-				return buf;
-			}
 		case NeonIORequest_RelSize:
 			{
 				CRelSizeRequest *r = &request->rel_size;
 
-				snprintf(buf, sizeof(buf), "RelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+				snprintf(buf, sizeof(buf), "RelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u allow_missing: %d",
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number,
+						 r->allow_missing);
 				return buf;
 			}
 		case NeonIORequest_GetPageV:

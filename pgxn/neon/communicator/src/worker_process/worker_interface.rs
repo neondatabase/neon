@@ -1,10 +1,8 @@
 //! Functions called from the C code in the worker process
 
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, CString, c_char};
 use std::path::PathBuf;
-
-use tracing::error;
 
 use crate::init::CommunicatorInitStruct;
 use crate::worker_process::main_loop;
@@ -14,10 +12,23 @@ use pageserver_client_grpc::ShardStripeSize;
 
 /// Launch the communicator's tokio tasks, which do most of the work.
 ///
-/// The caller has initialized the process as a regular PostgreSQL
-/// background worker process. The shared memory segment used to
-/// communicate with the backends has been allocated and initialized
-/// earlier, at postmaster startup, in rcommunicator_shmem_init().
+/// The caller has initialized the process as a regular PostgreSQL background worker
+/// process. The shared memory segment used to communicate with the backends has been
+/// allocated and initialized earlier, at postmaster startup, in
+/// rcommunicator_shmem_init().
+///
+/// Inputs:
+///   `tenant_id` and `timeline_id` can be NULL, if we're been launched in "non-Neon" mode,
+///   where we use local storage instead of connecting to remote neon storage. That's
+///   currently only used in some unit tests.
+///
+/// Result:
+///   Returns pointer to CommunicatorWorkerProcessStruct, which is a handle to running
+///   Rust tasks. The C code can use it to interact with the Rust parts. On failure, returns
+///   None/NULL, and an error message is returned in *error_p
+///
+/// This is called only once in the process, so the returned struct, and error message in
+/// case of failure, are simply leaked.
 #[unsafe(no_mangle)]
 pub extern "C" fn communicator_worker_process_launch(
     cis: Box<CommunicatorInitStruct>,
@@ -29,20 +40,27 @@ pub extern "C" fn communicator_worker_process_launch(
     stripe_size: u32,
     file_cache_path: *const c_char,
     initial_file_cache_size: u64,
-) -> &'static CommunicatorWorkerProcessStruct<'static> {
+    error_p: *mut *const c_char,
+) -> Option<&'static CommunicatorWorkerProcessStruct<'static>> {
     tracing::warn!("starting threads in rust code");
     // Convert the arguments into more convenient Rust types
-    let tenant_id = unsafe { CStr::from_ptr(tenant_id) }.to_str().unwrap();
-    let timeline_id = unsafe { CStr::from_ptr(timeline_id) }.to_str().unwrap();
+    let tenant_id = if tenant_id.is_null() {
+        None
+    } else {
+        let cstr = unsafe { CStr::from_ptr(tenant_id) };
+        Some(cstr.to_str().expect("assume UTF-8"))
+    };
+    let timeline_id = if timeline_id.is_null() {
+        None
+    } else {
+        let cstr = unsafe { CStr::from_ptr(timeline_id) };
+        Some(cstr.to_str().expect("assume UTF-8"))
+    };
     let auth_token = if auth_token.is_null() {
         None
     } else {
-        Some(
-            unsafe { CStr::from_ptr(auth_token) }
-                .to_str()
-                .unwrap()
-                .to_string(),
-        )
+        let cstr = unsafe { CStr::from_ptr(auth_token) };
+        Some(cstr.to_str().expect("assume UTF-8"))
     };
     let file_cache_path = {
         if file_cache_path.is_null() {
@@ -53,43 +71,39 @@ pub extern "C" fn communicator_worker_process_launch(
         }
     };
     let shard_map = shard_map_to_hash(nshards, shard_map);
+    // FIXME: distinguish between unsharded, and sharded with 1 shard
+    // Also, we might go from unsharded to sharded while the system
+    // is running.
+    let stripe_size = if stripe_size > 0 && nshards > 1 {
+        Some(ShardStripeSize(stripe_size))
+    } else {
+        None
+    };
 
-    // start main loop
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("communicator thread")
-        .build()
-        .unwrap();
-
-    let worker_struct = runtime.block_on(main_loop::init(
+    // The `init` function does all the work.
+    let result = main_loop::init(
         cis,
-        tenant_id.to_string(),
-        timeline_id.to_string(),
+        tenant_id,
+        timeline_id,
         auth_token,
         shard_map,
-        if stripe_size > 0 {
-            Some(ShardStripeSize(stripe_size))
-        } else {
-            None
-        },
+        stripe_size,
         initial_file_cache_size,
         file_cache_path,
-    ));
-    let worker_struct = Box::leak(Box::new(worker_struct));
+    );
 
-    let main_loop_handle = runtime.spawn(worker_struct.run());
+    // On failure, return the error message to the C caller in *error_p.
+    match result {
+        Ok(worker_struct) => Some(worker_struct),
+        Err(errmsg) => {
+            let errmsg = CString::new(errmsg).expect("no nuls within error message");
+            let errmsg = Box::leak(errmsg.into_boxed_c_str());
+            let p: *const c_char = errmsg.as_ptr();
 
-    runtime.spawn(async {
-        let err = main_loop_handle.await.unwrap_err();
-        error!("error: {err:?}");
-    });
-
-    runtime.block_on(worker_struct.launch_exporter_task());
-
-    // keep the runtime running after we exit this function
-    Box::leak(Box::new(runtime));
-
-    worker_struct
+            unsafe { *error_p = p };
+            None
+        }
+    }
 }
 
 /// Convert the "shard map" from an array of C strings, indexed by shard no to a rust HashMap

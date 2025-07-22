@@ -728,12 +728,9 @@ impl Endpoint {
 
         // For the sake of backwards-compatibility, also fill in 'pageserver_connstring'
         //
-        // XXX: I believe this is not really needed, except to make
-        // test_forward_compatibility happy.
-        //
         // Use a closure so that we can conviniently return None in the middle of the
         // loop.
-        let pageserver_connstring = (|| {
+        let pageserver_connstring: Option<String> = (|| {
             let num_shards = if args.pageserver_conninfo.shard_count.is_unsharded() {
                 1
             } else {
@@ -749,22 +746,24 @@ impl Endpoint {
                     .pageserver_conninfo
                     .shards
                     .get(&shard_index)
-                    .expect(&format!(
-                        "shard {} not found in pageserver_connection_info",
-                        shard_index
-                    ));
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "shard {} not found in pageserver_connection_info",
+                            shard_index
+                        )
+                    })?;
                 let pageserver = shard
                     .pageservers
                     .first()
-                    .expect("must have at least one pageserver");
+                    .ok_or(anyhow!("must have at least one pageserver"))?;
                 if let Some(libpq_url) = &pageserver.libpq_url {
                     connstrings.push(libpq_url.clone());
                 } else {
-                    return None;
+                    return Ok::<_, anyhow::Error>(None);
                 }
             }
-            Some(connstrings.join(","))
-        })();
+            Ok(Some(connstrings.join(",")))
+        })()?;
 
         // Create config file
         let config = {

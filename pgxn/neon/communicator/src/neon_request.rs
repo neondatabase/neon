@@ -14,6 +14,8 @@ pub type COid = u32;
 // This conveniently matches PG_IOV_MAX
 pub const MAX_GETPAGEV_PAGES: usize = 32;
 
+pub const INVALID_BLOCK_NUMBER: u32 = u32::MAX;
+
 use std::ffi::CStr;
 
 use pageserver_page_api::{self as page_api, SlruKind};
@@ -27,7 +29,6 @@ pub enum NeonIORequest {
 
     // Read requests. These are C-friendly variants of the corresponding structs in
     // pageserver_page_api.
-    RelExists(CRelExistsRequest),
     RelSize(CRelSizeRequest),
     GetPageV(CGetPageVRequest),
     ReadSlruSegment(CReadSlruSegmentRequest),
@@ -51,7 +52,7 @@ pub enum NeonIORequest {
 #[derive(Copy, Clone, Debug)]
 pub enum NeonIOResult {
     Empty,
-    RelExists(bool),
+    /// InvalidBlockNumber == 0xffffffff means "rel does not exist"
     RelSize(u32),
 
     /// the result pages are written to the shared memory addresses given in the request
@@ -85,7 +86,6 @@ impl NeonIORequest {
         use NeonIORequest::*;
         match self {
             Empty => 0,
-            RelExists(req) => req.request_id,
             RelSize(req) => req.request_id,
             GetPageV(req) => req.request_id,
             ReadSlruSegment(req) => req.request_id,
@@ -166,22 +166,13 @@ impl ShmemBuf {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-pub struct CRelExistsRequest {
-    pub request_id: u64,
-    pub spc_oid: COid,
-    pub db_oid: COid,
-    pub rel_number: u32,
-    pub fork_number: u8,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
 pub struct CRelSizeRequest {
     pub request_id: u64,
     pub spc_oid: COid,
     pub db_oid: COid,
     pub rel_number: u32,
     pub fork_number: u8,
+    pub allow_missing: bool,
 }
 
 #[repr(C)]
@@ -315,17 +306,6 @@ pub struct CRelUnlinkRequest {
     pub rel_number: u32,
     pub fork_number: u8,
     pub lsn: CLsn,
-}
-
-impl CRelExistsRequest {
-    pub fn reltag(&self) -> page_api::RelTag {
-        page_api::RelTag {
-            spcnode: self.spc_oid,
-            dbnode: self.db_oid,
-            relnode: self.rel_number,
-            forknum: self.fork_number,
-        }
-    }
 }
 
 impl CRelSizeRequest {

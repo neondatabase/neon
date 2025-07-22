@@ -759,7 +759,6 @@ impl<'t> IntegratedCacheReadAccess<'t> {
             Some((key, _)) => GetBucketResult::Occupied(key.rel, key.block_number),
         }
     }
-
 }
 
 pub struct BackendCacheReadOp<'t> {

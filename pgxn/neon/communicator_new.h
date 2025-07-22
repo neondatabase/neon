@@ -20,7 +20,6 @@
 #include "pagestore_client.h"
 
 /* initialization at postmaster startup */
-extern void pg_init_communicator_new(void);
 extern void CommunicatorNewShmemRequest(void);
 extern void CommunicatorNewShmemInit(void);
 

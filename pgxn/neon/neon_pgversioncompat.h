@@ -90,8 +90,7 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 
 #define InvalidRelFileNumber InvalidOid
 
-#define SMgrRelGetRelInfo(reln)				\
-	(reln->smgr_rnode.node)
+#define SMgrRelGetRelInfo(reln)	   	((reln)->smgr_rnode.node)
 
 #define DropRelationAllLocalBuffers DropRelFileNodeAllLocalBuffers
 
@@ -146,8 +145,7 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 		(tag).relNumber = (rel_number);					\
 	} while (false)
 
-#define SMgrRelGetRelInfo(reln) \
-	((reln)->smgr_rlocator)
+#define SMgrRelGetRelInfo(reln)	   	((reln)->smgr_rlocator)
 
 #define DropRelationAllLocalBuffers DropRelationAllLocalBuffers
 #endif

@@ -7,6 +7,9 @@ edition.workspace = true
 # 'testing' feature is currently unused in the communicator, but we accept it for convenience of
 # calling build scripts, so that you can pass the same feature to all packages.
 testing = []
+# 'rest_broker' feature is currently unused in the communicator, but we accept it for convenience of
+# calling build scripts, so that you can pass the same feature to all packages.
+rest_broker = []
 
 [lib]
 crate-type = ["staticlib"]
@@ -19,12 +22,13 @@ http.workspace = true
 libc.workspace = true
 nix.workspace = true
 atomic_enum = "0.3.0"
+measured.workspace = true
 prometheus.workspace = true
 prost.workspace = true
-tonic = { version = "0.12.0", default-features = false, features=["codegen", "prost", "transport"] }
-tokio = { version = "1.43.1", features = ["macros", "net", "io-util", "rt", "rt-multi-thread"] }
-tokio-pipe = { version = "0.2.12" }
 thiserror.workspace = true
+tonic = { workspace = true, default-features = false, features=["codegen", "prost", "transport"] }
+tokio = { workspace = true, features = ["macros", "net", "io-util", "rt", "rt-multi-thread"] }
+tokio-pipe = { version = "0.2.12" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

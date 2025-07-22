@@ -443,9 +443,9 @@ pub struct ImportPgdataIdempotencyKey(pub String);
 impl ImportPgdataIdempotencyKey {
     pub fn random() -> Self {
         use rand::Rng;
-        use rand::distributions::Alphanumeric;
+        use rand::distr::Alphanumeric;
         Self(
-            rand::thread_rng()
+            rand::rng()
                 .sample_iter(&Alphanumeric)
                 .take(20)
                 .map(char::from)

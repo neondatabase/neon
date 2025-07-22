@@ -21,5 +21,9 @@ mod worker_process;
 
 mod global_allocator;
 
+/// Name of the Unix Domain Socket that serves the metrics, and other APIs in the
+/// future. This is within the Postgres data directory.
+const NEON_COMMUNICATOR_SOCKET_NAME: &str = "neon-communicator.socket";
+
 // FIXME: get this from postgres headers somehow
 pub const BLCKSZ: usize = 8192;

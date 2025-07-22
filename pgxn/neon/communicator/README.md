@@ -1,11 +1,15 @@
 # Communicator
 
 This package provides the so-called "compute-pageserver communicator",
-or just "communicator" in short. It runs in a PostgreSQL server, as
-part of the neon extension, and handles the communication with the
-pageservers. On the PostgreSQL side, the glue code in pgxn/neon/ uses
-the communicator to implement the PostgreSQL Storage Manager (SMGR)
-interface.
+or just "communicator" in short. The communicator is a separate
+background worker process that runs in the PostgreSQL server. It's
+part of the neon extension.
+
+The commuicator handles the communication with the pageservers, and
+also provides an HTTP endpoint for metrics over a local Unix Domain
+socket (aka. the "communicator control socket"). On the PostgreSQL
+side, the glue code in pgxn/neon/ uses the communicator to implement
+the PostgreSQL Storage Manager (SMGR) interface.
 
 ## Design criteria
 
@@ -14,18 +18,20 @@ interface.
 
 ## Source code view
 
+pgxn/neon/communicator_process.c
+    Contains code needed to start up the communicator process, and
+    the glue that interacts with PostgreSQL code and the Rust
+    code in the communicator process.
+
 pgxn/neon/communicator_new.c
-	Contains the glue that interact with PostgreSQL code and the Rust
-	communicator code.
+	Contains the backend code that interacts with the communicator
+	process.
 
 pgxn/neon/communicator/src/backend_interface.rs
 	The entry point for calls from each backend.
 
 pgxn/neon/communicator/src/init.rs
 	Initialization at server startup
-
-pgxn/neon/communicator/src/worker_process/
-    Worker process main loop and glue code
 
 At compilation time, pgxn/neon/communicator/ produces a static
 library, libcommunicator.a. It is linked to the neon.so extension

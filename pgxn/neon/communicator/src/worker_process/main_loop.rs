@@ -10,8 +10,9 @@ use crate::global_allocator::MyAllocatorCollector;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
-use crate::neon_request::{NeonIORequest, NeonIOResult};
+use crate::neon_request::{NeonIORequest, NeonIOResult, INVALID_BLOCK_NUMBER};
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
+use crate::worker_process::lfc_metrics::LfcMetricsCollector;
 use pageserver_client_grpc::{PageserverClient, ShardSpec, ShardStripeSize};
 use pageserver_page_api as page_api;
 
@@ -20,6 +21,11 @@ use metrics::{IntCounter, IntCounterVec};
 use tokio::io::AsyncReadExt;
 use tokio_pipe::PipeRead;
 use uring_common::buf::IoBuf;
+
+use measured::MetricGroup;
+use measured::metric::MetricEncoding;
+use measured::metric::gauge::GaugeState;
+use measured::metric::group::Encoding;
 use utils::id::{TenantId, TimelineId};
 
 use super::callbacks::{get_request_lsn, notify_proc};
@@ -30,10 +36,10 @@ use utils::lsn::Lsn;
 
 pub struct CommunicatorWorkerProcessStruct<'a> {
     /// Tokio runtime that the main loop and any other related tasks runs in.
-    runtime: tokio::runtime::Handle,
+    runtime: tokio::runtime::Runtime,
 
     /// Client to communicate with the pageserver
-    client: PageserverClient,
+    client: Option<PageserverClient>,
 
     /// Request slots that backends use to send IO requests to the communicator.
     neon_request_slots: &'a [NeonIORequestSlot],
@@ -54,8 +60,9 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     stripe_size: Option<ShardStripeSize>,
 
     /*** Metrics ***/
+    pub(crate) lfc_metrics: LfcMetricsCollector,
+
     request_counters: IntCounterVec,
-    request_rel_exists_counter: IntCounter,
     request_rel_size_counter: IntCounter,
     request_get_pagev_counter: IntCounter,
     request_read_slru_segment_counter: IntCounter,
@@ -79,17 +86,35 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     allocator_metrics: MyAllocatorCollector,
 }
 
-pub(super) async fn init(
+/// Launch the communicator process's Rust subsystems
+pub(super) fn init(
     cis: Box<CommunicatorInitStruct>,
-    tenant_id: String,
-    timeline_id: String,
-    auth_token: Option<String>,
+    tenant_id: Option<&str>,
+    timeline_id: Option<&str>,
+    auth_token: Option<&str>,
     shard_map: HashMap<utils::shard::ShardIndex, String>,
     stripe_size: Option<ShardStripeSize>,
     initial_file_cache_size: u64,
     file_cache_path: Option<PathBuf>,
-) -> CommunicatorWorkerProcessStruct<'static> {
-    info!("Test log message");
+) -> Result<&'static CommunicatorWorkerProcessStruct<'static>, String> {
+    // The caller validated these already
+    let tenant_id = tenant_id
+        .map(TenantId::from_str)
+        .transpose()
+        .map_err(|e| format!("invalid tenant ID: {e}"))?;
+    let timeline_id = timeline_id
+        .map(TimelineId::from_str)
+        .transpose()
+        .map_err(|e| format!("invalid timeline ID: {e}"))?;
+    let shard_spec =
+        ShardSpec::new(shard_map, stripe_size).map_err(|e| format!("invalid shard spec: {e}:"))?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("communicator thread")
+        .build()
+        .unwrap();
+
     let last_lsn = get_request_lsn();
 
     let file_cache = if let Some(path) = file_cache_path {
@@ -109,11 +134,21 @@ pub(super) async fn init(
 
     debug!("Initialised integrated cache: {cache:?}");
 
-    let tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
-    let timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
-    let shard_spec = ShardSpec::new(shard_map, stripe_size).expect("invalid shard spec");
-    let client = PageserverClient::new(tenant_id, timeline_id, shard_spec, auth_token, None)
-        .expect("could not create client");
+    let client = if let (Some(tenant_id), Some(timeline_id)) = (tenant_id, timeline_id) {
+        let _guard = runtime.enter();
+        Some(
+            PageserverClient::new(
+                tenant_id,
+                timeline_id,
+                shard_spec,
+                auth_token.map(|s| s.to_string()),
+                None,
+            )
+            .expect("could not create client"),
+        )
+    } else {
+        None
+    };
 
     let request_counters = IntCounterVec::new(
         metrics::core::Opts::new(
@@ -123,7 +158,6 @@ pub(super) async fn init(
         &["request_kind"],
     )
     .unwrap();
-    let request_rel_exists_counter = request_counters.with_label_values(&["rel_exists"]);
     let request_rel_size_counter = request_counters.with_label_values(&["rel_size"]);
     let request_get_pagev_counter = request_counters.with_label_values(&["get_pagev"]);
     let request_read_slru_segment_counter =
@@ -164,8 +198,10 @@ pub(super) async fn init(
     let request_rel_zero_extend_nblocks_counter =
         request_nblocks_counters.with_label_values(&["rel_zero_extend"]);
 
-    CommunicatorWorkerProcessStruct {
-        runtime: tokio::runtime::Handle::current(),
+    let worker_struct = CommunicatorWorkerProcessStruct {
+        // Note: it's important to not drop the runtime, or all the tasks are dropped
+        // too. Including it in the returned struct is one way to keep it around.
+        runtime,
         stripe_size,
         neon_request_slots: cis.neon_request_slots,
         client,
@@ -174,8 +210,9 @@ pub(super) async fn init(
         in_progress_table: RequestInProgressTable::new(),
 
         // metrics
+        lfc_metrics: LfcMetricsCollector,
+
         request_counters,
-        request_rel_exists_counter,
         request_rel_size_counter,
         request_get_pagev_counter,
         request_read_slru_segment_counter,
@@ -197,7 +234,23 @@ pub(super) async fn init(
         request_rel_zero_extend_nblocks_counter,
 
         allocator_metrics: MyAllocatorCollector::new(),
-    }
+    };
+
+    let worker_struct = Box::leak(Box::new(worker_struct));
+
+    let main_loop_handle = worker_struct.runtime.spawn(worker_struct.run());
+    worker_struct.runtime.spawn(async {
+        let err = main_loop_handle.await.unwrap_err();
+        error!("error: {err:?}");
+    });
+
+    // Start the listener on the control socket
+    worker_struct
+        .runtime
+        .block_on(worker_struct.launch_control_socket_listener())
+        .map_err(|e| e.to_string())?;
+
+    Ok(worker_struct)
 }
 
 impl<'t> CommunicatorWorkerProcessStruct<'t> {
@@ -206,12 +259,13 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         &self,
         new_shard_map: HashMap<utils::shard::ShardIndex, String>,
     ) {
+        let client = self.client.as_ref().unwrap();
         let shard_spec =
             ShardSpec::new(new_shard_map, self.stripe_size.clone()).expect("invalid shard spec");
 
         {
             let _in_runtime = self.runtime.enter();
-            if let Err(err) = self.client.update_shards(shard_spec) {
+            if let Err(err) = client.update_shards(shard_spec) {
                 tracing::error!("could not update shard map: {err:?}");
             }
         }
@@ -336,42 +390,15 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
     /// Handle one IO request
     async fn handle_request(&'static self, req: &'_ NeonIORequest) -> NeonIOResult {
+        let client = self
+            .client
+            .as_ref()
+            .expect("cannot handle requests without client");
         match req {
             NeonIORequest::Empty => {
                 error!("unexpected Empty IO request");
                 NeonIOResult::Error(0)
             }
-            NeonIORequest::RelExists(req) => {
-                self.request_rel_exists_counter.inc();
-                let rel = req.reltag();
-
-                let _in_progress_guard = self
-                    .in_progress_table
-                    .lock(RequestInProgressKey::Rel(rel), req.request_id)
-                    .await;
-
-                // Check the cache first
-                let not_modified_since = match self.cache.get_rel_exists(&rel) {
-                    CacheResult::Found(exists) => return NeonIOResult::RelExists(exists),
-                    CacheResult::NotFound(lsn) => lsn,
-                };
-
-                match self
-                    .client
-                    .check_rel_exists(page_api::CheckRelExistsRequest {
-                        read_lsn: self.request_lsns(not_modified_since),
-                        rel,
-                    })
-                    .await
-                {
-                    Ok(exists) => NeonIOResult::RelExists(exists),
-                    Err(err) => {
-                        info!("tonic error: {err:?}");
-                        NeonIOResult::Error(0)
-                    }
-                }
-            }
-
             NeonIORequest::RelSize(req) => {
                 self.request_rel_size_counter.inc();
                 let rel = req.reltag();
@@ -387,16 +414,21 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         tracing::trace!("found relsize for {:?} in cache: {}", rel, nblocks);
                         return NeonIOResult::RelSize(nblocks);
                     }
+                    // XXX: we don't cache negative entries, so if there's no entry in the cache, it could mean
+                    // that the relation doesn't exist or that we don't have it cached.
                     CacheResult::NotFound(lsn) => lsn,
                 };
 
                 let read_lsn = self.request_lsns(not_modified_since);
-                match self
-                    .client
-                    .get_rel_size(page_api::GetRelSizeRequest { read_lsn, rel })
+                match client
+                    .get_rel_size(page_api::GetRelSizeRequest {
+                        read_lsn,
+                        rel,
+                        allow_missing: req.allow_missing,
+                    })
                     .await
                 {
-                    Ok(nblocks) => {
+                    Ok(Some(nblocks)) => {
                         // update the cache
                         tracing::info!(
                             "updated relsize for {:?} in cache: {}, lsn {}",
@@ -408,6 +440,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                             .remember_rel_size(&rel, nblocks, not_modified_since);
 
                         NeonIOResult::RelSize(nblocks)
+                    }
+                    Ok(None) => {
+                        // TODO: cache negative entry?
+                        NeonIOResult::RelSize(INVALID_BLOCK_NUMBER)
                     }
                     Err(err) => {
                         info!("tonic error: {err:?}");
@@ -429,8 +465,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let lsn = Lsn(req.request_lsn);
                 let file_path = req.destination_file_path();
 
-                match self
-                    .client
+                match client
                     .get_slru_segment(page_api::GetSlruSegmentRequest {
                         read_lsn: self.request_lsns(lsn),
                         kind: req.slru_kind,
@@ -478,8 +513,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     CacheResult::NotFound(lsn) => lsn,
                 };
 
-                match self
-                    .client
+                match client
                     .get_db_size(page_api::GetDbSizeRequest {
                         read_lsn: self.request_lsns(not_modified_since),
                         db_oid: req.db_oid,
@@ -585,6 +619,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     /// Subroutine to handle a GetPageV request, since it's a little more complicated than
     /// others.
     async fn handle_get_pagev_request(&'t self, req: &CGetPageVRequest) -> Result<(), i32> {
+        let client = self
+            .client
+            .as_ref()
+            .expect("cannot handle requests without client");
         let rel = req.reltag();
 
         // Check the cache first
@@ -643,8 +681,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             "sending getpage request for blocks {:?} in rel {:?} lsns {}",
             block_numbers, rel, read_lsn
         );
-        match self
-            .client
+        match client
             .get_page(page_api::GetPageRequest {
                 request_id: req.request_id.into(),
                 request_class: page_api::GetPageClass::Normal,
@@ -704,6 +741,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     ///
     /// This is very similar to a GetPageV request, but the results are only stored in the cache.
     async fn handle_prefetchv_request(&'static self, req: &CPrefetchVRequest) -> Result<(), i32> {
+        let client = self
+            .client
+            .as_ref()
+            .expect("cannot handle requests without client");
         let rel = req.reltag();
 
         // Check the cache first
@@ -744,8 +785,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         // TODO: spawn separate tasks for these. Use the integrated cache to keep track of the
         // in-flight requests
 
-        match self
-            .client
+        match client
             .get_page(page_api::GetPageRequest {
                 request_id: req.request_id.into(),
                 request_class: page_api::GetPageClass::Prefetch,
@@ -816,5 +856,15 @@ impl<'t> metrics::core::Collector for CommunicatorWorkerProcessStruct<'t> {
         values.append(&mut self.allocator_metrics.collect());
 
         values
+    }
+}
+
+impl<T> MetricGroup<T> for CommunicatorWorkerProcessStruct<'_>
+where
+    T: Encoding,
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_group_into(&self, enc: &mut T) -> Result<(), T::Err> {
+        self.lfc_metrics.collect_group_into(enc)
     }
 }
