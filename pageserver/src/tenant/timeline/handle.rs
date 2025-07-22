@@ -362,7 +362,7 @@ impl<T: Types> Cache<T> {
                         tokio::time::sleep(RETRY_BACKOFF).await;
                         continue;
                     } else {
-                        tracing::warn!(
+                        tracing::info!(
                             "Failed to resolve tenant shard after {} attempts: {:?}",
                             GET_MAX_RETRIES,
                             e
