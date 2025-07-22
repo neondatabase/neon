@@ -36,7 +36,7 @@ def query_clickhouse(
     if conn:
         cur = conn.cursor()
         cur.execute("SELECT * FROM pg_replication_slots WHERE slot_type = 'logical'")
-        log.info(cur.fetchall())
+        log.info("replication slots: %s", cur.fetchall())
     m.update(repr(tuple(res.result_rows)).encode())
     hash_res = m.hexdigest()
     log.debug("Hash: %s", hash_res)
