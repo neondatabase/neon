@@ -273,8 +273,7 @@ mod test {
             let json_string = json_strings[i];
             assert!(
                 json_string_shape_regex.is_match(json_string),
-                "Json log didn't match expected pattern:\n{}",
-                json_string
+                "Json log didn't match expected pattern:\n{json_string}",
             );
             let parsed_json: serde_json::Value = serde_json::from_str(json_string).unwrap();
             let actual_message = parsed_json["message"].as_str().unwrap();
