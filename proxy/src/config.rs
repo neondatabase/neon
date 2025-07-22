@@ -39,6 +39,7 @@ pub struct ProxyConfig {
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute: ComputeConfig,
+    pub greetings: String, // Greeting message sent to the client after connection establishment and contains session_id.
     #[cfg(feature = "testing")]
     pub disable_pg_session_jwt: bool,
 }

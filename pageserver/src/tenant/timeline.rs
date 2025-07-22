@@ -448,6 +448,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
+    #[expect(dead_code)]
     feature_resolver: Arc<TenantFeatureResolver>,
 }
 
@@ -2826,7 +2827,7 @@ impl Timeline {
                 if r.numerator == 0 {
                     false
                 } else {
-                    rand::thread_rng().gen_range(0..r.denominator) < r.numerator
+                    rand::rng().random_range(0..r.denominator) < r.numerator
                 }
             }
             None => false,
@@ -3908,7 +3909,7 @@ impl Timeline {
                                 // 1hour base
                                 (60_i64 * 60_i64)
                                     // 10min jitter
-                                    + rand::thread_rng().gen_range(-10 * 60..10 * 60),
+                                    + rand::rng().random_range(-10 * 60..10 * 60),
                             )
                             .expect("10min < 1hour"),
                         );
