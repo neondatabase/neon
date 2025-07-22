@@ -104,7 +104,13 @@ fn init_tracing_internal(service_name: String, export_config: ExportConfig) -> P
     );
 
     Provider::builder()
-        .with_batch_exporter(exporter)
+        .with_span_processor(
+            opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor::builder(
+                exporter,
+                opentelemetry_sdk::runtime::Tokio,
+            )
+            .build(),
+        )
         .with_resource(
             opentelemetry_sdk::Resource::builder()
                 .with_service_name(service_name)
