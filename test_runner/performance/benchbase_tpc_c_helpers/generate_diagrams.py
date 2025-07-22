@@ -13,8 +13,8 @@ import argparse
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt  # type: ignore[import-untyped]
-import pandas as pd
+import matplotlib.pyplot as plt  # type: ignore[import-not-found]
+import pandas as pd  # type: ignore[import-untyped]
 
 
 def load_results_csv(csv_file_path):
