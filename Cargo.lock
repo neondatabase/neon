@@ -1323,6 +1323,7 @@ dependencies = [
  "pageserver_page_api",
  "prometheus",
  "prost 0.13.5",
+ "strum_macros",
  "thiserror 1.0.69",
  "tokio",
  "tokio-pipe",

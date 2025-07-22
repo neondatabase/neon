@@ -24,6 +24,8 @@ use pageserver_page_api::{self as page_api, SlruKind};
 #[allow(clippy::large_enum_variant)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+#[derive(strum_macros::EnumDiscriminants)]
+#[strum_discriminants(derive(measured::FixedCardinalityLabel))]
 pub enum NeonIORequest {
     Empty,
 
