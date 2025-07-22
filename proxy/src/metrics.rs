@@ -112,6 +112,9 @@ pub struct ProxyMetrics {
     /// Number of bytes sent/received between all clients and backends.
     pub io_bytes: CounterVec<StaticLabelSet<Direction>>,
 
+    /// Number of IO errors while logging.
+    pub logging_errors_count: Counter,
+
     /// Number of errors by a given classification.
     pub errors_total: CounterVec<StaticLabelSet<crate::error::ErrorKind>>,
 
@@ -374,19 +377,18 @@ pub enum Waiting {
 #[label(singleton = "kind")]
 #[allow(clippy::enum_variant_names)]
 pub enum RedisMsgKind {
-    HSet,
-    HSetMultiple,
+    Set,
+    Get,
+    Expire,
     HGet,
-    HGetAll,
-    HDel,
 }
 
 #[derive(Default, Clone)]
 pub struct LatencyAccumulated {
-    cplane: time::Duration,
-    client: time::Duration,
-    compute: time::Duration,
-    retry: time::Duration,
+    pub cplane: time::Duration,
+    pub client: time::Duration,
+    pub compute: time::Duration,
+    pub retry: time::Duration,
 }
 
 impl std::fmt::Display for LatencyAccumulated {

@@ -32,9 +32,10 @@ use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::walrecord::*;
 use postgres_ffi::{
-    PgMajorVersion, TimestampTz, TransactionId, dispatch_pgversion, enum_pgversion,
-    enum_pgversion_dispatch, fsm_logical_to_physical, pg_constants,
+    PgMajorVersion, TransactionId, dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch,
+    fsm_logical_to_physical, pg_constants,
 };
+use postgres_ffi_types::TimestampTz;
 use postgres_ffi_types::forknum::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use tracing::*;
 use utils::bin_ser::{DeserializeError, SerializeError};
@@ -1069,7 +1070,7 @@ impl WalIngest {
         // NB: In PostgreSQL, the next-multi-xid stored in the control file is allowed to
         // go to 0, and it's fixed up by skipping to FirstMultiXactId in functions that
         // read it, like GetNewMultiXactId(). This is different from how nextXid is
-        // incremented! nextXid skips over < FirstNormalTransactionId when the the value
+        // incremented! nextXid skips over < FirstNormalTransactionId when the value
         // is stored, so it's never 0 in a checkpoint.
         //
         // I don't know why it's done that way, it seems less error-prone to skip over 0

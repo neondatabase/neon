@@ -9,10 +9,11 @@
 
 use super::super::waldecoder::WalStreamDecoder;
 use super::bindings::{
-    CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID, TimestampTz,
+    CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID,
     XLogLongPageHeaderData, XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
     MY_PGVERSION
 };
+use postgres_ffi_types::TimestampTz;
 use super::wal_generator::LogicalMessageGenerator;
 use crate::pg_constants;
 use crate::PG_TLI;

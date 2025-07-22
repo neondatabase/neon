@@ -74,11 +74,19 @@ const DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL: u64 = 3600;
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
+#[derive(Clone, Debug)]
 pub struct ComputeNodeParams {
     /// The ID of the compute
     pub compute_id: String,
-    // Url type maintains proper escaping
+
+    /// Url type maintains proper escaping
     pub connstr: url::Url,
+
+    /// The name of the 'weak' superuser role, which we give to the users.
+    /// It follows the allow list approach, i.e., we take a standard role
+    /// and grant it extra permissions with explicit GRANTs here and there,
+    /// and core patches.
+    pub privileged_role_name: String,
 
     pub resize_swap_on_bind: bool,
     pub set_disk_quota_for_fs: Option<String>,
@@ -105,6 +113,11 @@ pub struct ComputeNodeParams {
 
     /// Interval for installed extensions collection
     pub installed_extensions_collection_interval: Arc<AtomicU64>,
+
+    /// Timeout of PG compute startup in the Init state.
+    pub pg_init_timeout: Option<Duration>,
+
+    pub lakebase_mode: bool,
 }
 
 type TaskHandle = Mutex<Option<JoinHandle<()>>>;
@@ -146,6 +159,7 @@ pub struct RemoteExtensionMetrics {
 #[derive(Clone, Debug)]
 pub struct ComputeState {
     pub start_time: DateTime<Utc>,
+    pub pg_start_time: Option<DateTime<Utc>>,
     pub status: ComputeStatus,
     /// Timestamp of the last Postgres activity. It could be `None` if
     /// compute wasn't used since start.
@@ -183,6 +197,7 @@ impl ComputeState {
     pub fn new() -> Self {
         Self {
             start_time: Utc::now(),
+            pg_start_time: None,
             status: ComputeStatus::Empty,
             last_active: None,
             error: None,
@@ -640,6 +655,9 @@ impl ComputeNode {
             };
             _this_entered = start_compute_span.enter();
 
+            // Hadron: Record postgres start time (used to enforce pg_init_timeout).
+            state_guard.pg_start_time.replace(Utc::now());
+
             state_guard.set_status(ComputeStatus::Init, &self.state_changed);
             compute_state = state_guard.clone()
         }
@@ -1040,11 +1058,34 @@ impl ComputeNode {
             PageserverProtocol::Grpc => self.try_get_basebackup_grpc(spec, lsn)?,
         };
 
+        self.fix_zenith_signal_neon_signal()?;
+
         let mut state = self.state.lock().unwrap();
         state.metrics.pageserver_connect_micros =
             connected.duration_since(started).as_micros() as u64;
         state.metrics.basebackup_bytes = size as u64;
         state.metrics.basebackup_ms = started.elapsed().as_millis() as u64;
+
+        Ok(())
+    }
+
+    /// Move the Zenith signal file to Neon signal file location.
+    /// This makes Compute compatible with older PageServers that don't yet
+    /// know about the Zenith->Neon rename.
+    fn fix_zenith_signal_neon_signal(&self) -> Result<()> {
+        let datadir = Path::new(&self.params.pgdata);
+
+        let neonsig = datadir.join("neon.signal");
+
+        if neonsig.is_file() {
+            return Ok(());
+        }
+
+        let zenithsig = datadir.join("zenith.signal");
+
+        if zenithsig.is_file() {
+            fs::copy(zenithsig, neonsig)?;
+        }
 
         Ok(())
     }
@@ -1263,9 +1304,7 @@ impl ComputeNode {
 
         // In case of error, log and fail the check, but don't crash.
         // We're playing it safe because these errors could be transient
-        // and we don't yet retry. Also being careful here allows us to
-        // be backwards compatible with safekeepers that don't have the
-        // TIMELINE_STATUS API yet.
+        // and we don't yet retry.
         if responses.len() < quorum {
             error!(
                 "failed sync safekeepers check {:?} {:?} {:?}",
@@ -1368,6 +1407,7 @@ impl ComputeNode {
         self.create_pgdata()?;
         config::write_postgres_conf(
             pgdata_path,
+            &self.params,
             &pspec.spec,
             self.params.internal_http_port,
             tls_config,
@@ -1411,7 +1451,7 @@ impl ComputeNode {
         })?;
 
         // Update pg_hba.conf received with basebackup.
-        update_pg_hba(pgdata_path)?;
+        update_pg_hba(pgdata_path, None)?;
 
         // Place pg_dynshmem under /dev/shm. This allows us to use
         // 'dynamic_shared_memory_type = mmap' so that the files are placed in
@@ -1716,6 +1756,8 @@ impl ComputeNode {
         }
 
         // Run migrations separately to not hold up cold starts
+        let lakebase_mode = self.params.lakebase_mode;
+        let params = self.params.clone();
         tokio::spawn(async move {
             let mut conf = conf.as_ref().clone();
             conf.application_name("compute_ctl:migrations");
@@ -1727,7 +1769,7 @@ impl ComputeNode {
                             eprintln!("connection error: {e}");
                         }
                     });
-                    if let Err(e) = handle_migrations(&mut client).await {
+                    if let Err(e) = handle_migrations(params, &mut client, lakebase_mode).await {
                         error!("Failed to run migrations: {}", e);
                     }
                 }
@@ -1806,6 +1848,7 @@ impl ComputeNode {
         let pgdata_path = Path::new(&self.params.pgdata);
         config::write_postgres_conf(
             pgdata_path,
+            &self.params,
             &spec,
             self.params.internal_http_port,
             tls_config,
@@ -2418,14 +2461,31 @@ LIMIT 100",
     pub fn spawn_lfc_offload_task(self: &Arc<Self>, interval: Duration) {
         self.terminate_lfc_offload_task();
         let secs = interval.as_secs();
-        info!("spawning lfc offload worker with {secs}s interval");
         let this = self.clone();
+
+        info!("spawning LFC offload worker with {secs}s interval");
         let handle = spawn(async move {
             let mut interval = time::interval(interval);
             interval.tick().await; // returns immediately
             loop {
                 interval.tick().await;
-                this.offload_lfc_async().await;
+
+                let prewarm_state = this.state.lock().unwrap().lfc_prewarm_state.clone();
+                // Do not offload LFC state if we are currently prewarming or any issue occurred.
+                // If we'd do that, we might override the LFC state in endpoint storage with some
+                // incomplete state. Imagine a situation:
+                // 1. Endpoint started with `autoprewarm: true`
+                // 2. While prewarming is not completed, we upload the new incomplete state
+                // 3. Compute gets interrupted and restarts
+                // 4. We start again and try to prewarm with the state from 2. instead of the previous complete state
+                if matches!(
+                    prewarm_state,
+                    LfcPrewarmState::Completed
+                        | LfcPrewarmState::NotPrewarmed
+                        | LfcPrewarmState::Skipped
+                ) {
+                    this.offload_lfc_async().await;
+                }
             }
         });
         *self.lfc_offload_task.lock().unwrap() = Some(handle);
@@ -2464,7 +2524,7 @@ pub async fn installed_extensions(conf: tokio_postgres::Config) -> Result<()> {
                 serde_json::to_string(&extensions).expect("failed to serialize extensions list")
             );
         }
-        Err(err) => error!("could not get installed extensions: {err:?}"),
+        Err(err) => error!("could not get installed extensions: {err}"),
     }
     Ok(())
 }

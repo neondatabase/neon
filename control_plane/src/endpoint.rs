@@ -32,7 +32,8 @@
 //!     config.json                 - passed to `compute_ctl`
 //!     pgdata/
 //!         postgresql.conf       - copy of postgresql.conf created by `compute_ctl`
-//!         zenith.signal
+//!         neon.signal
+//!         zenith.signal         - copy of neon.signal, for backward compatibility
 //!         <other PostgreSQL files>
 //! ```
 //!
@@ -64,7 +65,6 @@ use jsonwebtoken::jwk::{
     OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
 };
 use nix::sys::signal::{Signal, kill};
-use pageserver_api::shard::ShardStripeSize;
 use pem::Pem;
 use reqwest::header::CONTENT_TYPE;
 use safekeeper_api::PgMajorVersion;
@@ -76,6 +76,7 @@ use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::shard::ShardStripeSize;
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
@@ -98,6 +99,7 @@ pub struct EndpointConf {
     features: Vec<ComputeFeature>,
     cluster: Option<Cluster>,
     compute_ctl_config: ComputeCtlConfig,
+    privileged_role_name: Option<String>,
 }
 
 //
@@ -198,6 +200,7 @@ impl ComputeControlPlane {
         grpc: bool,
         skip_pg_catalog_updates: bool,
         drop_subscriptions_before_start: bool,
+        privileged_role_name: Option<String>,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
@@ -235,6 +238,7 @@ impl ComputeControlPlane {
             features: vec![],
             cluster: None,
             compute_ctl_config: compute_ctl_config.clone(),
+            privileged_role_name: privileged_role_name.clone(),
         });
 
         ep.create_endpoint_dir()?;
@@ -256,6 +260,7 @@ impl ComputeControlPlane {
                 features: vec![],
                 cluster: None,
                 compute_ctl_config,
+                privileged_role_name,
             })?,
         )?;
         std::fs::write(
@@ -331,6 +336,9 @@ pub struct Endpoint {
 
     /// The compute_ctl config for the endpoint's compute.
     compute_ctl_config: ComputeCtlConfig,
+
+    /// The name of the privileged role for the endpoint.
+    privileged_role_name: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -431,6 +439,7 @@ impl Endpoint {
             features: conf.features,
             cluster: conf.cluster,
             compute_ctl_config: conf.compute_ctl_config,
+            privileged_role_name: conf.privileged_role_name,
         })
     }
 
@@ -463,7 +472,7 @@ impl Endpoint {
         conf.append("max_connections", "100");
         conf.append("wal_level", "logical");
         // wal_sender_timeout is the maximum time to wait for WAL replication.
-        // It also defines how often the walreciever will send a feedback message to the wal sender.
+        // It also defines how often the walreceiver will send a feedback message to the wal sender.
         conf.append("wal_sender_timeout", "5s");
         conf.append("listen_addresses", &self.pg_address.ip().to_string());
         conf.append("port", &self.pg_address.port().to_string());
@@ -867,6 +876,10 @@ impl Endpoint {
 
         if args.dev {
             cmd.arg("--dev");
+        }
+
+        if let Some(privileged_role_name) = self.privileged_role_name.clone() {
+            cmd.args(["--privileged-role-name", &privileged_role_name]);
         }
 
         let child = cmd.spawn()?;

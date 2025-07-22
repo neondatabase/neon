@@ -287,7 +287,7 @@ pub struct Timeline {
     ancestor_lsn: Lsn,
 
     // The LSN of gc-compaction that was last applied to this timeline.
-    gc_compaction_state: ArcSwap<Option<GcCompactionState>>,
+    gc_compaction_state: ArcSwapOption<GcCompactionState>,
 
     pub(crate) metrics: Arc<TimelineMetrics>,
 
@@ -448,7 +448,11 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
+    #[expect(dead_code)]
     feature_resolver: Arc<TenantFeatureResolver>,
+
+    /// Basebackup will collect the count and store it here. Used for reldirv2 rollout.
+    pub(crate) db_rel_count: ArcSwapOption<(usize, usize)>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -939,6 +943,20 @@ pub(crate) struct CompactOptions {
     /// Set job size for the GC compaction.
     /// This option is only used by GC compaction.
     pub sub_compaction_max_job_size_mb: Option<u64>,
+    /// Only for GC compaction.
+    /// If set, the compaction will compact the metadata layers. Should be only set to true in unit tests
+    /// because metadata compaction is not fully supported yet.
+    pub gc_compaction_do_metadata_compaction: bool,
+}
+
+impl CompactOptions {
+    #[cfg(test)]
+    pub fn default_for_gc_compaction_unit_tests() -> Self {
+        Self {
+            gc_compaction_do_metadata_compaction: true,
+            ..Default::default()
+        }
+    }
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1253,12 +1271,66 @@ impl Timeline {
         }
     }
 
+    #[inline(always)]
+    pub(crate) async fn debug_get(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+        reconstruct_state: &mut ValuesReconstructState,
+    ) -> Result<Bytes, PageReconstructError> {
+        if !lsn.is_valid() {
+            return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
+        }
+
+        // This check is debug-only because of the cost of hashing, and because it's a double-check: we
+        // already checked the key against the shard_identity when looking up the Timeline from
+        // page_service.
+        debug_assert!(!self.shard_identity.is_key_disposable(&key));
+
+        let query = VersionedKeySpaceQuery::uniform(KeySpace::single(key..key.next()), lsn);
+        let vectored_res = self
+            .debug_get_vectored_impl(query, reconstruct_state, ctx)
+            .await;
+
+        let key_value = vectored_res?.pop_first();
+        match key_value {
+            Some((got_key, value)) => {
+                if got_key != key {
+                    error!(
+                        "Expected {}, but singular vectored get returned {}",
+                        key, got_key
+                    );
+                    Err(PageReconstructError::Other(anyhow!(
+                        "Singular vectored get returned wrong key"
+                    )))
+                } else {
+                    value
+                }
+            }
+            None => Err(PageReconstructError::MissingKey(Box::new(
+                MissingKeyError {
+                    keyspace: KeySpace::single(key..key.next()),
+                    shard: self.shard_identity.get_shard_number(&key),
+                    original_hwm_lsn: lsn,
+                    ancestor_lsn: None,
+                    backtrace: None,
+                    read_path: None,
+                    query: None,
+                },
+            ))),
+        }
+    }
+
     pub(crate) const LAYERS_VISITED_WARN_THRESHOLD: u32 = 100;
 
     /// Look up multiple page versions at a given LSN
     ///
     /// This naive implementation will be replaced with a more efficient one
     /// which actually vectorizes the read path.
+    ///
+    /// NB: the read path must be cancellation-safe. The Tonic gRPC service will drop the future
+    /// if the client goes away (e.g. due to timeout or cancellation).
     pub(crate) async fn get_vectored(
         &self,
         query: VersionedKeySpaceQuery,
@@ -1543,6 +1615,98 @@ impl Timeline {
                 LAYERS_PER_READ_AMORTIZED_GLOBAL.observe(avg_layers_visited);
             }
         }
+
+        Ok(results)
+    }
+
+    // A copy of the get_vectored_impl method except that we store the image and wal records into `reconstruct_state`.
+    // This is only used in the http getpage call for debugging purpose.
+    pub(super) async fn debug_get_vectored_impl(
+        &self,
+        query: VersionedKeySpaceQuery,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        if query.is_empty() {
+            return Ok(BTreeMap::default());
+        }
+
+        let read_path = if self.conf.enable_read_path_debugging || ctx.read_path_debug() {
+            Some(ReadPath::new(
+                query.total_keyspace(),
+                query.high_watermark_lsn()?,
+            ))
+        } else {
+            None
+        };
+
+        reconstruct_state.read_path = read_path;
+
+        let traversal_res: Result<(), _> = self
+            .get_vectored_reconstruct_data(query.clone(), reconstruct_state, ctx)
+            .await;
+
+        if let Err(err) = traversal_res {
+            // Wait for all the spawned IOs to complete.
+            // See comments on `spawn_io` inside `storage_layer` for more details.
+            let mut collect_futs = std::mem::take(&mut reconstruct_state.keys)
+                .into_values()
+                .map(|state| state.collect_pending_ios())
+                .collect::<FuturesUnordered<_>>();
+            while collect_futs.next().await.is_some() {}
+            return Err(err);
+        };
+
+        let reconstruct_state = Arc::new(Mutex::new(reconstruct_state));
+        let futs = FuturesUnordered::new();
+
+        for (key, state) in std::mem::take(&mut reconstruct_state.lock().unwrap().keys) {
+            let req_lsn_for_key = query.map_key_to_lsn(&key);
+            futs.push({
+                let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
+                let rc_clone = Arc::clone(&reconstruct_state);
+
+                async move {
+                    assert_eq!(state.situation, ValueReconstructSituation::Complete);
+
+                    let converted = match state.collect_pending_ios().await {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            return (key, Err(err));
+                        }
+                    };
+                    DELTAS_PER_READ_GLOBAL.observe(converted.num_deltas() as f64);
+
+                    // The walredo module expects the records to be descending in terms of Lsn.
+                    // And we submit the IOs in that order, so, there shuold be no need to sort here.
+                    debug_assert!(
+                        converted
+                            .records
+                            .is_sorted_by_key(|(lsn, _)| std::cmp::Reverse(*lsn)),
+                        "{converted:?}"
+                    );
+                    {
+                        let mut guard = rc_clone.lock().unwrap();
+                        guard.set_debug_state(&converted);
+                    }
+                    (
+                        key,
+                        walredo_self
+                            .reconstruct_value(
+                                key,
+                                req_lsn_for_key,
+                                converted,
+                                RedoAttemptType::ReadPage,
+                            )
+                            .await,
+                    )
+                }
+            });
+        }
+
+        let results = futs
+            .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .await;
 
         Ok(results)
     }
@@ -1893,6 +2057,8 @@ impl Timeline {
     // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
     // ephemeral layer bytes has been breached.
     pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let Ok(mut write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
@@ -2040,6 +2206,7 @@ impl Timeline {
                     compact_lsn_range: None,
                     sub_compaction: false,
                     sub_compaction_max_job_size_mb: None,
+                    gc_compaction_do_metadata_compaction: false,
                 },
                 ctx,
             )
@@ -2663,7 +2830,7 @@ impl Timeline {
                 if r.numerator == 0 {
                     false
                 } else {
-                    rand::thread_rng().gen_range(0..r.denominator) < r.numerator
+                    rand::rng().random_range(0..r.denominator) < r.numerator
                 }
             }
             None => false,
@@ -3071,7 +3238,7 @@ impl Timeline {
                 }),
                 disk_consistent_lsn: AtomicLsn::new(disk_consistent_lsn.0),
 
-                gc_compaction_state: ArcSwap::new(Arc::new(gc_compaction_state)),
+                gc_compaction_state: ArcSwapOption::from_pointee(gc_compaction_state),
 
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
@@ -3179,6 +3346,8 @@ impl Timeline {
                 basebackup_cache: resources.basebackup_cache,
 
                 feature_resolver: resources.feature_resolver.clone(),
+
+                db_rel_count: ArcSwapOption::from_pointee(None),
             };
 
             result.repartition_threshold =
@@ -3250,7 +3419,7 @@ impl Timeline {
         gc_compaction_state: GcCompactionState,
     ) -> anyhow::Result<()> {
         self.gc_compaction_state
-            .store(Arc::new(Some(gc_compaction_state.clone())));
+            .store(Some(Arc::new(gc_compaction_state.clone())));
         self.remote_client
             .schedule_index_upload_for_gc_compaction_state_update(gc_compaction_state)
     }
@@ -3272,7 +3441,10 @@ impl Timeline {
     }
 
     pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {
-        self.gc_compaction_state.load_full().as_ref().clone()
+        self.gc_compaction_state
+            .load()
+            .as_ref()
+            .map(|x| x.as_ref().clone())
     }
 
     /// Creates and starts the wal receiver.
@@ -3752,7 +3924,7 @@ impl Timeline {
                                 // 1hour base
                                 (60_i64 * 60_i64)
                                     // 10min jitter
-                                    + rand::thread_rng().gen_range(-10 * 60..10 * 60),
+                                    + rand::rng().random_range(-10 * 60..10 * 60),
                             )
                             .expect("10min < 1hour"),
                         );
@@ -5611,10 +5783,11 @@ impl Timeline {
     /// Predicate function which indicates whether we should check if new image layers
     /// are required. Since checking if new image layers are required is expensive in
     /// terms of CPU, we only do it in the following cases:
-    /// 1. If the timeline has ingested sufficient WAL to justify the cost
+    /// 1. If the timeline has ingested sufficient WAL to justify the cost or ...
     /// 2. If enough time has passed since the last check:
     ///     1. For large tenants, we wish to perform the check more often since they
-    ///        suffer from the lack of image layers
+    ///        suffer from the lack of image layers. Note that we assume sharded tenants
+    ///        to be large since non-zero shards do not track the logical size.
     ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
         let large_timeline_threshold = self.conf.image_layer_generation_large_timeline_threshold;
@@ -5628,30 +5801,39 @@ impl Timeline {
 
         let distance_based_decision = distance.0 >= min_distance;
 
-        let mut time_based_decision = false;
         let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
-        if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
-            let check_required_after =
-                if Some(Into::<u64>::into(&logical_size)) >= large_timeline_threshold {
-                    self.get_checkpoint_timeout()
-                } else {
-                    Duration::from_secs(3600 * 48)
-                };
-
-            time_based_decision = match *last_check_instant {
-                Some(last_check) => {
-                    let elapsed = last_check.elapsed();
-                    elapsed >= check_required_after
+        let check_required_after = (|| {
+            if self.shard_identity.is_unsharded() {
+                if let CurrentLogicalSize::Exact(logical_size) =
+                    self.current_logical_size.current_size()
+                {
+                    if Some(Into::<u64>::into(&logical_size)) < large_timeline_threshold {
+                        return Duration::from_secs(3600 * 48);
+                    }
                 }
-                None => true,
-            };
-        }
+            }
+
+            self.get_checkpoint_timeout()
+        })();
+
+        let time_based_decision = match *last_check_instant {
+            Some(last_check) => {
+                let elapsed = last_check.elapsed();
+                elapsed >= check_required_after
+            }
+            None => true,
+        };
 
         // Do the expensive delta layer counting only if this timeline has ingested sufficient
         // WAL since the last check or a checkpoint timeout interval has elapsed since the last
         // check.
         let decision = distance_based_decision || time_based_decision;
-
+        tracing::info!(
+            "Decided to check image layers: {}. Distance-based decision: {}, time-based decision: {}",
+            decision,
+            distance_based_decision,
+            time_based_decision
+        );
         if decision {
             self.last_image_layer_creation_check_at.store(lsn);
             *last_check_instant = Some(Instant::now());

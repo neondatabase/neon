@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures::future::pending;
 use tokio::time::Instant;
 use tracing::{error, info, warn};
 
@@ -8,60 +9,54 @@ use utils::backoff::exponential_backoff_duration;
 /// A retry handler for Pageserver gRPC requests.
 ///
 /// This is used instead of backoff::retry for better control and observability.
-pub struct Retry;
+pub struct Retry {
+    /// Timeout across all retry attempts. If None, retries forever.
+    pub timeout: Option<Duration>,
+    /// The initial backoff duration. The first retry does not use a backoff.
+    pub base_backoff: Duration,
+    /// The maximum backoff duration.
+    pub max_backoff: Duration,
+}
 
 impl Retry {
-    /// The per-request timeout.
-    // TODO: tune these, and/or make them configurable. Should we retry forever?
-    const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-    /// The total timeout across all attempts
-    const TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
-    /// The initial backoff duration.
-    const BASE_BACKOFF: Duration = Duration::from_millis(10);
-    /// The maximum backoff duration.
-    const MAX_BACKOFF: Duration = Duration::from_secs(10);
-    /// If true, log successful requests. For debugging.
-    const LOG_SUCCESS: bool = false;
-
-    /// Runs the given async closure with timeouts and retries (exponential backoff), passing the
-    /// attempt number starting at 0. Logs errors, using the current tracing span for context.
+    /// Runs the given async closure with timeouts and retries (exponential backoff). Logs errors,
+    /// using the current tracing span for context.
     ///
-    /// Only certain gRPC status codes are retried, see [`Self::should_retry`]. For default
-    /// timeouts, see [`Self::REQUEST_TIMEOUT`] and [`Self::TOTAL_TIMEOUT`].
+    /// Only certain gRPC status codes are retried, see [`Self::should_retry`].
     pub async fn with<T, F, O>(&self, mut f: F) -> tonic::Result<T>
     where
-        F: FnMut(usize) -> O, // takes attempt number, starting at 0
+        F: FnMut(usize) -> O, // pass attempt number, starting at 0
         O: Future<Output = tonic::Result<T>>,
     {
         let started = Instant::now();
-        let deadline = started + Self::TOTAL_TIMEOUT;
+        let deadline = self.timeout.map(|timeout| started + timeout);
         let mut last_error = None;
         let mut retries = 0;
         loop {
-            // Set up a future to wait for the backoff (if any) and run the request with a timeout.
+            // Set up a future to wait for the backoff, if any, and run the closure.
             let backoff_and_try = async {
                 // NB: sleep() always sleeps 1ms, even when given a 0 argument. See:
                 // https://github.com/tokio-rs/tokio/issues/6866
-                if let Some(backoff) = Self::backoff_duration(retries) {
+                if let Some(backoff) = self.backoff_duration(retries) {
                     tokio::time::sleep(backoff).await;
                 }
 
-                let request_started = Instant::now();
-                tokio::time::timeout(Self::REQUEST_TIMEOUT, f(retries))
-                    .await
-                    .map_err(|_| {
-                        tonic::Status::deadline_exceeded(format!(
-                            "request timed out after {:.3}s",
-                            request_started.elapsed().as_secs_f64()
-                        ))
-                    })?
+                f(retries).await
             };
 
-            // Wait for the backoff and request, or bail out if the total timeout is exceeded.
+            // Set up a future for the timeout, if any.
+            let timeout = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => pending().await,
+                }
+            };
+
+            // Wait for the backoff and request, or bail out if the timeout is exceeded.
             let result = tokio::select! {
                 result = backoff_and_try => result,
 
-                _ = tokio::time::sleep_until(deadline) => {
+                _ = timeout => {
                     let last_error = last_error.unwrap_or_else(|| {
                         tonic::Status::deadline_exceeded(format!(
                             "request timed out after {:.3}s",
@@ -79,7 +74,7 @@ impl Retry {
             match result {
                 // Success, return the result.
                 Ok(result) => {
-                    if retries > 0 || Self::LOG_SUCCESS {
+                    if retries > 0 {
                         info!(
                             "request succeeded after {retries} retries in {:.3}s",
                             started.elapsed().as_secs_f64(),
@@ -112,12 +107,13 @@ impl Retry {
         }
     }
 
-    /// Returns the backoff duration for the given retry attempt, or None for no backoff.
-    fn backoff_duration(retry: usize) -> Option<Duration> {
+    /// Returns the backoff duration for the given retry attempt, or None for no backoff. The first
+    /// attempt and first retry never backs off, so this returns None for 0 and 1 retries.
+    fn backoff_duration(&self, retries: usize) -> Option<Duration> {
         let backoff = exponential_backoff_duration(
-            retry as u32,
-            Self::BASE_BACKOFF.as_secs_f64(),
-            Self::MAX_BACKOFF.as_secs_f64(),
+            (retries as u32).saturating_sub(1), // first retry does not back off
+            self.base_backoff.as_secs_f64(),
+            self.max_backoff.as_secs_f64(),
         );
         (!backoff.is_zero()).then_some(backoff)
     }

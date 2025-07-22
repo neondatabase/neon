@@ -23,12 +23,13 @@ use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
 };
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse};
 use crate::control_plane::{
     AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, EndpointAccessControl, NodeInfo,
     RoleAccessControl,
 };
 use crate::metrics::Metrics;
+use crate::proxy::retry::CouldRetry;
 use crate::rate_limiter::WakeComputeRateLimiter;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
 use crate::{compute, http, scram};
@@ -65,6 +66,66 @@ impl NeonControlPlaneClient {
 
     pub(crate) fn url(&self) -> &str {
         self.endpoint.url().as_str()
+    }
+
+    async fn get_and_cache_auth_info<T>(
+        &self,
+        ctx: &RequestContext,
+        endpoint: &EndpointId,
+        role: &RoleName,
+        cache_key: &EndpointId,
+        extract: impl FnOnce(&EndpointAccessControl, &RoleAccessControl) -> T,
+    ) -> Result<T, GetAuthInfoError> {
+        match self.do_get_auth_req(ctx, endpoint, role).await {
+            Ok(auth_info) => {
+                let control = EndpointAccessControl {
+                    allowed_ips: Arc::new(auth_info.allowed_ips),
+                    allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
+                    flags: auth_info.access_blocker_flags,
+                    rate_limits: auth_info.rate_limits,
+                };
+                let role_control = RoleAccessControl {
+                    secret: auth_info.secret,
+                };
+                let res = extract(&control, &role_control);
+
+                self.caches.project_info.insert_endpoint_access(
+                    auth_info.account_id,
+                    auth_info.project_id,
+                    cache_key.into(),
+                    role.into(),
+                    control,
+                    role_control,
+                );
+
+                if let Some(project_id) = auth_info.project_id {
+                    ctx.set_project_id(project_id);
+                }
+
+                Ok(res)
+            }
+            Err(err) => match err {
+                GetAuthInfoError::ApiError(ControlPlaneError::Message(ref msg)) => {
+                    let retry_info = msg.status.as_ref().and_then(|s| s.details.retry_info);
+
+                    // If we can retry this error, do not cache it,
+                    // unless we were given a retry delay.
+                    if msg.could_retry() && retry_info.is_none() {
+                        return Err(err);
+                    }
+
+                    self.caches.project_info.insert_endpoint_access_err(
+                        cache_key.into(),
+                        role.into(),
+                        msg.clone(),
+                        retry_info.map(|r| Duration::from_millis(r.retry_delay_ms)),
+                    );
+
+                    Err(err)
+                }
+                err => Err(err),
+            },
+        }
     }
 
     async fn do_get_auth_req(
@@ -283,43 +344,34 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         ctx: &RequestContext,
         endpoint: &EndpointId,
         role: &RoleName,
-    ) -> Result<RoleAccessControl, crate::control_plane::errors::GetAuthInfoError> {
-        let normalized_ep = &endpoint.normalize();
-        if let Some(secret) = self
+    ) -> Result<RoleAccessControl, GetAuthInfoError> {
+        let key = endpoint.normalize();
+
+        if let Some((role_control, ttl)) = self
             .caches
             .project_info
-            .get_role_secret(normalized_ep, role)
+            .get_role_secret_with_ttl(&key, role)
         {
-            return Ok(secret);
+            return match role_control {
+                Err(mut msg) => {
+                    info!(key = &*key, "found cached get_role_access_control error");
+
+                    // if retry_delay_ms is set change it to the remaining TTL
+                    replace_retry_delay_ms(&mut msg, |_| ttl.as_millis() as u64);
+
+                    Err(GetAuthInfoError::ApiError(ControlPlaneError::Message(msg)))
+                }
+                Ok(role_control) => {
+                    debug!(key = &*key, "found cached role access control");
+                    Ok(role_control)
+                }
+            };
         }
 
-        let auth_info = self.do_get_auth_req(ctx, endpoint, role).await?;
-
-        let control = EndpointAccessControl {
-            allowed_ips: Arc::new(auth_info.allowed_ips),
-            allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
-            flags: auth_info.access_blocker_flags,
-            rate_limits: auth_info.rate_limits,
-        };
-        let role_control = RoleAccessControl {
-            secret: auth_info.secret,
-        };
-
-        if let Some(project_id) = auth_info.project_id {
-            let normalized_ep_int = normalized_ep.into();
-
-            self.caches.project_info.insert_endpoint_access(
-                auth_info.account_id,
-                project_id,
-                normalized_ep_int,
-                role.into(),
-                control,
-                role_control.clone(),
-            );
-            ctx.set_project_id(project_id);
-        }
-
-        Ok(role_control)
+        self.get_and_cache_auth_info(ctx, endpoint, role, &key, |_, role_control| {
+            role_control.clone()
+        })
+        .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -329,38 +381,30 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
         endpoint: &EndpointId,
         role: &RoleName,
     ) -> Result<EndpointAccessControl, GetAuthInfoError> {
-        let normalized_ep = &endpoint.normalize();
-        if let Some(control) = self.caches.project_info.get_endpoint_access(normalized_ep) {
-            return Ok(control);
+        let key = endpoint.normalize();
+
+        if let Some((control, ttl)) = self.caches.project_info.get_endpoint_access_with_ttl(&key) {
+            return match control {
+                Err(mut msg) => {
+                    info!(
+                        key = &*key,
+                        "found cached get_endpoint_access_control error"
+                    );
+
+                    // if retry_delay_ms is set change it to the remaining TTL
+                    replace_retry_delay_ms(&mut msg, |_| ttl.as_millis() as u64);
+
+                    Err(GetAuthInfoError::ApiError(ControlPlaneError::Message(msg)))
+                }
+                Ok(control) => {
+                    debug!(key = &*key, "found cached endpoint access control");
+                    Ok(control)
+                }
+            };
         }
 
-        let auth_info = self.do_get_auth_req(ctx, endpoint, role).await?;
-
-        let control = EndpointAccessControl {
-            allowed_ips: Arc::new(auth_info.allowed_ips),
-            allowed_vpce: Arc::new(auth_info.allowed_vpc_endpoint_ids),
-            flags: auth_info.access_blocker_flags,
-            rate_limits: auth_info.rate_limits,
-        };
-        let role_control = RoleAccessControl {
-            secret: auth_info.secret,
-        };
-
-        if let Some(project_id) = auth_info.project_id {
-            let normalized_ep_int = normalized_ep.into();
-
-            self.caches.project_info.insert_endpoint_access(
-                auth_info.account_id,
-                project_id,
-                normalized_ep_int,
-                role.into(),
-                control.clone(),
-                role_control,
-            );
-            ctx.set_project_id(project_id);
-        }
-
-        Ok(control)
+        self.get_and_cache_auth_info(ctx, endpoint, role, &key, |control, _| control.clone())
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -382,16 +426,27 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
 
         macro_rules! check_cache {
             () => {
-                if let Some(cached) = self.caches.node_info.get(&key) {
-                    let (cached, info) = cached.take_value();
-                    let info = info.map_err(|c| {
-                        info!(key = &*key, "found cached wake_compute error");
-                        WakeComputeError::ControlPlane(ControlPlaneError::Message(Box::new(*c)))
-                    })?;
+                if let Some(cached) = self.caches.node_info.get_with_created_at(&key) {
+                    let (cached, (info, created_at)) = cached.take_value();
+                    return match info {
+                        Err(mut msg) => {
+                            info!(key = &*key, "found cached wake_compute error");
 
-                    debug!(key = &*key, "found cached compute node info");
-                    ctx.set_project(info.aux.clone());
-                    return Ok(cached.map(|()| info));
+                            // if retry_delay_ms is set, reduce it by the amount of time it spent in cache
+                            replace_retry_delay_ms(&mut msg, |delay| {
+                                delay.saturating_sub(created_at.elapsed().as_millis() as u64)
+                            });
+
+                            Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
+                                msg,
+                            )))
+                        }
+                        Ok(info) => {
+                            debug!(key = &*key, "found cached compute node info");
+                            ctx.set_project(info.aux.clone());
+                            Ok(cached.map(|()| info))
+                        }
+                    };
                 }
             };
         }
@@ -434,44 +489,39 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                 Ok(cached.map(|()| node))
             }
             Err(err) => match err {
-                WakeComputeError::ControlPlane(ControlPlaneError::Message(err)) => {
-                    let Some(status) = &err.status else {
-                        return Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
-                            err,
-                        )));
-                    };
+                WakeComputeError::ControlPlane(ControlPlaneError::Message(ref msg)) => {
+                    let retry_info = msg.status.as_ref().and_then(|s| s.details.retry_info);
 
-                    let reason = status
-                        .details
-                        .error_info
-                        .map_or(Reason::Unknown, |x| x.reason);
-
-                    // if we can retry this error, do not cache it.
-                    if reason.can_retry() {
-                        return Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
-                            err,
-                        )));
+                    // If we can retry this error, do not cache it,
+                    // unless we were given a retry delay.
+                    if msg.could_retry() && retry_info.is_none() {
+                        return Err(err);
                     }
 
-                    // at this point, we should only have quota errors.
                     debug!(
                         key = &*key,
                         "created a cache entry for the wake compute error"
                     );
 
-                    self.caches.node_info.insert_ttl(
-                        key,
-                        Err(err.clone()),
-                        Duration::from_secs(30),
-                    );
+                    let ttl = retry_info.map_or(Duration::from_secs(30), |r| {
+                        Duration::from_millis(r.retry_delay_ms)
+                    });
 
-                    Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
-                        err,
-                    )))
+                    self.caches.node_info.insert_ttl(key, Err(msg.clone()), ttl);
+
+                    Err(err)
                 }
-                err => return Err(err),
+                err => Err(err),
             },
         }
+    }
+}
+
+fn replace_retry_delay_ms(msg: &mut ControlPlaneErrorMessage, f: impl FnOnce(u64) -> u64) {
+    if let Some(status) = &mut msg.status
+        && let Some(retry_info) = &mut status.details.retry_info
+    {
+        retry_info.retry_delay_ms = f(retry_info.retry_delay_ms);
     }
 }
 

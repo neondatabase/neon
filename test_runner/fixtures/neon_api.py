@@ -24,6 +24,7 @@ def connection_parameters_to_env(params: dict[str, str]) -> dict[str, str]:
 
 # Some API calls not yet implemented.
 # You may want to copy not-yet-implemented methods from the PR https://github.com/neondatabase/neon/pull/11305
+@final
 class NeonAPI:
     def __init__(self, neon_api_key: str, neon_api_base_url: str):
         self.__neon_api_key = neon_api_key
@@ -34,7 +35,9 @@ class NeonAPI:
         self.retries524 = 0
         self.retries4xx = 0
 
-    def __request(self, method: str | bytes, endpoint: str, **kwargs: Any) -> requests.Response:
+    def __request(
+        self, method: str | bytes, endpoint: str, retry404: bool = False, **kwargs: Any
+    ) -> requests.Response:
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
 
@@ -55,10 +58,12 @@ class NeonAPI:
                 resp.raise_for_status()
                 break
             elif resp.status_code >= 400:
-                if resp.status_code == 422:
-                    if resp.json()["message"] == "branch not ready yet":
-                        retry = True
-                        self.retries4xx += 1
+                if resp.status_code == 404 and retry404:
+                    retry = True
+                    self.retries4xx += 1
+                elif resp.status_code == 422 and resp.json()["message"] == "branch not ready yet":
+                    retry = True
+                    self.retries4xx += 1
                 elif resp.status_code == 423 and resp.json()["message"] in {
                     "endpoint is in some transitive state, could not suspend",
                     "project already has running conflicting operations, scheduling of new ones is prohibited",
@@ -66,7 +71,7 @@ class NeonAPI:
                     retry = True
                     self.retries4xx += 1
                 elif resp.status_code == 524:
-                    log.info("The request was timed out, trying to get operations")
+                    log.info("The request was timed out")
                     retry = True
                     self.retries524 += 1
             if retry:
@@ -166,7 +171,7 @@ class NeonAPI:
         protected: bool | None = None,
         archived: bool | None = None,
         init_source: str | None = None,
-        add_endpoint=True,
+        add_endpoint: bool = True,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {}
         if add_endpoint:
@@ -203,6 +208,9 @@ class NeonAPI:
         resp = self.__request(
             "GET",
             f"/projects/{project_id}/branches/{branch_id}",
+            # XXX Retry get parent details to work around the issue
+            # https://databricks.atlassian.net/browse/LKB-279
+            retry404=True,
             headers={
                 "Accept": "application/json",
             },
@@ -213,6 +221,16 @@ class NeonAPI:
         resp = self.__request(
             "DELETE",
             f"/projects/{project_id}/branches/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
+    def reset_to_parent(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/reset_to_parent",
             headers={
                 "Accept": "application/json",
             },
@@ -307,6 +325,10 @@ class NeonAPI:
         if endpoint_type:
             data["endpoint"]["type"] = endpoint_type
         if settings:
+            # otherwise we get 400 "settings must not be nil"
+            # TODO(myrrc): fix on cplane side
+            if "pg_settings" not in settings:
+                settings["pg_settings"] = {}
             data["endpoint"]["settings"] = settings
 
         resp = self.__request(

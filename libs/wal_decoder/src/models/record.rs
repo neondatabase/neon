@@ -2,7 +2,8 @@
 
 use bytes::Bytes;
 use postgres_ffi::walrecord::{MultiXactMember, describe_postgres_wal_record};
-use postgres_ffi::{MultiXactId, MultiXactOffset, TimestampTz, TransactionId};
+use postgres_ffi::{MultiXactId, MultiXactOffset, TransactionId};
+use postgres_ffi_types::TimestampTz;
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::DeserializeError;
 

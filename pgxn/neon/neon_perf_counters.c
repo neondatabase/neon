@@ -17,21 +17,31 @@
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 
+#include "neon.h"
 #include "neon_perf_counters.h"
 #include "neon_pgversioncompat.h"
 
 neon_per_backend_counters *neon_per_backend_counters_shared;
 
-Size
-NeonPerfCountersShmemSize(void)
+void
+NeonPerfCountersShmemRequest(void)
 {
-	Size		size = 0;
-
-	size = add_size(size, mul_size(NUM_NEON_PERF_COUNTER_SLOTS,
-								   sizeof(neon_per_backend_counters)));
-
-	return size;
+	Size size;
+#if PG_MAJORVERSION_NUM < 15
+	/* Hack: in PG14 MaxBackends is not initialized at the time of calling NeonPerfCountersShmemRequest function.
+	 * Do it ourselves and then undo to prevent assertion failure
+	 */
+	Assert(MaxBackends == 0); /* not initialized yet */
+	InitializeMaxBackends();
+	size = mul_size(NUM_NEON_PERF_COUNTER_SLOTS, sizeof(neon_per_backend_counters));
+	MaxBackends = 0;
+#else
+	size = mul_size(NUM_NEON_PERF_COUNTER_SLOTS, sizeof(neon_per_backend_counters));
+#endif
+	RequestAddinShmemSpace(size);
 }
+
+
 
 void
 NeonPerfCountersShmemInit(void)

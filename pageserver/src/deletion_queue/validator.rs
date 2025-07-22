@@ -1,5 +1,5 @@
 //! The validator is responsible for validating DeletionLists for execution,
-//! based on whethe the generation in the DeletionList is still the latest
+//! based on whether the generation in the DeletionList is still the latest
 //! generation for a tenant.
 //!
 //! The purpose of validation is to ensure split-brain safety in the cluster

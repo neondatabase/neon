@@ -3396,7 +3396,13 @@ impl TenantShard {
                 .collect_vec();
 
             for timeline in timelines {
-                timeline.maybe_freeze_ephemeral_layer().await;
+                // Include a span with the timeline ID. The parent span already has the tenant ID.
+                let span =
+                    info_span!("maybe_freeze_ephemeral_layer", timeline_id = %timeline.timeline_id);
+                timeline
+                    .maybe_freeze_ephemeral_layer()
+                    .instrument(span)
+                    .await;
             }
         }
 
@@ -6167,11 +6173,11 @@ mod tests {
     use pageserver_api::keyspace::KeySpaceRandomAccum;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings, LsnLease};
     use pageserver_compaction::helpers::overlaps_with;
+    use rand::Rng;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
     #[cfg(feature = "testing")]
     use rand::rngs::StdRng;
-    use rand::{Rng, thread_rng};
     #[cfg(feature = "testing")]
     use std::ops::Range;
     use storage_layer::{IoConcurrency, PersistentLayerKey};
@@ -6292,8 +6298,8 @@ mod tests {
             while lsn < lsn_range.end {
                 let mut key = key_range.start;
                 while key < key_range.end {
-                    let gap = random.gen_range(1..=100) <= spec.gap_chance;
-                    let will_init = random.gen_range(1..=100) <= spec.will_init_chance;
+                    let gap = random.random_range(1..=100) <= spec.gap_chance;
+                    let will_init = random.random_range(1..=100) <= spec.will_init_chance;
 
                     if gap {
                         continue;
@@ -6336,8 +6342,8 @@ mod tests {
             while lsn < lsn_range.end {
                 let mut key = key_range.start;
                 while key < key_range.end {
-                    let gap = random.gen_range(1..=100) <= spec.gap_chance;
-                    let will_init = random.gen_range(1..=100) <= spec.will_init_chance;
+                    let gap = random.random_range(1..=100) <= spec.gap_chance;
+                    let will_init = random.random_range(1..=100) <= spec.will_init_chance;
 
                     if gap {
                         continue;
@@ -7814,7 +7820,7 @@ mod tests {
         for _ in 0..50 {
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let mut writer = tline.writer().await;
                 writer
@@ -7903,7 +7909,7 @@ mod tests {
 
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let mut writer = tline.writer().await;
                 writer
@@ -7971,7 +7977,7 @@ mod tests {
 
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let mut writer = tline.writer().await;
                 writer
@@ -8235,7 +8241,7 @@ mod tests {
 
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = (blknum * STEP) as u32;
                 let mut writer = tline.writer().await;
                 writer
@@ -8508,7 +8514,7 @@ mod tests {
         for iter in 1..=10 {
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = (blknum * STEP) as u32;
                 let mut writer = tline.writer().await;
                 writer
@@ -9222,7 +9228,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -9305,7 +9315,11 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -9842,7 +9856,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -9877,7 +9895,11 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -10452,7 +10474,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     flags: dryrun_flags,
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -10463,14 +10485,22 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -10489,14 +10519,22 @@ mod tests {
             guard.cutoffs.space = Lsn(0x38);
         }
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await; // no wals between 0x30 and 0x38, so we should obtain the same result
 
         // not increasing the GC horizon and compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -10701,7 +10739,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     flags: dryrun_flags,
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -10712,14 +10750,22 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -10919,7 +10965,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         branch_tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -10932,7 +10982,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     compact_lsn_range: Some(CompactLsnRange::above(Lsn(0x40))),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11253,10 +11303,10 @@ mod tests {
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_read_path() -> anyhow::Result<()> {
-        use rand::seq::SliceRandom;
+        use rand::seq::IndexedRandom;
 
         let seed = if cfg!(feature = "fuzz-read-path") {
-            let seed: u64 = thread_rng().r#gen();
+            let seed: u64 = rand::rng().random();
             seed
         } else {
             // Use a hard-coded seed when not in fuzzing mode.
@@ -11270,8 +11320,8 @@ mod tests {
 
         let (queries, will_init_chance, gap_chance) = if cfg!(feature = "fuzz-read-path") {
             const QUERIES: u64 = 5000;
-            let will_init_chance: u8 = random.gen_range(0..=10);
-            let gap_chance: u8 = random.gen_range(0..=50);
+            let will_init_chance: u8 = random.random_range(0..=10);
+            let gap_chance: u8 = random.random_range(0..=50);
 
             (QUERIES, will_init_chance, gap_chance)
         } else {
@@ -11372,7 +11422,8 @@ mod tests {
 
                 while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                     let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
-                    let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
+                    let mut selected_key =
+                        start_key.add(random.random_range(0..KEY_DIMENSION_SIZE));
 
                     while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                         if used_keys.contains(&selected_key)
@@ -11387,7 +11438,7 @@ mod tests {
                             .add_key(selected_key);
                         used_keys.insert(selected_key);
 
-                        let pick_next = random.gen_range(0..=100) <= PICK_NEXT_CHANCE;
+                        let pick_next = random.random_range(0..=100) <= PICK_NEXT_CHANCE;
                         if pick_next {
                             selected_key = selected_key.next();
                         } else {
@@ -11600,7 +11651,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(0)..get_key(2)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11647,7 +11698,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(2)..get_key(4)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11699,7 +11750,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(4)..get_key(9)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11750,7 +11801,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(9)..get_key(10)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11806,7 +11857,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(0)..get_key(10)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12077,7 +12128,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     compact_lsn_range: Some(CompactLsnRange::above(Lsn(0x28))),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12112,7 +12163,11 @@ mod tests {
 
         // compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -12331,7 +12386,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: Some((get_key(0)..get_key(2)).into()),
                     compact_lsn_range: Some((Lsn(0x20)..Lsn(0x28)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12377,7 +12432,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: Some((get_key(3)..get_key(8)).into()),
                     compact_lsn_range: Some((Lsn(0x28)..Lsn(0x40)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12425,7 +12480,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: Some((get_key(0)..get_key(5)).into()),
                     compact_lsn_range: Some((Lsn(0x20)..Lsn(0x50)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12460,7 +12515,11 @@ mod tests {
 
         // final full compaction
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -12570,7 +12629,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: None,
                     compact_lsn_range: None,
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )

@@ -107,7 +107,7 @@ pub(crate) struct ErrorInfo {
     // Schema could also have `metadata` field, but it's not structured. Skip it for now.
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, Deserialize, Default, PartialEq, Eq)]
 pub(crate) enum Reason {
     /// RoleProtected indicates that the role is protected and the attempted operation is not permitted on protected roles.
     #[serde(rename = "ROLE_PROTECTED")]
@@ -126,10 +126,16 @@ pub(crate) enum Reason {
     /// or that the subject doesn't have enough permissions to access the requested endpoint.
     #[serde(rename = "ENDPOINT_NOT_FOUND")]
     EndpointNotFound,
+    /// EndpointDisabled indicates that the endpoint has been disabled and does not accept connections.
+    #[serde(rename = "ENDPOINT_DISABLED")]
+    EndpointDisabled,
     /// BranchNotFound indicates that the branch wasn't found, usually due to the provided ID not being correct,
     /// or that the subject doesn't have enough permissions to access the requested branch.
     #[serde(rename = "BRANCH_NOT_FOUND")]
     BranchNotFound,
+    /// WrongLsnOrTimestamp indicates that the specified LSN or timestamp are wrong.
+    #[serde(rename = "WRONG_LSN_OR_TIMESTAMP")]
+    WrongLsnOrTimestamp,
     /// RateLimitExceeded indicates that the rate limit for the operation has been exceeded.
     #[serde(rename = "RATE_LIMIT_EXCEEDED")]
     RateLimitExceeded,
@@ -152,6 +158,9 @@ pub(crate) enum Reason {
     /// LogicalSizeQuotaExceeded indicates that the logical size quota was exceeded.
     #[serde(rename = "LOGICAL_SIZE_QUOTA_EXCEEDED")]
     LogicalSizeQuotaExceeded,
+    /// ActiveEndpointsLimitExceeded indicates that the limit of concurrently active endpoints was exceeded.
+    #[serde(rename = "ACTIVE_ENDPOINTS_LIMIT_EXCEEDED")]
+    ActiveEndpointsLimitExceeded,
     /// RunningOperations indicates that the project already has some running operations
     /// and scheduling of new ones is prohibited.
     #[serde(rename = "RUNNING_OPERATIONS")]
@@ -162,9 +171,13 @@ pub(crate) enum Reason {
     /// LockAlreadyTaken indicates that the we attempted to take a lock that was already taken.
     #[serde(rename = "LOCK_ALREADY_TAKEN")]
     LockAlreadyTaken,
-    /// ActiveEndpointsLimitExceeded indicates that the limit of concurrently active endpoints was exceeded.
-    #[serde(rename = "ACTIVE_ENDPOINTS_LIMIT_EXCEEDED")]
-    ActiveEndpointsLimitExceeded,
+    /// EndpointIdle indicates that the endpoint cannot become active, because it's idle.
+    #[serde(rename = "ENDPOINT_IDLE")]
+    EndpointIdle,
+    /// ProjectUnderMaintenance indicates that the project is currently ongoing maintenance,
+    /// and thus cannot accept connections.
+    #[serde(rename = "PROJECT_UNDER_MAINTENANCE")]
+    ProjectUnderMaintenance,
     #[default]
     #[serde(other)]
     Unknown,
@@ -184,13 +197,15 @@ impl Reason {
     pub(crate) fn can_retry(self) -> bool {
         match self {
             // do not retry role protected errors
-            // not a transitive error
+            // not a transient error
             Reason::RoleProtected => false,
-            // on retry, it will still not be found
+            // on retry, it will still not be found or valid
             Reason::ResourceNotFound
             | Reason::ProjectNotFound
             | Reason::EndpointNotFound
-            | Reason::BranchNotFound => false,
+            | Reason::EndpointDisabled
+            | Reason::BranchNotFound
+            | Reason::WrongLsnOrTimestamp => false,
             // we were asked to go away
             Reason::RateLimitExceeded
             | Reason::NonDefaultBranchComputeTimeExceeded
@@ -200,11 +215,13 @@ impl Reason {
             | Reason::DataTransferQuotaExceeded
             | Reason::LogicalSizeQuotaExceeded
             | Reason::ActiveEndpointsLimitExceeded => false,
-            // transitive error. control plane is currently busy
+            // transient error. control plane is currently busy
             // but might be ready soon
             Reason::RunningOperations
             | Reason::ConcurrencyLimitReached
-            | Reason::LockAlreadyTaken => true,
+            | Reason::LockAlreadyTaken
+            | Reason::EndpointIdle
+            | Reason::ProjectUnderMaintenance => true,
             // unknown error. better not retry it.
             Reason::Unknown => false,
         }
@@ -240,19 +257,19 @@ pub(crate) struct GetEndpointAccessControl {
     pub(crate) rate_limits: EndpointRateLimitConfig,
 }
 
-#[derive(Copy, Clone, Deserialize, Default)]
+#[derive(Copy, Clone, Deserialize, Default, Debug)]
 pub struct EndpointRateLimitConfig {
     pub connection_attempts: ConnectionAttemptsLimit,
 }
 
-#[derive(Copy, Clone, Deserialize, Default)]
+#[derive(Copy, Clone, Deserialize, Default, Debug)]
 pub struct ConnectionAttemptsLimit {
     pub tcp: Option<LeakyBucketSetting>,
     pub ws: Option<LeakyBucketSetting>,
     pub http: Option<LeakyBucketSetting>,
 }
 
-#[derive(Copy, Clone, Deserialize)]
+#[derive(Copy, Clone, Deserialize, Debug)]
 pub struct LeakyBucketSetting {
     pub rps: f64,
     pub burst: f64,

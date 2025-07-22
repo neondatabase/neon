@@ -17,12 +17,14 @@ use http_utils::tls_certs::ReloadingCertificateResolver;
 use metrics::set_build_info_metric;
 use remote_storage::RemoteStorageConfig;
 use safekeeper::defaults::{
-    DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
-    DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
+    DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT,
+    DEFAULT_GLOBAL_DISK_CHECK_INTERVAL, DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR,
+    DEFAULT_MAX_GLOBAL_DISK_USAGE_RATIO, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
     DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES, DEFAULT_MAX_TIMELINE_DISK_USAGE_BYTES,
     DEFAULT_PARTIAL_BACKUP_CONCURRENCY, DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
     DEFAULT_SSL_CERT_FILE, DEFAULT_SSL_CERT_RELOAD_PERIOD, DEFAULT_SSL_KEY_FILE,
 };
+use safekeeper::hadron;
 use safekeeper::wal_backup::WalBackup;
 use safekeeper::{
     BACKGROUND_RUNTIME, BROKER_RUNTIME, GlobalTimelines, HTTP_RUNTIME, SafeKeeperConf,
@@ -40,6 +42,12 @@ use utils::logging::{self, LogFormat, SecretString};
 use utils::metrics_collector::{METRICS_COLLECTION_INTERVAL, METRICS_COLLECTOR};
 use utils::sentry_init::init_sentry;
 use utils::{pid_file, project_build_tag, project_git_version, tcp_listener};
+
+use safekeeper::hadron::{
+    GLOBAL_DISK_LIMIT_EXCEEDED, get_filesystem_capacity, get_filesystem_usage,
+};
+use safekeeper::metrics::GLOBAL_DISK_UTIL_CHECK_SECONDS;
+use std::sync::atomic::Ordering;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -252,6 +260,19 @@ struct Args {
     /// Run in development mode (disables security checks)
     #[arg(long, help = "Run in development mode (disables security checks)")]
     dev: bool,
+    /* BEGIN_HADRON */
+    #[arg(long)]
+    enable_pull_timeline_on_startup: bool,
+    /// How often to scan entire data-dir for total disk usage
+    #[arg(long, value_parser=humantime::parse_duration, default_value = DEFAULT_GLOBAL_DISK_CHECK_INTERVAL)]
+    global_disk_check_interval: Duration,
+    /// The portion of the filesystem capacity that can be used by all timelines.
+    /// A circuit breaker will trip and reject all WAL writes if the total usage
+    /// exceeds this ratio.
+    /// Set to 0 to disable the global disk usage limit.
+    #[arg(long, default_value_t = DEFAULT_MAX_GLOBAL_DISK_USAGE_RATIO)]
+    max_global_disk_usage_ratio: f64,
+    /* END_HADRON */
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -435,6 +456,13 @@ async fn main() -> anyhow::Result<()> {
         use_https_safekeeper_api: args.use_https_safekeeper_api,
         enable_tls_wal_service_api: args.enable_tls_wal_service_api,
         force_metric_collection_on_scrape: args.force_metric_collection_on_scrape,
+        /* BEGIN_HADRON */
+        advertise_pg_addr_tenant_only: None,
+        enable_pull_timeline_on_startup: args.enable_pull_timeline_on_startup,
+        hcc_base_url: None,
+        global_disk_check_interval: args.global_disk_check_interval,
+        max_global_disk_usage_ratio: args.max_global_disk_usage_ratio,
+        /* END_HADRON */
     });
 
     // initialize sentry if SENTRY_DSN is provided
@@ -529,6 +557,20 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
     // Load all timelines from disk to memory.
     global_timelines.init().await?;
 
+    /* BEGIN_HADRON */
+    if conf.enable_pull_timeline_on_startup && global_timelines.timelines_count() == 0 {
+        match hadron::hcc_pull_timelines(&conf, global_timelines.clone()).await {
+            Ok(_) => {
+                info!("Successfully pulled all timelines from peer safekeepers");
+            }
+            Err(e) => {
+                error!("Failed to pull timelines from peer safekeepers: {:?}", e);
+                return Err(e);
+            }
+        }
+    }
+    /* END_HADRON */
+
     // Run everything in current thread rt, if asked.
     if conf.current_thread_runtime {
         info!("running in current thread runtime");
@@ -594,6 +636,49 @@ async fn start_safekeeper(conf: Arc<SafeKeeperConf>) -> Result<()> {
         .map(|res| ("Timeline map housekeeping".to_owned(), res));
     tasks_handles.push(Box::pin(timeline_housekeeping_handle));
 
+    /* BEGIN_HADRON */
+    // Spawn global disk usage watcher task, if a global disk usage limit is specified.
+    let interval = conf.global_disk_check_interval;
+    let data_dir = conf.workdir.clone();
+    // Use the safekeeper data directory to compute filesystem capacity. This only runs once on startup, so
+    // there is little point to continue if we can't have the proper protections in place.
+    let fs_capacity_bytes = get_filesystem_capacity(data_dir.as_std_path())
+        .expect("Failed to get filesystem capacity for data directory");
+    let limit: u64 = (conf.max_global_disk_usage_ratio * fs_capacity_bytes as f64) as u64;
+    if limit > 0 {
+        let disk_usage_watch_handle = BACKGROUND_RUNTIME
+            .handle()
+            .spawn(async move {
+                // Use Tokio interval to preserve fixed cadence between filesystem utilization checks
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+                loop {
+                    ticker.tick().await;
+                    let data_dir_clone = data_dir.clone();
+                    let check_start = Instant::now();
+
+                    let usage = tokio::task::spawn_blocking(move || {
+                        get_filesystem_usage(data_dir_clone.as_std_path())
+                    })
+                    .await
+                    .unwrap_or(0);
+
+                    let elapsed = check_start.elapsed().as_secs_f64();
+                    GLOBAL_DISK_UTIL_CHECK_SECONDS.observe(elapsed);
+                    if usage > limit {
+                        warn!(
+                            "Global disk usage exceeded limit. Usage: {} bytes, limit: {} bytes",
+                            usage, limit
+                        );
+                    }
+                    GLOBAL_DISK_LIMIT_EXCEEDED.store(usage > limit, Ordering::Relaxed);
+                }
+            })
+            .map(|res| ("Global disk usage watcher".to_string(), res));
+        tasks_handles.push(Box::pin(disk_usage_watch_handle));
+    }
+    /* END_HADRON */
     if let Some(pg_listener_tenant_only) = pg_listener_tenant_only {
         let wal_service_handle = current_thread_rt
             .as_ref()

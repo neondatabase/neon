@@ -31,6 +31,7 @@ pub struct UnreliableWrapper {
     /* BEGIN_HADRON */
     // This the probability of failure for each operation, ranged from [0, 100].
     // The probability is default to 100, which means that all operations will fail.
+    // Storage will fail by probability up to attempts_to_fail times.
     attempt_failure_probability: u64,
     /* END_HADRON */
 }
@@ -80,7 +81,7 @@ impl UnreliableWrapper {
     ///
     fn attempt(&self, op: RemoteOp) -> anyhow::Result<u64> {
         let mut attempts = self.attempts.lock().unwrap();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         match attempts.entry(op) {
             Entry::Occupied(mut e) => {
@@ -93,7 +94,7 @@ impl UnreliableWrapper {
                 /* BEGIN_HADRON */
                 // If there are more attempts to fail, fail the request by probability.
                 if (attempts_before_this < self.attempts_to_fail)
-                    && (rng.gen_range(0..=100) < self.attempt_failure_probability)
+                    && (rng.random_range(0..=100) < self.attempt_failure_probability)
                 {
                     let error =
                         anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());
