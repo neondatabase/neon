@@ -194,7 +194,12 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    let tracing_provider = init(cli.dev)?;
+    let mut log_dir = None;
+    if cli.lakebase_mode {
+        log_dir = std::env::var("COMPUTE_CTL_LOG_DIRECTORY").ok();
+    }
+
+    let (tracing_provider, _file_logs_guard) = init(cli.dev, log_dir)?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -238,8 +243,11 @@ fn main() -> Result<()> {
     deinit_and_exit(tracing_provider, exit_code);
 }
 
-fn init(dev_mode: bool) -> Result<Option<tracing_utils::Provider>> {
-    let provider = init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+fn init(
+    dev_mode: bool,
+    log_dir: Option<String>,
+) -> Result<Option<tracing_utils::Provider>, Option<tracing_appender::non_blocking::WorkerGuard>> {
+    let (provider, file_logs_guard) = init_tracing_and_logging(DEFAULT_LOG_LEVEL, &log_dir)?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
@@ -250,7 +258,7 @@ fn init(dev_mode: bool) -> Result<Option<tracing_utils::Provider>> {
 
     info!("compute build_tag: {}", &BUILD_TAG.to_string());
 
-    Ok(provider)
+    Ok((provider, file_logs_guard))
 }
 
 fn get_config(cli: &Cli) -> Result<ComputeConfig> {

@@ -119,3 +119,7 @@ pub async fn get_installed_extensions(
         extensions: extensions_map.into_values().collect(),
     })
 }
+
+pub fn initialize_metrics() {
+    Lazy::force(&INSTALLED_EXTENSIONS);
+}
