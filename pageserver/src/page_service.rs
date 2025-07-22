@@ -1636,9 +1636,10 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        Self::handle_get_nblocks_request(&shard, &req, &ctx)
+                        Self::handle_get_nblocks_request(&shard, &req, false, &ctx)
                             .instrument(span.clone())
                             .await
+                            .map(|msg| msg.expect("allow_missing=false"))
                             .map(|msg| (PagestreamBeMessage::Nblocks(msg), timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
@@ -2303,12 +2304,16 @@ impl PageServerHandler {
         Ok(PagestreamExistsResponse { req: *req, exists })
     }
 
+    /// If `allow_missing` is true, returns None instead of Err on missing relations. Otherwise,
+    /// never returns None. It is only supported by the gRPC protocol, so we pass it separately to
+    /// avoid changing the libpq protocol types.
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_nblocks_request(
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
+        allow_missing: bool,
         ctx: &RequestContext,
-    ) -> Result<PagestreamNblocksResponse, PageStreamError> {
+    ) -> Result<Option<PagestreamNblocksResponse>, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -2320,20 +2325,25 @@ impl PageServerHandler {
         .await?;
 
         let n_blocks = timeline
-            .get_rel_size(
+            .get_rel_size_in_reldir(
                 req.rel,
                 Version::LsnRange(LsnRange {
                     effective_lsn: lsn,
                     request_lsn: req.hdr.request_lsn,
                 }),
+                None,
+                allow_missing,
                 ctx,
             )
             .await?;
+        let Some(n_blocks) = n_blocks else {
+            return Ok(None);
+        };
 
-        Ok(PagestreamNblocksResponse {
+        Ok(Some(PagestreamNblocksResponse {
             req: *req,
             n_blocks,
-        })
+        }))
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -3218,12 +3228,24 @@ where
 pub struct GrpcPageServiceHandler {
     tenant_manager: Arc<TenantManager>,
     ctx: RequestContext,
+
+    /// Cancelled to shut down the server. Tonic will shut down in response to this, but wait for
+    /// in-flight requests to complete. Any tasks we spawn ourselves must respect this token.
+    cancel: CancellationToken,
+
+    /// Any tasks we spawn ourselves should clone this gate guard, so that we can wait for them to
+    /// complete during shutdown. Request handlers implicitly hold this guard already.
     gate_guard: GateGuard,
+
+    /// `get_vectored` concurrency setting.
     get_vectored_concurrent_io: GetVectoredConcurrentIo,
 }
 
 impl GrpcPageServiceHandler {
     /// Spawns a gRPC server for the page service.
+    ///
+    /// Returns a `CancellableTask` handle that can be used to shut down the server. It waits for
+    /// any in-flight requests and tasks to complete first.
     ///
     /// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
     /// need to reimplement the TCP+TLS accept loop ourselves.
@@ -3234,12 +3256,15 @@ impl GrpcPageServiceHandler {
         get_vectored_concurrent_io: GetVectoredConcurrentIo,
         listener: std::net::TcpListener,
     ) -> anyhow::Result<CancellableTask> {
+        // Set up a cancellation token for shutting down the server, and a gate to wait for all
+        // requests and spawned tasks to complete.
         let cancel = CancellationToken::new();
+        let gate = Gate::default();
+
         let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
             .download_behavior(DownloadBehavior::Download)
             .perf_span_dispatch(perf_trace_dispatch)
             .detached_child();
-        let gate = Gate::default();
 
         // Set up the TCP socket. We take a preconfigured TcpListener to bind the
         // port early during startup.
@@ -3270,6 +3295,7 @@ impl GrpcPageServiceHandler {
         let page_service_handler = GrpcPageServiceHandler {
             tenant_manager,
             ctx,
+            cancel: cancel.clone(),
             gate_guard: gate.enter().expect("gate was just created"),
             get_vectored_concurrent_io,
         };
@@ -3306,19 +3332,20 @@ impl GrpcPageServiceHandler {
             .build_v1()?;
         let server = server.add_service(reflection_service);
 
-        // Spawn server task.
+        // Spawn server task. It runs until the cancellation token fires and in-flight requests and
+        // tasks complete. The `CancellableTask` will wait for the task's join handle, which
+        // implicitly waits for the gate to close.
         let task_cancel = cancel.clone();
         let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-            "grpc listener",
+            "grpc pageservice listener",
             async move {
-                let result = server
+                server
                     .serve_with_incoming_shutdown(incoming, task_cancel.cancelled())
-                    .await;
-                if result.is_ok() {
-                    // TODO: revisit shutdown logic once page service is implemented.
-                    gate.close().await;
-                }
-                result
+                    .await?;
+                // Server exited cleanly. All requests should have completed by now. Wait for any
+                // spawned tasks to complete as well (e.g. IoConcurrency sidecars) via the gate.
+                gate.close().await;
+                anyhow::Ok(())
             },
         ));
 
@@ -3508,7 +3535,10 @@ impl GrpcPageServiceHandler {
 
 /// Implements the gRPC page service.
 ///
-/// TODO: cancellation.
+/// On client disconnect (e.g. timeout or client shutdown), Tonic will drop the request handler
+/// futures, so the read path must be cancellation-safe. On server shutdown, Tonic will wait for
+/// in-flight requests to complete.
+///
 /// TODO: when the libpq impl is removed, remove the Pagestream types and inline the handler code.
 #[tonic::async_trait]
 impl proto::PageService for GrpcPageServiceHandler {
@@ -3518,39 +3548,6 @@ impl proto::PageService for GrpcPageServiceHandler {
 
     type GetPagesStream =
         Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
-
-    #[instrument(skip_all, fields(rel, lsn))]
-    async fn check_rel_exists(
-        &self,
-        req: tonic::Request<proto::CheckRelExistsRequest>,
-    ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
-        let received_at = extract::<ReceivedAt>(&req).0;
-        let timeline = self.get_request_timeline(&req).await?;
-        let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
-
-        // Validate the request, decorate the span, and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&timeline)?;
-        let req: page_api::CheckRelExistsRequest = req.into_inner().try_into()?;
-
-        span_record!(rel=%req.rel, lsn=%req.read_lsn);
-
-        let req = PagestreamExistsRequest {
-            hdr: Self::make_hdr(req.read_lsn, None),
-            rel: req.rel,
-        };
-
-        // Execute the request and convert the response.
-        let _timer = Self::record_op_start_and_throttle(
-            &timeline,
-            metrics::SmgrQueryType::GetRelExists,
-            received_at,
-        )
-        .await?;
-
-        let resp = PageServerHandler::handle_get_rel_exists_request(&timeline, &req, &ctx).await?;
-        let resp: page_api::CheckRelExistsResponse = resp.exists;
-        Ok(tonic::Response::new(resp.into()))
-    }
 
     #[instrument(skip_all, fields(lsn))]
     async fn get_base_backup(
@@ -3593,8 +3590,14 @@ impl proto::PageService for GrpcPageServiceHandler {
 
         // Spawn a task to run the basebackup.
         let span = Span::current();
+        let gate_guard = self
+            .gate_guard
+            .try_clone()
+            .map_err(|_| tonic::Status::unavailable("shutting down"))?;
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
+            let _gate_guard = gate_guard; // keep gate open until task completes
+
             let gzip_level = match req.compression {
                 page_api::BaseBackupCompression::None => None,
                 // NB: using fast compression because it's on the critical path for compute
@@ -3718,15 +3721,17 @@ impl proto::PageService for GrpcPageServiceHandler {
             .await?;
 
         // Spawn an IoConcurrency sidecar, if enabled.
-        let Ok(gate_guard) = self.gate_guard.try_clone() else {
-            return Err(tonic::Status::unavailable("shutting down"));
-        };
+        let gate_guard = self
+            .gate_guard
+            .try_clone()
+            .map_err(|_| tonic::Status::unavailable("shutting down"))?;
         let io_concurrency =
             IoConcurrency::spawn_from_conf(self.get_vectored_concurrent_io, gate_guard);
 
-        // Spawn a task to handle the GetPageRequest stream.
+        // Construct the GetPageRequest stream handler.
         let span = Span::current();
         let ctx = self.ctx.attached_child();
+        let cancel = self.cancel.clone();
         let mut reqs = req.into_inner();
 
         let resps = async_stream::try_stream! {
@@ -3734,7 +3739,19 @@ impl proto::PageService for GrpcPageServiceHandler {
                 .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
                 .await?
                 .downgrade();
-            while let Some(req) = reqs.message().await? {
+            loop {
+                // NB: Tonic considers the entire stream to be an in-flight request and will wait
+                // for it to complete before shutting down. React to cancellation between requests.
+                let req = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(tonic::Status::unavailable("shutting down")),
+
+                    result = reqs.message() => match result {
+                        Ok(Some(req)) => Ok(req),
+                        Ok(None) => break, // client closed the stream
+                        Err(err) => Err(err),
+                    },
+                }?;
                 let req_id = req.request_id.map(page_api::RequestID::from).unwrap_or_default();
                 let result = Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
                     .instrument(span.clone()) // propagate request span
@@ -3758,7 +3775,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         Ok(tonic::Response::new(Box::pin(resps)))
     }
 
-    #[instrument(skip_all, fields(rel, lsn))]
+    #[instrument(skip_all, fields(rel, lsn, allow_missing))]
     async fn get_rel_size(
         &self,
         req: tonic::Request<proto::GetRelSizeRequest>,
@@ -3770,8 +3787,9 @@ impl proto::PageService for GrpcPageServiceHandler {
         // Validate the request, decorate the span, and convert it to a Pagestream request.
         Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetRelSizeRequest = req.into_inner().try_into()?;
+        let allow_missing = req.allow_missing;
 
-        span_record!(rel=%req.rel, lsn=%req.read_lsn);
+        span_record!(rel=%req.rel, lsn=%req.read_lsn, allow_missing=%req.allow_missing);
 
         let req = PagestreamNblocksRequest {
             hdr: Self::make_hdr(req.read_lsn, None),
@@ -3786,8 +3804,11 @@ impl proto::PageService for GrpcPageServiceHandler {
         )
         .await?;
 
-        let resp = PageServerHandler::handle_get_nblocks_request(&timeline, &req, &ctx).await?;
-        let resp: page_api::GetRelSizeResponse = resp.n_blocks;
+        let resp =
+            PageServerHandler::handle_get_nblocks_request(&timeline, &req, allow_missing, &ctx)
+                .await?;
+        let resp: page_api::GetRelSizeResponse = resp.map(|resp| resp.n_blocks);
+
         Ok(tonic::Response::new(resp.into()))
     }
 

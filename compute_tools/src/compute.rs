@@ -2729,7 +2729,10 @@ mod tests {
 
         match ParsedSpec::try_from(spec.clone()) {
             Ok(_p) => panic!("Failed to detect duplicate entry"),
-            Err(e) => assert!(e.to_string().starts_with("duplicate entry in safekeeper_connstrings:")),
+            Err(e) => assert!(
+                e.to_string()
+                    .starts_with("duplicate entry in safekeeper_connstrings:")
+            ),
         };
     }
 }
