@@ -233,7 +233,13 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let session = cancellation_handler.get_key();
 
-    finish_client_init(&pg_settings, *session.key(), &mut stream);
+    finish_client_init(
+        ctx,
+        &pg_settings,
+        *session.key(),
+        &mut stream,
+        &config.greetings,
+    );
     let stream = stream.flush_and_into_inner().await?;
 
     let session_id = ctx.session_id();

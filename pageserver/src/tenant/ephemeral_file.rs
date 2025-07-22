@@ -508,8 +508,8 @@ mod tests {
 
         let write_nbytes = cap * 2 + cap / 2;
 
-        let content: Vec<u8> = rand::thread_rng()
-            .sample_iter(rand::distributions::Standard)
+        let content: Vec<u8> = rand::rng()
+            .sample_iter(rand::distr::StandardUniform)
             .take(write_nbytes)
             .collect();
 
@@ -565,8 +565,8 @@ mod tests {
         let cap = writer.mutable().capacity();
         drop(writer);
 
-        let content: Vec<u8> = rand::thread_rng()
-            .sample_iter(rand::distributions::Standard)
+        let content: Vec<u8> = rand::rng()
+            .sample_iter(rand::distr::StandardUniform)
             .take(cap * 2 + cap / 2)
             .collect();
 
@@ -614,8 +614,8 @@ mod tests {
         let cap = mutable.capacity();
         let align = mutable.align();
         drop(writer);
-        let content: Vec<u8> = rand::thread_rng()
-            .sample_iter(rand::distributions::Standard)
+        let content: Vec<u8> = rand::rng()
+            .sample_iter(rand::distr::StandardUniform)
             .take(cap * 2 + cap / 2)
             .collect();
 

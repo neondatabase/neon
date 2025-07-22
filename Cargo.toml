@@ -49,6 +49,7 @@ members = [
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
     "pgxn/neon/communicator",
+    "proxy/subzero_core",
 ]
 
 [workspace.package]
@@ -157,7 +158,9 @@ procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13.5"
 prost-types = "0.13.5"
-rand = "0.8"
+rand = "0.9"
+# Remove after p256 is updated to 0.14.
+rand_core = "=0.6"
 redis = { version = "0.29.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

@@ -233,7 +233,7 @@ mod tests {
                 .unwrap()
                 .as_millis();
             use rand::Rng;
-            let random = rand::thread_rng().r#gen::<u32>();
+            let random = rand::rng().random::<u32>();
 
             let s3_config = remote_storage::S3Config {
                 bucket_name: var(REAL_S3_BUCKET).unwrap(),

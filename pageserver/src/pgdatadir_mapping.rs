@@ -504,8 +504,9 @@ impl Timeline {
 
         for rel in rels {
             let n_blocks = self
-                .get_rel_size_in_reldir(rel, version, Some((reldir_key, &reldir)), ctx)
-                .await?;
+                .get_rel_size_in_reldir(rel, version, Some((reldir_key, &reldir)), false, ctx)
+                .await?
+                .expect("allow_missing=false");
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -521,10 +522,16 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
-        self.get_rel_size_in_reldir(tag, version, None, ctx).await
+        Ok(self
+            .get_rel_size_in_reldir(tag, version, None, false, ctx)
+            .await?
+            .expect("allow_missing=false"))
     }
 
-    /// Get size of a relation file. The relation must exist, otherwise an error is returned.
+    /// Get size of a relation file. If `allow_missing` is true, returns None for missing relations,
+    /// otherwise errors.
+    ///
+    /// INVARIANT: never returns None if `allow_missing=false`.
     ///
     /// See [`Self::get_rel_exists_in_reldir`] on why we need `deserialized_reldir_v1`.
     pub(crate) async fn get_rel_size_in_reldir(
@@ -532,8 +539,9 @@ impl Timeline {
         tag: RelTag,
         version: Version<'_>,
         deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
+        allow_missing: bool,
         ctx: &RequestContext,
-    ) -> Result<BlockNumber, PageReconstructError> {
+    ) -> Result<Option<BlockNumber>, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
                 RelationError::InvalidRelnode.into(),
@@ -541,7 +549,15 @@ impl Timeline {
         }
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, version) {
-            return Ok(nblocks);
+            return Ok(Some(nblocks));
+        }
+
+        if allow_missing
+            && !self
+                .get_rel_exists_in_reldir(tag, version, deserialized_reldir_v1, ctx)
+                .await?
+        {
+            return Ok(None);
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
@@ -553,7 +569,7 @@ impl Timeline {
             // FSM, and smgrnblocks() on it immediately afterwards,
             // without extending it.  Tolerate that by claiming that
             // any non-existent FSM fork has size 0.
-            return Ok(0);
+            return Ok(Some(0));
         }
 
         let key = rel_size_to_key(tag);
@@ -562,7 +578,7 @@ impl Timeline {
 
         self.update_cached_rel_size(tag, version, nblocks);
 
-        Ok(nblocks)
+        Ok(Some(nblocks))
     }
 
     /// Does the relation exist?
