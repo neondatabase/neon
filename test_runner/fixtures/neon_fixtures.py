@@ -5793,6 +5793,7 @@ SKIP_FILES = frozenset(
         "postmaster.pid",
         "pg_control",
         "pg_dynshmem",
+        "neon-communicator.socket",
     )
 )
 
