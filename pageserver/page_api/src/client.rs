@@ -69,16 +69,6 @@ impl Client {
         Ok(Self { inner })
     }
 
-    /// Returns whether a relation exists.
-    pub async fn check_rel_exists(
-        &mut self,
-        req: CheckRelExistsRequest,
-    ) -> tonic::Result<CheckRelExistsResponse> {
-        let req = proto::CheckRelExistsRequest::from(req);
-        let resp = self.inner.check_rel_exists(req).await?.into_inner();
-        Ok(resp.into())
-    }
-
     /// Fetches a base backup.
     pub async fn get_base_backup(
         &mut self,
@@ -114,7 +104,8 @@ impl Client {
         Ok(resps.and_then(|resp| ready(GetPageResponse::try_from(resp).map_err(|err| err.into()))))
     }
 
-    /// Returns the size of a relation, as # of blocks.
+    /// Returns the size of a relation as # of blocks, or None if allow_missing=true and the
+    /// relation does not exist.
     pub async fn get_rel_size(
         &mut self,
         req: GetRelSizeRequest,

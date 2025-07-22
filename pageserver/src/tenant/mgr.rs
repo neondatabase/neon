@@ -328,7 +328,7 @@ fn emergency_generations(
                     LocationMode::Attached(alc) => TenantStartupMode::Attached((
                         alc.attach_mode,
                         alc.generation,
-                        ShardStripeSize::default(),
+                        lc.shard.stripe_size,
                     )),
                     LocationMode::Secondary(_) => TenantStartupMode::Secondary,
                 },

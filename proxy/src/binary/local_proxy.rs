@@ -20,6 +20,8 @@ use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::local::LocalBackend;
 use crate::auth::{self};
 use crate::cancellation::CancellationHandler;
+#[cfg(feature = "rest_broker")]
+use crate::config::RestConfig;
 use crate::config::{
     self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
     refresh_config_loop,
@@ -275,6 +277,13 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             is_auth_broker: false,
             accept_jwts: true,
             console_redirect_confirmation_timeout: Duration::ZERO,
+        },
+        #[cfg(feature = "rest_broker")]
+        rest_config: RestConfig {
+            is_rest_broker: false,
+            db_schema_cache: None,
+            max_schema_size: 0,
+            hostname_prefix: String::new(),
         },
         proxy_protocol_v2: config::ProxyProtocolV2::Rejected,
         handshake_timeout: Duration::from_secs(10),

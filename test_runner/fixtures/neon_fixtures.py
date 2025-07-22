@@ -4121,6 +4121,294 @@ class NeonAuthBroker:
                 self._popen.kill()
 
 
+class NeonLocalProxy(LogUtils):
+    """
+    An object managing a local_proxy instance for rest broker testing.
+    The local_proxy serves as a direct connection to VanillaPostgres.
+    """
+
+    def __init__(
+        self,
+        neon_binpath: Path,
+        test_output_dir: Path,
+        http_port: int,
+        metrics_port: int,
+        vanilla_pg: VanillaPostgres,
+        config_path: Path | None = None,
+    ):
+        self.neon_binpath = neon_binpath
+        self.test_output_dir = test_output_dir
+        self.http_port = http_port
+        self.metrics_port = metrics_port
+        self.vanilla_pg = vanilla_pg
+        self.config_path = config_path or (test_output_dir / "local_proxy.json")
+        self.host = "127.0.0.1"
+        self.running = False
+        self.logfile = test_output_dir / "local_proxy.log"
+        self._popen: subprocess.Popen[bytes] | None = None
+        super().__init__(logfile=self.logfile)
+
+    def start(self) -> Self:
+        assert self._popen is None
+        assert not self.running
+
+        # Ensure vanilla_pg is running
+        if not self.vanilla_pg.is_running():
+            self.vanilla_pg.start()
+
+        args = [
+            str(self.neon_binpath / "local_proxy"),
+            "--http",
+            f"{self.host}:{self.http_port}",
+            "--metrics",
+            f"{self.host}:{self.metrics_port}",
+            "--postgres",
+            f"127.0.0.1:{self.vanilla_pg.default_options['port']}",
+            "--config-path",
+            str(self.config_path),
+            "--disable-pg-session-jwt",
+        ]
+
+        logfile = open(self.logfile, "w")
+        self._popen = subprocess.Popen(args, stdout=logfile, stderr=logfile)
+        self.running = True
+        self._wait_until_ready()
+        return self
+
+    def stop(self) -> Self:
+        if self._popen is not None and self.running:
+            self._popen.terminate()
+            try:
+                self._popen.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.warning("failed to gracefully terminate local_proxy; killing")
+                self._popen.kill()
+            self.running = False
+        return self
+
+    def get_binary_version(self) -> str:
+        """Get the version string of the local_proxy binary"""
+        try:
+            result = subprocess.run(
+                [str(self.neon_binpath / "local_proxy"), "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.stdout.strip()
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+            return ""
+
+    @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
+    def _wait_until_ready(self):
+        assert self._popen and self._popen.poll() is None, (
+            "Local proxy exited unexpectedly. Check test log."
+        )
+        requests.get(f"http://{self.host}:{self.http_port}/metrics")
+
+    def get_metrics(self) -> str:
+        response = requests.get(f"http://{self.host}:{self.metrics_port}/metrics")
+        return response.text
+
+    def assert_no_errors(self):
+        # Define allowed error patterns for local_proxy
+        allowed_errors = [
+            # Add patterns as needed
+        ]
+        not_allowed = [
+            "error",
+            "panic",
+            "failed",
+        ]
+
+        for na in not_allowed:
+            if na not in allowed_errors:
+                assert not self.log_contains(na), f"Found disallowed error pattern: {na}"
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ):
+        self.stop()
+
+
+class NeonRestBrokerProxy(LogUtils):
+    """
+    An object managing a proxy instance configured as both auth broker and rest broker.
+    This is the main proxy binary with --is-auth-broker and --is-rest-broker flags.
+    """
+
+    def __init__(
+        self,
+        neon_binpath: Path,
+        test_output_dir: Path,
+        wss_port: int,
+        http_port: int,
+        mgmt_port: int,
+        config_path: Path | None = None,
+    ):
+        self.neon_binpath = neon_binpath
+        self.test_output_dir = test_output_dir
+        self.wss_port = wss_port
+        self.http_port = http_port
+        self.mgmt_port = mgmt_port
+        self.config_path = config_path or (test_output_dir / "rest_broker_proxy.json")
+        self.host = "127.0.0.1"
+        self.running = False
+        self.logfile = test_output_dir / "rest_broker_proxy.log"
+        self._popen: subprocess.Popen[Any] | None = None
+
+    def start(self) -> Self:
+        if self.running:
+            return self
+
+        # Generate self-signed TLS certificates
+        cert_path = self.test_output_dir / "server.crt"
+        key_path = self.test_output_dir / "server.key"
+
+        if not cert_path.exists() or not key_path.exists():
+            import subprocess
+
+            log.info("Generating self-signed TLS certificate for rest broker")
+            subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-new",
+                    "-x509",
+                    "-days",
+                    "365",
+                    "-nodes",
+                    "-text",
+                    "-out",
+                    str(cert_path),
+                    "-keyout",
+                    str(key_path),
+                    "-subj",
+                    "/CN=*.local.neon.build",
+                ],
+                check=True,
+            )
+
+        log.info(
+            f"Starting rest broker proxy on WSS port {self.wss_port}, HTTP port {self.http_port}"
+        )
+
+        cmd = [
+            str(self.neon_binpath / "proxy"),
+            "-c",
+            str(cert_path),
+            "-k",
+            str(key_path),
+            "--is-auth-broker",
+            "true",
+            "--is-rest-broker",
+            "true",
+            "--wss",
+            f"{self.host}:{self.wss_port}",
+            "--http",
+            f"{self.host}:{self.http_port}",
+            "--mgmt",
+            f"{self.host}:{self.mgmt_port}",
+            "--auth-backend",
+            "local",
+            "--config-path",
+            str(self.config_path),
+        ]
+
+        log.info(f"Starting rest broker proxy with command: {' '.join(cmd)}")
+
+        with open(self.logfile, "w") as logfile:
+            self._popen = subprocess.Popen(
+                cmd,
+                stdout=logfile,
+                stderr=subprocess.STDOUT,
+                cwd=self.test_output_dir,
+                env={
+                    **os.environ,
+                    "RUST_LOG": "info",
+                    "LOGFMT": "text",
+                    "OTEL_SDK_DISABLED": "true",
+                },
+            )
+
+        self.running = True
+        self._wait_until_ready()
+        return self
+
+    def stop(self) -> Self:
+        if not self.running:
+            return self
+
+        log.info("Stopping rest broker proxy")
+
+        if self._popen is not None:
+            self._popen.terminate()
+            try:
+                self._popen.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                log.warning("failed to gracefully terminate rest broker proxy; killing")
+                self._popen.kill()
+
+        self.running = False
+        return self
+
+    def get_binary_version(self) -> str:
+        cmd = [str(self.neon_binpath / "proxy"), "--version"]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return res.stdout.strip()
+
+    @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
+    def _wait_until_ready(self):
+        # Check if the WSS port is ready using a simple HTTPS request
+        # REST API is served on the WSS port with HTTPS
+        requests.get(f"https://{self.host}:{self.wss_port}/", timeout=1, verify=False)
+        # Any response (even error) means the server is up - we just need to connect
+
+    def get_metrics(self) -> str:
+        # Metrics are still on the HTTP port
+        response = requests.get(f"http://{self.host}:{self.http_port}/metrics", timeout=5)
+        response.raise_for_status()
+        return response.text
+
+    def assert_no_errors(self):
+        # Define allowed error patterns for rest broker proxy
+        allowed_errors = [
+            "connection closed before message completed",
+            "connection reset by peer",
+            "broken pipe",
+            "client disconnected",
+            "Authentication failed",
+            "connection timed out",
+            "no connection available",
+            "Pool dropped",
+        ]
+
+        with open(self.logfile) as f:
+            for line in f:
+                if "ERROR" in line or "FATAL" in line:
+                    if not any(allowed in line for allowed in allowed_errors):
+                        raise AssertionError(
+                            f"Found error in rest broker proxy log: {line.strip()}"
+                        )
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ):
+        self.stop()
+
+
 @pytest.fixture(scope="function")
 def link_proxy(
     port_distributor: PortDistributor, neon_binpath: Path, test_output_dir: Path
@@ -4198,6 +4486,81 @@ def static_proxy(
         router_tls_port=router_tls_port,
         external_http_port=external_http_port,
         auth_backend=NeonProxy.Postgres(auth_endpoint),
+    ) as proxy:
+        proxy.start()
+        yield proxy
+
+
+@pytest.fixture(scope="function")
+def local_proxy(
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
+) -> Iterator[NeonLocalProxy]:
+    """Local proxy that connects directly to vanilla postgres for rest broker testing."""
+
+    # Start vanilla_pg without database bootstrapping
+    vanilla_pg.start()
+
+    http_port = port_distributor.get_port()
+    metrics_port = port_distributor.get_port()
+
+    with NeonLocalProxy(
+        neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
+        http_port=http_port,
+        metrics_port=metrics_port,
+        vanilla_pg=vanilla_pg,
+    ) as proxy:
+        proxy.start()
+        yield proxy
+
+
+@pytest.fixture(scope="function")
+def local_proxy_fixed_port(
+    vanilla_pg: VanillaPostgres,
+    neon_binpath: Path,
+    test_output_dir: Path,
+) -> Iterator[NeonLocalProxy]:
+    """Local proxy that connects directly to vanilla postgres on the hardcoded port 7432."""
+
+    # Start vanilla_pg without database bootstrapping
+    vanilla_pg.start()
+
+    # Use the hardcoded port that the rest broker proxy expects
+    http_port = 7432
+    metrics_port = 7433  # Use a different port for metrics
+
+    with NeonLocalProxy(
+        neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
+        http_port=http_port,
+        metrics_port=metrics_port,
+        vanilla_pg=vanilla_pg,
+    ) as proxy:
+        proxy.start()
+        yield proxy
+
+
+@pytest.fixture(scope="function")
+def rest_broker_proxy(
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
+) -> Iterator[NeonRestBrokerProxy]:
+    """Rest broker proxy that handles both auth broker and rest broker functionality."""
+
+    wss_port = port_distributor.get_port()
+    http_port = port_distributor.get_port()
+    mgmt_port = port_distributor.get_port()
+
+    with NeonRestBrokerProxy(
+        neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
+        wss_port=wss_port,
+        http_port=http_port,
+        mgmt_port=mgmt_port,
     ) as proxy:
         proxy.start()
         yield proxy
