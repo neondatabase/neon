@@ -513,6 +513,35 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
     assert "password authentication failed for user" in res["message"]
 
 
+def test_sql_over_http_pool_settings(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user http_auth with password 'http' superuser")
+
+    def multiquery(*queries) -> Any:
+        results = static_proxy.http_multiquery(
+            *queries,
+            user="http_auth",
+            password="http",
+            expected_code=200,
+        )
+
+        return [result["rows"] for result in results["results"]]
+
+    [[intervalstyle]] = static_proxy.safe_psql("SHOW IntervalStyle")
+    assert intervalstyle == "postgres", "'postgres' is the default IntervalStyle in postgres"
+
+    result = multiquery("select '0 seconds'::interval as interval")
+    assert result[0][0]["interval"] == "00:00:00", "interval is expected in postgres format"
+
+    result = multiquery(
+        "SET IntervalStyle = 'iso_8601'",
+        "select '0 seconds'::interval as interval",
+    )
+    assert result[1][0]["interval"] == "PT0S", "interval is expected in ISO-8601 format"
+
+    result = multiquery("select '0 seconds'::interval as interval")
+    assert result[0][0]["interval"] == "00:00:00", "interval is expected in postgres format"
+
+
 def test_sql_over_http_urlencoding(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user \"http+auth$$\" with password '%+$^&*@!' superuser")
 
