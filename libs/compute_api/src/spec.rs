@@ -115,9 +115,17 @@ pub struct ComputeSpec {
     /// The goal is to use method 1. everywhere. But for backwards-compatibility with old
     /// versions of the control plane, `compute_ctl` will check 2. and 3. if the
     /// `pageserver_connection_info` field is missing.
+    ///
+    /// If both `pageserver_connection_info` and `pageserver_connstring`+`shard_stripe_size` are
+    /// given, they must contain the same information.
     pub pageserver_connection_info: Option<PageserverConnectionInfo>,
 
     pub pageserver_connstring: Option<String>,
+
+    /// Stripe size for pageserver sharding, in pages. This is set together with the legacy
+    /// `pageserver_connstring` field. When the modern `pageserver_connection_info` field is used,
+    /// the stripe size is stored in `pageserver_connection_info.stripe_size` instead.
+    pub shard_stripe_size: Option<ShardStripeSize>,
 
     // More neon ids that we expose to the compute_ctl
     // and to postgres as neon extension GUCs.
@@ -150,10 +158,6 @@ pub struct ComputeSpec {
     pub remote_extensions: Option<RemoteExtSpec>,
 
     pub pgbouncer_settings: Option<IndexMap<String, String>>,
-
-    // Stripe size for pageserver sharding, in pages
-    #[serde(default)]
-    pub shard_stripe_size: Option<ShardStripeSize>,
 
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
