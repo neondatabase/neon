@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
-use utils::shard::{ShardCount, ShardIndex, ShardStripeSize};
+use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
 
 use crate::responses::TlsConfig;
 
@@ -246,6 +246,74 @@ pub struct PageserverConnectionInfo {
     /// as preferred if it cannot actually be used with all the pageservers.
     #[serde(default)]
     pub prefer_protocol: PageserverProtocol,
+}
+
+/// Extract PageserverConnectionInfo from a comma-separated list of libpq connection strings.
+///
+/// This is used for backwards-compatilibity, to parse the legacy [ComputeSpec::pageserver_connstr]
+/// field, or the 'neon.pageserver_connstring' GUC. Nowadays, the 'pageserver_connection_info' field
+/// should be used instead.
+impl PageserverConnectionInfo {
+    pub fn from_connstr(
+        connstr: &str,
+        stripe_size: Option<ShardStripeSize>,
+    ) -> Result<PageserverConnectionInfo, anyhow::Error> {
+        let shard_infos: Vec<_> = connstr
+            .split(',')
+            .map(|connstr| PageserverShardInfo {
+                pageservers: vec![PageserverShardConnectionInfo {
+                    id: None,
+                    libpq_url: Some(connstr.to_string()),
+                    grpc_url: None,
+                }],
+            })
+            .collect();
+
+        match shard_infos.len() {
+            0 => anyhow::bail!("empty connection string"),
+            1 => {
+                // We assume that if there's only connection string, it means "unsharded",
+                // rather than a sharded system with just a single shard. The latter is
+                // possible in principle, but we never do it.
+                let shard_count = ShardCount::unsharded();
+                let only_shard = shard_infos.first().unwrap().clone();
+                let shards = vec![(ShardIndex::unsharded(), only_shard)];
+                Ok(PageserverConnectionInfo {
+                    shard_count,
+                    stripe_size: None,
+                    shards: shards.into_iter().collect(),
+                    prefer_protocol: PageserverProtocol::Libpq,
+                })
+            }
+            n => {
+                if stripe_size.is_none() {
+                    anyhow::bail!("{n} shards but no stripe_size");
+                }
+                let shard_count = ShardCount(n.try_into()?);
+                let shards = shard_infos
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, shard_info)| {
+                        (
+                            ShardIndex {
+                                shard_count,
+                                shard_number: ShardNumber(
+                                    idx.try_into().expect("shard number fits in u8"),
+                                ),
+                            },
+                            shard_info,
+                        )
+                    })
+                    .collect();
+                Ok(PageserverConnectionInfo {
+                    shard_count,
+                    stripe_size,
+                    shards,
+                    prefer_protocol: PageserverProtocol::Libpq,
+                })
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]

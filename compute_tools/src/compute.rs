@@ -7,7 +7,7 @@ use compute_api::responses::{
 };
 use compute_api::spec::{
     ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverConnectionInfo,
-    PageserverProtocol, PageserverShardConnectionInfo, PageserverShardInfo, PgIdent,
+    PageserverProtocol, PgIdent,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -37,7 +37,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
 use utils::pid_file;
-use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
+use utils::shard::{ShardIndex, ShardNumber, ShardStripeSize};
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
@@ -281,72 +281,6 @@ impl ParsedSpec {
     }
 }
 
-/// Extract PageserverConnectionInfo from a comma-separated list of libpq connection strings.
-///
-/// This is used for backwards-compatilibity, to parse the legacye `pageserver_connstr`
-/// field in the compute spec, or the 'neon.pageserver_connstring' GUC. Nowadays, the
-/// 'pageserver_connection_info' field should be used instead.
-fn extract_pageserver_conninfo_from_connstr(
-    connstr: &str,
-    stripe_size: Option<ShardStripeSize>,
-) -> Result<PageserverConnectionInfo, anyhow::Error> {
-    let shard_infos: Vec<_> = connstr
-        .split(',')
-        .map(|connstr| PageserverShardInfo {
-            pageservers: vec![PageserverShardConnectionInfo {
-                id: None,
-                libpq_url: Some(connstr.to_string()),
-                grpc_url: None,
-            }],
-        })
-        .collect();
-
-    match shard_infos.len() {
-        0 => anyhow::bail!("empty connection string"),
-        1 => {
-            // We assume that if there's only connection string, it means "unsharded",
-            // rather than a sharded system with just a single shard. The latter is
-            // possible in principle, but we never do it.
-            let shard_count = ShardCount::unsharded();
-            let only_shard = shard_infos.first().unwrap().clone();
-            let shards = vec![(ShardIndex::unsharded(), only_shard)];
-            Ok(PageserverConnectionInfo {
-                shard_count,
-                stripe_size: None,
-                shards: shards.into_iter().collect(),
-                prefer_protocol: PageserverProtocol::Libpq,
-            })
-        }
-        n => {
-            if stripe_size.is_none() {
-                anyhow::bail!("{n} shards but no stripe_size");
-            }
-            let shard_count = ShardCount(n.try_into()?);
-            let shards = shard_infos
-                .into_iter()
-                .enumerate()
-                .map(|(idx, shard_info)| {
-                    (
-                        ShardIndex {
-                            shard_count,
-                            shard_number: ShardNumber(
-                                idx.try_into().expect("shard number fits in u8"),
-                            ),
-                        },
-                        shard_info,
-                    )
-                })
-                .collect();
-            Ok(PageserverConnectionInfo {
-                shard_count,
-                stripe_size,
-                shards,
-                prefer_protocol: PageserverProtocol::Libpq,
-            })
-        }
-    }
-}
-
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = anyhow::Error;
     fn try_from(spec: ComputeSpec) -> Result<Self, anyhow::Error> {
@@ -360,7 +294,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         let mut pageserver_conninfo = spec.pageserver_connection_info.clone();
         if pageserver_conninfo.is_none() {
             if let Some(pageserver_connstr_field) = &spec.pageserver_connstring {
-                pageserver_conninfo = Some(extract_pageserver_conninfo_from_connstr(
+                pageserver_conninfo = Some(PageserverConnectionInfo::from_connstr(
                     pageserver_connstr_field,
                     spec.shard_stripe_size,
                 )?);
@@ -375,7 +309,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
                     None
                 };
                 pageserver_conninfo =
-                    Some(extract_pageserver_conninfo_from_connstr(&guc, stripe_size)?);
+                    Some(PageserverConnectionInfo::from_connstr(&guc, stripe_size)?);
             }
         }
         let pageserver_conninfo = pageserver_conninfo.ok_or(anyhow::anyhow!(
