@@ -466,11 +466,11 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             encode_hadron_token(&claims, key_pair_2.serialize_pem().as_bytes()).unwrap();
 
         // Verify that we can decode the token with matching decoding keys (decoding also verifies the signature).
-        assert_eq!(auth.decode(&encoded_1).unwrap().claims, claims);
-        assert_eq!(auth.decode(&encoded_2).unwrap().claims, claims);
-        assert_eq!(auth_cert_1.decode(&encoded_1).unwrap().claims, claims);
+        assert_eq!(auth.decode::<Claims>(&encoded_1).unwrap().claims, claims);
+        assert_eq!(auth.decode::<Claims>(&encoded_2).unwrap().claims, claims);
+        assert_eq!(auth_cert_1.decode::<Claims>(&encoded_1).unwrap().claims, claims);
 
         // Verify that the token cannot be decoded with a mismatched decode key.
-        assert!(auth_cert_1.decode(&encoded_2).is_err());
+        assert!(auth_cert_1.decode::<Claims>(&encoded_2).is_err());
     }
 }
