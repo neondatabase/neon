@@ -16,6 +16,14 @@ on:
       - 'test_runner/logical_repl/**/*.py'
       - 'poetry.lock'
   workflow_dispatch:
+    inputs:
+      clickhouse_version:
+        required: false
+        description: "The ClickHouse version"
+        type: choice
+        options:
+          - "2.8"
+          - "2.9"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
@@ -60,7 +68,7 @@ jobs:
       options: --init --user root
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:24.8
+        image: clickhouse/clickhouse-server:${{ inputs.clickhouse_version }}
         env:
           CLICKHOUSE_PASSWORD: "4yXDXt4fu2zZTv"
         ports:
