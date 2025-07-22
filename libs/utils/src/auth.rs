@@ -468,7 +468,10 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         // Verify that we can decode the token with matching decoding keys (decoding also verifies the signature).
         assert_eq!(auth.decode::<Claims>(&encoded_1).unwrap().claims, claims);
         assert_eq!(auth.decode::<Claims>(&encoded_2).unwrap().claims, claims);
-        assert_eq!(auth_cert_1.decode::<Claims>(&encoded_1).unwrap().claims, claims);
+        assert_eq!(
+            auth_cert_1.decode::<Claims>(&encoded_1).unwrap().claims,
+            claims
+        );
 
         // Verify that the token cannot be decoded with a mismatched decode key.
         assert!(auth_cert_1.decode::<Claims>(&encoded_2).is_err());
