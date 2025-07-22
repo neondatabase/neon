@@ -7,7 +7,9 @@
 //! The exporter speaks HTTP, listens on a Unix Domain Socket under the Postgres
 //! data directory. For debugging, you can access it with curl:
 //!
-//!    curl --unix-socket neon-communicator.socket http://localhost/metrics
+//! ```sh
+//! curl --unix-socket neon-communicator.socket http://localhost/metrics
+//! ```
 //!
 use axum::Router;
 use axum::body::Body;
