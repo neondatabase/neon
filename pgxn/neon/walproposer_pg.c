@@ -66,6 +66,9 @@ int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 int			safekeeper_proto_version = 3;
 char	   *safekeeper_conninfo_options = "";
+/* BEGIN_HADRON */
+int         databricks_max_wal_mb_per_second = -1;
+/* END_HADRON */
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
@@ -80,10 +83,8 @@ static XLogRecPtr standby_flush_lsn = InvalidXLogRecPtr;
 static XLogRecPtr standby_apply_lsn = InvalidXLogRecPtr;
 static HotStandbyFeedback agg_hs_feedback;
 
-static void nwp_shmem_startup_hook(void);
 static void nwp_register_gucs(void);
 static void assign_neon_safekeepers(const char *newval, void *extra);
-static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
 static uint64 startup_backpressure_wrap(void);
 static bool backpressure_throttling_impl(void);
@@ -96,11 +97,6 @@ static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
 static void walprop_pg_load_libpqwalreceiver(void);
 
 static process_interrupts_callback_t PrevProcessInterruptsCallback = NULL;
-static shmem_startup_hook_type prev_shmem_startup_hook_type;
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook = NULL;
-static void walproposer_shmem_request(void);
-#endif
 static void WalproposerShmemInit_SyncSafekeeper(void);
 
 
@@ -190,8 +186,6 @@ pg_init_walproposer(void)
 
 	nwp_register_gucs();
 
-	nwp_prepare_shmem();
-
 	delay_backend_us = &startup_backpressure_wrap;
 	PrevProcessInterruptsCallback = ProcessInterruptsCallback;
 	ProcessInterruptsCallback = backpressure_throttling_impl;
@@ -252,6 +246,18 @@ nwp_register_gucs(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+    /* BEGIN_HADRON */
+    DefineCustomIntVariable(
+                            "databricks.max_wal_mb_per_second",
+                            "The maximum WAL MB per second allowed. If breached, sending WAL hit the backpressure. Setting to -1 disables the limit.",
+                            NULL,
+                            &databricks_max_wal_mb_per_second,
+                            -1, -1, INT_MAX,
+                            PGC_SUSET,
+                            GUC_UNIT_MB,
+                            NULL, NULL, NULL);
+    /* END_HADRON */
 }
 
 
@@ -393,6 +399,15 @@ assign_neon_safekeepers(const char *newval, void *extra)
 static uint64
 backpressure_lag_impl(void)
 {
+	struct WalproposerShmemState* state = NULL;
+
+	/* BEGIN_HADRON */
+	if(max_cluster_size < 0){
+		// if max cluster size is not set, then we don't apply backpressure because we're reconfiguring PG
+		return 0;
+	}
+	/* END_HADRON */
+
 	if (max_replication_apply_lag > 0 || max_replication_flush_lag > 0 || max_replication_write_lag > 0)
 	{
 		XLogRecPtr	writePtr;
@@ -426,6 +441,30 @@ backpressure_lag_impl(void)
 			return (myFlushLsn - applyPtr - max_replication_apply_lag * MB);
 		}
 	}
+
+	/* BEGIN_HADRON */
+	if (databricks_max_wal_mb_per_second == -1) {
+		return 0;
+	}
+
+	state = GetWalpropShmemState();
+	if (state != NULL && !!pg_atomic_read_u32(&state->wal_rate_limiter.should_limit))
+	{
+		TimestampTz now = GetCurrentTimestamp();
+		struct WalRateLimiter *limiter = &state->wal_rate_limiter;
+		uint64 last_recorded_time = pg_atomic_read_u64(&limiter->last_recorded_time_us);
+		if (now - last_recorded_time > USECS_PER_SEC)
+		{
+			/*
+			 * The backend has past 1 second since the last recorded time and it's time to push more WALs.
+			 * If the backends are pushing WALs too fast, the wal proposer will rate limit them again.
+			 */
+			uint32 expected = true;
+			pg_atomic_compare_exchange_u32(&state->wal_rate_limiter.should_limit, &expected, false);
+		}
+		return 1;
+	}
+	/* END_HADRON */
 	return 0;
 }
 
@@ -454,12 +493,11 @@ WalproposerShmemSize(void)
 	return sizeof(WalproposerShmemState);
 }
 
-static bool
+void
 WalproposerShmemInit(void)
 {
 	bool		found;
 
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	walprop_shared = ShmemInitStruct("Walproposer shared state",
 									 sizeof(WalproposerShmemState),
 									 &found);
@@ -472,10 +510,11 @@ WalproposerShmemInit(void)
 		pg_atomic_init_u64(&walprop_shared->mineLastElectedTerm, 0);
 		pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
 		pg_atomic_init_u64(&walprop_shared->currentClusterSize, 0);
+		/* BEGIN_HADRON */
+		pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.should_limit, 0);
+		pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.last_recorded_time_us, 0);
+		/* END_HADRON */
 	}
-	LWLockRelease(AddinShmemInitLock);
-
-	return found;
 }
 
 static void
@@ -487,6 +526,10 @@ WalproposerShmemInit_SyncSafekeeper(void)
 	pg_atomic_init_u64(&walprop_shared->propEpochStartLsn, 0);
 	pg_atomic_init_u64(&walprop_shared->mineLastElectedTerm, 0);
 	pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
+	/* BEGIN_HADRON */
+	pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.should_limit, 0);
+	pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.last_recorded_time_us, 0);
+	/* END_HADRON */
 }
 
 #define BACK_PRESSURE_DELAY 10000L // 0.01 sec
@@ -520,7 +563,6 @@ backpressure_throttling_impl(void)
 	lag = backpressure_lag_impl();
 	if (lag == 0)
 		return retry;
-
 
 	old_status = get_ps_display(&len);
 	new_status = (char *) palloc(len + 64 + 1);
@@ -576,41 +618,14 @@ walprop_register_bgworker(void)
 
 /* shmem handling */
 
-static void
-nwp_prepare_shmem(void)
-{
-#if PG_VERSION_NUM >= 150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = walproposer_shmem_request;
-#else
-	RequestAddinShmemSpace(WalproposerShmemSize());
-#endif
-	prev_shmem_startup_hook_type = shmem_startup_hook;
-	shmem_startup_hook = nwp_shmem_startup_hook;
-}
-
-#if PG_VERSION_NUM >= 150000
 /*
  * shmem_request hook: request additional shared resources.  We'll allocate or
- * attach to the shared resources in nwp_shmem_startup_hook().
+ * attach to the shared resources in WalproposerShmemInit().
  */
-static void
-walproposer_shmem_request(void)
+void
+WalproposerShmemRequest(void)
 {
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-
 	RequestAddinShmemSpace(WalproposerShmemSize());
-}
-#endif
-
-static void
-nwp_shmem_startup_hook(void)
-{
-	if (prev_shmem_startup_hook_type)
-		prev_shmem_startup_hook_type();
-
-	WalproposerShmemInit();
 }
 
 WalproposerShmemState *
@@ -1458,6 +1473,8 @@ XLogBroadcastWalProposer(WalProposer *wp)
 {
 	XLogRecPtr	startptr;
 	XLogRecPtr	endptr;
+	struct WalproposerShmemState *state = NULL;
+	TimestampTz now = 0;
 
 	/* Start from the last sent position */
 	startptr = sentPtr;
@@ -1502,12 +1519,35 @@ XLogBroadcastWalProposer(WalProposer *wp)
 	 * that arbitrary LSN is eventually reported as written, flushed and
 	 * applied, so that it can measure the elapsed time.
 	 */
-	LagTrackerWrite(endptr, GetCurrentTimestamp());
+	now = GetCurrentTimestamp();
+	LagTrackerWrite(endptr, now);
 
 	/* Do we have any work to do? */
 	Assert(startptr <= endptr);
 	if (endptr <= startptr)
 		return;
+
+	/* BEGIN_HADRON */
+	state = GetWalpropShmemState();
+	if (databricks_max_wal_mb_per_second != -1 && state != NULL)
+	{
+		uint64 max_wal_bytes = (uint64) databricks_max_wal_mb_per_second * 1024 * 1024;
+		struct WalRateLimiter *limiter = &state->wal_rate_limiter;
+		uint64 last_recorded_time = pg_atomic_read_u64(&limiter->last_recorded_time_us);
+		if (now - last_recorded_time > USECS_PER_SEC)
+		{
+			/* Reset the rate limiter */
+			limiter->sent_bytes = 0;
+			pg_atomic_write_u64(&limiter->last_recorded_time_us, now);
+			pg_atomic_write_u32(&limiter->should_limit, false);
+		}
+		limiter->sent_bytes += (endptr - startptr);
+		if (limiter->sent_bytes > max_wal_bytes)
+		{
+			pg_atomic_write_u32(&limiter->should_limit, true);
+		}
+	}
+	/* END_HADRON */
 
 	WalProposerBroadcast(wp, startptr, endptr);
 	sentPtr = endptr;

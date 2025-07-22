@@ -10,6 +10,7 @@ use crate::id_lock_map::trace_shared_lock;
 use crate::metrics;
 use crate::persistence::{
     DatabaseError, SafekeeperTimelineOpKind, TimelinePendingOpPersistence, TimelinePersistence,
+    TimelineUpdate,
 };
 use crate::safekeeper::Safekeeper;
 use crate::safekeeper_client::SafekeeperClient;
@@ -25,7 +26,8 @@ use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::PgVersionId;
 use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration};
 use safekeeper_api::models::{
-    PullTimelineRequest, TimelineMembershipSwitchRequest, TimelineMembershipSwitchResponse,
+    PullTimelineRequest, TimelineLocateResponse, TimelineMembershipSwitchRequest,
+    TimelineMembershipSwitchResponse,
 };
 use safekeeper_api::{INITIAL_TERM, Term};
 use safekeeper_client::mgmt_api;
@@ -37,21 +39,14 @@ use utils::lsn::Lsn;
 
 use super::Service;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct TimelineLocateResponse {
-    pub generation: SafekeeperGeneration,
-    pub sk_set: Vec<NodeId>,
-    pub new_sk_set: Option<Vec<NodeId>>,
-}
-
 impl Service {
-    fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, ApiError> {
+    fn make_member_set(safekeepers: &[Safekeeper]) -> Result<MemberSet, anyhow::Error> {
         let members = safekeepers
             .iter()
             .map(|sk| sk.get_safekeeper_id())
             .collect::<Vec<_>>();
 
-        MemberSet::new(members).map_err(ApiError::InternalServerError)
+        MemberSet::new(members)
     }
 
     fn get_safekeepers(&self, ids: &[i64]) -> Result<Vec<Safekeeper>, ApiError> {
@@ -86,7 +81,7 @@ impl Service {
     ) -> Result<Vec<NodeId>, ApiError> {
         let safekeepers = self.get_safekeepers(&timeline_persistence.sk_set)?;
 
-        let mset = Self::make_member_set(&safekeepers)?;
+        let mset = Self::make_member_set(&safekeepers).map_err(ApiError::InternalServerError)?;
         let mconf = safekeeper_api::membership::Configuration::new(mset);
 
         let req = safekeeper_api::models::TimelineCreateRequest {
@@ -461,7 +456,7 @@ impl Service {
         let persistence = TimelinePersistence {
             tenant_id: req.tenant_id.to_string(),
             timeline_id: req.timeline_id.to_string(),
-            start_lsn: Lsn::INVALID.into(),
+            start_lsn: req.start_lsn.into(),
             generation: 1,
             sk_set: req.sk_set.iter().map(|sk_id| sk_id.0 as i64).collect(),
             new_sk_set: None,
@@ -469,12 +464,26 @@ impl Service {
             deleted_at: None,
             sk_set_notified_generation: 1,
         };
-        let inserted = self.persistence.insert_timeline(persistence).await?;
+        let inserted = self
+            .persistence
+            .insert_timeline(persistence.clone())
+            .await?;
         if inserted {
             tracing::info!("imported timeline into db");
-        } else {
-            tracing::info!("didn't import timeline into db, as it is already present in db");
+            return Ok(());
         }
+        tracing::info!("timeline already present in db, updating");
+
+        let update = TimelineUpdate {
+            tenant_id: persistence.tenant_id,
+            timeline_id: persistence.timeline_id,
+            start_lsn: persistence.start_lsn,
+            sk_set: persistence.sk_set,
+            new_sk_set: persistence.new_sk_set,
+        };
+        self.persistence.update_timeline_unsafe(update).await?;
+        tracing::info!("timeline updated");
+
         Ok(())
     }
 
@@ -1135,6 +1144,26 @@ impl Service {
             }
         }
 
+        if new_sk_set.is_empty() {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "new safekeeper set is empty"
+            )));
+        }
+
+        if new_sk_set.len() < self.config.timeline_safekeeper_count {
+            return Err(ApiError::BadRequest(anyhow::anyhow!(
+                "new safekeeper set must have at least {} safekeepers",
+                self.config.timeline_safekeeper_count
+            )));
+        }
+
+        let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
+        let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
+        // Construct new member set in advance to validate it.
+        // E.g. validates that there is no duplicate safekeepers.
+        let new_sk_member_set =
+            Self::make_member_set(&new_safekeepers).map_err(ApiError::BadRequest)?;
+
         // TODO(diko): per-tenant lock is too wide. Consider introducing per-timeline locks.
         let _tenant_lock = trace_shared_lock(
             &self.tenant_op_locks,
@@ -1164,6 +1193,18 @@ impl Service {
             .iter()
             .map(|&id| NodeId(id as u64))
             .collect::<Vec<_>>();
+
+        // Validate that we are not migrating to a decomissioned safekeeper.
+        for sk in new_safekeepers.iter() {
+            if !cur_sk_set.contains(&sk.get_id())
+                && sk.scheduling_policy() == SkSchedulingPolicy::Decomissioned
+            {
+                return Err(ApiError::BadRequest(anyhow::anyhow!(
+                    "safekeeper {} is decomissioned",
+                    sk.get_id()
+                )));
+            }
+        }
 
         tracing::info!(
             ?cur_sk_set,
@@ -1230,11 +1271,8 @@ impl Service {
         }
 
         let cur_safekeepers = self.get_safekeepers(&timeline.sk_set)?;
-        let cur_sk_member_set = Self::make_member_set(&cur_safekeepers)?;
-
-        let new_sk_set_i64 = new_sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
-        let new_safekeepers = self.get_safekeepers(&new_sk_set_i64)?;
-        let new_sk_member_set = Self::make_member_set(&new_safekeepers)?;
+        let cur_sk_member_set =
+            Self::make_member_set(&cur_safekeepers).map_err(ApiError::InternalServerError)?;
 
         let joint_config = membership::Configuration {
             generation,
@@ -1522,7 +1560,8 @@ impl Service {
         }
 
         let cur_safekeepers = self.get_safekeepers(&timeline.sk_set)?;
-        let cur_sk_member_set = Self::make_member_set(&cur_safekeepers)?;
+        let cur_sk_member_set =
+            Self::make_member_set(&cur_safekeepers).map_err(ApiError::InternalServerError)?;
 
         let mconf = membership::Configuration {
             generation: SafekeeperGeneration::new(timeline.generation as u32),

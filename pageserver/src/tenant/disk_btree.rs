@@ -1090,7 +1090,7 @@ pub(crate) mod tests {
         const NUM_KEYS: usize = 100000;
         let mut all_data: BTreeMap<u128, u64> = BTreeMap::new();
         for idx in 0..NUM_KEYS {
-            let u: f64 = rand::thread_rng().gen_range(0.0..1.0);
+            let u: f64 = rand::rng().random_range(0.0..1.0);
             let t = -(f64::ln(u));
             let key_int = (t * 1000000.0) as u128;
 
@@ -1116,7 +1116,7 @@ pub(crate) mod tests {
 
         // Test get() operations on random keys, most of which will not exist
         for _ in 0..100000 {
-            let key_int = rand::thread_rng().r#gen::<u128>();
+            let key_int = rand::rng().random::<u128>();
             let search_key = u128::to_be_bytes(key_int);
             assert!(reader.get(&search_key, &ctx).await? == all_data.get(&key_int).cloned());
         }

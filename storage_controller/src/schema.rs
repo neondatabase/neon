@@ -14,6 +14,24 @@ diesel::table! {
 }
 
 diesel::table! {
+    hadron_safekeepers (sk_node_id) {
+        sk_node_id -> Int8,
+        listen_http_addr -> Varchar,
+        listen_http_port -> Int4,
+        listen_pg_addr -> Varchar,
+        listen_pg_port -> Int4,
+    }
+}
+
+diesel::table! {
+    hadron_timeline_safekeepers (timeline_id, sk_node_id) {
+        timeline_id -> Varchar,
+        sk_node_id -> Int8,
+        legacy_endpoint_id -> Nullable<Uuid>,
+    }
+}
+
+diesel::table! {
     metadata_health (tenant_id, shard_number, shard_count) {
         tenant_id -> Varchar,
         shard_number -> Int4,
@@ -106,6 +124,8 @@ diesel::table! {
 
 diesel::allow_tables_to_appear_in_same_query!(
     controllers,
+    hadron_safekeepers,
+    hadron_timeline_safekeepers,
     metadata_health,
     nodes,
     safekeeper_timeline_pending_ops,

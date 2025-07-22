@@ -108,7 +108,7 @@ pub(crate) static LFC_PREWARMS: Lazy<IntCounter> = Lazy::new(|| {
 pub(crate) static LFC_PREWARM_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "compute_ctl_lfc_prewarm_errors_total",
-        "Total number of LFC prewarms errors requested by compute_ctl or autoprewarm option",
+        "Total number of LFC prewarm errors",
     )
     .expect("failed to define a metric")
 });
@@ -124,7 +124,7 @@ pub(crate) static LFC_OFFLOADS: Lazy<IntCounter> = Lazy::new(|| {
 pub(crate) static LFC_OFFLOAD_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "compute_ctl_lfc_offload_errors_total",
-        "Total number of LFC offload errors requested by compute_ctl or lfc_offload_period_seconds option",
+        "Total number of LFC offload errors",
     )
     .expect("failed to define a metric")
 });

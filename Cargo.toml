@@ -49,6 +49,7 @@ members = [
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
     "pgxn/neon/communicator",
+    "proxy/subzero_core",
 ]
 
 [workspace.package]
@@ -130,6 +131,7 @@ jemalloc_pprof = { version = "0.7", features = ["symbolize", "flamegraph"] }
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
+lock_api = "0.4.13"
 md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
@@ -156,7 +158,9 @@ procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13.5"
 prost-types = "0.13.5"
-rand = "0.8"
+rand = "0.9"
+# Remove after p256 is updated to 0.14.
+rand_core = "=0.6"
 redis = { version = "0.29.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
@@ -165,7 +169,7 @@ reqwest-middleware = "0.4"
 reqwest-retry = "0.7"
 routerify = "3"
 rpds = "0.13"
-rustc-hash = "1.1.0"
+rustc-hash = "2.1.1"
 rustls = { version = "0.23.16", default-features = false }
 rustls-pemfile = "2"
 rustls-pki-types = "1.11"
@@ -201,7 +205,7 @@ tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.g
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "io-util", "rt"] }
 toml = "0.8"
@@ -262,6 +266,7 @@ neon-shmem = { version = "0.1", path = "./libs/neon-shmem/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
+pageserver_client_grpc = { path = "./pageserver/client_grpc" }
 pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 pageserver_page_api = { path = "./pageserver/page_api" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }

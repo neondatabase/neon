@@ -24,10 +24,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
         [
             ".*get_values_reconstruct_data for layer .*",
             ".*could not find data for key.*",
-            ".*is not active. Current state: Broken.*",
             ".*will not become active. Current state: Broken.*",
-            ".*failed to load metadata.*",
-            ".*load failed.*load local timeline.*",
             ".*: layer load failed, assuming permanent failure:.*",
             ".*failed to get checkpoint bytes.*",
             ".*failed to get control bytes.*",

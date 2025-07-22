@@ -1,17 +1,16 @@
 use std::collections::{HashMap, HashSet, hash_map};
 use std::convert::Infallible;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use clashmap::ClashMap;
 use clashmap::mapref::one::Ref;
-use rand::{Rng, thread_rng};
-use tokio::sync::Mutex;
+use rand::Rng;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
 use crate::config::ProjectInfoCacheOptions;
+use crate::control_plane::messages::{ControlPlaneErrorMessage, Reason};
 use crate::control_plane::{EndpointAccessControl, RoleAccessControl};
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::types::{EndpointId, RoleName};
@@ -22,52 +21,53 @@ pub(crate) trait ProjectInfoCache {
     fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt);
     fn invalidate_endpoint_access_for_org(&self, account_id: AccountIdInt);
     fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
-    async fn decrement_active_listeners(&self);
-    async fn increment_active_listeners(&self);
 }
 
 struct Entry<T> {
-    created_at: Instant,
+    expires_at: Instant,
     value: T,
 }
 
 impl<T> Entry<T> {
-    pub(crate) fn new(value: T) -> Self {
+    pub(crate) fn new(value: T, ttl: Duration) -> Self {
         Self {
-            created_at: Instant::now(),
+            expires_at: Instant::now() + ttl,
             value,
         }
     }
 
-    pub(crate) fn get(&self, valid_since: Instant) -> Option<&T> {
-        (valid_since < self.created_at).then_some(&self.value)
+    pub(crate) fn get(&self) -> Option<&T> {
+        (!self.is_expired()).then_some(&self.value)
     }
-}
 
-impl<T> From<T> for Entry<T> {
-    fn from(value: T) -> Self {
-        Self::new(value)
+    fn is_expired(&self) -> bool {
+        self.expires_at <= Instant::now()
     }
 }
 
 struct EndpointInfo {
-    role_controls: HashMap<RoleNameInt, Entry<RoleAccessControl>>,
-    controls: Option<Entry<EndpointAccessControl>>,
+    role_controls: HashMap<RoleNameInt, Entry<ControlPlaneResult<RoleAccessControl>>>,
+    controls: Option<Entry<ControlPlaneResult<EndpointAccessControl>>>,
 }
 
+type ControlPlaneResult<T> = Result<T, Box<ControlPlaneErrorMessage>>;
+
 impl EndpointInfo {
-    pub(crate) fn get_role_secret(
+    pub(crate) fn get_role_secret_with_ttl(
         &self,
         role_name: RoleNameInt,
-        valid_since: Instant,
-    ) -> Option<RoleAccessControl> {
-        let controls = self.role_controls.get(&role_name)?;
-        controls.get(valid_since).cloned()
+    ) -> Option<(ControlPlaneResult<RoleAccessControl>, Duration)> {
+        let entry = self.role_controls.get(&role_name)?;
+        let ttl = entry.expires_at - Instant::now();
+        Some((entry.get()?.clone(), ttl))
     }
 
-    pub(crate) fn get_controls(&self, valid_since: Instant) -> Option<EndpointAccessControl> {
-        let controls = self.controls.as_ref()?;
-        controls.get(valid_since).cloned()
+    pub(crate) fn get_controls_with_ttl(
+        &self,
+    ) -> Option<(ControlPlaneResult<EndpointAccessControl>, Duration)> {
+        let entry = self.controls.as_ref()?;
+        let ttl = entry.expires_at - Instant::now();
+        Some((entry.get()?.clone(), ttl))
     }
 
     pub(crate) fn invalidate_endpoint(&mut self) {
@@ -92,11 +92,8 @@ pub struct ProjectInfoCacheImpl {
     project2ep: ClashMap<ProjectIdInt, HashSet<EndpointIdInt>>,
     // FIXME(stefan): we need a way to GC the account2ep map.
     account2ep: ClashMap<AccountIdInt, HashSet<EndpointIdInt>>,
-    config: ProjectInfoCacheOptions,
 
-    start_time: Instant,
-    ttl_disabled_since_us: AtomicU64,
-    active_listeners_lock: Mutex<usize>,
+    config: ProjectInfoCacheOptions,
 }
 
 #[async_trait]
@@ -152,29 +149,6 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             }
         }
     }
-
-    async fn decrement_active_listeners(&self) {
-        let mut listeners_guard = self.active_listeners_lock.lock().await;
-        if *listeners_guard == 0 {
-            tracing::error!("active_listeners count is already 0, something is broken");
-            return;
-        }
-        *listeners_guard -= 1;
-        if *listeners_guard == 0 {
-            self.ttl_disabled_since_us
-                .store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    async fn increment_active_listeners(&self) {
-        let mut listeners_guard = self.active_listeners_lock.lock().await;
-        *listeners_guard += 1;
-        if *listeners_guard == 1 {
-            let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
-            self.ttl_disabled_since_us
-                .store(new_ttl, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
 }
 
 impl ProjectInfoCacheImpl {
@@ -184,9 +158,6 @@ impl ProjectInfoCacheImpl {
             project2ep: ClashMap::new(),
             account2ep: ClashMap::new(),
             config,
-            ttl_disabled_since_us: AtomicU64::new(u64::MAX),
-            start_time: Instant::now(),
-            active_listeners_lock: Mutex::new(0),
         }
     }
 
@@ -198,30 +169,28 @@ impl ProjectInfoCacheImpl {
         self.cache.get(&endpoint_id)
     }
 
-    pub(crate) fn get_role_secret(
+    pub(crate) fn get_role_secret_with_ttl(
         &self,
         endpoint_id: &EndpointId,
         role_name: &RoleName,
-    ) -> Option<RoleAccessControl> {
-        let valid_since = self.get_cache_times();
+    ) -> Option<(ControlPlaneResult<RoleAccessControl>, Duration)> {
         let role_name = RoleNameInt::get(role_name)?;
         let endpoint_info = self.get_endpoint_cache(endpoint_id)?;
-        endpoint_info.get_role_secret(role_name, valid_since)
+        endpoint_info.get_role_secret_with_ttl(role_name)
     }
 
-    pub(crate) fn get_endpoint_access(
+    pub(crate) fn get_endpoint_access_with_ttl(
         &self,
         endpoint_id: &EndpointId,
-    ) -> Option<EndpointAccessControl> {
-        let valid_since = self.get_cache_times();
+    ) -> Option<(ControlPlaneResult<EndpointAccessControl>, Duration)> {
         let endpoint_info = self.get_endpoint_cache(endpoint_id)?;
-        endpoint_info.get_controls(valid_since)
+        endpoint_info.get_controls_with_ttl()
     }
 
     pub(crate) fn insert_endpoint_access(
         &self,
         account_id: Option<AccountIdInt>,
-        project_id: ProjectIdInt,
+        project_id: Option<ProjectIdInt>,
         endpoint_id: EndpointIdInt,
         role_name: RoleNameInt,
         controls: EndpointAccessControl,
@@ -230,26 +199,89 @@ impl ProjectInfoCacheImpl {
         if let Some(account_id) = account_id {
             self.insert_account2endpoint(account_id, endpoint_id);
         }
-        self.insert_project2endpoint(project_id, endpoint_id);
+        if let Some(project_id) = project_id {
+            self.insert_project2endpoint(project_id, endpoint_id);
+        }
 
         if self.cache.len() >= self.config.size {
             // If there are too many entries, wait until the next gc cycle.
             return;
         }
 
-        let controls = Entry::from(controls);
-        let role_controls = Entry::from(role_controls);
+        debug!(
+            key = &*endpoint_id,
+            "created a cache entry for endpoint access"
+        );
+
+        let controls = Some(Entry::new(Ok(controls), self.config.ttl));
+        let role_controls = Entry::new(Ok(role_controls), self.config.ttl);
 
         match self.cache.entry(endpoint_id) {
             clashmap::Entry::Vacant(e) => {
                 e.insert(EndpointInfo {
                     role_controls: HashMap::from_iter([(role_name, role_controls)]),
-                    controls: Some(controls),
+                    controls,
                 });
             }
             clashmap::Entry::Occupied(mut e) => {
                 let ep = e.get_mut();
-                ep.controls = Some(controls);
+                ep.controls = controls;
+                if ep.role_controls.len() < self.config.max_roles {
+                    ep.role_controls.insert(role_name, role_controls);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn insert_endpoint_access_err(
+        &self,
+        endpoint_id: EndpointIdInt,
+        role_name: RoleNameInt,
+        msg: Box<ControlPlaneErrorMessage>,
+        ttl: Option<Duration>,
+    ) {
+        if self.cache.len() >= self.config.size {
+            // If there are too many entries, wait until the next gc cycle.
+            return;
+        }
+
+        debug!(
+            key = &*endpoint_id,
+            "created a cache entry for an endpoint access error"
+        );
+
+        let ttl = ttl.unwrap_or(self.config.ttl);
+
+        let controls = if msg.get_reason() == Reason::RoleProtected {
+            // RoleProtected is the only role-specific error that control plane can give us.
+            // If a given role name does not exist, it still returns a successful response,
+            // just with an empty secret.
+            None
+        } else {
+            // We can cache all the other errors in EndpointInfo.controls,
+            // because they don't depend on what role name we pass to control plane.
+            Some(Entry::new(Err(msg.clone()), ttl))
+        };
+
+        let role_controls = Entry::new(Err(msg), ttl);
+
+        match self.cache.entry(endpoint_id) {
+            clashmap::Entry::Vacant(e) => {
+                e.insert(EndpointInfo {
+                    role_controls: HashMap::from_iter([(role_name, role_controls)]),
+                    controls,
+                });
+            }
+            clashmap::Entry::Occupied(mut e) => {
+                let ep = e.get_mut();
+                if let Some(entry) = &ep.controls
+                    && !entry.is_expired()
+                    && entry.value.is_ok()
+                {
+                    // If we have cached non-expired, non-error controls, keep them.
+                } else {
+                    ep.controls = controls;
+                }
                 if ep.role_controls.len() < self.config.max_roles {
                     ep.role_controls.insert(role_name, role_controls);
                 }
@@ -275,27 +307,6 @@ impl ProjectInfoCacheImpl {
         }
     }
 
-    fn ignore_ttl_since(&self) -> Option<Instant> {
-        let ttl_disabled_since_us = self
-            .ttl_disabled_since_us
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        if ttl_disabled_since_us == u64::MAX {
-            return None;
-        }
-
-        Some(self.start_time + Duration::from_micros(ttl_disabled_since_us))
-    }
-
-    fn get_cache_times(&self) -> Instant {
-        let mut valid_since = Instant::now() - self.config.ttl;
-        if let Some(ignore_ttl_since) = self.ignore_ttl_since() {
-            // We are fine if entry is not older than ttl or was added before we are getting notifications.
-            valid_since = valid_since.min(ignore_ttl_since);
-        }
-        valid_since
-    }
-
     pub fn maybe_invalidate_role_secret(&self, endpoint_id: &EndpointId, role_name: &RoleName) {
         let Some(endpoint_id) = EndpointIdInt::get(endpoint_id) else {
             return;
@@ -313,16 +324,7 @@ impl ProjectInfoCacheImpl {
             return;
         };
 
-        let created_at = role_controls.get().created_at;
-        let expire = match self.ignore_ttl_since() {
-            // if ignoring TTL, we should still try and roll the password if it's old
-            // and we the client gave an incorrect password. There could be some lag on the redis channel.
-            Some(_) => created_at + self.config.ttl < Instant::now(),
-            // edge case: redis is down, let's be generous and invalidate the cache immediately.
-            None => true,
-        };
-
-        if expire {
+        if role_controls.get().is_expired() {
             role_controls.remove();
         }
     }
@@ -341,7 +343,7 @@ impl ProjectInfoCacheImpl {
     }
 
     fn gc(&self) {
-        let shard = thread_rng().gen_range(0..self.project2ep.shards().len());
+        let shard = rand::rng().random_range(0..self.project2ep.shards().len());
         debug!(shard, "project_info_cache: performing epoch reclamation");
 
         // acquire a random shard lock
@@ -361,13 +363,11 @@ impl ProjectInfoCacheImpl {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::control_plane::messages::EndpointRateLimitConfig;
+    use crate::control_plane::messages::{Details, EndpointRateLimitConfig, ErrorInfo, Status};
     use crate::control_plane::{AccessBlockerFlags, AuthSecret};
     use crate::scram::ServerSecret;
-    use crate::types::ProjectId;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {
@@ -378,9 +378,9 @@ mod tests {
             ttl: Duration::from_secs(1),
             gc_interval: Duration::from_secs(600),
         });
-        let project_id: ProjectId = "project".into();
+        let project_id: Option<ProjectIdInt> = Some(ProjectIdInt::from(&"project".into()));
         let endpoint_id: EndpointId = "endpoint".into();
-        let account_id: Option<AccountIdInt> = None;
+        let account_id = None;
 
         let user1: RoleName = "user1".into();
         let user2: RoleName = "user2".into();
@@ -393,7 +393,7 @@ mod tests {
 
         cache.insert_endpoint_access(
             account_id,
-            (&project_id).into(),
+            project_id,
             (&endpoint_id).into(),
             (&user1).into(),
             EndpointAccessControl {
@@ -409,7 +409,7 @@ mod tests {
 
         cache.insert_endpoint_access(
             account_id,
-            (&project_id).into(),
+            project_id,
             (&endpoint_id).into(),
             (&user2).into(),
             EndpointAccessControl {
@@ -423,11 +423,17 @@ mod tests {
             },
         );
 
-        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
-        assert_eq!(cached.secret, secret1);
+        let (cached, ttl) = cache
+            .get_role_secret_with_ttl(&endpoint_id, &user1)
+            .unwrap();
+        assert_eq!(cached.unwrap().secret, secret1);
+        assert_eq!(ttl, cache.config.ttl);
 
-        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
-        assert_eq!(cached.secret, secret2);
+        let (cached, ttl) = cache
+            .get_role_secret_with_ttl(&endpoint_id, &user2)
+            .unwrap();
+        assert_eq!(cached.unwrap().secret, secret2);
+        assert_eq!(ttl, cache.config.ttl);
 
         // Shouldn't add more than 2 roles.
         let user3: RoleName = "user3".into();
@@ -435,7 +441,7 @@ mod tests {
 
         cache.insert_endpoint_access(
             account_id,
-            (&project_id).into(),
+            project_id,
             (&endpoint_id).into(),
             (&user3).into(),
             EndpointAccessControl {
@@ -449,17 +455,144 @@ mod tests {
             },
         );
 
-        assert!(cache.get_role_secret(&endpoint_id, &user3).is_none());
+        assert!(
+            cache
+                .get_role_secret_with_ttl(&endpoint_id, &user3)
+                .is_none()
+        );
 
-        let cached = cache.get_endpoint_access(&endpoint_id).unwrap();
+        let cached = cache
+            .get_endpoint_access_with_ttl(&endpoint_id)
+            .unwrap()
+            .0
+            .unwrap();
         assert_eq!(cached.allowed_ips, allowed_ips);
 
         tokio::time::advance(Duration::from_secs(2)).await;
-        let cached = cache.get_role_secret(&endpoint_id, &user1);
+        let cached = cache.get_role_secret_with_ttl(&endpoint_id, &user1);
         assert!(cached.is_none());
-        let cached = cache.get_role_secret(&endpoint_id, &user2);
+        let cached = cache.get_role_secret_with_ttl(&endpoint_id, &user2);
         assert!(cached.is_none());
-        let cached = cache.get_endpoint_access(&endpoint_id);
+        let cached = cache.get_endpoint_access_with_ttl(&endpoint_id);
         assert!(cached.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_caching_project_info_errors() {
+        let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
+            size: 10,
+            max_roles: 10,
+            ttl: Duration::from_secs(1),
+            gc_interval: Duration::from_secs(600),
+        });
+        let project_id = Some(ProjectIdInt::from(&"project".into()));
+        let endpoint_id: EndpointId = "endpoint".into();
+        let account_id = None;
+
+        let user1: RoleName = "user1".into();
+        let user2: RoleName = "user2".into();
+        let secret = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
+
+        let role_msg = Box::new(ControlPlaneErrorMessage {
+            error: "role is protected and cannot be used for password-based authentication"
+                .to_owned()
+                .into_boxed_str(),
+            http_status_code: http::StatusCode::NOT_FOUND,
+            status: Some(Status {
+                code: "PERMISSION_DENIED".to_owned().into_boxed_str(),
+                message: "role is protected and cannot be used for password-based authentication"
+                    .to_owned()
+                    .into_boxed_str(),
+                details: Details {
+                    error_info: Some(ErrorInfo {
+                        reason: Reason::RoleProtected,
+                    }),
+                    retry_info: None,
+                    user_facing_message: None,
+                },
+            }),
+        });
+
+        let generic_msg = Box::new(ControlPlaneErrorMessage {
+            error: "oh noes".to_owned().into_boxed_str(),
+            http_status_code: http::StatusCode::NOT_FOUND,
+            status: None,
+        });
+
+        let get_role_secret = |endpoint_id, role_name| {
+            cache
+                .get_role_secret_with_ttl(endpoint_id, role_name)
+                .unwrap()
+                .0
+        };
+        let get_endpoint_access =
+            |endpoint_id| cache.get_endpoint_access_with_ttl(endpoint_id).unwrap().0;
+
+        // stores role-specific errors only for get_role_secret
+        cache.insert_endpoint_access_err(
+            (&endpoint_id).into(),
+            (&user1).into(),
+            role_msg.clone(),
+            None,
+        );
+        assert_eq!(
+            get_role_secret(&endpoint_id, &user1).unwrap_err().error,
+            role_msg.error
+        );
+        assert!(cache.get_endpoint_access_with_ttl(&endpoint_id).is_none());
+
+        // stores non-role specific errors for both get_role_secret and get_endpoint_access
+        cache.insert_endpoint_access_err(
+            (&endpoint_id).into(),
+            (&user1).into(),
+            generic_msg.clone(),
+            None,
+        );
+        assert_eq!(
+            get_role_secret(&endpoint_id, &user1).unwrap_err().error,
+            generic_msg.error
+        );
+        assert_eq!(
+            get_endpoint_access(&endpoint_id).unwrap_err().error,
+            generic_msg.error
+        );
+
+        // error isn't returned for other roles in the same endpoint
+        assert!(
+            cache
+                .get_role_secret_with_ttl(&endpoint_id, &user2)
+                .is_none()
+        );
+
+        // success for a role does not overwrite errors for other roles
+        cache.insert_endpoint_access(
+            account_id,
+            project_id,
+            (&endpoint_id).into(),
+            (&user2).into(),
+            EndpointAccessControl {
+                allowed_ips: Arc::new(vec![]),
+                allowed_vpce: Arc::new(vec![]),
+                flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
+            },
+            RoleAccessControl {
+                secret: secret.clone(),
+            },
+        );
+        assert!(get_role_secret(&endpoint_id, &user1).is_err());
+        assert!(get_role_secret(&endpoint_id, &user2).is_ok());
+        // ...but does clear the access control error
+        assert!(get_endpoint_access(&endpoint_id).is_ok());
+
+        // storing an error does not overwrite successful access control response
+        cache.insert_endpoint_access_err(
+            (&endpoint_id).into(),
+            (&user2).into(),
+            generic_msg.clone(),
+            None,
+        );
+        assert!(get_role_secret(&endpoint_id, &user2).is_err());
+        assert!(get_endpoint_access(&endpoint_id).is_ok());
     }
 }

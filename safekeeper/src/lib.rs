@@ -10,6 +10,7 @@ use pem::Pem;
 use remote_storage::RemoteStorageConfig;
 use storage_broker::Uri;
 use tokio::runtime::Runtime;
+use url::Url;
 use utils::auth::SwappableJwtAuth;
 use utils::id::NodeId;
 use utils::logging::SecretString;
@@ -20,6 +21,7 @@ pub mod control_file;
 pub mod control_file_upgrade;
 pub mod copy_timeline;
 pub mod debug_dump;
+pub mod hadron;
 pub mod handler;
 pub mod http;
 pub mod metrics;
@@ -48,6 +50,7 @@ pub mod wal_storage;
 pub mod test_utils;
 
 mod timelines_global_map;
+
 use std::sync::Arc;
 
 pub use timelines_global_map::GlobalTimelines;
@@ -81,6 +84,10 @@ pub mod defaults {
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";
     pub const DEFAULT_SSL_CERT_FILE: &str = "server.crt";
     pub const DEFAULT_SSL_CERT_RELOAD_PERIOD: &str = "60s";
+
+    // Global disk watcher defaults
+    pub const DEFAULT_GLOBAL_DISK_CHECK_INTERVAL: &str = "60s";
+    pub const DEFAULT_MAX_GLOBAL_DISK_USAGE_RATIO: f64 = 0.0;
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +107,11 @@ pub struct SafeKeeperConf {
     pub advertise_pg_addr: Option<String>,
     pub availability_zone: Option<String>,
     pub no_sync: bool,
+    /* BEGIN_HADRON */
+    pub advertise_pg_addr_tenant_only: Option<String>,
+    pub enable_pull_timeline_on_startup: bool,
+    pub hcc_base_url: Option<Url>,
+    /* END_HADRON */
     pub broker_endpoint: Uri,
     pub broker_keepalive_interval: Duration,
     pub heartbeat_timeout: Duration,
@@ -109,6 +121,10 @@ pub struct SafeKeeperConf {
     /* BEGIN_HADRON */
     pub max_reelect_offloader_lag_bytes: u64,
     pub max_timeline_disk_usage_bytes: u64,
+    /// How often to check the working directory's filesystem for total disk usage.
+    pub global_disk_check_interval: Duration,
+    /// The portion of the filesystem capacity that can be used by all timelines.
+    pub max_global_disk_usage_ratio: f64,
     /* END_HADRON */
     pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
@@ -134,6 +150,7 @@ pub struct SafeKeeperConf {
     pub ssl_ca_certs: Vec<Pem>,
     pub use_https_safekeeper_api: bool,
     pub enable_tls_wal_service_api: bool,
+    pub force_metric_collection_on_scrape: bool,
 }
 
 impl SafeKeeperConf {
@@ -165,6 +182,8 @@ impl SafeKeeperConf {
             /* BEGIN_HADRON */
             max_reelect_offloader_lag_bytes: defaults::DEFAULT_MAX_REELECT_OFFLOADER_LAG_BYTES,
             max_timeline_disk_usage_bytes: defaults::DEFAULT_MAX_TIMELINE_DISK_USAGE_BYTES,
+            global_disk_check_interval: Duration::from_secs(60),
+            max_global_disk_usage_ratio: defaults::DEFAULT_MAX_GLOBAL_DISK_USAGE_RATIO,
             /* END_HADRON */
             current_thread_runtime: false,
             walsenders_keep_horizon: false,
@@ -183,6 +202,12 @@ impl SafeKeeperConf {
             ssl_ca_certs: Vec::new(),
             use_https_safekeeper_api: false,
             enable_tls_wal_service_api: false,
+            force_metric_collection_on_scrape: true,
+            /* BEGIN_HADRON */
+            advertise_pg_addr_tenant_only: None,
+            enable_pull_timeline_on_startup: false,
+            hcc_base_url: None,
+            /* END_HADRON */
         }
     }
 }
@@ -221,10 +246,13 @@ pub static WAL_BACKUP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create WAL backup runtime")
 });
 
+/// Hadron: Dedicated runtime for infrequent background tasks.
 pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
-        .thread_name("background worker")
-        .worker_threads(1) // there is only one task now (ssl certificate reloading), having more threads doesn't make sense
+        .thread_name("Hadron background worker")
+        // One worker thread is enough, as most of the actual tasks run on blocking threads
+        // which has it own thread pool.
+        .worker_threads(1)
         .enable_all()
         .build()
         .expect("Failed to create background runtime")

@@ -82,7 +82,7 @@ impl NodeInfo {
     }
 }
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, Debug)]
 pub(crate) struct AccessBlockerFlags {
     pub public_access_blocked: bool,
     pub vpc_access_blocked: bool,
@@ -92,12 +92,12 @@ pub(crate) type NodeInfoCache =
     TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ControlPlaneErrorMessage>>>;
 pub(crate) type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RoleAccessControl {
     pub secret: Option<AuthSecret>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EndpointAccessControl {
     pub allowed_ips: Arc<Vec<IpPattern>>,
     pub allowed_vpce: Arc<Vec<String>>,

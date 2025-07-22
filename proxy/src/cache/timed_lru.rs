@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use hashlink::{LruCache, linked_hash_map::RawEntryMut};
 use tracing::debug;
 
+use super::Cache;
 use super::common::Cached;
-use super::{Cache, timed_lru};
 
 /// An implementation of timed LRU cache with fixed capacity.
 /// Key properties:
@@ -30,7 +30,7 @@ use super::{Cache, timed_lru};
 ///
 /// * There's an API for immediate invalidation (removal) of a cache entry;
 ///   It's useful in case we know for sure that the entry is no longer correct.
-///   See [`timed_lru::Cached`] for more information.
+///   See [`Cached`] for more information.
 ///
 /// * Expired entries are kept in the cache, until they are evicted by the LRU policy,
 ///   or by a successful lookup (i.e. the entry hasn't expired yet).
@@ -204,6 +204,11 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
         self.insert_raw_ttl(key, value, ttl, false);
     }
 
+    #[cfg(feature = "rest_broker")]
+    pub(crate) fn insert(&self, key: K, value: V) {
+        self.insert_raw_ttl(key, value, self.ttl, self.update_ttl_on_retrieval);
+    }
+
     pub(crate) fn insert_unit(&self, key: K, value: V) -> (Option<V>, Cached<&Self, ()>) {
         let (_, old) = self.insert_raw(key.clone(), value);
 
@@ -214,18 +219,44 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
 
         (old, cached)
     }
+
+    #[cfg(feature = "rest_broker")]
+    pub(crate) fn flush(&self) {
+        let now = Instant::now();
+        let mut cache = self.cache.lock();
+
+        // Collect keys of expired entries first
+        let expired_keys: Vec<_> = cache
+            .iter()
+            .filter_map(|(key, entry)| {
+                if entry.expires_at <= now {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Remove expired entries
+        for key in expired_keys {
+            cache.remove(&key);
+        }
+    }
 }
 
 impl<K: Hash + Eq, V: Clone> TimedLru<K, V> {
-    /// Retrieve a cached entry in convenient wrapper.
-    pub(crate) fn get<Q>(&self, key: &Q) -> Option<timed_lru::Cached<&Self>>
+    /// Retrieve a cached entry in convenient wrapper, alongside timing information.
+    pub(crate) fn get_with_created_at<Q>(
+        &self,
+        key: &Q,
+    ) -> Option<Cached<&Self, (<Self as Cache>::Value, Instant)>>
     where
         K: Borrow<Q> + Clone,
         Q: Hash + Eq + ?Sized,
     {
         self.get_raw(key, |key, entry| Cached {
             token: Some((self, key.clone())),
-            value: entry.value.clone(),
+            value: (entry.value.clone(), entry.created_at),
         })
     }
 }

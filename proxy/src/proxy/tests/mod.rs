@@ -338,8 +338,8 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), Scram::mock()));
 
     use rand::Rng;
-    use rand::distributions::Alphanumeric;
-    let password: String = rand::thread_rng()
+    use rand::distr::Alphanumeric;
+    let password: String = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(rand::random::<u8>() as usize)
         .map(char::from)

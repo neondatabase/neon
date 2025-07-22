@@ -246,9 +246,9 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
 
     system_memory = psutil.virtual_memory().total
 
-    # The smallest total size limit we can configure is 1/1024th of the system memory (e.g. 128MB on
-    # a system with 128GB of RAM).  We will then write enough data to violate this limit.
-    max_dirty_data = 128 * 1024 * 1024
+    # The smallest total size limit we can configure is 1/1024th of the system memory (e.g. 256MB on
+    # a system with 256GB of RAM).  We will then write enough data to violate this limit.
+    max_dirty_data = 256 * 1024 * 1024
     ephemeral_bytes_per_memory_kb = (max_dirty_data * 1024) // system_memory
     assert ephemeral_bytes_per_memory_kb > 0
 
@@ -272,7 +272,7 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
     timeline_count = 10
 
     # This is about 2MiB of data per timeline
-    entries_per_timeline = 100_000
+    entries_per_timeline = 200_000
 
     last_flush_lsns = asyncio.run(workload(env, tenant_conf, timeline_count, entries_per_timeline))
     wait_until_pageserver_is_caught_up(env, last_flush_lsns)
