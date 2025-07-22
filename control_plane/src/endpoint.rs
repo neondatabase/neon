@@ -734,11 +734,7 @@ impl Endpoint {
         // Use a closure so that we can conviniently return None in the middle of the
         // loop.
         let pageserver_connstring: Option<String> = (|| {
-            let num_shards = if args.pageserver_conninfo.shard_count.is_unsharded() {
-                1
-            } else {
-                args.pageserver_conninfo.shard_count.0
-            };
+            let num_shards = args.pageserver_conninfo.shard_count.count();
             let mut connstrings = Vec::new();
             for shard_no in 0..num_shards {
                 let shard_index = ShardIndex {
