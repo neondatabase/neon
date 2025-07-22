@@ -47,6 +47,26 @@ extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blk
 extern FileCacheState* lfc_get_state(size_t max_entries);
 extern void lfc_prewarm(FileCacheState* fcs, uint32 n_workers);
 
+typedef struct LfcStatsEntry
+{
+	const char *metric_name;
+	bool		isnull;
+	uint64		value;
+} LfcStatsEntry;
+extern LfcStatsEntry *lfc_get_stats(int *num_entries);
+
+typedef struct
+{
+	uint32		pageoffs;
+	Oid			relfilenode;
+	Oid			reltablespace;
+	Oid			reldatabase;
+	ForkNumber	forknum;
+	BlockNumber blocknum;
+	uint16		accesscount;
+} LocalCachePagesRec;
+extern LocalCachePagesRec *lfc_local_cache_pages(uint32 *num_entries);
+
 extern int32 lfc_approximate_working_set_size_seconds(time_t duration, bool reset);
 
 
