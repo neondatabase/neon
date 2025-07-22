@@ -35,7 +35,7 @@ remote extensions.
 
 - [Rust](https://doc.rust-lang.org/std/env/consts/constant.ARCH.html)
   - `x86_64`
-  - `arm64`
+  - `aarch64`
 - [Go](https://pkg.go.dev/internal/goarch#pkg-constants)
   - `amd64`
   - `arm64`
