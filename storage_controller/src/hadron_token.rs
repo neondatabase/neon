@@ -3,7 +3,7 @@ use camino::Utf8Path;
 use jsonwebtoken::EncodingKey;
 use std::fs;
 use utils::{
-    auth::{encode_hadron_token_with_encoding_key, Claims, Scope},
+    auth::{Claims, Scope, encode_hadron_token_with_encoding_key},
     id::TenantId,
 };
 use uuid::Uuid;

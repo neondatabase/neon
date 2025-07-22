@@ -44,18 +44,19 @@ use pageserver_api::models::{
     TopTenantShardItem, TopTenantShardsRequest, TopTenantShardsResponse,
 };
 use pageserver_api::shard::{ShardCount, TenantShardId};
+use postgres_backend::AuthType;
 use postgres_ffi::PgMajorVersion;
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tenant_size_model::svg::SvgBranchKind;
-use postgres_backend::AuthType;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::auth::JwtAuth;
 use utils::auth::SwappableJwtAuth;
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};

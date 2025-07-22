@@ -1,9 +1,9 @@
 // For details about authentication see docs/authentication.md
 
-use std::borrow::Cow;
 use std::fmt::Display;
 use std::fs;
 use std::sync::Arc;
+use std::{borrow::Cow, io, path::Path};
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
@@ -11,11 +11,11 @@ use camino::Utf8Path;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode,
 };
+use oid_registry::OID_PKCS1_RSAENCRYPTION;
 use pem::Pem;
+use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
-use oid_registry::OID_PKCS1_RSAENCRYPTION;
-use rustls_pki_types::CertificateDer;
 
 use crate::id::TenantId;
 
@@ -259,7 +259,9 @@ impl JwtAuth {
             anyhow::bail!("{cert_path} is neither a directory or a file")
         }
         if decoding_keys.is_empty() {
-            anyhow::bail!("Configured for JWT auth with zero decoding keys. All JWT gated requests would be rejected.");
+            anyhow::bail!(
+                "Configured for JWT auth with zero decoding keys. All JWT gated requests would be rejected."
+            );
         }
 
         // Note that we need to create a `JwtAuth` with a different `validation` from the default one created by `new()` in this case
@@ -319,13 +321,13 @@ pub fn encode_from_key_file<S: Serialize>(claims: &S, pem: &Pem) -> Result<Strin
 /// Encode (i.e., sign) a Hadron auth token with the given claims and RSA private key. This is used
 /// by HCC to sign tokens when deploying compute or returning the compute spec. The resulting token
 /// is used by the compute node to authenticate with HCC and PS/SK.
-pub fn encode_hadron_token(claims: &Claims, key_data: &[u8]) -> Result<String> {
+pub fn encode_hadron_token<S: Serialize>(claims: &S, key_data: &[u8]) -> Result<String> {
     let key = EncodingKey::from_rsa_pem(key_data)?;
     encode_hadron_token_with_encoding_key(claims, &key)
 }
 
-pub fn encode_hadron_token_with_encoding_key(
-    claims: &Claims,
+pub fn encode_hadron_token_with_encoding_key<S: Serialize>(
+    claims: &S,
     encoding_key: &EncodingKey,
 ) -> Result<String> {
     Ok(encode(
@@ -364,7 +366,6 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
             endpoint_id: None,
             scope: Scope::Tenant,
-            endpoint_id: None,
         };
 
         // A test token containing the following payload, signed using TEST_PRIV_KEY_ED25519:
@@ -394,7 +395,6 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
             endpoint_id: None,
             scope: Scope::Tenant,
-            endpoint_id: None,
         };
 
         let pem = pem::parse(TEST_PRIV_KEY_ED25519).unwrap();

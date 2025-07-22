@@ -515,17 +515,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     let persistence = Arc::new(Persistence::new(secrets.database_url).await);
 
-    let service = Service::spawn(
-        config,
-        persistence.clone(),
-        secrets.token_generator,
-    )
-    .await?;
+    let service = Service::spawn(config, persistence.clone(), secrets.token_generator).await?;
 
     let jwt_auth = secrets
         .public_key
         .map(|jwt_auth| Arc::new(SwappableJwtAuth::new(jwt_auth)));
-    let router = make_router(service.clone(), auth, build_info)
+    let router = make_router(service.clone(), jwt_auth, build_info)
         .build()
         .map_err(|err| anyhow!(err))?;
     let http_service =

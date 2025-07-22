@@ -1132,7 +1132,8 @@ class NeonEnv:
             or config.use_https_storage_broker_api
         )
         self.ssl_ca_file = (
-            self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None)
+            self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None
+        )
 
         # The auth token type used in the test environment. neon_local is instruted to generate key pairs
         # according to the auth token type. The keys are always generated but are only used if

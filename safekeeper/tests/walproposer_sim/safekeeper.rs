@@ -9,12 +9,12 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
 use camino::Utf8PathBuf;
-use postgres_backend::AuthType;
 use desim::executor::{self, PollSome};
 use desim::network::TCP;
 use desim::node_os::NodeOs;
 use desim::proto::{AnyMessage, NetEvent, NodeEvent};
 use http::Uri;
+use postgres_backend::AuthType;
 use safekeeper::SafeKeeperConf;
 use safekeeper::safekeeper::{
     ProposerAcceptorMessage, SK_PROTO_VERSION_3, SafeKeeper, UNKNOWN_SERVER_VERSION,

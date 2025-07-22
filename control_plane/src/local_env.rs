@@ -18,7 +18,7 @@ use postgres_backend::AuthType;
 use reqwest::{Certificate, Url};
 use safekeeper_api::PgMajorVersion;
 use serde::{Deserialize, Serialize};
-use utils::auth::{encode_from_key_file, Claims, encode_hadron_token};
+use utils::auth::{encode_from_key_file, encode_hadron_token};
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
 use crate::broker::StorageBroker;
@@ -833,11 +833,16 @@ impl LocalEnv {
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
     pub fn generate_auth_token<S: Serialize>(&self, claims: &S) -> anyhow::Result<String> {
-        let private_key_path = self.get_private_key_path();
-        let key_data = fs::read(private_key_path)?;
         match self.token_auth_type {
-            AuthType::NeonJWT => encode_from_key_file(claims, &key_data),
-            AuthType::HadronJWT => encode_hadron_token(claims, &key_data),
+            AuthType::NeonJWT => {
+                let key_data = self.read_private_key()?;
+                encode_from_key_file(claims, &key_data)
+            }
+            AuthType::HadronJWT => {
+                let private_key_path = self.get_private_key_path();
+                let key_data = fs::read(private_key_path)?;
+                encode_hadron_token(claims, &key_data)
+            }
             _ => panic!("unsupported token auth type {:?}", self.token_auth_type),
         }
     }

@@ -459,7 +459,10 @@ fn start_pageserver(
     let http_auth;
     let pg_auth;
     let grpc_auth;
-    if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type].iter().any(|auth_type| auth_type == AuthType::NeonJWT || auth_type == HadronJWT) {
+    if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type]
+        .iter()
+        .any(|auth_type| *auth_type == AuthType::NeonJWT || *auth_type == AuthType::HadronJWT)
+    {
         // unwrap is ok because check is performed when creating config, so path is set and exists
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
         info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
@@ -481,7 +484,7 @@ fn start_pageserver(
         };
         pg_auth = match conf.pg_auth_type {
             AuthType::Trust => None,
-            AuthType::NeonJWT => Some(auth.clone()),
+            AuthType::NeonJWT | AuthType::HadronJWT => Some(auth.clone()),
         };
         grpc_auth = match conf.grpc_auth_type {
             AuthType::Trust => None,

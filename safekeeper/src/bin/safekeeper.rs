@@ -14,8 +14,8 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use http_utils::tls_certs::ReloadingCertificateResolver;
-use postgres_backend::AuthType;
 use metrics::set_build_info_metric;
+use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT,
@@ -374,17 +374,17 @@ async fn main() -> anyhow::Result<()> {
         Some(path) => {
             info!("loading pg auth JWT key from {path}");
             match args.token_auth_type {
-                AuthType::NeonJWT => {
-                    Some(Arc::new(
-                        JwtAuth::from_key_path(path).context("failed to load the auth key")?,
-                    ))
-                }
-                AuthType::HadronJWT => {
-                    Some(Arc::new(
-                        JwtAuth::from_cert_path(path).context("failed to load auth keys from certificates")?,
-                    ))
-                }
-                _ => panic!("AuthType {auth_type} is not allowed when --pg-auth-public-key-path is specified", auth_type = args.token_auth_type),
+                AuthType::NeonJWT => Some(Arc::new(
+                    JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+                )),
+                AuthType::HadronJWT => Some(Arc::new(
+                    JwtAuth::from_cert_path(path)
+                        .context("failed to load auth keys from certificates")?,
+                )),
+                _ => panic!(
+                    "AuthType {auth_type} is not allowed when --pg-auth-public-key-path is specified",
+                    auth_type = args.token_auth_type
+                ),
             }
         }
     };
@@ -396,17 +396,17 @@ async fn main() -> anyhow::Result<()> {
         Some(path) => {
             info!("loading pg tenant only auth JWT key from {path}");
             match args.token_auth_type {
-                AuthType::NeonJWT => {
-                    Some(Arc::new(
-                        JwtAuth::from_key_path(path).context("failed to load the auth key")?,
-                    ))
-                }
-                AuthType::HadronJWT => {
-                    Some(Arc::new(
-                        JwtAuth::from_cert_path(path).context("failed to load auth keys from certificates")?,
-                    ))
-                }
-                _ => panic!("AuthType {auth_type} is not allowed when --pg-tenant-only-auth-public-key-path is specified", auth_type = args.token_auth_type),
+                AuthType::NeonJWT => Some(Arc::new(
+                    JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+                )),
+                AuthType::HadronJWT => Some(Arc::new(
+                    JwtAuth::from_cert_path(path)
+                        .context("failed to load auth keys from certificates")?,
+                )),
+                _ => panic!(
+                    "AuthType {auth_type} is not allowed when --pg-tenant-only-auth-public-key-path is specified",
+                    auth_type = args.token_auth_type
+                ),
             }
         }
     };
@@ -418,9 +418,15 @@ async fn main() -> anyhow::Result<()> {
         Some(path) => {
             info!("loading http auth JWT key(s) from {path}");
             let jwt_auth = match args.token_auth_type {
-                AuthType::NeonJWT => JwtAuth::from_key_path(path).context("failed to load the auth key")?,
-                AuthType::HadronJWT => JwtAuth::from_cert_path(path).context("failed to load auth keys from certificates")?,
-                _ => panic!("AuthType {auth_type} is not allowed when --http-auth-public-key-path is specified", auth_type = args.token_auth_type),
+                AuthType::NeonJWT => {
+                    JwtAuth::from_key_path(path).context("failed to load the auth key")?
+                }
+                AuthType::HadronJWT => JwtAuth::from_cert_path(path)
+                    .context("failed to load auth keys from certificates")?,
+                _ => panic!(
+                    "AuthType {auth_type} is not allowed when --http-auth-public-key-path is specified",
+                    auth_type = args.token_auth_type
+                ),
             };
             Some(Arc::new(SwappableJwtAuth::new(jwt_auth)))
         }
@@ -456,7 +462,6 @@ async fn main() -> anyhow::Result<()> {
         listen_http_addr: args.listen_http,
         listen_https_addr: args.listen_https,
         advertise_pg_addr: args.advertise_pg,
-        advertise_pg_addr_tenant_only: args.advertise_pg_tenant_only,
         availability_zone: args.availability_zone,
         no_sync: args.no_sync,
         broker_endpoint: args.broker_endpoint,
@@ -495,7 +500,7 @@ async fn main() -> anyhow::Result<()> {
         enable_tls_wal_service_api: args.enable_tls_wal_service_api,
         force_metric_collection_on_scrape: args.force_metric_collection_on_scrape,
         /* BEGIN_HADRON */
-        advertise_pg_addr_tenant_only: None,
+        advertise_pg_addr_tenant_only: args.advertise_pg_tenant_only,
         enable_pull_timeline_on_startup: args.enable_pull_timeline_on_startup,
         hcc_base_url: None,
         global_disk_check_interval: args.global_disk_check_interval,

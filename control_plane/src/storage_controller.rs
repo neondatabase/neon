@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
-use utils::auth::{Claims, Scope, encode_from_key_file};
+use utils::auth::{Claims, Scope, encode_from_key_file, encode_hadron_token};
 use utils::id::{NodeId, TenantId};
 use whoami::username;
 
@@ -625,15 +625,17 @@ impl StorageController {
             let jwt_token = private_key.encode_token(&claims)?;
             args.push(format!("--jwt-token={jwt_token}"));
 
-            let peer_claims = Claims::new(None, Scope::Admin);
-            let peer_jwt_token = encode_from_key_file(&peer_claims, private_key)
-                .expect("failed to generate jwt token");
-            args.push(format!("--peer-jwt-token={peer_jwt_token}"));
+            if let StorageControllerPrivateKey::EdPrivateKey(key) = private_key {
+                let peer_claims = Claims::new(None, Scope::Admin);
+                let peer_jwt_token =
+                    encode_from_key_file(&peer_claims, key).expect("failed to generate jwt token");
+                args.push(format!("--peer-jwt-token={peer_jwt_token}"));
 
-            let claims = Claims::new(None, Scope::SafekeeperData);
-            let jwt_token =
-                encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
-            args.push(format!("--safekeeper-jwt-token={jwt_token}"));
+                let claims = Claims::new(None, Scope::SafekeeperData);
+                let jwt_token =
+                    encode_from_key_file(&claims, key).expect("failed to generate jwt token");
+                args.push(format!("--safekeeper-jwt-token={jwt_token}"));
+            }
         }
 
         if let Some(public_key) = &self.public_key {
@@ -685,7 +687,13 @@ impl StorageController {
             self.env.base_data_dir.display()
         ));
 
-        if self.env.safekeepers.iter().any(|sk| sk.auth_enabled) && self.private_key.is_none() {
+        if self
+            .env
+            .safekeepers
+            .iter()
+            .any(|sk| sk.auth_type != AuthType::Trust)
+            && self.private_key.is_none()
+        {
             anyhow::bail!("Safekeeper set up for auth but no private key specified");
         }
 

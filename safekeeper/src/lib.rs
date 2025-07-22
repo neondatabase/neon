@@ -106,7 +106,6 @@ pub struct SafeKeeperConf {
     pub listen_http_addr: String,
     pub listen_https_addr: Option<String>,
     pub advertise_pg_addr: Option<String>,
-    pub advertise_pg_addr_tenant_only: Option<String>,
     pub availability_zone: Option<String>,
     pub no_sync: bool,
     /* BEGIN_HADRON */
@@ -166,7 +165,6 @@ impl SafeKeeperConf {
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             listen_https_addr: None,
             advertise_pg_addr: None,
-            advertise_pg_addr_tenant_only: None,
             availability_zone: None,
             remote_storage: None,
             my_id: NodeId(0),

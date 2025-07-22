@@ -20,8 +20,6 @@ use safekeeper_client::mgmt_api;
 use thiserror::Error;
 use utils::auth::{Claims, Scope};
 use utils::id::NodeId;
-use utils::ip_address::HADRON_NODE_IP_ADDRESS;
-use utils::{http::error::HttpErrorBody, id::NodeId};
 
 use crate::background_process;
 use crate::local_env::{LocalEnv, SafekeeperConf};
@@ -113,7 +111,7 @@ impl SafekeeperNode {
         }
 
         // Generate a token file for authentication with other safekeepers
-        if self.conf.auth_enabled {
+        if self.conf.auth_type != AuthType::Trust {
             let token = self
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
@@ -224,26 +222,14 @@ impl SafekeeperNode {
             args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
         }
 
-        if self.conf.auth_enabled {
-            let token_path = self.datadir_path().join("peer_jwt_token");
-            let token_path_str = token_path
-                .to_str()
-                .with_context(|| {
-                    format!("Token path {token_path:?} cannot be represented as a unicode string")
-                })?
-                .to_owned();
-            args.extend(["--auth-token-path".to_owned(), token_path_str]);
-        }
-
         args.extend_from_slice(extra_opts);
 
-        let env_variables = Vec::new();
         background_process::start_process(
             &format!("safekeeper-{id}"),
             &datadir,
             &self.env.safekeeper_bin(),
             &args,
-            env_variables,
+            self.safekeeper_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             retry_timeout,
             || async {
@@ -255,6 +241,19 @@ impl SafekeeperNode {
             },
         )
         .await
+    }
+
+    fn safekeeper_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let mut env_vars = vec![];
+        // Generate a token to connect from safekeeper to peers
+        if self.conf.auth_type != AuthType::Trust {
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
+            // TODO: Safekeepers don't read this env var
+            env_vars.push(("SAFEKEEPER_AUTH_TOKEN".to_owned(), token.clone()));
+        }
+        Ok(env_vars)
     }
 
     ///
