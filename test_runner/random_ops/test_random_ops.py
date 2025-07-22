@@ -143,7 +143,7 @@ class NeonBranch:
         Prints the branch's id with all the predecessors
         (r) means the branch is a reset one
         """
-        return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''} {f'({self.name})' if self.name else ''}, parent: {self.parent}"
+        return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''} {f'({self.name})' if self.name and self.name != self.id else ''}, parent: {self.parent}"
 
     def random_time(self) -> datetime:
         min_time = max(
@@ -518,17 +518,18 @@ class NeonProject:
         if not target_branch:
             return None
         self.snapshots[snapshot_id].restored = True
-        new_branch_def = self.neon_api.restore_snapshot(
+        new_branch_def: dict[str, Any] = self.neon_api.restore_snapshot(
             self.id,
             snapshot_id,
             target_branch.id,
             self.generate_branch_name(),
         )
         self.wait()
+        new_branch_def = self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
         # XXX do not merge, debug only
         log.info("new_branch: %s", new_branch_def)
         new_branch = NeonBranch(
-            self, self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
+            self, new_branch_def
         )
         target_branch_def = self.neon_api.get_branch_details(self.id, target_branch.id)
         if "name" in target_branch_def["branch"]:
@@ -585,9 +586,8 @@ def setup_class(
         print(f"::warning::Retried on 524 error {neon_api.retries524} times")
     if neon_api.retries4xx > 0:
         print(f"::warning::Retried on 4xx error {neon_api.retries4xx} times")
-    #XXX do not merge, debug only
-    #log.info("Removing the project %s", project.id)
-    #project.delete()
+    log.info("Removing the project %s", project.id)
+    project.delete()
 
 
 def do_action(project: NeonProject, action: str) -> bool:
