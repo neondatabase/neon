@@ -17,13 +17,13 @@ if TYPE_CHECKING:
 # Originally Neon always called `mdexists` to check if the local file exists and determine if it's an unlogged relation. Now we check the cache first.
 # mdexists is not so cheap: it closes and opens the file.
 #
-# This test tries to emulate situation when most of writes are with persistence=0.
-# We create multiple connections to the database and in each fill it's own table. So each backends writes only it's own table and other tables
-# descriptors are not cached. At the same time all backends perform eviction from shared buffers. Probability that backends evicts page of it's own
+# This test tries to recreate the situation that most of writes are with persistence=0.
+# We open multiple connections to the database and in each fill its own table. So each backends writes only its own table and other table's
+# descriptors are not cached. At the same time all backends perform eviction from shared buffers. Probability that backends evicts page of its own
 # relation is 1/N when N is number of relations=number of backends. The more relations, the smaller probability.
 # For large enough number of relations most of writes are with unknown persistence.
 #
-# At Linux this test shows about 2x time speed improvement.
+# On Linux, introducing the relpersistence cache shows about 2x time speed improvement in this test.
 #
 @pytest.mark.timeout(10000)
 def test_unlogged(neon_env_builder: NeonEnvBuilder):
