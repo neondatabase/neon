@@ -23,6 +23,7 @@ def query_clickhouse(
     client,
     query: str,
     digest: str,
+    conn: psycopg2.extensions.connection | None = None,
 ) -> None:
     """
     Run the query on the client
@@ -32,6 +33,10 @@ def query_clickhouse(
     res = client.query(query)
     log.debug(res.result_rows)
     m = hashlib.sha1()
+    if conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM pg_replication_slots WHERE slot_type = 'logical'")
+        log.info(cur.fetchall())
     m.update(repr(tuple(res.result_rows)).encode())
     hash_res = m.hexdigest()
     log.debug("Hash: %s", hash_res)
@@ -55,7 +60,9 @@ def test_clickhouse(remote_pg: RemotePostgres):
     conn.commit()
     if "CLICKHOUSE_PASSWORD" not in os.environ:
         raise RuntimeError("CLICKHOUSE_PASSWORD not set")
-    client = clickhouse_connect.get_client(host=clickhouse_host, password=os.environ["CLICKHOUSE_PASSWORD"])
+    client = clickhouse_connect.get_client(
+        host=clickhouse_host, password=os.environ["CLICKHOUSE_PASSWORD"]
+    )
     client.command("SET allow_experimental_database_materialized_postgresql=1")
     client.command("DROP DATABASE IF EXISTS db1_postgres")
     client.command(
@@ -70,6 +77,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
             client,
             "select * from db1_postgres.table1 order by 1",
             "ee600d8f7cd05bd0b169fa81f44300a9dd10085a",
+            conn,
         ),
         timeout=90,
     )
