@@ -24,6 +24,7 @@ on:
         options:
           - "2.8"
           - "2.9"
+        default: "2.8"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
