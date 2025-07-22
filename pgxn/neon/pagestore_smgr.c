@@ -100,6 +100,8 @@ typedef enum
 
 int debug_compare_local;
 
+XLogRecPtr last_replay_lsn;
+
 static NRelFileInfo unlogged_build_rel_info;
 static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 
@@ -602,6 +604,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			replay_lsn = GetXLogReplayRecPtr(NULL);
 			MIN_BACKEND_PREFETCH_LSN = replay_lsn;
 		}
+		last_replay_lsn = replay_lsn;
 		for (int i = 0; i < nblocks; i++)
 		{
 			neon_request_lsns *result = &output[i];
