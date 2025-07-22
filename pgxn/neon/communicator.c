@@ -541,7 +541,7 @@ communicator_prefetch_pump_state(void)
 		/*
 		 * Update backend's min in-flight prefetch LSN.
 		 */
-		XLogRecPtr min_backend_prefetch_lsn = GetXLogReplayRecPtr(NULL);
+		XLogRecPtr min_backend_prefetch_lsn = last_replay_lsn != InvalidXLogRecPtr ? last_replay_lsn : GetXLogReplayRecPtr(NULL);
 		for (uint64_t ring_index = MyPState->ring_receive; ring_index < MyPState->ring_unused; ring_index++)
 		{
 			PrefetchRequest* slot = GetPrfSlot(ring_index);
@@ -1039,11 +1039,16 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 	Assert(mySlotNo == MyPState->ring_unused);
 
 	if (force_request_lsns)
+	{
 		slot->request_lsns = *force_request_lsns;
+	}
 	else
+	{
 		neon_get_request_lsns(BufTagGetNRelFileInfo(slot->buftag),
 							  slot->buftag.forkNum, slot->buftag.blockNum,
 							  &slot->request_lsns, 1);
+		last_replay_lsn = InvalidXLogRecPtr;
+	}
 	request.hdr.lsn = slot->request_lsns.request_lsn;
 	request.hdr.not_modified_since = slot->request_lsns.not_modified_since;
 
@@ -1509,10 +1514,12 @@ page_server_request(void const *req)
 			MyNeonCounters->pageserver_open_requests--;
 		} while (resp == NULL);
 		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+		last_replay_lsn = InvalidXLogRecPtr;
 	}
 	PG_CATCH();
 	{
 		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+		last_replay_lsn = InvalidXLogRecPtr;
 		/* Nothing should cancel disconnect: we should not leave connection in opaque state */
 		HOLD_INTERRUPTS();
 		page_server->disconnect(shard_no);
@@ -2554,8 +2561,8 @@ communicator_reconfigure_timeout_if_needed(void)
 	{
 		/*
 		 * The background writer/checkpointer doens't (shouldn't) read any pages.
-		 * And definitely they should run on replica.
-		 * The only cae when we can get here is replica promotion.
+		 * And definitely they should not run on replica.
+		 * The only case when we can get here is replica promotion.
 		 */
 		if (AmBackgroundWriterProcess() || AmCheckpointerProcess())
 		{
