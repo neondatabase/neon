@@ -46,7 +46,7 @@ use super::backend::{HttpConnError, LocalProxyConnError, PoolingBackend};
 use super::conn_pool::AuthData;
 use super::conn_pool_lib::ConnInfo;
 use super::error::{ConnInfoError, Credentials, HttpCodeError, ReadPayloadError};
-use super::http_conn_pool::{self, Send};
+use super::http_conn_pool::{self, LocalProxyClient};
 use super::http_util::{
     ALLOW_POOL, CONN_STRING, NEON_REQUEST_ID, RAW_TEXT_OUTPUT, TXN_ISOLATION_LEVEL, TXN_READ_ONLY,
     get_conn_info, json_response, uuid_to_header_value,
@@ -145,7 +145,7 @@ impl DbSchemaCache {
         endpoint_id: &EndpointCacheKey,
         auth_header: &HeaderValue,
         connection_string: &str,
-        client: &mut http_conn_pool::Client<Send>,
+        client: &mut http_conn_pool::Client<LocalProxyClient>,
         ctx: &RequestContext,
         config: &'static ProxyConfig,
     ) -> Result<Arc<(ApiConfig, DbSchemaOwned)>, RestError> {
@@ -190,7 +190,7 @@ impl DbSchemaCache {
         &self,
         auth_header: &HeaderValue,
         connection_string: &str,
-        client: &mut http_conn_pool::Client<Send>,
+        client: &mut http_conn_pool::Client<LocalProxyClient>,
         ctx: &RequestContext,
         config: &'static ProxyConfig,
     ) -> Result<(ApiConfig, DbSchemaOwned), RestError> {
@@ -430,7 +430,7 @@ struct BatchQueryData<'a> {
 }
 
 async fn make_local_proxy_request<S: DeserializeOwned>(
-    client: &mut http_conn_pool::Client<Send>,
+    client: &mut http_conn_pool::Client<LocalProxyClient>,
     headers: impl IntoIterator<Item = (&HeaderName, HeaderValue)>,
     body: QueryData<'_>,
     max_len: usize,
@@ -461,7 +461,7 @@ async fn make_local_proxy_request<S: DeserializeOwned>(
 }
 
 async fn make_raw_local_proxy_request(
-    client: &mut http_conn_pool::Client<Send>,
+    client: &mut http_conn_pool::Client<LocalProxyClient>,
     headers: impl IntoIterator<Item = (&HeaderName, HeaderValue)>,
     body: String,
 ) -> Result<Response<Incoming>, RestError> {
