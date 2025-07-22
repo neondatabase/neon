@@ -54,14 +54,16 @@ where
 {
     type Item = io::Result<Message>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // read 1 byte tag, 4 bytes length.
-        let header = ready!(self.as_mut().poll_read_exact(cx, 5)?);
+        let header = ready!(self.as_mut().poll_fill_buf_exact(cx, 5)?);
 
         let len = u32::from_be_bytes(header[1..5].try_into().unwrap());
+        if len < 4 {
+            return Poll::Ready(Some(Err(std::io::Error::other(
+                "postgres message too small",
+            ))));
+        }
         if len >= 65536 {
             return Poll::Ready(Some(Err(std::io::Error::other(
                 "postgres message too large",
@@ -69,8 +71,9 @@ where
         }
 
         // the tag is an additional byte.
-        let _payload = ready!(self.as_mut().poll_read_exact(cx, len as usize + 1)?);
+        let _message = ready!(self.as_mut().poll_fill_buf_exact(cx, len as usize + 1)?);
 
+        // Message::parse will remove the all the bytes from the buffer.
         Poll::Ready(Message::parse(&mut self.read_buf).transpose())
     }
 }
@@ -80,9 +83,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    fn poll_read_exact(
+    /// Fill the buffer until it's the exact length provided. No additional data will be read from the socket.
+    ///
+    /// If the current buffer length is greater, nothing happens.
+    fn poll_fill_buf_exact(
         self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        cx: &mut Context<'_>,
         len: usize,
     ) -> Poll<Result<&[u8], std::io::Error>> {
         let this = self.get_mut();
@@ -131,21 +137,10 @@ where
     }
 }
 
-pub async fn connect_raw<S, T>(
+pub(crate) async fn startup<S, T>(
     stream: &mut StartupStream<S, T>,
     config: &Config,
 ) -> Result<(), Error>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    T: TlsStream + Unpin,
-{
-    startup(stream, config).await?;
-    authenticate(stream, config).await?;
-
-    Ok(())
-}
-
-async fn startup<S, T>(stream: &mut StartupStream<S, T>, config: &Config) -> Result<(), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
@@ -156,7 +151,10 @@ where
     stream.send(buf.freeze()).await.map_err(Error::io)
 }
 
-async fn authenticate<S, T>(stream: &mut StartupStream<S, T>, config: &Config) -> Result<(), Error>
+pub(crate) async fn authenticate<S, T>(
+    stream: &mut StartupStream<S, T>,
+    config: &Config,
+) -> Result<(), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsStream + Unpin,
