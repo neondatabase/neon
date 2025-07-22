@@ -24,6 +24,7 @@ mod migration;
 pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
+pub mod pg_isready;
 pub mod pgbouncer;
 pub mod rsyslog;
 pub mod spec;

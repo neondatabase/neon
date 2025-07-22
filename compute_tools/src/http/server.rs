@@ -27,6 +27,7 @@ use super::{
     },
 };
 use crate::compute::ComputeNode;
+use crate::http::routes::{hadron_liveness_probe, refresh_configuration};
 
 /// `compute_ctl` has two servers: internal and external. The internal server
 /// binds to the loopback interface and handles communication from clients on

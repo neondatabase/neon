@@ -51,6 +51,7 @@ use compute_tools::compute::{
 use compute_tools::extension_server::get_pg_version_string;
 use compute_tools::logger::*;
 use compute_tools::params::*;
+use compute_tools::pg_isready::get_pg_isready_bin;
 use compute_tools::spec::*;
 use rlimit::{Resource, setrlimit};
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
@@ -231,6 +232,8 @@ fn main() -> Result<()> {
                 cli.installed_extensions_collection_interval,
             )),
             pg_init_timeout: cli.pg_init_timeout.map(Duration::from_secs),
+            pg_isready_bin: get_pg_isready_bin(&cli.pgbin),
+            instance_id: std::env::var("INSTANCE_ID").ok(),
             lakebase_mode: cli.lakebase_mode,
         },
         config,
@@ -246,7 +249,10 @@ fn main() -> Result<()> {
 fn init(
     dev_mode: bool,
     log_dir: Option<String>,
-) -> Result<Option<tracing_utils::Provider>, Option<tracing_appender::non_blocking::WorkerGuard>> {
+) -> Result<(
+    Option<tracing_utils::Provider>,
+    Option<tracing_appender::non_blocking::WorkerGuard>,
+)> {
     let (provider, file_logs_guard) = init_tracing_and_logging(DEFAULT_LOG_LEVEL, &log_dir)?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;

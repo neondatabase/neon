@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use compute_api::responses::{InstalledExtension, InstalledExtensions};
+use once_cell::sync::Lazy;
 use tokio_postgres::error::Error as PostgresError;
 use tokio_postgres::{Client, Config, NoTls};
 

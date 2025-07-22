@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::sync::{LazyLock, RwLock};
+use tracing::Subscriber;
 use tracing::info;
 use tracing_appender;
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::{fmt, layer::SubscriberExt, registry::LookupSpan};
 
 /// Initialize logging to stderr, and OpenTelemetry tracing and exporter.
 ///
@@ -17,10 +19,10 @@ use tracing_subscriber::prelude::*;
 pub fn init_tracing_and_logging(
     default_log_level: &str,
     log_dir_opt: &Option<String>,
-) -> anyhow::Result<
+) -> anyhow::Result<(
     Option<tracing_utils::Provider>,
     Option<tracing_appender::non_blocking::WorkerGuard>,
-> {
+)> {
     // Initialize Logging
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_log_level));
