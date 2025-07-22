@@ -853,7 +853,6 @@ lfc_prewarm_main(Datum main_arg)
 	size_t prewarm_batch;
 	size_t n_workers;
 	dsm_segment *seg;
-	volatile bool continue_sleep;
 	FileCacheState* fcs;
 	uint8* bitmap;
 	BufferTag tag;
@@ -864,13 +863,6 @@ lfc_prewarm_main(Datum main_arg)
 
 	pqsignal(SIGTERM, die);
 	BackgroundWorkerUnblockSignals();
-
-	continue_sleep = true;
-
-	do {
-		sleep(1);
-		elog(LOG, "zzzzz %d", MyProcPid);
-	} while (continue_sleep);
 
 	seg = dsm_attach(lfc_ctl->prewarm_lfc_state_handle);
 	if (seg == NULL)
