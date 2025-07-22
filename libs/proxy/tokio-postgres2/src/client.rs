@@ -296,6 +296,33 @@ impl Client {
         self.batch_execute("discard all").await
     }
 
+    /// Similar to `discard_all`, but it does not clear any query plans
+    ///
+    /// This runs in the background, so it can be executed without `await`ing.
+    pub fn reset_session_background(&mut self) -> Result<(), Error> {
+        // "CLOSE ALL": closes any cursors
+        // "SET SESSION AUTHORIZATION DEFAULT": resets the current_user back to the session_user
+        // "RESET ALL": resets any GUCs back to their session defaults.
+        // "DEALLOCATE ALL": deallocates any prepared statements
+        // "UNLISTEN *": stops listening on all channels
+        // "SELECT pg_advisory_unlock_all();": unlocks all advisory locks
+        // "DISCARD TEMP;": drops all temporary tables
+        // "DISCARD SEQUENCES;": deallocates all cached sequence state
+
+        let _responses = self.inner_mut().send_simple_query(
+            "CLOSE ALL;
+            SET SESSION AUTHORIZATION DEFAULT;
+            RESET ALL;
+            DEALLOCATE ALL;
+            UNLISTEN *;
+            SELECT pg_advisory_unlock_all();
+            DISCARD TEMP;
+            DISCARD SEQUENCES;",
+        )?;
+
+        Ok(())
+    }
+
     /// Begins a new database transaction.
     ///
     /// The transaction will roll back by default - use the `commit` method to commit it.
