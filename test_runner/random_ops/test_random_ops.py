@@ -97,6 +97,9 @@ class NeonBranch:
         self.name: str | None = None
         if "name" in branch["branch"]:
             self.name = branch["branch"]["name"]
+        self.restored_from: str | None = None
+        if "restored_from" in branch:
+            self.restored_from = branch["restored_from"]
         self.project: NeonProject = project
         self.neon_api: NeonAPI = project.neon_api
         self.project_id: str = branch["branch"]["project_id"]
@@ -351,7 +354,7 @@ class NeonProject:
         if branch_id not in self.reset_branches:
             self.terminate_benchmark(branch_id)
         self.neon_api.delete_branch(self.id, branch_id)
-        if len(parent.children) == 1 and parent.id != self.main_branch.id:
+        if len(parent.children) == 1 and parent.id != self.main_branch.id and parent.restored_from is None:
             self.leaf_branches[parent.id] = parent
         parent.children.pop(branch_id)
         if branch_id in self.leaf_branches:
