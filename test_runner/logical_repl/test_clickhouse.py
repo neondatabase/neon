@@ -71,7 +71,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
             "select * from db1_postgres.table1 order by 1",
             "ee600d8f7cd05bd0b169fa81f44300a9dd10085a",
         ),
-        timeout=900,
+        timeout=90,
     )
     cur.execute("INSERT INTO table1 (id, column1) VALUES (3, 'ghi'), (4, 'jkl');")
     conn.commit()
@@ -81,7 +81,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
             "select * from db1_postgres.table1 order by 1",
             "9eba2daaf7e4d7d27ac849525f68b562ab53947d",
         ),
-        timeout=900,
+        timeout=90,
     )
     log.debug("Sleeping before final checking if Neon is still alive")
     time.sleep(3)
