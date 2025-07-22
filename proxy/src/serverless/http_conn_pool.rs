@@ -23,8 +23,8 @@ use crate::protocol2::ConnectionInfoExtra;
 use crate::types::EndpointCacheKey;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 
-pub(crate) type Send = http2::SendRequest<BoxBody<Bytes, hyper::Error>>;
-pub(crate) type Connect =
+pub(crate) type LocalProxyClient = http2::SendRequest<BoxBody<Bytes, hyper::Error>>;
+pub(crate) type LocalProxyConnection =
     http2::Connection<TokioIo<AsyncRW>, BoxBody<Bytes, hyper::Error>, TokioExecutor>;
 
 #[derive(Clone)]
@@ -189,14 +189,14 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C, HttpConnPool<C>> {
 }
 
 pub(crate) fn poll_http2_client(
-    global_pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
+    global_pool: Arc<GlobalConnPool<LocalProxyClient, HttpConnPool<LocalProxyClient>>>,
     ctx: &RequestContext,
     conn_info: &ConnInfo,
-    client: Send,
-    connection: Connect,
+    client: LocalProxyClient,
+    connection: LocalProxyConnection,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
-) -> Client<Send> {
+) -> Client<LocalProxyClient> {
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
     let session_id = ctx.session_id();
 
@@ -285,7 +285,7 @@ impl<C: ClientInnerExt + Clone> Client<C> {
     }
 }
 
-impl ClientInnerExt for Send {
+impl ClientInnerExt for LocalProxyClient {
     fn is_closed(&self) -> bool {
         self.is_closed()
     }
@@ -296,6 +296,8 @@ impl ClientInnerExt for Send {
     }
 
     fn reset(&mut self) -> Result<(), postgres_client::Error> {
+        // We use HTTP/2.0 to talk to local proxy. HTTP is stateless,
+        // so there's nothing to reset.
         Ok(())
     }
 }

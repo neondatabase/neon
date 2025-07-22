@@ -18,7 +18,7 @@ use tracing::{debug, info};
 use super::AsyncRW;
 use super::conn_pool::poll_client;
 use super::conn_pool_lib::{Client, ConnInfo, EndpointConnPool, GlobalConnPool};
-use super::http_conn_pool::{self, HttpConnPool, Send, poll_http2_client};
+use super::http_conn_pool::{self, HttpConnPool, LocalProxyClient, poll_http2_client};
 use super::local_conn_pool::{self, EXT_NAME, EXT_SCHEMA, EXT_VERSION, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo};
@@ -40,7 +40,7 @@ use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host, LOCAL_PROXY_SUFFIX};
 
 pub(crate) struct PoolingBackend {
-    pub(crate) http_conn_pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
+    pub(crate) http_conn_pool: Arc<GlobalConnPool<LocalProxyClient, HttpConnPool<LocalProxyClient>>>,
     pub(crate) local_pool: Arc<LocalConnPool<postgres_client::Client>>,
     pub(crate) pool:
         Arc<GlobalConnPool<postgres_client::Client, EndpointConnPool<postgres_client::Client>>>,
@@ -210,7 +210,7 @@ impl PoolingBackend {
         &self,
         ctx: &RequestContext,
         conn_info: ConnInfo,
-    ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
+    ) -> Result<http_conn_pool::Client<LocalProxyClient>, HttpConnError> {
         debug!("pool: looking for an existing connection");
         if let Ok(Some(client)) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
@@ -568,7 +568,7 @@ impl ConnectMechanism for TokioMechanism {
 }
 
 struct HyperMechanism {
-    pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
+    pool: Arc<GlobalConnPool<LocalProxyClient, HttpConnPool<LocalProxyClient>>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
@@ -578,7 +578,7 @@ struct HyperMechanism {
 
 #[async_trait]
 impl ConnectMechanism for HyperMechanism {
-    type Connection = http_conn_pool::Client<Send>;
+    type Connection = http_conn_pool::Client<LocalProxyClient>;
     type ConnectError = HttpConnError;
     type Error = HttpConnError;
 
@@ -632,7 +632,7 @@ async fn connect_http2(
     port: u16,
     timeout: Duration,
     tls: Option<&Arc<rustls::ClientConfig>>,
-) -> Result<(http_conn_pool::Send, http_conn_pool::Connect), LocalProxyConnError> {
+) -> Result<(http_conn_pool::LocalProxyClient, http_conn_pool::LocalProxyConnection), LocalProxyConnError> {
     let addrs = match host_addr {
         Some(addr) => vec![SocketAddr::new(addr, port)],
         None => lookup_host((host, port))
