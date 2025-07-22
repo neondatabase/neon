@@ -22,11 +22,11 @@ pub(super) fn init(
 ) -> Result<&'static CommunicatorWorkerProcessStruct, String> {
     // The caller validated these already
     let _tenant_id = tenant_id
-        .map(|s| TenantId::from_str(s))
+        .map(TenantId::from_str)
         .transpose()
         .map_err(|e| format!("invalid tenant ID: {e}"))?;
     let _timeline_id = timeline_id
-        .map(|s| TimelineId::from_str(s))
+        .map(TimelineId::from_str)
         .transpose()
         .map_err(|e| format!("invalid timeline ID: {e}"))?;
 
