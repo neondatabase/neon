@@ -1625,8 +1625,10 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			}
 			if (relperst == NEON_RELPERSISTENCE_UNLOGGED_BUILD)
 			{
-				/* In case of unlogged build we need to avoid race condition at unlogged build end.
-				 * Obtain shared lock here to prevent backend completing unlogged build from performing cleanup amnd remvong files.
+				/*
+				 * A relation going through an unlogged build can complete the unlogged build at any time.
+				 * To make sure that the backend performing the build doesn't complete and
+				 * remove the underlying local file just when we are about to write it, acquire the lock.
 				 */
 				LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
 				is_locked = true;
