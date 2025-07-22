@@ -3925,7 +3925,7 @@ class NeonProxy(PgProtocol):
                 [query, params] = query
                 json_queries.append({"query": query, "params": params})
 
-        queries = [j["query"] for j in json_queries];
+        queries = [j["query"] for j in json_queries]
         log.info(f"Executing http queries: {queries}")
 
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
