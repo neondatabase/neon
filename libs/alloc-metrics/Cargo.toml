@@ -1,0 +1,18 @@
+[package]
+name = "alloc-metrics"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+metrics.workspace = true
+measured.workspace = true
+thread_local.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tikv-jemallocator.workspace = true
+
+[[bench]]
+harness = false
+name = "alloc"

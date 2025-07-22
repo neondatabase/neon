@@ -478,7 +478,7 @@ pub trait CounterPairAssoc {
 }
 
 pub struct CounterPairVec<A: CounterPairAssoc> {
-    vec: measured::metric::MetricVec<MeasuredCounterPairState, A::LabelGroupSet>,
+    pub vec: measured::metric::MetricVec<MeasuredCounterPairState, A::LabelGroupSet>,
 }
 
 impl<A: CounterPairAssoc> Default for CounterPairVec<A>
@@ -492,6 +492,17 @@ where
     }
 }
 
+impl<A: CounterPairAssoc> CounterPairVec<A>
+where
+    A::LabelGroupSet: Default,
+{
+    pub fn dense() -> Self {
+        Self {
+            vec: measured::metric::MetricVec::dense(),
+        }
+    }
+}
+
 impl<A: CounterPairAssoc> CounterPairVec<A> {
     pub fn guard(
         &self,
@@ -501,14 +512,31 @@ impl<A: CounterPairAssoc> CounterPairVec<A> {
         self.vec.get_metric(id).inc.inc();
         MeasuredCounterPairGuard { vec: &self.vec, id }
     }
+
+    #[inline]
     pub fn inc(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
         let id = self.vec.with_labels(labels);
         self.vec.get_metric(id).inc.inc();
     }
+
+    #[inline]
     pub fn dec(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>) {
         let id = self.vec.with_labels(labels);
         self.vec.get_metric(id).dec.inc();
     }
+
+    #[inline]
+    pub fn inc_by(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>, x: u64) {
+        let id = self.vec.with_labels(labels);
+        self.vec.get_metric(id).inc.inc_by(x);
+    }
+
+    #[inline]
+    pub fn dec_by(&self, labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>, x: u64) {
+        let id = self.vec.with_labels(labels);
+        self.vec.get_metric(id).dec.inc_by(x);
+    }
+
     pub fn remove_metric(
         &self,
         labels: <A::LabelGroupSet as LabelGroupSet>::Group<'_>,
@@ -553,6 +581,28 @@ pub struct MeasuredCounterPairState {
     pub dec: CounterState,
 }
 
+impl MeasuredCounterPairState {
+    #[inline]
+    pub fn inc(&self) {
+        self.inc.inc();
+    }
+
+    #[inline]
+    pub fn dec(&self) {
+        self.dec.inc();
+    }
+
+    #[inline]
+    pub fn inc_by(&self, x: u64) {
+        self.inc.inc_by(x);
+    }
+
+    #[inline]
+    pub fn dec_by(&self, x: u64) {
+        self.dec.inc_by(x);
+    }
+}
+
 impl measured::metric::MetricType for MeasuredCounterPairState {
     type Metadata = ();
 }
@@ -569,9 +619,9 @@ impl<A: CounterPairAssoc> Drop for MeasuredCounterPairGuard<'_, A> {
 }
 
 /// [`MetricEncoding`] for [`MeasuredCounterPairState`] that only writes the inc counter to the inner encoder.
-struct Inc<T>(T);
+pub struct Inc<T>(pub T);
 /// [`MetricEncoding`] for [`MeasuredCounterPairState`] that only writes the dec counter to the inner encoder.
-struct Dec<T>(T);
+pub struct Dec<T>(pub T);
 
 impl<T: Encoding> Encoding for Inc<T> {
     type Err = T::Err;

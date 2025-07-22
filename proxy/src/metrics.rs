@@ -1,5 +1,11 @@
+#![expect(
+    clippy::ref_option_ref,
+    reason = "generated from measured derived output"
+)]
+
 use std::sync::{Arc, OnceLock};
 
+use alloc_metrics::TrackedAllocator;
 use lasso::ThreadedRodeo;
 use measured::label::{
     FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet,
@@ -11,17 +17,24 @@ use measured::{
     MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogVec};
+use tikv_jemallocator::Jemalloc;
 use tokio::time::{self, Instant};
 
 use crate::control_plane::messages::ColdStartInfo;
 use crate::error::ErrorKind;
 
+pub type Alloc = TrackedAllocator<Jemalloc, MemoryContext>;
+
 #[derive(MetricGroup)]
-#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
+#[metric(new(thread_pool: Arc<ThreadPoolMetrics>, alloc: Option<&'static Alloc>))]
 pub struct Metrics {
     #[metric(namespace = "proxy")]
     #[metric(init = ProxyMetrics::new(thread_pool))]
     pub proxy: ProxyMetrics,
+
+    #[metric(namespace = "alloc")]
+    #[metric(init = alloc)]
+    pub alloc: Option<&'static Alloc>,
 
     #[metric(namespace = "wake_compute_lock")]
     pub wake_compute_lock: ApiLockMetrics,
@@ -29,8 +42,8 @@ pub struct Metrics {
 
 static SELF: OnceLock<Metrics> = OnceLock::new();
 impl Metrics {
-    pub fn install(thread_pool: Arc<ThreadPoolMetrics>) {
-        let mut metrics = Metrics::new(thread_pool);
+    pub fn install(thread_pool: Arc<ThreadPoolMetrics>, alloc: Option<&'static Alloc>) {
+        let mut metrics = Metrics::new(thread_pool, alloc);
 
         metrics.proxy.errors_total.init_all_dense();
         metrics.proxy.redis_errors_total.init_all_dense();
@@ -45,7 +58,7 @@ impl Metrics {
 
     pub fn get() -> &'static Self {
         #[cfg(test)]
-        return SELF.get_or_init(|| Metrics::new(Arc::new(ThreadPoolMetrics::new(0))));
+        return SELF.get_or_init(|| Metrics::new(Arc::new(ThreadPoolMetrics::new(0)), None));
 
         #[cfg(not(test))]
         SELF.get()
@@ -659,4 +672,10 @@ pub struct ThreadPoolMetrics {
     pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
     pub worker_task_skips_total: CounterVec<ThreadPoolWorkers>,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+#[label(singleton = "context")]
+pub enum MemoryContext {
+    Root,
 }

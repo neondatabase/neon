@@ -11,6 +11,7 @@ rest_broker = ["dep:subzero-core", "dep:ouroboros"]
 
 [dependencies]
 ahash.workspace = true
+alloc-metrics.workspace = true
 anyhow.workspace = true
 arc-swap.workspace = true
 async-compression.workspace = true
