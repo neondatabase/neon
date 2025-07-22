@@ -571,9 +571,10 @@ impl GlobalTimelines {
                 // gate to finish as this is deadlock prone, so for actual
                 // deletion will take it second time.
                 //
-                // Canceling the timeline will block membership_switch requests,
-                // so it's guaranteed that we will not remove a timeline with higher generation
-                // even if there is a concurrent membership_switch request.
+                // Canceling the timeline will block membership switch requests,
+                // ensuring that the timeline generation will not increase
+                // after this point, and we will not remove a timeline with a generation
+                // higher than the requested one.
                 if let DeleteOrExclude::Exclude(ref mconf) = action {
                     let shared_state = timeline.read_shared_state().await;
                     if shared_state.sk.state().mconf.generation > mconf.generation {

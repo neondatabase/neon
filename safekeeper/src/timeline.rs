@@ -914,8 +914,10 @@ impl Timeline {
         to: Configuration,
     ) -> Result<TimelineMembershipSwitchResponse> {
         let mut state = self.write_shared_state().await;
-        // Ensure we never race with exclude/delete requests
-        // because they could have been started with an older generation.
+        // Ensure we don't race with exclude/delete requests by checking the cancellation
+        // token under the write_shared_state lock.
+        // Exclude/delete cancel the timeline under the shared state lock,
+        // so the timeline cannot be deleted in the middle of the membership switch.
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
