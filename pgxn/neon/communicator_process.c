@@ -329,7 +329,7 @@ callback_set_my_latch_unsafe(void)
  * FIXME: The logic from neon_get_request_lsns() needs to go here, except for
  * the last-written LSN cache stuff, which is managed by the rust code now.
  */
-uint64_t
+XLogRecPtr
 callback_get_request_lsn_unsafe(void)
 {
 	/*

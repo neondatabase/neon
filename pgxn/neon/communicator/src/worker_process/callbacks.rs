@@ -10,7 +10,7 @@ use utils::lsn::Lsn;
 unsafe extern "C" {
     pub fn notify_proc_unsafe(procno: std::ffi::c_int);
     pub fn callback_set_my_latch_unsafe();
-    pub fn callback_get_request_lsn_unsafe() -> u64;
+    pub fn callback_get_request_lsn_unsafe() -> crate::neon_request::CLsn;
     pub fn callback_get_lfc_metrics_unsafe() -> LfcMetrics;
 }
 
@@ -27,7 +27,7 @@ unsafe fn callback_set_my_latch_unsafe() {
     panic!("not usable in unit tests");
 }
 #[cfg(test)]
-unsafe fn callback_get_request_lsn_unsafe() {
+unsafe fn callback_get_request_lsn_unsafe() -> Lsn {
     panic!("not usable in unit tests");
 }
 #[cfg(test)]
