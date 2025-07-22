@@ -292,10 +292,6 @@ impl Client {
         simple_query::batch_execute(self.inner_mut(), query).await
     }
 
-    pub async fn discard_all(&mut self) -> Result<ReadyForQueryStatus, Error> {
-        self.batch_execute("discard all").await
-    }
-
     /// Similar to `discard_all`, but it does not clear any query plans
     ///
     /// This runs in the background, so it can be executed without `await`ing.
