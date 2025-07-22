@@ -6965,6 +6965,7 @@ dependencies = [
  "hyper 0.14.30",
  "itertools 0.10.5",
  "json-structural-diff",
+ "jsonwebtoken",
  "lasso",
  "measured",
  "metrics",

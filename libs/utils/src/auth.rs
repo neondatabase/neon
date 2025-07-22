@@ -94,6 +94,7 @@ impl Claims {
             scope,
             endpoint_id: None,
         }
+    }
 
     pub fn new_for_endpoint(endpoint_id: Uuid) -> Self {
         Self {
