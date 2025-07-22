@@ -2169,7 +2169,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 								rinfo,
 								MAIN_FORKNUM);
 
-		/* Obtain exclusive lock to prevent concrrent writes to the file while we performing cleanup */
+		/* Obtain exclusive lock to prevent concurrent writes to the file while we perform cleanup */
 		LWLockAcquire(finish_unlogged_build_lock, LW_EXCLUSIVE);
 		unlogged_build_rel_entry->relperst = NEON_RELPERSISTENCE_PERMANENT;
 		LWLockRelease(finish_unlogged_build_lock);
