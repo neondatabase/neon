@@ -22,9 +22,9 @@ on:
         description: "The ClickHouse version"
         type: choice
         options:
-          - "2.8"
-          - "2.9"
-        default: "2.8"
+          - "24.8"
+          - "24.9"
+        default: "24.8"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
