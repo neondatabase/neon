@@ -190,9 +190,17 @@ alloc_curl_handle(void)
 bool
 BufferTagIsValid(const BufferTag *tag)
 {
+	#if PG_MAJORVERSION_NUM >= 16
 	return (tag->spcOid != InvalidOid) &&
 		(tag->dbOid != InvalidOid) &&
 		(tag->relNumber != InvalidRelFileNumber) &&
 		(tag->forkNum != InvalidForkNumber) &&
 		(tag->blockNum != InvalidBlockNumber);
+	#else
+	return (tag->rnode.spcNode != InvalidOid) &&
+		(tag->rnode.dbNode != InvalidOid) &&
+		(tag->rnode.relNode != InvalidOid) &&
+		(tag->forkNum != InvalidForkNumber) &&
+		(tag->blockNum != InvalidBlockNumber);
+	#endif
 }
