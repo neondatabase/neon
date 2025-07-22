@@ -178,6 +178,8 @@ static PageServer page_servers[MAX_SHARDS];
 static bool pageserver_flush(shardno_t shard_no);
 static void pageserver_disconnect(shardno_t shard_no);
 static void pageserver_disconnect_shard(shardno_t shard_no);
+// HADRON
+shardno_t get_num_shards(void);
 
 static bool
 PagestoreShmemIsValid(void)
@@ -285,6 +287,22 @@ AssignPageserverConnstring(const char *newval, void *extra)
 		/* no change */
 	}
 }
+
+/* BEGIN_HADRON */
+/**
+ * Return the total number of shards seen in the shard map.
+ */
+shardno_t get_num_shards(void)
+{
+	const ShardMap *shard_map;
+
+	Assert(pagestore_shared);
+	shard_map = &pagestore_shared->shard_map;
+
+	Assert(shard_map != NULL);
+	return shard_map->num_shards;
+}
+/* END_HADRON */
 
 /*
  * Get the current number of shards, and/or the connection string for a
