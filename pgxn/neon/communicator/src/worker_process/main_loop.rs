@@ -42,7 +42,7 @@ pub(super) fn init(
         runtime,
 
         // metrics
-        lfc_metrics: LfcMetricsCollector::new(),
+        lfc_metrics: LfcMetricsCollector,
     };
     let worker_struct = Box::leak(Box::new(worker_struct));
 

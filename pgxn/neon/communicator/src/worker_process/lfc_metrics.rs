@@ -8,12 +8,6 @@ use super::callbacks::callback_get_lfc_metrics;
 
 pub(crate) struct LfcMetricsCollector;
 
-impl LfcMetricsCollector {
-    pub(crate) fn new() -> Self {
-        Self
-    }
-}
-
 #[derive(MetricGroup)]
 #[metric(new())]
 struct LfcMetricsGroup {
