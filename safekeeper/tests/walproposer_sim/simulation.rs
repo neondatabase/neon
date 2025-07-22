@@ -394,13 +394,13 @@ pub fn generate_schedule(seed: u64) -> Schedule {
     let mut schedule = Vec::new();
     let mut time = 0;
 
-    let cnt = rng.gen_range(1..100);
+    let cnt = rng.random_range(1..100);
 
     for _ in 0..cnt {
-        time += rng.gen_range(0..500);
-        let action = match rng.gen_range(0..3) {
-            0 => TestAction::WriteTx(rng.gen_range(1..10)),
-            1 => TestAction::RestartSafekeeper(rng.gen_range(0..3)),
+        time += rng.random_range(0..500);
+        let action = match rng.random_range(0..3) {
+            0 => TestAction::WriteTx(rng.random_range(1..10)),
+            1 => TestAction::RestartSafekeeper(rng.random_range(0..3)),
             2 => TestAction::RestartWalProposer,
             _ => unreachable!(),
         };
@@ -413,13 +413,13 @@ pub fn generate_schedule(seed: u64) -> Schedule {
 pub fn generate_network_opts(seed: u64) -> NetworkOptions {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
-    let timeout = rng.gen_range(100..2000);
-    let max_delay = rng.gen_range(1..2 * timeout);
-    let min_delay = rng.gen_range(1..=max_delay);
+    let timeout = rng.random_range(100..2000);
+    let max_delay = rng.random_range(1..2 * timeout);
+    let min_delay = rng.random_range(1..=max_delay);
 
-    let max_fail_prob = rng.gen_range(0.0..0.9);
-    let connect_fail_prob = rng.gen_range(0.0..max_fail_prob);
-    let send_fail_prob = rng.gen_range(0.0..connect_fail_prob);
+    let max_fail_prob = rng.random_range(0.0..0.9);
+    let connect_fail_prob = rng.random_range(0.0..max_fail_prob);
+    let send_fail_prob = rng.random_range(0.0..connect_fail_prob);
 
     NetworkOptions {
         keepalive_timeout: Some(timeout),
