@@ -334,7 +334,7 @@ struct PgSniRouterArgs {
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    let _logging_guard = crate::logging::init().await?;
+    let _logging_guard = crate::logging::init()?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
