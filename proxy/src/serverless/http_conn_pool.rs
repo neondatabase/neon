@@ -294,4 +294,8 @@ impl ClientInnerExt for Send {
         // ideally throw something meaningful
         -1
     }
+
+    fn reset(&mut self) -> Result<(), postgres_client::Error> {
+        Ok(())
+    }
 }
