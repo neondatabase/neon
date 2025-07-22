@@ -134,7 +134,10 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
         let res = auth_info.authenticate(ctx, &mut node).await;
         match res {
-            Ok(()) => break,
+            Ok(()) => {
+                send_client_greeting(ctx, &config.greetings, client);
+                break;
+            }
             Err(e) if attempt < 2 && e.should_retry_wake_compute() => {
                 tracing::warn!(error = ?e, "retrying wake compute");
 
@@ -154,14 +157,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let session = cancellation_handler.get_key();
 
-    let (process_id, secret_key) = finish_client_init(
-        ctx,
-        &config.greetings,
-        *session.key(),
-        client,
-        &mut node.stream,
-    )
-    .await?;
+    let (process_id, secret_key) =
+        forward_compute_params_to_client(ctx, *session.key(), client, &mut node.stream).await?;
     let hostname = node.hostname.to_string();
 
     let session_id = ctx.session_id();
@@ -189,14 +186,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     Ok((node, cancel_on_shutdown))
 }
 
-/// Finish client connection initialization: confirm auth success, send params, etc.
-pub(crate) async fn finish_client_init(
+/// Greet the client with any useful information.
+pub(crate) fn send_client_greeting(
     ctx: &RequestContext,
     greetings: &String,
-    cancel_key_data: CancelKeyData,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    compute: &mut StartupStream<TcpStream, RustlsStream>,
-) -> Result<(i32, i32), ClientRequestError> {
+) {
     // Expose session_id to clients if we have a greeting message.
     if !greetings.is_empty() {
         let session_msg = format!("{}, session_id: {}", greetings, ctx.session_id());
@@ -232,7 +227,14 @@ pub(crate) async fn finish_client_init(
             value: latency_measured.retry.as_micros().to_string().as_bytes(),
         });
     }
+}
 
+pub(crate) async fn forward_compute_params_to_client(
+    ctx: &RequestContext,
+    cancel_key_data: CancelKeyData,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    compute: &mut StartupStream<TcpStream, RustlsStream>,
+) -> Result<(i32, i32), ClientRequestError> {
     let mut process_id = 0;
     let mut secret_key = 0;
 

@@ -17,7 +17,7 @@ use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::{ErrorSource, finish_client_init};
+use crate::proxy::{ErrorSource, forward_compute_params_to_client, send_client_greeting};
 use crate::util::run_until_cancelled;
 
 pub async fn task_main(
@@ -231,17 +231,13 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         .authenticate(ctx, &mut node)
         .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
         .await?;
+    send_client_greeting(ctx, &config.greetings, &mut stream);
 
     let session = cancellation_handler.get_key();
 
-    let (process_id, secret_key) = finish_client_init(
-        ctx,
-        &config.greetings,
-        *session.key(),
-        &mut stream,
-        &mut node.stream,
-    )
-    .await?;
+    let (process_id, secret_key) =
+        forward_compute_params_to_client(ctx, *session.key(), &mut stream, &mut node.stream)
+            .await?;
     let stream = stream.flush_and_into_inner().await?;
     let hostname = node.hostname.to_string();
 
