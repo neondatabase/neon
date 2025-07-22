@@ -30,13 +30,13 @@ def query_clickhouse(
     return answer if successful, raise an exception otherwise
     """
     log.debug("Query: %s", query)
-    res = client.query(query)
-    log.debug(res.result_rows)
-    m = hashlib.sha1()
     if conn:
         cur = conn.cursor()
         cur.execute("SELECT * FROM pg_replication_slots WHERE slot_type = 'logical'")
         log.info("replication slots: %s", cur.fetchall())
+    res = client.query(query)
+    log.debug(res.result_rows)
+    m = hashlib.sha1()
     m.update(repr(tuple(res.result_rows)).encode())
     hash_res = m.hexdigest()
     log.debug("Hash: %s", hash_res)
