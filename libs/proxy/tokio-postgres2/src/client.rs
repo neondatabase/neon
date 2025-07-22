@@ -306,7 +306,8 @@ impl Client {
         // "DISCARD SEQUENCES;": deallocates all cached sequence state
 
         let _responses = self.inner_mut().send_simple_query(
-            "CLOSE ALL;
+            "ROLLBACK;
+            CLOSE ALL;
             SET SESSION AUTHORIZATION DEFAULT;
             RESET ALL;
             DEALLOCATE ALL;
