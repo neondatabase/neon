@@ -86,6 +86,10 @@ jobs:
         with:
           submodules: true
 
+      - uses: ./.github/actions/prepare-for-subzero
+        with:
+          token: ${{ secrets.CI_ACCESS_TOKEN }}
+
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
@@ -116,7 +120,7 @@ jobs:
           ARCH: ${{ inputs.arch }}
           SANITIZERS: ${{ inputs.sanitizers }}
         run: |
-          CARGO_FLAGS="--locked --features testing"
+          CARGO_FLAGS="--locked --features testing,rest_broker"
           if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
             CARGO_PROFILE=""

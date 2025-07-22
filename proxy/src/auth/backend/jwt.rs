@@ -803,7 +803,7 @@ mod tests {
     use http_body_util::Full;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
-    use rand::rngs::OsRng;
+    use rand_core::OsRng;
     use rsa::pkcs8::DecodePrivateKey;
     use serde::Serialize;
     use serde_json::json;
