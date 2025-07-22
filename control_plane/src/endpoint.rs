@@ -97,6 +97,8 @@ pub struct EndpointConf {
     reconfigure_concurrency: usize,
     drop_subscriptions_before_start: bool,
     features: Vec<ComputeFeature>,
+    compute_id: String,
+    instance_id: Option<String>,
     cluster: Option<Cluster>,
     compute_ctl_config: ComputeCtlConfig,
     privileged_role_name: Option<String>,
@@ -199,6 +201,8 @@ impl ComputeControlPlane {
         mode: ComputeMode,
         grpc: bool,
         skip_pg_catalog_updates: bool,
+        compute_id: &str,
+        instance_id: Option<String>,
         drop_subscriptions_before_start: bool,
         privileged_role_name: Option<String>,
     ) -> Result<Arc<Endpoint>> {
@@ -236,6 +240,8 @@ impl ComputeControlPlane {
             grpc,
             reconfigure_concurrency: 1,
             features: vec![],
+            compute_id: compute_id.to_owned(),
+            instance_id: instance_id.clone(),
             cluster: None,
             compute_ctl_config: compute_ctl_config.clone(),
             privileged_role_name: privileged_role_name.clone(),
@@ -258,6 +264,8 @@ impl ComputeControlPlane {
                 drop_subscriptions_before_start,
                 reconfigure_concurrency: 1,
                 features: vec![],
+                compute_id: compute_id.to_string(),
+                instance_id: instance_id.clone(),
                 cluster: None,
                 compute_ctl_config,
                 privileged_role_name,
@@ -331,6 +339,13 @@ pub struct Endpoint {
     reconfigure_concurrency: usize,
     // Feature flags
     features: Vec<ComputeFeature>,
+
+    // The compute_id is used to identify the compute node in the cloud.
+    compute_id: String,
+
+    // Hadron database instance id used for PG authentication and logs
+    instance_id: Option<String>,
+
     // Cluster settings
     cluster: Option<Cluster>,
 
@@ -395,6 +410,7 @@ pub struct EndpointStartArgs {
     pub autoprewarm: bool,
     pub offload_lfc_interval_seconds: Option<std::num::NonZeroU64>,
     pub dev: bool,
+    pub pg_init_timeout: Option<Duration>,
 }
 
 impl Endpoint {
@@ -437,6 +453,8 @@ impl Endpoint {
             reconfigure_concurrency: conf.reconfigure_concurrency,
             drop_subscriptions_before_start: conf.drop_subscriptions_before_start,
             features: conf.features,
+            compute_id: conf.compute_id,
+            instance_id: conf.instance_id,
             cluster: conf.cluster,
             compute_ctl_config: conf.compute_ctl_config,
             privileged_role_name: conf.privileged_role_name,
@@ -481,7 +499,7 @@ impl Endpoint {
         conf.append("restart_after_crash", "off");
 
         // Load the 'neon' extension
-        conf.append("shared_preload_libraries", "neon");
+        conf.append("shared_preload_libraries", "neon, databricks_auth");
 
         conf.append_line("");
         // Replication-related configurations, such as WAL sending
@@ -785,6 +803,7 @@ impl Endpoint {
                 shard_stripe_size: Some(args.shard_stripe_size),
                 local_proxy_config: None,
                 reconfigure_concurrency: self.reconfigure_concurrency,
+                databricks_settings: None,
                 drop_subscriptions_before_start: self.drop_subscriptions_before_start,
                 audit_log_level: ComputeAudit::Disabled,
                 logs_export_host: None::<String>,

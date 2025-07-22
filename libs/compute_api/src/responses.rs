@@ -173,6 +173,11 @@ pub enum ComputeStatus {
     TerminationPendingImmediate,
     // Terminated Postgres
     Terminated,
+    // A spec refresh is being requested
+    RefreshConfigurationPending,
+    // A spec refresh is being applied. We cannot refresh configuration again until the current
+    // refresh is done, i.e., signal_refresh_configuration() will return 500 error.
+    RefreshConfiguration,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -185,6 +190,10 @@ impl Display for ComputeStatus {
         match self {
             ComputeStatus::Empty => f.write_str("empty"),
             ComputeStatus::ConfigurationPending => f.write_str("configuration-pending"),
+            ComputeStatus::RefreshConfigurationPending => {
+                f.write_str("refresh-configuration-pending")
+            }
+            ComputeStatus::RefreshConfiguration => f.write_str("refresh-configuration"),
             ComputeStatus::Init => f.write_str("init"),
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),
@@ -285,10 +294,15 @@ pub struct TlsConfig {
 }
 
 /// Response of the `/computes/{compute_id}/spec` control-plane API.
+/// This is not actually a compute API response, so consider moving
+/// to a different place.
 #[derive(Deserialize, Debug)]
 pub struct ControlPlaneConfigResponse {
     pub spec: Option<ComputeSpec>,
     pub status: ControlPlaneComputeStatus,
+    // Hadron: Deserialize this field into a harmless default if
+    // compute_ctl_config is not present for compatibility.
+    #[serde(default)]
     pub compute_ctl_config: ComputeCtlConfig,
 }
 
