@@ -298,7 +298,7 @@ impl GlobalTimelines {
             }
 
             if state.has_tombstone(&ttid, generation) {
-                anyhow::bail!("Timeline {ttid} is deleted, refusing to recreate");
+                anyhow::bail!(TimelineError::Deleted(ttid));
             }
 
             state.get_dependencies()
@@ -353,7 +353,7 @@ impl GlobalTimelines {
                 // If the timeline is deleted, we refuse to recreate it.
                 // This is a safeguard against accidentally overwriting a timeline that was deleted
                 // by concurrent request.
-                anyhow::bail!("Timeline {ttid} is deleted, refusing to recreate");
+                anyhow::bail!(TimelineError::Deleted(ttid));
             }
 
             // We might have an outdated tombstone with the older generation.

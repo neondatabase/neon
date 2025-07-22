@@ -650,6 +650,10 @@ pub async fn handle_request(
                 Some(TimelineError::AlreadyExists(_)) => Ok(PullTimelineResponse {
                     safekeeper_host: None,
                 }),
+                Some(TimelineError::Deleted(_)) => Err(ApiError::Conflict(format!(
+                    "Timeline {}/{} deleted",
+                    request.tenant_id, request.timeline_id
+                ))),
                 Some(TimelineError::CreationInProgress(_)) => {
                     // We don't return success here because creation might still fail.
                     Err(ApiError::Conflict("Creation in progress".to_owned()))
