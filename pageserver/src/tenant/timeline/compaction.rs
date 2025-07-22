@@ -1326,13 +1326,7 @@ impl Timeline {
                 .max()
         };
 
-        let (partition_mode, partition_lsn) = if cfg!(test)
-            || cfg!(feature = "testing")
-            || self
-                .feature_resolver
-                .evaluate_boolean("image-compaction-boundary")
-                .is_ok()
-        {
+        let (partition_mode, partition_lsn) = {
             let last_repartition_lsn = self.partitioning.read().1;
             let lsn = match l0_l1_boundary_lsn {
                 Some(boundary) => gc_cutoff
@@ -1348,8 +1342,6 @@ impl Timeline {
             } else {
                 ("l0_l1_boundary", lsn)
             }
-        } else {
-            ("latest_record", self.get_last_record_lsn())
         };
 
         // 2. Repartition and create image layers if necessary
