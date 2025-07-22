@@ -1630,9 +1630,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 				 */
 				LWLockAcquire(finish_unlogged_build_lock, LW_SHARED);
 				is_locked = true;
-				/*
-				 * Recheck relperst under lock - may be unlogged build is already finished
-				 */
+				/* Recheck now that we hold the lock - the build might already have finished */
 				relperst = get_cached_relperst(rinfo);
 			}
 			if (relperst == NEON_RELPERSISTENCE_UNLOGGED || relperst == NEON_RELPERSISTENCE_UNLOGGED_BUILD)
