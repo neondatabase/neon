@@ -89,7 +89,7 @@ async fn simulate(cmd: &SimulateCmd, results_path: &Path) -> anyhow::Result<()> 
             let cold_key_range = splitpoint..key_range.end;
 
             for i in 0..cmd.num_records {
-                let chosen_range = if rand::thread_rng().gen_bool(0.9) {
+                let chosen_range = if rand::rng().random_bool(0.9) {
                     &hot_key_range
                 } else {
                     &cold_key_range

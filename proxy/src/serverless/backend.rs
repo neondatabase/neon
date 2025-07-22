@@ -8,7 +8,7 @@ use ed25519_dalek::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use jose_jwk::jose_b64;
 use postgres_client::config::SslMode;
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 use rustls::pki_types::{DnsName, ServerName};
 use tokio::net::{TcpStream, lookup_host};
 use tokio_rustls::TlsConnector;
