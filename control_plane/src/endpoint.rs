@@ -1225,7 +1225,7 @@ pub fn tenant_locate_response_to_conn_info(
     let stripe_size = if response.shard_params.count.is_unsharded() {
         None
     } else {
-        Some(response.shard_params.stripe_size.0)
+        Some(response.shard_params.stripe_size)
     };
     Ok(PageserverConnectionInfo {
         shard_count: response.shard_params.count,

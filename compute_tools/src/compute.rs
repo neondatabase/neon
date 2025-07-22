@@ -37,7 +37,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
 use utils::pid_file;
-use utils::shard::{ShardCount, ShardIndex, ShardNumber};
+use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
@@ -288,7 +288,7 @@ impl ParsedSpec {
 /// 'pageserver_connection_info' field should be used instead.
 fn extract_pageserver_conninfo_from_connstr(
     connstr: &str,
-    stripe_size: Option<u32>,
+    stripe_size: Option<ShardStripeSize>,
 ) -> Result<PageserverConnectionInfo, anyhow::Error> {
     let shard_infos: Vec<_> = connstr
         .split(',')
@@ -370,7 +370,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             if let Some(guc) = spec.cluster.settings.find("neon.pageserver_connstring") {
                 let stripe_size = if let Some(guc) = spec.cluster.settings.find("neon.stripe_size")
                 {
-                    Some(u32::from_str(&guc)?)
+                    Some(ShardStripeSize(u32::from_str(&guc)?))
                 } else {
                     None
                 };

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
-use utils::shard::{ShardCount, ShardIndex};
+use utils::shard::{ShardCount, ShardIndex, ShardStripeSize};
 
 use crate::responses::TlsConfig;
 
@@ -153,7 +153,7 @@ pub struct ComputeSpec {
 
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
-    pub shard_stripe_size: Option<u32>,
+    pub shard_stripe_size: Option<ShardStripeSize>,
 
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
@@ -232,7 +232,7 @@ pub struct PageserverConnectionInfo {
     pub shard_count: ShardCount,
 
     /// INVARIANT: null if shard_count is 0, otherwise non-null and immutable
-    pub stripe_size: Option<u32>,
+    pub stripe_size: Option<ShardStripeSize>,
 
     pub shards: HashMap<ShardIndex, PageserverShardInfo>,
 
