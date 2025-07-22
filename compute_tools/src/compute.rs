@@ -1184,11 +1184,11 @@ impl ComputeNode {
         let pageserver = shard0
             .pageservers
             .first()
-            .expect("must have at least one pageserver");
+            .ok_or(anyhow::anyhow!("must have at least one pageserver"))?;
         let shard0_url = pageserver
             .grpc_url
             .clone()
-            .expect("no grpc_url for shard 0");
+            .ok_or(anyhow::anyhow!("no grpc_url for shard 0"))?;
 
         let (reader, connected) = tokio::runtime::Handle::current().block_on(async move {
             let mut client = page_api::Client::connect(
@@ -1241,11 +1241,11 @@ impl ComputeNode {
         let pageserver = shard0
             .pageservers
             .first()
-            .expect("must have at least one pageserver");
+            .ok_or(anyhow::anyhow!("must have at least one pageserver"))?;
         let shard0_connstr = pageserver
             .libpq_url
             .clone()
-            .expect("no libpq_url for shard 0");
+            .ok_or(anyhow::anyhow!("no libpq_url for shard 0"))?;
         let mut config = postgres::Config::from_str(&shard0_connstr)?;
 
         // Use the storage auth token from the config file, if given.
