@@ -9,13 +9,11 @@ pub use crate::config::Config;
 pub use crate::connect_raw::RawConnection;
 pub use crate::connection::Connection;
 pub use crate::error::Error;
-pub use crate::generic_client::GenericClient;
 pub use crate::query::RowStream;
 pub use crate::row::{Row, SimpleQueryRow};
 pub use crate::simple_query::SimpleQueryStream;
 pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
-pub use crate::transaction::Transaction;
 pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
 
 /// After executing a query, the connection will be in one of these states
@@ -55,7 +53,6 @@ mod connect_socket;
 mod connect_tls;
 mod connection;
 pub mod error;
-mod generic_client;
 pub mod maybe_tls_stream;
 mod prepare;
 mod query;
@@ -63,7 +60,6 @@ pub mod row;
 mod simple_query;
 mod statement;
 pub mod tls;
-mod transaction;
 mod transaction_builder;
 pub mod types;
 

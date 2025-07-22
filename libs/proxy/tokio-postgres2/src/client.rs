@@ -18,10 +18,7 @@ use crate::config::{Host, SslMode};
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
 use crate::types::{Oid, Type};
-use crate::{
-    CancelToken, Error, ReadyForQueryStatus, SimpleQueryMessage, Transaction, TransactionBuilder,
-    query, simple_query,
-};
+use crate::{CancelToken, Error, ReadyForQueryStatus, SimpleQueryMessage, query, simple_query};
 
 pub struct Responses {
     /// new messages from conn
@@ -320,48 +317,9 @@ impl Client {
         Ok(())
     }
 
-    /// Begins a new database transaction.
-    ///
-    /// The transaction will roll back by default - use the `commit` method to commit it.
-    pub async fn transaction(&mut self) -> Result<Transaction<'_>, Error> {
-        struct RollbackIfNotDone<'me> {
-            client: &'me mut Client,
-            done: bool,
-        }
-
-        impl Drop for RollbackIfNotDone<'_> {
-            fn drop(&mut self) {
-                if self.done {
-                    return;
-                }
-
-                let _ = self.client.inner.send_simple_query("ROLLBACK");
-            }
-        }
-
-        // This is done, as `Future` created by this method can be dropped after
-        // `RequestMessages` is synchronously send to the `Connection` by
-        // `batch_execute()`, but before `Responses` is asynchronously polled to
-        // completion. In that case `Transaction` won't be created and thus
-        // won't be rolled back.
-        {
-            let mut cleaner = RollbackIfNotDone {
-                client: self,
-                done: false,
-            };
-            cleaner.client.batch_execute("BEGIN").await?;
-            cleaner.done = true;
-        }
-
-        Ok(Transaction::new(self))
-    }
-
-    /// Returns a builder for a transaction with custom settings.
-    ///
-    /// Unlike the `transaction` method, the builder can be used to control the transaction's isolation level and other
-    /// attributes.
-    pub fn build_transaction(&mut self) -> TransactionBuilder<'_> {
-        TransactionBuilder::new(self)
+    /// Commit the transaction.
+    pub async fn commit(&mut self) -> Result<ReadyForQueryStatus, Error> {
+        self.batch_execute("COMMIT").await
     }
 
     /// Constructs a cancellation token that can later be used to request cancellation of a query running on the

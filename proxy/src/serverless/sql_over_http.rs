@@ -14,7 +14,7 @@ use hyper::http::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
-use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
+use postgres_client::{IsolationLevel, NoTls, ReadyForQueryStatus, TransactionBuilder};
 use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
@@ -759,39 +759,33 @@ impl BatchQueryData {
         info!("starting transaction");
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
-        let mut builder = inner.build_transaction();
-        if let Some(isolation_level) = parsed_headers.txn_isolation_level {
-            builder = builder.isolation_level(isolation_level);
-        }
-        if parsed_headers.txn_read_only {
-            builder = builder.read_only(true);
-        }
-        if parsed_headers.txn_deferrable {
-            builder = builder.deferrable(true);
-        }
 
-        let mut transaction = builder
-            .start()
-            .await
-            .inspect_err(|_| {
-                // if we cannot start a transaction, we should return immediately
-                // and not return to the pool. connection is clearly broken
-                discard.discard();
-            })
-            .map_err(SqlOverHttpError::Postgres)?;
-
-        let json_output = match query_batch_to_json(
-            config,
-            cancel.child_token(),
-            &mut transaction,
-            self,
-            parsed_headers,
-        )
-        .await
         {
+            let query = TransactionBuilder {
+                isolation_level: parsed_headers.txn_isolation_level,
+                read_only: parsed_headers.txn_read_only.then_some(true),
+                deferrable: parsed_headers.txn_deferrable.then_some(true),
+            }
+            .format();
+
+            inner
+                .batch_execute(&query)
+                .await
+                .inspect_err(|_| {
+                    // if we cannot start a transaction, we should return immediately
+                    // and not return to the pool. connection is clearly broken
+                    discard.discard();
+                })
+                .map_err(SqlOverHttpError::Postgres)?;
+        }
+
+        let res =
+            query_batch_to_json(config, cancel.child_token(), inner, self, parsed_headers).await;
+
+        let json_output = match res {
             Ok(json_output) => {
                 info!("commit");
-                transaction
+                inner
                     .commit()
                     .await
                     .inspect_err(|_| {
@@ -823,7 +817,7 @@ impl BatchQueryData {
 async fn query_batch(
     config: &'static HttpConfig,
     cancel: CancellationToken,
-    transaction: &mut Transaction<'_>,
+    client: &mut postgres_client::Client,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
     results: &mut json::ListSer<'_>,
@@ -831,7 +825,7 @@ async fn query_batch(
     for stmt in queries.queries {
         let query = pin!(query_to_json(
             config,
-            transaction,
+            client,
             stmt,
             results.entry(),
             parsed_headers,
@@ -856,23 +850,23 @@ async fn query_batch(
 async fn query_batch_to_json(
     config: &'static HttpConfig,
     cancel: CancellationToken,
-    tx: &mut Transaction<'_>,
+    client: &mut postgres_client::Client,
     queries: BatchQueryData,
     headers: HttpHeaders,
 ) -> Result<String, SqlOverHttpError> {
     let json_output = json::value_to_string!(|obj| json::value_as_object!(|obj| {
         let results = obj.key("results");
         json::value_as_list!(|results| {
-            query_batch(config, cancel, tx, queries, headers, results).await?;
+            query_batch(config, cancel, client, queries, headers, results).await?;
         });
     }));
 
     Ok(json_output)
 }
 
-async fn query_to_json<T: GenericClient>(
+async fn query_to_json(
     config: &'static HttpConfig,
-    client: &mut T,
+    client: &mut postgres_client::Client,
     data: QueryData,
     output: json::ValueSer<'_>,
     parsed_headers: HttpHeaders,
