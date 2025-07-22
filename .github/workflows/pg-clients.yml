@@ -60,7 +60,7 @@ jobs:
       options: --init --user root
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:24.6
+        image: clickhouse/clickhouse-server:24.7
         env:
           CLICKHOUSE_PASSWORD: "4yXDXt4fu2zZTv"
         ports:
