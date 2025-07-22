@@ -269,11 +269,6 @@ impl ClientInnerCommon<postgres_client::Client> {
             local_data.jti += 1;
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
-            self.inner
-                .discard_all()
-                .await
-                .map_err(SqlOverHttpError::InternalPostgres)?;
-
             // initiates the auth session
             // this is safe from query injections as the jwt format free of any escape characters.
             let query = format!("select auth.jwt_session_init('{token}')");
