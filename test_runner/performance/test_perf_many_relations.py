@@ -5,7 +5,7 @@ import pytest
 from fixtures.benchmark_fixture import NeonBenchmarker
 from fixtures.compare_fixtures import RemoteCompare
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.utils import shared_buffers_for_max_cu
 
 
@@ -80,7 +80,9 @@ def test_perf_simple_many_relations_reldir(
     """
     Test creating many relations in a single database.
     """
-    env = neon_env_builder.init_start(initial_tenant_conf={"rel_size_v2_enabled": reldir != "v1"})
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={"rel_size_v2_enabled": str(reldir != "v1")}
+    )
     ep = env.endpoints.create_start(
         "main",
         config_lines=[
@@ -91,6 +93,7 @@ def test_perf_simple_many_relations_reldir(
     )
 
     ep.safe_psql("CREATE TABLE IF NOT EXISTS initial_table (v1 int)")
+    wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
 
     if reldir == "v1":
         assert (
