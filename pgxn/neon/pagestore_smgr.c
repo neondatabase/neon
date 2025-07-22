@@ -1647,6 +1647,13 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			}
 			if (relperst == NEON_RELPERSISTENCE_UNLOGGED || relperst == NEON_RELPERSISTENCE_UNLOGGED_BUILD)
 			{
+				/*
+				 * We could set reln->smgr_relpersistence now that we have determined
+				 * that it's local. But we don't dare to do it, because that
+				 * would immediately allow reads as well, which shouldn't
+				 * happen. We could cache it with a different 'relpersistence'
+				 * value, but this isn't performance critical.
+				 */
 				return;
 			}
 			break;
