@@ -6,14 +6,18 @@ BEGIN
             admin_option AS admin
         INTO monitor
         FROM pg_auth_members
-        WHERE roleid = 'neon_superuser'::regrole
-            AND member = 'pg_monitor'::regrole;
+        WHERE roleid = 'pg_monitor'::regrole
+            AND member = 'neon_superuser'::regrole;
 
-    IF NOT monitor.member THEN
+    IF monitor IS NULL THEN
+        RAISE EXCEPTION 'no entry in pg_auth_members for neon_superuser and pg_monitor';
+    END IF;
+
+    IF monitor.admin IS NULL OR NOT monitor.member THEN
         RAISE EXCEPTION 'neon_superuser is not a member of pg_monitor';
     END IF;
 
-    IF NOT monitor.admin THEN
+    IF monitor.admin IS NULL OR NOT monitor.admin THEN
         RAISE EXCEPTION 'neon_superuser cannot grant pg_monitor';
     END IF;
 END $$;

@@ -3,4 +3,4 @@ mod pool;
 mod retry;
 mod split;
 
-pub use client::PageserverClient;
+pub use client::{PageserverClient, ShardSpec};

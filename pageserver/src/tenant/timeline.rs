@@ -448,6 +448,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
+    #[expect(dead_code)]
     feature_resolver: Arc<TenantFeatureResolver>,
 }
 
@@ -939,6 +940,20 @@ pub(crate) struct CompactOptions {
     /// Set job size for the GC compaction.
     /// This option is only used by GC compaction.
     pub sub_compaction_max_job_size_mb: Option<u64>,
+    /// Only for GC compaction.
+    /// If set, the compaction will compact the metadata layers. Should be only set to true in unit tests
+    /// because metadata compaction is not fully supported yet.
+    pub gc_compaction_do_metadata_compaction: bool,
+}
+
+impl CompactOptions {
+    #[cfg(test)]
+    pub fn default_for_gc_compaction_unit_tests() -> Self {
+        Self {
+            gc_compaction_do_metadata_compaction: true,
+            ..Default::default()
+        }
+    }
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1002,7 +1017,7 @@ impl From<WaitLsnError> for tonic::Status {
 impl From<CreateImageLayersError> for CompactionError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
-            CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            CreateImageLayersError::Cancelled => CompactionError::new_cancelled(),
             CreateImageLayersError::Other(e) => {
                 CompactionError::Other(e.context("create image layers"))
             }
@@ -1253,12 +1268,66 @@ impl Timeline {
         }
     }
 
+    #[inline(always)]
+    pub(crate) async fn debug_get(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+        reconstruct_state: &mut ValuesReconstructState,
+    ) -> Result<Bytes, PageReconstructError> {
+        if !lsn.is_valid() {
+            return Err(PageReconstructError::Other(anyhow::anyhow!("Invalid LSN")));
+        }
+
+        // This check is debug-only because of the cost of hashing, and because it's a double-check: we
+        // already checked the key against the shard_identity when looking up the Timeline from
+        // page_service.
+        debug_assert!(!self.shard_identity.is_key_disposable(&key));
+
+        let query = VersionedKeySpaceQuery::uniform(KeySpace::single(key..key.next()), lsn);
+        let vectored_res = self
+            .debug_get_vectored_impl(query, reconstruct_state, ctx)
+            .await;
+
+        let key_value = vectored_res?.pop_first();
+        match key_value {
+            Some((got_key, value)) => {
+                if got_key != key {
+                    error!(
+                        "Expected {}, but singular vectored get returned {}",
+                        key, got_key
+                    );
+                    Err(PageReconstructError::Other(anyhow!(
+                        "Singular vectored get returned wrong key"
+                    )))
+                } else {
+                    value
+                }
+            }
+            None => Err(PageReconstructError::MissingKey(Box::new(
+                MissingKeyError {
+                    keyspace: KeySpace::single(key..key.next()),
+                    shard: self.shard_identity.get_shard_number(&key),
+                    original_hwm_lsn: lsn,
+                    ancestor_lsn: None,
+                    backtrace: None,
+                    read_path: None,
+                    query: None,
+                },
+            ))),
+        }
+    }
+
     pub(crate) const LAYERS_VISITED_WARN_THRESHOLD: u32 = 100;
 
     /// Look up multiple page versions at a given LSN
     ///
     /// This naive implementation will be replaced with a more efficient one
     /// which actually vectorizes the read path.
+    ///
+    /// NB: the read path must be cancellation-safe. The Tonic gRPC service will drop the future
+    /// if the client goes away (e.g. due to timeout or cancellation).
     pub(crate) async fn get_vectored(
         &self,
         query: VersionedKeySpaceQuery,
@@ -1543,6 +1612,98 @@ impl Timeline {
                 LAYERS_PER_READ_AMORTIZED_GLOBAL.observe(avg_layers_visited);
             }
         }
+
+        Ok(results)
+    }
+
+    // A copy of the get_vectored_impl method except that we store the image and wal records into `reconstruct_state`.
+    // This is only used in the http getpage call for debugging purpose.
+    pub(super) async fn debug_get_vectored_impl(
+        &self,
+        query: VersionedKeySpaceQuery,
+        reconstruct_state: &mut ValuesReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
+        if query.is_empty() {
+            return Ok(BTreeMap::default());
+        }
+
+        let read_path = if self.conf.enable_read_path_debugging || ctx.read_path_debug() {
+            Some(ReadPath::new(
+                query.total_keyspace(),
+                query.high_watermark_lsn()?,
+            ))
+        } else {
+            None
+        };
+
+        reconstruct_state.read_path = read_path;
+
+        let traversal_res: Result<(), _> = self
+            .get_vectored_reconstruct_data(query.clone(), reconstruct_state, ctx)
+            .await;
+
+        if let Err(err) = traversal_res {
+            // Wait for all the spawned IOs to complete.
+            // See comments on `spawn_io` inside `storage_layer` for more details.
+            let mut collect_futs = std::mem::take(&mut reconstruct_state.keys)
+                .into_values()
+                .map(|state| state.collect_pending_ios())
+                .collect::<FuturesUnordered<_>>();
+            while collect_futs.next().await.is_some() {}
+            return Err(err);
+        };
+
+        let reconstruct_state = Arc::new(Mutex::new(reconstruct_state));
+        let futs = FuturesUnordered::new();
+
+        for (key, state) in std::mem::take(&mut reconstruct_state.lock().unwrap().keys) {
+            let req_lsn_for_key = query.map_key_to_lsn(&key);
+            futs.push({
+                let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
+                let rc_clone = Arc::clone(&reconstruct_state);
+
+                async move {
+                    assert_eq!(state.situation, ValueReconstructSituation::Complete);
+
+                    let converted = match state.collect_pending_ios().await {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            return (key, Err(err));
+                        }
+                    };
+                    DELTAS_PER_READ_GLOBAL.observe(converted.num_deltas() as f64);
+
+                    // The walredo module expects the records to be descending in terms of Lsn.
+                    // And we submit the IOs in that order, so, there shuold be no need to sort here.
+                    debug_assert!(
+                        converted
+                            .records
+                            .is_sorted_by_key(|(lsn, _)| std::cmp::Reverse(*lsn)),
+                        "{converted:?}"
+                    );
+                    {
+                        let mut guard = rc_clone.lock().unwrap();
+                        guard.set_debug_state(&converted);
+                    }
+                    (
+                        key,
+                        walredo_self
+                            .reconstruct_value(
+                                key,
+                                req_lsn_for_key,
+                                converted,
+                                RedoAttemptType::ReadPage,
+                            )
+                            .await,
+                    )
+                }
+            });
+        }
+
+        let results = futs
+            .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .await;
 
         Ok(results)
     }
@@ -1893,6 +2054,8 @@ impl Timeline {
     // an ephemeral layer open forever when idle.  It also freezes layers if the global limit on
     // ephemeral layer bytes has been breached.
     pub(super) async fn maybe_freeze_ephemeral_layer(&self) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let Ok(mut write_guard) = self.write_lock.try_lock() else {
             // If the write lock is held, there is an active wal receiver: rolling open layers
             // is their responsibility while they hold this lock.
@@ -2040,6 +2203,7 @@ impl Timeline {
                     compact_lsn_range: None,
                     sub_compaction: false,
                     sub_compaction_max_job_size_mb: None,
+                    gc_compaction_do_metadata_compaction: false,
                 },
                 ctx,
             )
@@ -2117,12 +2281,7 @@ impl Timeline {
         match &result {
             Ok(_) => self.compaction_failed.store(false, AtomicOrdering::Relaxed),
             Err(e) if e.is_cancel() => {}
-            Err(CompactionError::ShuttingDown) => {
-                // Covered by the `Err(e) if e.is_cancel()` branch.
-            }
-            Err(CompactionError::Other(_)) => {
-                self.compaction_failed.store(true, AtomicOrdering::Relaxed)
-            }
+            Err(_) => self.compaction_failed.store(true, AtomicOrdering::Relaxed),
         };
 
         result
@@ -2668,7 +2827,7 @@ impl Timeline {
                 if r.numerator == 0 {
                     false
                 } else {
-                    rand::thread_rng().gen_range(0..r.denominator) < r.numerator
+                    rand::rng().random_range(0..r.denominator) < r.numerator
                 }
             }
             None => false,
@@ -2849,6 +3008,18 @@ impl Timeline {
             .tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
+    }
+
+    // HADRON
+    fn get_image_layer_force_creation_period(&self) -> Option<Duration> {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .image_layer_force_creation_period
+            .or(self
+                .conf
+                .default_tenant_conf
+                .image_layer_force_creation_period)
     }
 
     fn get_compaction_algorithm_settings(&self) -> CompactionAlgorithmSettings {
@@ -3120,7 +3291,6 @@ impl Timeline {
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
                 last_image_layer_creation_check_instant: Mutex::new(None),
-
                 last_received_wal: Mutex::new(None),
                 rel_size_latest_cache: RwLock::new(HashMap::new()),
                 rel_size_snapshot_cache: Mutex::new(LruCache::new(relsize_snapshot_cache_capacity)),
@@ -3739,7 +3909,7 @@ impl Timeline {
                                 // 1hour base
                                 (60_i64 * 60_i64)
                                     // 10min jitter
-                                    + rand::thread_rng().gen_range(-10 * 60..10 * 60),
+                                    + rand::rng().random_range(-10 * 60..10 * 60),
                             )
                             .expect("10min < 1hour"),
                         );
@@ -5041,6 +5211,7 @@ impl Timeline {
                 .create_image_layers(
                     &partitions,
                     self.initdb_lsn,
+                    None,
                     ImageLayerCreationMode::Initial,
                     ctx,
                     LastImageLayerCreationStatus::Initial,
@@ -5312,14 +5483,19 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition? True if we want to generate.
-    async fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> bool {
+    async fn time_for_new_image_layer(
+        &self,
+        partition: &KeySpace,
+        lsn: Lsn,
+        force_image_creation_lsn: Option<Lsn>,
+    ) -> bool {
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
         let Ok(layers) = guard.layer_map() else {
             return false;
         };
-
+        let mut min_image_lsn: Lsn = Lsn::MAX;
         let mut max_deltas = 0;
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn);
@@ -5354,7 +5530,23 @@ impl Timeline {
                         return true;
                     }
                 }
+                min_image_lsn = min(min_image_lsn, img_lsn);
             }
+        }
+
+        // HADRON
+        // for child timelines, we consider all pages up to ancestor_LSN are redone successfully by the parent timeline
+        min_image_lsn = min_image_lsn.max(self.get_ancestor_lsn());
+        if min_image_lsn < force_image_creation_lsn.unwrap_or(Lsn(0)) && max_deltas > 0 {
+            info!(
+                "forcing image creation for partitioned range {}-{}. Min image LSN: {}, force image creation LSN: {}, num deltas: {}",
+                partition.ranges[0].start,
+                partition.ranges[0].end,
+                min_image_lsn,
+                force_image_creation_lsn.unwrap(),
+                max_deltas
+            );
+            return true;
         }
 
         debug!(
@@ -5576,13 +5768,14 @@ impl Timeline {
     /// Predicate function which indicates whether we should check if new image layers
     /// are required. Since checking if new image layers are required is expensive in
     /// terms of CPU, we only do it in the following cases:
-    /// 1. If the timeline has ingested sufficient WAL to justify the cost
+    /// 1. If the timeline has ingested sufficient WAL to justify the cost or ...
     /// 2. If enough time has passed since the last check:
     ///     1. For large tenants, we wish to perform the check more often since they
-    ///        suffer from the lack of image layers
+    ///        suffer from the lack of image layers. Note that we assume sharded tenants
+    ///        to be large since non-zero shards do not track the logical size.
     ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
-        const LARGE_TENANT_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
+        let large_timeline_threshold = self.conf.image_layer_generation_large_timeline_threshold;
 
         let last_checks_at = self.last_image_layer_creation_check_at.load();
         let distance = lsn
@@ -5593,30 +5786,39 @@ impl Timeline {
 
         let distance_based_decision = distance.0 >= min_distance;
 
-        let mut time_based_decision = false;
         let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
-        if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
-            let check_required_after = if Into::<u64>::into(&logical_size) >= LARGE_TENANT_THRESHOLD
-            {
-                self.get_checkpoint_timeout()
-            } else {
-                Duration::from_secs(3600 * 48)
-            };
-
-            time_based_decision = match *last_check_instant {
-                Some(last_check) => {
-                    let elapsed = last_check.elapsed();
-                    elapsed >= check_required_after
+        let check_required_after = (|| {
+            if self.shard_identity.is_unsharded() {
+                if let CurrentLogicalSize::Exact(logical_size) =
+                    self.current_logical_size.current_size()
+                {
+                    if Some(Into::<u64>::into(&logical_size)) < large_timeline_threshold {
+                        return Duration::from_secs(3600 * 48);
+                    }
                 }
-                None => true,
-            };
-        }
+            }
+
+            self.get_checkpoint_timeout()
+        })();
+
+        let time_based_decision = match *last_check_instant {
+            Some(last_check) => {
+                let elapsed = last_check.elapsed();
+                elapsed >= check_required_after
+            }
+            None => true,
+        };
 
         // Do the expensive delta layer counting only if this timeline has ingested sufficient
         // WAL since the last check or a checkpoint timeout interval has elapsed since the last
         // check.
         let decision = distance_based_decision || time_based_decision;
-
+        tracing::info!(
+            "Decided to check image layers: {}. Distance-based decision: {}, time-based decision: {}",
+            decision,
+            distance_based_decision,
+            time_based_decision
+        );
         if decision {
             self.last_image_layer_creation_check_at.store(lsn);
             *last_check_instant = Some(Instant::now());
@@ -5629,10 +5831,12 @@ impl Timeline {
     /// true = we have generate all image layers, false = we preempt the process for L0 compaction.
     ///
     /// `partition_mode` is only for logging purpose and is not used anywhere in this function.
+    #[allow(clippy::too_many_arguments)]
     async fn create_image_layers(
         self: &Arc<Timeline>,
         partitioning: &KeyPartitioning,
         lsn: Lsn,
+        force_image_creation_lsn: Option<Lsn>,
         mode: ImageLayerCreationMode,
         ctx: &RequestContext,
         last_status: LastImageLayerCreationStatus,
@@ -5736,7 +5940,11 @@ impl Timeline {
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
-                if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
+                if !check_for_image_layers
+                    || !self
+                        .time_for_new_image_layer(partition, lsn, force_image_creation_lsn)
+                        .await
+                {
                     start = img_range.end;
                     continue;
                 }
@@ -6057,26 +6265,88 @@ impl Drop for Timeline {
     }
 }
 
-/// Top-level failure to compact.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum CompactionError {
-    #[error("The timeline or pageserver is shutting down")]
-    ShuttingDown,
-    #[error(transparent)]
-    Other(anyhow::Error),
-}
+pub(crate) use compaction_error::CompactionError;
+/// In a private mod to enforce that [`CompactionError::is_cancel`] is used
+/// instead of `match`ing on [`CompactionError::ShuttingDown`].
+mod compaction_error {
+    use utils::sync::gate::GateError;
 
-impl CompactionError {
-    /// Errors that can be ignored, i.e., cancel and shutdown.
-    pub fn is_cancel(&self) -> bool {
-        matches!(self, Self::ShuttingDown)
+    use crate::{
+        pgdatadir_mapping::CollectKeySpaceError,
+        tenant::{PageReconstructError, blob_io::WriteBlobError, upload_queue::NotInitialized},
+        virtual_file::owned_buffers_io::write::FlushTaskError,
+    };
+
+    /// Top-level failure to compact. Use [`Self::is_cancel`].
+    #[derive(Debug, thiserror::Error)]
+    pub(crate) enum CompactionError {
+        /// Use [`Self::is_cancel`] instead of checking for this variant.
+        #[error("The timeline or pageserver is shutting down")]
+        #[allow(private_interfaces)]
+        ShuttingDown(ForbidMatching), // private ForbidMatching enforces use of [`Self::is_cancel`].
+        #[error(transparent)]
+        Other(anyhow::Error),
     }
 
-    pub fn from_collect_keyspace(err: CollectKeySpaceError) -> Self {
-        if err.is_cancel() {
-            Self::ShuttingDown
-        } else {
-            Self::Other(err.into_anyhow())
+    #[derive(Debug)]
+    struct ForbidMatching;
+
+    impl CompactionError {
+        pub fn new_cancelled() -> Self {
+            Self::ShuttingDown(ForbidMatching)
+        }
+        /// Errors that can be ignored, i.e., cancel and shutdown.
+        pub fn is_cancel(&self) -> bool {
+            let other = match self {
+                CompactionError::ShuttingDown(_) => return true,
+                CompactionError::Other(other) => other,
+            };
+
+            // The write path of compaction in particular often lacks differentiated
+            // handling errors stemming from cancellation from other errors.
+            // So, if requested, we also check the ::Other variant by downcasting.
+            // The list below has been found empirically from flaky tests and production logs.
+            // The process is simple: on ::Other(), compaction will print the enclosed
+            // anyhow::Error in debug mode, i.e., with backtrace. That backtrace contains the
+            // line where the write path / compaction code does undifferentiated error handling
+            // from a non-anyhow type to an anyhow type. Add the type to the list of downcasts
+            // below, following the same is_cancel() pattern.
+
+            let root_cause = other.root_cause();
+
+            let upload_queue = root_cause
+                .downcast_ref::<NotInitialized>()
+                .is_some_and(|e| e.is_stopping());
+            let timeline = root_cause
+                .downcast_ref::<PageReconstructError>()
+                .is_some_and(|e| e.is_cancel());
+            let buffered_writer_flush_task_canelled = root_cause
+                .downcast_ref::<FlushTaskError>()
+                .is_some_and(|e| e.is_cancel());
+            let write_blob_cancelled = root_cause
+                .downcast_ref::<WriteBlobError>()
+                .is_some_and(|e| e.is_cancel());
+            let gate_closed = root_cause
+                .downcast_ref::<GateError>()
+                .is_some_and(|e| e.is_cancel());
+            upload_queue
+                || timeline
+                || buffered_writer_flush_task_canelled
+                || write_blob_cancelled
+                || gate_closed
+        }
+        pub fn into_anyhow(self) -> anyhow::Error {
+            match self {
+                CompactionError::ShuttingDown(ForbidMatching) => anyhow::Error::new(self),
+                CompactionError::Other(e) => e,
+            }
+        }
+        pub fn from_collect_keyspace(err: CollectKeySpaceError) -> Self {
+            if err.is_cancel() {
+                Self::new_cancelled()
+            } else {
+                Self::Other(err.into_anyhow())
+            }
         }
     }
 }
@@ -6088,7 +6358,7 @@ impl From<super::upload_queue::NotInitialized> for CompactionError {
                 CompactionError::Other(anyhow::anyhow!(value))
             }
             super::upload_queue::NotInitialized::ShuttingDown
-            | super::upload_queue::NotInitialized::Stopped => CompactionError::ShuttingDown,
+            | super::upload_queue::NotInitialized::Stopped => CompactionError::new_cancelled(),
         }
     }
 }
@@ -6098,7 +6368,7 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
         match e {
             super::storage_layer::layer::DownloadError::TimelineShutdown
             | super::storage_layer::layer::DownloadError::DownloadCancelled => {
-                CompactionError::ShuttingDown
+                CompactionError::new_cancelled()
             }
             super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads
             | super::storage_layer::layer::DownloadError::DownloadRequired
@@ -6117,14 +6387,14 @@ impl From<super::storage_layer::layer::DownloadError> for CompactionError {
 
 impl From<layer_manager::Shutdown> for CompactionError {
     fn from(_: layer_manager::Shutdown) -> Self {
-        CompactionError::ShuttingDown
+        CompactionError::new_cancelled()
     }
 }
 
 impl From<super::storage_layer::errors::PutError> for CompactionError {
     fn from(e: super::storage_layer::errors::PutError) -> Self {
         if e.is_cancel() {
-            CompactionError::ShuttingDown
+            CompactionError::new_cancelled()
         } else {
             CompactionError::Other(e.into_anyhow())
         }
@@ -6223,7 +6493,7 @@ impl Timeline {
         let mut guard = tokio::select! {
             guard = self.layers.write(LayerManagerLockHolder::Compaction) => guard,
             _ = self.cancel.cancelled() => {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
         };
 
@@ -7050,6 +7320,19 @@ impl Timeline {
             .unwrap()
             .clone()
     }
+
+    /* BEGIN_HADRON */
+    pub(crate) async fn compute_image_consistent_lsn(&self) -> anyhow::Result<Lsn> {
+        let guard = self
+            .layers
+            .read(LayerManagerLockHolder::ComputeImageConsistentLsn)
+            .await;
+        let layer_map = guard.layer_map()?;
+        let disk_consistent_lsn = self.get_disk_consistent_lsn();
+
+        Ok(layer_map.compute_image_consistent_lsn(disk_consistent_lsn))
+    }
+    /* END_HADRON */
 }
 
 impl Timeline {

@@ -768,6 +768,7 @@ mod test {
         async fn re_attach(
             &self,
             _conf: &PageServerConf,
+            _empty_local_disk: bool,
         ) -> Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError> {
             unimplemented!()
         }

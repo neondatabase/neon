@@ -371,9 +371,28 @@ paths:
       summary: Terminate Postgres and wait for it to exit
       description: ""
       operationId: terminate
+      parameters:
+        - name: mode
+          in: query
+          description: "Terminate mode: fast (wait 30s before returning) and immediate"
+          required: false
+          schema:
+            type: string
+            enum: ["fast", "immediate"]
+            default: fast
       responses:
         200:
           description: Result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TerminateResponse"
+        201:
+          description: Result if compute is already terminated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TerminateResponse"
         412:
           description: "wrong state"
           content:
@@ -530,11 +549,14 @@ components:
       type: string
       enum:
         - empty
-        - init
-        - failed
-        - running
         - configuration_pending
+        - init
+        - running
         - configuration
+        - failed
+        - termination_pending_fast
+        - termination_pending_immediate
+        - terminated
       example: running
 
     ExtensionInstallRequest:
@@ -591,11 +613,11 @@ components:
         - skipped
       properties:
         status:
-          description: Lfc prewarm status
-          enum: [not_prewarmed, prewarming, completed, failed]
+          description: LFC prewarm status
+          enum: [not_prewarmed, prewarming, completed, failed, skipped]
           type: string
         error:
-          description: Lfc prewarm error, if any
+          description: LFC prewarm error, if any
           type: string
         total:
           description: Total pages processed
@@ -613,11 +635,11 @@ components:
         - status
       properties:
         status:
-          description: Lfc offload status
+          description: LFC offload status
           enum: [not_offloaded, offloading, completed, failed]
           type: string
         error:
-          description: Lfc offload error, if any
+          description: LFC offload error, if any
           type: string
 
     PromoteState:
@@ -659,6 +681,17 @@ components:
           type: string
           description: Role name.
           example: "neon"
+
+    TerminateResponse:
+      type: object
+      required:
+        - lsn
+      properties:
+        lsn:
+          type: string
+          nullable: true
+          description: "last WAL flush LSN"
+          example: "0/028F10D8"
 
     SetRoleGrantsResponse:
       type: object

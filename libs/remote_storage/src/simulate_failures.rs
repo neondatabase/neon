@@ -1,6 +1,8 @@
 //! This module provides a wrapper around a real RemoteStorage implementation that
 //! causes the first N attempts at each upload or download operatio to fail. For
 //! testing purposes.
+use rand::Rng;
+use std::cmp;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::num::NonZeroU32;
@@ -25,6 +27,13 @@ pub struct UnreliableWrapper {
 
     // Tracks how many failed attempts of each operation has been made.
     attempts: Mutex<HashMap<RemoteOp, u64>>,
+
+    /* BEGIN_HADRON */
+    // This the probability of failure for each operation, ranged from [0, 100].
+    // The probability is default to 100, which means that all operations will fail.
+    // Storage will fail by probability up to attempts_to_fail times.
+    attempt_failure_probability: u64,
+    /* END_HADRON */
 }
 
 /// Used to identify retries of different unique operation.
@@ -40,7 +49,11 @@ enum RemoteOp {
 }
 
 impl UnreliableWrapper {
-    pub fn new(inner: crate::GenericRemoteStorage, attempts_to_fail: u64) -> Self {
+    pub fn new(
+        inner: crate::GenericRemoteStorage,
+        attempts_to_fail: u64,
+        attempt_failure_probability: u64,
+    ) -> Self {
         assert!(attempts_to_fail > 0);
         let inner = match inner {
             GenericRemoteStorage::AwsS3(s) => GenericRemoteStorage::AwsS3(s),
@@ -51,9 +64,11 @@ impl UnreliableWrapper {
                 panic!("Can't wrap unreliable wrapper unreliably")
             }
         };
+        let actual_attempt_failure_probability = cmp::min(attempt_failure_probability, 100);
         UnreliableWrapper {
             inner,
             attempts_to_fail,
+            attempt_failure_probability: actual_attempt_failure_probability,
             attempts: Mutex::new(HashMap::new()),
         }
     }
@@ -66,6 +81,7 @@ impl UnreliableWrapper {
     ///
     fn attempt(&self, op: RemoteOp) -> anyhow::Result<u64> {
         let mut attempts = self.attempts.lock().unwrap();
+        let mut rng = rand::rng();
 
         match attempts.entry(op) {
             Entry::Occupied(mut e) => {
@@ -75,15 +91,19 @@ impl UnreliableWrapper {
                     *p
                 };
 
-                if attempts_before_this >= self.attempts_to_fail {
-                    // let it succeed
-                    e.remove();
-                    Ok(attempts_before_this)
-                } else {
+                /* BEGIN_HADRON */
+                // If there are more attempts to fail, fail the request by probability.
+                if (attempts_before_this < self.attempts_to_fail)
+                    && (rng.random_range(0..=100) < self.attempt_failure_probability)
+                {
                     let error =
                         anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());
                     Err(error)
+                } else {
+                    e.remove();
+                    Ok(attempts_before_this)
                 }
+                /* END_HADRON */
             }
             Entry::Vacant(e) => {
                 let error = anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());

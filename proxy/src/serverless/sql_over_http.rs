@@ -14,10 +14,7 @@ use hyper::http::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
-use postgres_client::{
-    GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, RowStream, Transaction,
-};
-use serde::Serialize;
+use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
@@ -67,7 +64,7 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
+pub(super) const HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
 where
@@ -687,32 +684,21 @@ impl QueryData {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
-        match select(
+        let mut json_buf = vec![];
+
+        let batch_result = match select(
             pin!(query_to_json(
                 config,
                 &mut *inner,
                 self,
-                &mut 0,
+                json::ValueSer::new(&mut json_buf),
                 parsed_headers
             )),
             pin!(cancel.cancelled()),
         )
         .await
         {
-            // The query successfully completed.
-            Either::Left((Ok((status, results)), __not_yet_cancelled)) => {
-                discard.check_idle(status);
-
-                let json_output =
-                    serde_json::to_string(&results).expect("json serialization should not fail");
-                Ok(json_output)
-            }
-            // The query failed with an error
-            Either::Left((Err(e), __not_yet_cancelled)) => {
-                discard.discard();
-                Err(e)
-            }
-            // The query was cancelled.
+            Either::Left((res, __not_yet_cancelled)) => res,
             Either::Right((_cancelled, query)) => {
                 tracing::info!("cancelling query");
                 if let Err(err) = cancel_token.cancel_query(NoTls).await {
@@ -721,13 +707,7 @@ impl QueryData {
                 // wait for the query cancellation
                 match time::timeout(time::Duration::from_millis(100), query).await {
                     // query successed before it was cancelled.
-                    Ok(Ok((status, results))) => {
-                        discard.check_idle(status);
-
-                        let json_output = serde_json::to_string(&results)
-                            .expect("json serialization should not fail");
-                        Ok(json_output)
-                    }
+                    Ok(Ok(status)) => Ok(status),
                     // query failed or was cancelled.
                     Ok(Err(error)) => {
                         let db_error = match &error {
@@ -743,13 +723,28 @@ impl QueryData {
                             discard.discard();
                         }
 
-                        Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres))
+                        return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
                     }
                     Err(_timeout) => {
                         discard.discard();
-                        Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres))
+                        return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
                     }
                 }
+            }
+        };
+
+        match batch_result {
+            // The query successfully completed.
+            Ok(status) => {
+                discard.check_idle(status);
+
+                let json_output = String::from_utf8(json_buf).expect("json should be valid utf8");
+                Ok(json_output)
+            }
+            // The query failed with an error
+            Err(e) => {
+                discard.discard();
+                Err(e)
             }
         }
     }
@@ -787,7 +782,7 @@ impl BatchQueryData {
             })
             .map_err(SqlOverHttpError::Postgres)?;
 
-        let json_output = match query_batch(
+        let json_output = match query_batch_to_json(
             config,
             cancel.child_token(),
             &mut transaction,
@@ -845,24 +840,21 @@ async fn query_batch(
     transaction: &mut Transaction<'_>,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
-) -> Result<String, SqlOverHttpError> {
-    let mut results = Vec::with_capacity(queries.queries.len());
-    let mut current_size = 0;
+    results: &mut json::ListSer<'_>,
+) -> Result<(), SqlOverHttpError> {
     for stmt in queries.queries {
         let query = pin!(query_to_json(
             config,
             transaction,
             stmt,
-            &mut current_size,
+            results.entry(),
             parsed_headers,
         ));
         let cancelled = pin!(cancel.cancelled());
         let res = select(query, cancelled).await;
         match res {
             // TODO: maybe we should check that the transaction bit is set here
-            Either::Left((Ok((_, values)), _cancelled)) => {
-                results.push(values);
-            }
+            Either::Left((Ok(_), _cancelled)) => {}
             Either::Left((Err(e), _cancelled)) => {
                 return Err(e);
             }
@@ -872,8 +864,22 @@ async fn query_batch(
         }
     }
 
-    let results = json!({ "results": results });
-    let json_output = serde_json::to_string(&results).expect("json serialization should not fail");
+    Ok(())
+}
+
+async fn query_batch_to_json(
+    config: &'static HttpConfig,
+    cancel: CancellationToken,
+    tx: &mut Transaction<'_>,
+    queries: BatchQueryData,
+    headers: HttpHeaders,
+) -> Result<String, SqlOverHttpError> {
+    let json_output = json::value_to_string!(|obj| json::value_as_object!(|obj| {
+        let results = obj.key("results");
+        json::value_as_list!(|results| {
+            query_batch(config, cancel, tx, queries, headers, results).await?;
+        });
+    }));
 
     Ok(json_output)
 }
@@ -882,54 +888,54 @@ async fn query_to_json<T: GenericClient>(
     config: &'static HttpConfig,
     client: &mut T,
     data: QueryData,
-    current_size: &mut usize,
+    output: json::ValueSer<'_>,
     parsed_headers: HttpHeaders,
-) -> Result<(ReadyForQueryStatus, impl Serialize + use<T>), SqlOverHttpError> {
+) -> Result<ReadyForQueryStatus, SqlOverHttpError> {
     let query_start = Instant::now();
 
-    let query_params = data.params;
+    let mut output = json::ObjectSer::new(output);
     let mut row_stream = client
-        .query_raw_txt(&data.query, query_params)
+        .query_raw_txt(&data.query, data.params)
         .await
         .map_err(SqlOverHttpError::Postgres)?;
     let query_acknowledged = Instant::now();
 
-    let columns_len = row_stream.statement.columns().len();
-    let mut fields = Vec::with_capacity(columns_len);
-
+    let mut json_fields = output.key("fields").list();
     for c in row_stream.statement.columns() {
-        fields.push(json!({
-            "name": c.name().to_owned(),
-            "dataTypeID": c.type_().oid(),
-            "tableID": c.table_oid(),
-            "columnID": c.column_id(),
-            "dataTypeSize": c.type_size(),
-            "dataTypeModifier": c.type_modifier(),
-            "format": "text",
-        }));
+        let json_field = json_fields.entry();
+        json::value_as_object!(|json_field| {
+            json_field.entry("name", c.name());
+            json_field.entry("dataTypeID", c.type_().oid());
+            json_field.entry("tableID", c.table_oid());
+            json_field.entry("columnID", c.column_id());
+            json_field.entry("dataTypeSize", c.type_size());
+            json_field.entry("dataTypeModifier", c.type_modifier());
+            json_field.entry("format", "text");
+        });
     }
+    json_fields.finish();
 
-    let raw_output = parsed_headers.raw_output;
     let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
+    let raw_output = parsed_headers.raw_output;
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
     // big.
-    let mut rows = Vec::new();
+    let mut rows = 0;
+    let mut json_rows = output.key("rows").list();
     while let Some(row) = row_stream.next().await {
         let row = row.map_err(SqlOverHttpError::Postgres)?;
-        *current_size += row.body_len();
 
         // we don't have a streaming response support yet so this is to prevent OOM
         // from a malicious query (eg a cross join)
-        if *current_size > config.max_response_size_bytes {
+        if json_rows.as_buffer().len() > config.max_response_size_bytes {
             return Err(SqlOverHttpError::ResponseTooLarge(
                 config.max_response_size_bytes,
             ));
         }
 
-        let row = pg_text_row_to_json(&row, raw_output, array_mode)?;
-        rows.push(row);
+        pg_text_row_to_json(json_rows.entry(), &row, raw_output, array_mode)?;
+        rows += 1;
 
         // assumption: parsing pg text and converting to json takes CPU time.
         // let's assume it is slightly expensive, so we should consume some cooperative budget.
@@ -937,16 +943,14 @@ async fn query_to_json<T: GenericClient>(
         // of rows and never hit the tokio mpsc for a long time (although unlikely).
         tokio::task::consume_budget().await;
     }
+    json_rows.finish();
 
     let query_resp_end = Instant::now();
-    let RowStream {
-        command_tag,
-        status: ready,
-        ..
-    } = row_stream;
+
+    let ready = row_stream.status;
 
     // grab the command tag and number of rows affected
-    let command_tag = command_tag.unwrap_or_default();
+    let command_tag = row_stream.command_tag.unwrap_or_default();
     let mut command_tag_split = command_tag.split(' ');
     let command_tag_name = command_tag_split.next().unwrap_or_default();
     let command_tag_count = if command_tag_name == "INSERT" {
@@ -959,7 +963,7 @@ async fn query_to_json<T: GenericClient>(
     .and_then(|s| s.parse::<i64>().ok());
 
     info!(
-        rows = rows.len(),
+        rows,
         ?ready,
         command_tag,
         acknowledgement = ?(query_acknowledged - query_start),
@@ -967,16 +971,12 @@ async fn query_to_json<T: GenericClient>(
         "finished executing query"
     );
 
-    // Resulting JSON format is based on the format of node-postgres result.
-    let results = json!({
-        "command": command_tag_name.to_string(),
-        "rowCount": command_tag_count,
-        "rows": rows,
-        "fields": fields,
-        "rowAsArray": array_mode,
-    });
+    output.entry("command", command_tag_name);
+    output.entry("rowCount", command_tag_count);
+    output.entry("rowAsArray", array_mode);
 
-    Ok((ready, results))
+    output.finish();
+    Ok(ready)
 }
 
 enum Client {

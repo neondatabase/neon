@@ -2847,6 +2847,24 @@ pub(crate) static MISROUTED_PAGESTREAM_REQUESTS: Lazy<IntCounter> = Lazy::new(||
     .expect("failed to define a metric")
 });
 
+// Global counter for PageStream request results by outcome. Outcomes are divided into 3 categories:
+// - success
+// - internal_error: errors that indicate bugs in the storage cluster (e.g. page reconstruction errors, misrouted requests, LSN timeout errors)
+// - other_error: transient error conditions that are expected in normal operation or indicate bugs with other parts of the system (e.g. error due to pageserver shutdown, malformed requests etc.)
+pub(crate) static PAGESTREAM_HANDLER_RESULTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_pagestream_handler_results_total",
+        "Number of pageserver pagestream handler results by outcome (success, internal_error, other_error)",
+        &["outcome"]
+    )
+    .expect("failed to define a metric")
+});
+
+// Constants for pageserver_pagestream_handler_results_total's outcome labels
+pub(crate) const PAGESTREAM_HANDLER_OUTCOME_SUCCESS: &str = "success";
+pub(crate) const PAGESTREAM_HANDLER_OUTCOME_INTERNAL_ERROR: &str = "internal_error";
+pub(crate) const PAGESTREAM_HANDLER_OUTCOME_OTHER_ERROR: &str = "other_error";
+
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting

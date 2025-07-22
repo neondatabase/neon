@@ -3,7 +3,7 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use futures_util::{Sink, SinkExt, Stream, TryStreamExt, ready};
 use postgres_protocol2::authentication::sasl;
@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
 
 use crate::Error;
-use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
+use crate::codec::{BackendMessage, BackendMessages, PostgresCodec};
 use crate::config::{self, AuthKeys, Config};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::TlsStream;
@@ -25,7 +25,7 @@ pub struct StartupStream<S, T> {
     delayed_notice: Vec<NoticeResponseBody>,
 }
 
-impl<S, T> Sink<FrontendMessage> for StartupStream<S, T>
+impl<S, T> Sink<Bytes> for StartupStream<S, T>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
@@ -36,7 +36,7 @@ where
         Pin::new(&mut self.inner).poll_ready(cx)
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: FrontendMessage) -> io::Result<()> {
+    fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> io::Result<()> {
         Pin::new(&mut self.inner).start_send(item)
     }
 
@@ -120,10 +120,7 @@ where
     let mut buf = BytesMut::new();
     frontend::startup_message(&config.server_params, &mut buf).map_err(Error::encode)?;
 
-    stream
-        .send(FrontendMessage::Raw(buf.freeze()))
-        .await
-        .map_err(Error::io)
+    stream.send(buf.freeze()).await.map_err(Error::io)
 }
 
 async fn authenticate<S, T>(stream: &mut StartupStream<S, T>, config: &Config) -> Result<(), Error>
@@ -191,10 +188,7 @@ where
     let mut buf = BytesMut::new();
     frontend::password_message(password, &mut buf).map_err(Error::encode)?;
 
-    stream
-        .send(FrontendMessage::Raw(buf.freeze()))
-        .await
-        .map_err(Error::io)
+    stream.send(buf.freeze()).await.map_err(Error::io)
 }
 
 async fn authenticate_sasl<S, T>(
@@ -253,10 +247,7 @@ where
 
     let mut buf = BytesMut::new();
     frontend::sasl_initial_response(mechanism, scram.message(), &mut buf).map_err(Error::encode)?;
-    stream
-        .send(FrontendMessage::Raw(buf.freeze()))
-        .await
-        .map_err(Error::io)?;
+    stream.send(buf.freeze()).await.map_err(Error::io)?;
 
     let body = match stream.try_next().await.map_err(Error::io)? {
         Some(Message::AuthenticationSaslContinue(body)) => body,
@@ -272,10 +263,7 @@ where
 
     let mut buf = BytesMut::new();
     frontend::sasl_response(scram.message(), &mut buf).map_err(Error::encode)?;
-    stream
-        .send(FrontendMessage::Raw(buf.freeze()))
-        .await
-        .map_err(Error::io)?;
+    stream.send(buf.freeze()).await.map_err(Error::io)?;
 
     let body = match stream.try_next().await.map_err(Error::io)? {
         Some(Message::AuthenticationSaslFinal(body)) => body,

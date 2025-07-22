@@ -36,7 +36,7 @@ impl StorageBroker {
     pub async fn start(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
         let broker = &self.env.broker;
 
-        print!("Starting neon broker at {}", broker.client_url());
+        println!("Starting neon broker at {}", broker.client_url());
 
         let mut args = Vec::new();
 

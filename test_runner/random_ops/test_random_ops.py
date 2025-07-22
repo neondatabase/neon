@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from fixtures.log_helper import log
-from requests import HTTPError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -180,26 +179,11 @@ class NeonBranch:
         self.updated_at = datetime.fromisoformat(res["branch"]["updated_at"])
         self.parent_timestamp = datetime.fromisoformat(res["branch"]["parent_timestamp"])
         parent_id: str = res["branch"]["parent_id"]
-        # XXX Retry get parent details to work around the issue
-        # https://databricks.atlassian.net/browse/LKB-279
-        target_time = datetime.now() + timedelta(seconds=30)
-        while datetime.now() < target_time:
-            try:
-                parent_def = self.neon_api.get_branch_details(self.project_id, parent_id)
-            except HTTPError as he:
-                if he.response.status_code == 404:
-                    log.info("Branch not found, waiting...")
-                    time.sleep(1)
-                else:
-                    raise HTTPError(he) from he
-            else:
-                break
-        else:
-            raise RuntimeError(f"Branch {parent_id} not found")
-
         # Creates an object for the parent branch
         # After the reset operation a new parent branch is created
-        parent = NeonBranch(self.project, parent_def, True)
+        parent = NeonBranch(
+            self.project, self.neon_api.get_branch_details(self.project_id, parent_id), True
+        )
         self.project.branches[parent_id] = parent
         self.parent = parent
         parent.children[self.id] = self

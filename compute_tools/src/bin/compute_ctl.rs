@@ -87,6 +87,14 @@ struct Cli {
     #[arg(short = 'C', long, value_name = "DATABASE_URL")]
     pub connstr: String,
 
+    #[arg(
+        long,
+        default_value = "neon_superuser",
+        value_name = "PRIVILEGED_ROLE_NAME",
+        value_parser = Self::parse_privileged_role_name
+    )]
+    pub privileged_role_name: String,
+
     #[cfg(target_os = "linux")]
     #[arg(long, default_value = "neon-postgres")]
     pub cgroup: String,
@@ -149,6 +157,21 @@ impl Cli {
 
         Ok(url)
     }
+
+    /// For simplicity, we do not escape `privileged_role_name` anywhere in the code.
+    /// Since it's a system role, which we fully control, that's fine. Still, let's
+    /// validate it to avoid any surprises.
+    fn parse_privileged_role_name(value: &str) -> Result<String> {
+        use regex::Regex;
+
+        let pattern = Regex::new(r"^[a-z_]+$").unwrap();
+
+        if !pattern.is_match(value) {
+            bail!("--privileged-role-name can only contain lowercase letters and underscores")
+        }
+
+        Ok(value.to_string())
+    }
 }
 
 fn main() -> Result<()> {
@@ -165,7 +188,7 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    runtime.block_on(init(cli.dev))?;
+    let tracing_provider = init(cli.dev)?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -178,6 +201,7 @@ fn main() -> Result<()> {
         ComputeNodeParams {
             compute_id: cli.compute_id,
             connstr,
+            privileged_role_name: cli.privileged_role_name.clone(),
             pgdata: cli.pgdata.clone(),
             pgbin: cli.pgbin.clone(),
             pgversion: get_pg_version_string(&cli.pgbin),
@@ -203,11 +227,11 @@ fn main() -> Result<()> {
 
     scenario.teardown();
 
-    deinit_and_exit(exit_code);
+    deinit_and_exit(tracing_provider, exit_code);
 }
 
-async fn init(dev_mode: bool) -> Result<()> {
-    init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
+fn init(dev_mode: bool) -> Result<Option<tracing_utils::Provider>> {
+    let provider = init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
@@ -218,7 +242,7 @@ async fn init(dev_mode: bool) -> Result<()> {
 
     info!("compute build_tag: {}", &BUILD_TAG.to_string());
 
-    Ok(())
+    Ok(provider)
 }
 
 fn get_config(cli: &Cli) -> Result<ComputeConfig> {
@@ -243,25 +267,27 @@ fn get_config(cli: &Cli) -> Result<ComputeConfig> {
     }
 }
 
-fn deinit_and_exit(exit_code: Option<i32>) -> ! {
-    // Shutdown trace pipeline gracefully, so that it has a chance to send any
-    // pending traces before we exit. Shutting down OTEL tracing provider may
-    // hang for quite some time, see, for example:
-    // - https://github.com/open-telemetry/opentelemetry-rust/issues/868
-    // - and our problems with staging https://github.com/neondatabase/cloud/issues/3707#issuecomment-1493983636
-    //
-    // Yet, we want computes to shut down fast enough, as we may need a new one
-    // for the same timeline ASAP. So wait no longer than 2s for the shutdown to
-    // complete, then just error out and exit the main thread.
-    info!("shutting down tracing");
-    let (sender, receiver) = mpsc::channel();
-    let _ = thread::spawn(move || {
-        tracing_utils::shutdown_tracing();
-        sender.send(()).ok()
-    });
-    let shutdown_res = receiver.recv_timeout(Duration::from_millis(2000));
-    if shutdown_res.is_err() {
-        error!("timed out while shutting down tracing, exiting anyway");
+fn deinit_and_exit(tracing_provider: Option<tracing_utils::Provider>, exit_code: Option<i32>) -> ! {
+    if let Some(p) = tracing_provider {
+        // Shutdown trace pipeline gracefully, so that it has a chance to send any
+        // pending traces before we exit. Shutting down OTEL tracing provider may
+        // hang for quite some time, see, for example:
+        // - https://github.com/open-telemetry/opentelemetry-rust/issues/868
+        // - and our problems with staging https://github.com/neondatabase/cloud/issues/3707#issuecomment-1493983636
+        //
+        // Yet, we want computes to shut down fast enough, as we may need a new one
+        // for the same timeline ASAP. So wait no longer than 2s for the shutdown to
+        // complete, then just error out and exit the main thread.
+        info!("shutting down tracing");
+        let (sender, receiver) = mpsc::channel();
+        let _ = thread::spawn(move || {
+            _ = p.shutdown();
+            sender.send(()).ok()
+        });
+        let shutdown_res = receiver.recv_timeout(Duration::from_millis(2000));
+        if shutdown_res.is_err() {
+            error!("timed out while shutting down tracing, exiting anyway");
+        }
     }
 
     info!("shutting down");
@@ -326,5 +352,50 @@ mod test {
             "https://example.com?hello=world",
         ])
         .expect_err("URL parameters are not allowed");
+    }
+
+    #[test]
+    fn verify_privileged_role_name() {
+        // Valid name
+        let cli = Cli::parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "my_superuser",
+        ]);
+        assert_eq!(cli.privileged_role_name, "my_superuser");
+
+        // Invalid names
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "NeonSuperuser",
+        ])
+        .expect_err("uppercase letters are not allowed");
+
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "$'neon_superuser",
+        ])
+        .expect_err("special characters are not allowed");
+
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "",
+        ])
+        .expect_err("empty name is not allowed");
     }
 }

@@ -4,6 +4,7 @@
 //!
 //! Separate, `metadata` subcommand allows to print and update pageserver's metadata file.
 
+mod download_remote_object;
 mod draw_timeline_dir;
 mod index_part;
 mod key;
@@ -16,6 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
+use download_remote_object::DownloadRemoteObjectCmd;
 use index_part::IndexPartCmd;
 use layers::LayerCmd;
 use page_trace::PageTraceCmd;
@@ -63,6 +65,7 @@ enum Commands {
     /// Debug print a hex key found from logs
     Key(key::DescribeKeyCommand),
     PageTrace(PageTraceCmd),
+    DownloadRemoteObject(DownloadRemoteObjectCmd),
 }
 
 /// Read and update pageserver metadata file
@@ -185,6 +188,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Key(dkc) => dkc.execute(),
         Commands::PageTrace(cmd) => page_trace::main(&cmd)?,
+        Commands::DownloadRemoteObject(cmd) => {
+            download_remote_object::main(&cmd).await?;
+        }
     };
     Ok(())
 }

@@ -127,7 +127,7 @@ impl SafekeeperNode {
         extra_opts: &[String],
         retry_timeout: &Duration,
     ) -> anyhow::Result<()> {
-        print!(
+        println!(
             "Starting safekeeper at '{}' in '{}', retrying for {:?}",
             self.pg_connection_config.raw_address(),
             self.datadir_path().display(),

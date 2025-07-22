@@ -145,7 +145,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let session = cancellation_handler.get_key();
 
-    finish_client_init(&pg_settings, *session.key(), client);
+    finish_client_init(ctx, &pg_settings, *session.key(), client, &config.greetings);
 
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = oneshot::channel();
@@ -165,9 +165,11 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 pub(crate) fn finish_client_init(
+    ctx: &RequestContext,
     settings: &compute::PostgresSettings,
     cancel_key_data: CancelKeyData,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    greetings: &String,
 ) {
     // Forward all deferred notices to the client.
     for notice in &settings.delayed_notice {
@@ -176,11 +178,47 @@ pub(crate) fn finish_client_init(
         });
     }
 
+    // Expose session_id to clients if we have a greeting message.
+    if !greetings.is_empty() {
+        let session_msg = format!("{}, session_id: {}", greetings, ctx.session_id());
+        client.write_message(BeMessage::NoticeResponse(session_msg.as_str()));
+    }
+
     // Forward all postgres connection params to the client.
     for (name, value) in &settings.params {
         client.write_message(BeMessage::ParameterStatus {
             name: name.as_bytes(),
             value: value.as_bytes(),
+        });
+    }
+
+    // Forward recorded latencies for probing requests
+    if let Some(testodrome_id) = ctx.get_testodrome_id() {
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.testodrome_id".as_bytes(),
+            value: testodrome_id.as_bytes(),
+        });
+
+        let latency_measured = ctx.get_proxy_latency();
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.cplane_latency".as_bytes(),
+            value: latency_measured.cplane.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.client_latency".as_bytes(),
+            value: latency_measured.client.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.compute_latency".as_bytes(),
+            value: latency_measured.compute.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.retry_latency".as_bytes(),
+            value: latency_measured.retry.as_micros().to_string().as_bytes(),
         });
     }
 
@@ -195,15 +233,18 @@ impl NeonOptions {
     // proxy options:
 
     /// `PARAMS_COMPAT` allows opting in to forwarding all startup parameters from client to compute.
-    pub const PARAMS_COMPAT: &str = "proxy_params_compat";
+    pub const PARAMS_COMPAT: &'static str = "proxy_params_compat";
 
     // cplane options:
 
     /// `LSN` allows provisioning an ephemeral compute with time-travel to the provided LSN.
-    const LSN: &str = "lsn";
+    const LSN: &'static str = "lsn";
+
+    /// `TIMESTAMP` allows provisioning an ephemeral compute with time-travel to the provided timestamp.
+    const TIMESTAMP: &'static str = "timestamp";
 
     /// `ENDPOINT_TYPE` allows configuring an ephemeral compute to be read_only or read_write.
-    const ENDPOINT_TYPE: &str = "endpoint_type";
+    const ENDPOINT_TYPE: &'static str = "endpoint_type";
 
     pub(crate) fn parse_params(params: &StartupMessageParams) -> Self {
         params
@@ -228,6 +269,7 @@ impl NeonOptions {
             // This is not a cplane option, we know it does not create ephemeral computes.
             Self::PARAMS_COMPAT => false,
             Self::LSN => true,
+            Self::TIMESTAMP => true,
             Self::ENDPOINT_TYPE => true,
             // err on the side of caution. any cplane options we don't know about
             // might lead to ephemeral computes.

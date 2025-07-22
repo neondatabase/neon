@@ -60,7 +60,7 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
 
     with primary.connect() as primary_conn:
         primary_cur = primary_conn.cursor()
-        primary_cur.execute("create extension neon")
+        primary_cur.execute("create schema neon;create extension neon with schema neon")
         primary_cur.execute(
             "create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)"
         )
@@ -172,7 +172,7 @@ def test_replica_promote_handler_disconnects(neon_simple_env: NeonEnv):
     secondary: Endpoint = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
 
     with primary.connect() as conn, conn.cursor() as cur:
-        cur.execute("create extension neon")
+        cur.execute("create schema neon;create extension neon with schema neon")
         cur.execute("create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)")
         cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
         cur.execute("show neon.safekeepers")

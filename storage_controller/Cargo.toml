@@ -52,6 +52,7 @@ tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 measured.workspace = true
 rustls.workspace = true
 scopeguard.workspace = true
@@ -63,6 +64,7 @@ tokio-postgres-rustls.workspace = true
 diesel = { version = "2.2.6", features = [
     "serde_json",
     "chrono",
+    "uuid",
 ] }
 diesel-async = { version = "0.5.2", features = ["postgres", "bb8", "async-connection-wrapper"] }
 diesel_migrations = { version = "2.2.0" }
