@@ -17,9 +17,6 @@ if TYPE_CHECKING:
     from typing import Any
 
 
-GET_CONNECTION_PID_QUERY = "SELECT pid FROM pg_stat_activity WHERE state = 'active'"
-
-
 @pytest.mark.asyncio
 async def test_http_pool_begin_1(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user http_auth with password 'http' superuser")
@@ -479,7 +476,7 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
 
     def get_pid(status: int, pw: str, user="http_auth") -> Any:
         return static_proxy.http_query(
-            GET_CONNECTION_PID_QUERY,
+            "SELECT pg_backend_pid() as pid",
             [],
             user=user,
             password=pw,
@@ -573,23 +570,37 @@ def test_http_pool_begin(static_proxy: NeonProxy):
     query(200, "SELECT 1;")  # Query that should succeed regardless of the transaction
 
 
-def test_sql_over_http_pool_idle(static_proxy: NeonProxy):
+def test_sql_over_http_pool_tx_reuse(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user http_auth2 with password 'http' superuser")
 
-    def query(status: int, query: str) -> Any:
+    def query(status: int, query: str, *args) -> Any:
         return static_proxy.http_query(
             query,
-            [],
+            args,
             user="http_auth2",
             password="http",
             expected_code=status,
         )
 
-    pid1 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
+    def query_pid_txid() -> Any:
+        result = query(
+            200,
+            "SELECT pg_backend_pid() as pid, pg_current_xact_id() as txid",
+        )
+
+        return result["rows"][0]
+
+    res0 = query_pid_txid()
+
     time.sleep(0.02)
     query(200, "BEGIN")
-    pid2 = query(200, GET_CONNECTION_PID_QUERY)["rows"][0]["pid"]
-    assert pid1 != pid2
+
+    res1 = query_pid_txid()
+    res2 = query_pid_txid()
+
+    assert res0["pid"] == res1["pid"], "connection should be reused"
+    assert res0["pid"] == res2["pid"], "connection should be reused"
+    assert res1["txid"] != res2["txid"], "txid should be different"
 
 
 @pytest.mark.timeout(60)

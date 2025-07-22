@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use clashmap::ClashMap;
 use parking_lot::RwLock;
-use postgres_client::ReadyForQueryStatus;
 use rand::Rng;
 use smol_str::ToSmolStr;
 use tracing::{Span, debug, info, warn};
@@ -714,12 +713,6 @@ impl ClientInnerExt for postgres_client::Client {
 }
 
 impl<C: ClientInnerExt> Discard<'_, C> {
-    pub(crate) fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        let conn_info = &self.conn_info;
-        if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is not idle");
-        }
-    }
     pub(crate) fn discard(&mut self) {
         let conn_info = &self.conn_info;
         if std::mem::take(self.pool).strong_count() > 0 {
