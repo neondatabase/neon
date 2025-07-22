@@ -3920,7 +3920,7 @@ class NeonProxy(PgProtocol):
         connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
         response = requests.post(
             f"https://{self.domain}:{self.external_http_port}/sql",
-            data=json.dumps({"queries":json_queries}),
+            data=json.dumps({"queries": json_queries}),
             headers={
                 "Content-Type": "application/sql",
                 "Neon-Connection-String": connstr,
