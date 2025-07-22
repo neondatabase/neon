@@ -183,3 +183,16 @@ alloc_curl_handle(void)
 }
 
 #endif
+
+/*
+ * Check if a BufferTag is valid by verifying all its fields are not invalid.
+ */
+bool
+BufferTagIsValid(const BufferTag *tag)
+{
+	return (tag->spcOid != InvalidOid) &&
+		(tag->dbOid != InvalidOid) &&
+		(tag->relNumber != InvalidRelFileNumber) &&
+		(tag->forkNum != InvalidForkNumber) &&
+		(tag->blockNum != InvalidBlockNumber);
+}

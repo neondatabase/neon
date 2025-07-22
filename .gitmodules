@@ -13,4 +13,4 @@
 [submodule "vendor/postgres-v17"]
 	path = vendor/postgres-v17
 	url = ../postgres.git
-	branch = thesuhas/buffer_tag_validation
+	branch = REL_17_STABLE_neon

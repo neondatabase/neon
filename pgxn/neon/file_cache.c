@@ -49,6 +49,7 @@
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
+#include "neon_utils.h"
 #include "pagestore_client.h"
 #include "communicator.h"
 
@@ -906,11 +907,9 @@ lfc_prewarm_main(Datum main_arg)
 					tag = fcs->chunks[snd_idx >> fcs_chunk_size_log];
 					tag.blockNum += snd_idx & ((1 << fcs_chunk_size_log) - 1);
 
-					#if PG_MAJORVERSION_NUM >= 17
 					if (!BufferTagIsValid(&tag)) {
 						elog(ERROR, "LFC: Invalid buffer tag: %u", tag.blockNum);
 					}
-					#endif
 
 					if (!lfc_cache_contains(BufTagGetNRelFileInfo(tag), tag.forkNum, tag.blockNum))
 					{
