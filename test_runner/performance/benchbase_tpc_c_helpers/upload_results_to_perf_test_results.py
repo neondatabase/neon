@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ruff: noqa
 # we exclude the file from ruff because on the github runner we have python 3.9 and ruff
-# is running with newer python which suggests changes incompatible with python 3.9
+# is running with newer python 3.12 which suggests changes incompatible with python 3.9
 """
 Upload BenchBase TPC-C results from summary.json and results.csv files to perf_test_results database.
 
