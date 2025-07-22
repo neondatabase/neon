@@ -3899,6 +3899,41 @@ class NeonProxy(PgProtocol):
             assert response.status_code == expected_code, f"response: {response.json()}"
         return response.json()
 
+    def http_multiquery(self, *queries, **kwargs):
+        # TODO maybe use default values if not provided
+        user = quote(kwargs["user"])
+        password = quote(kwargs["password"])
+        expected_code = kwargs.get("expected_code")
+        timeout = kwargs.get("timeout")
+
+        json_queries = []
+        for query in queries:
+            if type(query) is str:
+                json_queries.append({"query": query})
+            else:
+                [query, params] = query
+                json_queries.append({"query": query, "params": params})
+
+        queries = [j["query"] for j in json_queries];
+        log.info(f"Executing http queries: {queries}")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        response = requests.post(
+            f"https://{self.domain}:{self.external_http_port}/sql",
+            data=json.dumps({"queries":json_queries}),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Pool-Opt-In": "true",
+            },
+            verify=str(self.test_output_dir / "proxy.crt"),
+            timeout=timeout,
+        )
+
+        if expected_code is not None:
+            assert response.status_code == expected_code, f"response: {response.json()}"
+        return response.json()
+
     async def http2_query(self, query, args, **kwargs):
         # TODO maybe use default values if not provided
         user = kwargs["user"]
