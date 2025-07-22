@@ -302,10 +302,10 @@ pub struct PullTimelineRequest {
     pub timeline_id: TimelineId,
     pub http_hosts: Vec<String>,
     /// Membership configuration to switch to after pull.
-    /// It guarantees that if pull_timeline returns successful, the timeline will
+    /// It guarantees that if pull_timeline returns successfully, the timeline will
     /// not be deleted by request with an older generation.
     /// Storage controller always sets this field.
-    /// Might be None only for manual pull_timeline requests.
+    /// None is only allowed for manual pull_timeline requests.
     pub mconf: Option<Configuration>,
 }
 

@@ -40,10 +40,17 @@ enum GlobalMapTimeline {
 struct GlobalTimelinesState {
     timelines: HashMap<TenantTimelineId, GlobalMapTimeline>,
 
-    // A tombstone indicates this timeline used to exist has been deleted.  These are used to prevent
-    // on-demand timeline creation from recreating deleted timelines.  This is only soft-enforced, as
-    // this map is dropped on restart.
+    /// A tombstone indicates this timeline used to exist has been deleted. These are used to prevent
+    /// on-demand timeline creation from recreating deleted timelines. This is only soft-enforced, as
+    /// this map is dropped on restart.
+    /// The timeline might also be deleted (excluded) via safekeeper migration algorithm. In that case
+    /// the tombsone contains the corresponding safekeeper generation. The pull_timeline requests with
+    /// higher generation ignore such tombstones and can recreate the timeline.
     timeline_tombstones: HashMap<TenantTimelineId, TimelineTombstone>,
+    /// A tombstone indicates that the tenant used to exist has been deleted.
+    /// These are created only by tenant_delete requests. They are always valid regardless of the
+    /// request generation.
+    /// This is only soft-enforced, as this map is dropped on restart.
     tenant_tombstones: HashMap<TenantId, Instant>,
 
     conf: Arc<SafeKeeperConf>,
@@ -107,8 +114,9 @@ impl GlobalTimelinesState {
     }
 
     /// Check if the state has a tenant or a timeline tombstone.
-    /// If `generation` is provided, check only for tombsotnes with same or higher generation.
-    /// If `generation` is `None`, check for any tombstone.
+    /// If `generation` is provided, check only for timeline tombsotnes with same or higher generation.
+    /// If `generation` is `None`, check for any timeline tombstone.
+    /// Tenant tombstones are checked regardless of the generation.
     fn has_tombstone(
         &self,
         ttid: &TenantTimelineId,
@@ -125,10 +133,8 @@ impl GlobalTimelinesState {
 
     fn delete(&mut self, ttid: TenantTimelineId, generation: Option<SafekeeperGeneration>) {
         self.timelines.remove(&ttid);
-        let prev_value = self
-            .timeline_tombstones
+        self.timeline_tombstones
             .insert(ttid, TimelineTombstone::new(generation));
-        assert!(prev_value.is_none());
     }
 
     fn add_tenant_tombstone(&mut self, tenant_id: TenantId) {
