@@ -35,7 +35,6 @@ members = [
     "libs/pq_proto",
     "libs/tenant_size_model",
     "libs/metrics",
-    "libs/neonart",
     "libs/postgres_connection",
     "libs/remote_storage",
     "libs/tracing-utils",
