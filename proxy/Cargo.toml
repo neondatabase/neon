@@ -66,6 +66,7 @@ postgres-client = { package = "tokio-postgres2", path = "../libs/proxy/tokio-pos
 postgres-protocol = { package = "postgres-protocol2", path = "../libs/proxy/postgres-protocol2" }
 pq_proto.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 regex.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
 reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
@@ -133,6 +134,6 @@ pbkdf2 = { workspace = true, features = ["simple", "std"] }
 rcgen.workspace = true
 rstest.workspace = true
 walkdir.workspace = true
-rand_distr = "0.4"
+rand_distr = "0.5"
 tokio-postgres.workspace = true
 tracing-test = "0.2"

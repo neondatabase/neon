@@ -104,7 +104,7 @@ impl Id {
 
     pub fn generate() -> Self {
         let mut tli_buf = [0u8; 16];
-        rand::thread_rng().fill(&mut tli_buf);
+        rand::rng().fill(&mut tli_buf);
         Id::from(tli_buf)
     }
 
