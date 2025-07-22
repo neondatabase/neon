@@ -1617,8 +1617,9 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 				relperst = mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum) ? NEON_RELPERSISTENCE_UNLOGGED : NEON_RELPERSISTENCE_PERMANENT;
 				/*
 				 * There is no lock hold between get_cached_relperst and set_cached_relperst.
-				 * We assume that multiple backends can repeat this check and get the same result (there is assert in set_cached_relperst).
-				 * And concurrent setting UNLOGGED_BUILD is not possible because only one backend can perform unlogged build.
+				 * We assume that if multiple backends perform this check, they all get the same result (there is assert in set_cached_relperst).
+				 * Furthermore we assume that when a relation changes from PERMANENT to UNLOGGED_BUILD, we assume that it has no buffers in 
+				 * the shared buffer cache and therefore no other backend will try to concurrently write its pages. (In fact we require that the relation is completely empty.)
 				 */
 				set_cached_relperst(rinfo, relperst);
 			}
