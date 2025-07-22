@@ -600,6 +600,7 @@ impl ParameterStatusBody {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct ReadyForQueryBody {
     status: u8,
 }

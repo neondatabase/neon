@@ -29,6 +29,9 @@ pub struct Responses {
     waiting: usize,
     /// number of ReadyForQuery messages received.
     received: usize,
+
+    /// The last query status we received.
+    last_status: ReadyForQueryStatus,
 }
 
 impl Responses {
@@ -39,7 +42,8 @@ impl Responses {
                 let received = self.received;
 
                 // increase the query head if this is the last message.
-                if let Message::ReadyForQuery(_) = message {
+                if let Message::ReadyForQuery(ref status) = message {
+                    self.last_status = (*status).into();
                     self.received += 1;
                 }
 
@@ -68,6 +72,15 @@ impl Responses {
     pub async fn next(&mut self) -> Result<Message, Error> {
         future::poll_fn(|cx| self.poll_next(cx)).await
     }
+
+    pub async fn wait_until_ready(&mut self) -> Result<ReadyForQueryStatus, Error> {
+        while self.received < self.waiting {
+            if let Message::ReadyForQuery(status) = self.next().await? {
+                return Ok(status.into());
+            }
+        }
+        Ok(self.last_status)
+    }
 }
 
 /// A cache of type info and prepared statements for fetching type info
@@ -91,13 +104,6 @@ impl InnerClient {
         self.responses.waiting += 1;
         Ok(PartialQuery(Some(self)))
     }
-
-    // pub fn send_with_sync<F>(&mut self, f: F) -> Result<&mut Responses, Error>
-    // where
-    //     F: FnOnce(&mut BytesMut) -> Result<(), Error>,
-    // {
-    //     self.start()?.send_with_sync(f)
-    // }
 
     pub fn send_simple_query(&mut self, query: &str) -> Result<&mut Responses, Error> {
         self.responses.waiting += 1;
@@ -197,6 +203,8 @@ impl Client {
                     cur: BackendMessages::empty(),
                     waiting: 0,
                     received: 0,
+                    // new connections are always idle.
+                    last_status: ReadyForQueryStatus::Idle,
                 },
                 buffer: Default::default(),
             },
@@ -228,6 +236,10 @@ impl Client {
             .ok();
 
         rx
+    }
+
+    pub async fn wait_until_ready(&mut self) -> Result<ReadyForQueryStatus, Error> {
+        self.inner_mut().responses.wait_until_ready().await
     }
 
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
