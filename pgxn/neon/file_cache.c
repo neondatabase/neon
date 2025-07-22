@@ -635,6 +635,11 @@ lfc_init(void)
 							NULL);
 }
 
+/*
+ * Dump a list of pages that are currently in the LFC
+ *
+ * This is used to get a snapshot that can be used to prewarm the LFC later.
+ */
 FileCacheState*
 lfc_get_state(size_t max_entries)
 {
@@ -2267,4 +2272,3 @@ get_prewarm_info(PG_FUNCTION_ARGS)
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
-

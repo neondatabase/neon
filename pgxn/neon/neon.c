@@ -508,7 +508,7 @@ _PG_init(void)
 
 	DefineCustomBoolVariable(
 							"neon.disable_logical_replication_subscribers",
-							"Disables incomming logical replication",
+							"Disable incoming logical replication",
 							NULL,
 							&disable_logical_replication_subscribers,
 							false,
@@ -567,7 +567,7 @@ _PG_init(void)
 
 	DefineCustomEnumVariable(
 							"neon.debug_compare_local",
-							"Debug mode for compaing content of pages in prefetch ring/LFC/PS and local disk",
+							"Debug mode for comparing content of pages in prefetch ring/LFC/PS and local disk",
 							NULL,
 							&debug_compare_local,
 							DEBUG_COMPARE_LOCAL_NONE,
@@ -735,7 +735,6 @@ neon_shmem_request_hook(void)
 static void
 neon_shmem_startup_hook(void)
 {
-	/* Initialize */
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
