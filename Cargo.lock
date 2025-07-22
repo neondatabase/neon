@@ -1461,7 +1461,7 @@ name = "consumption_metrics"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "rand 0.8.5",
+ "rand 0.9.1",
  "serde",
 ]
 
@@ -1864,7 +1864,7 @@ dependencies = [
  "bytes",
  "hex",
  "parking_lot 0.12.1",
- "rand 0.8.5",
+ "rand 0.9.1",
  "smallvec",
  "tracing",
  "utils",
@@ -2109,7 +2109,7 @@ dependencies = [
  "itertools 0.10.5",
  "jsonwebtoken",
  "prometheus",
- "rand 0.8.5",
+ "rand 0.9.1",
  "remote_storage",
  "serde",
  "serde_json",
@@ -3792,8 +3792,8 @@ dependencies = [
  "once_cell",
  "procfs",
  "prometheus",
- "rand 0.8.5",
- "rand_distr 0.4.3",
+ "rand 0.9.1",
+ "rand_distr",
  "twox-hash",
 ]
 
@@ -3885,7 +3885,7 @@ dependencies = [
  "lock_api",
  "nix 0.30.1",
  "rand 0.9.1",
- "rand_distr 0.5.1",
+ "rand_distr",
  "rustc-hash 2.1.1",
  "tempfile",
  "thiserror 1.0.69",
@@ -4361,7 +4361,7 @@ dependencies = [
  "pageserver_client_grpc",
  "pageserver_page_api",
  "pprof",
- "rand 0.8.5",
+ "rand 0.9.1",
  "reqwest",
  "serde",
  "serde_json",
@@ -4458,7 +4458,7 @@ dependencies = [
  "pprof",
  "pq_proto",
  "procfs",
- "rand 0.8.5",
+ "rand 0.9.1",
  "range-set-blaze",
  "regex",
  "remote_storage",
@@ -4525,7 +4525,7 @@ dependencies = [
  "postgres_ffi_types",
  "postgres_versioninfo",
  "posthog_client_lite",
- "rand 0.8.5",
+ "rand 0.9.1",
  "remote_storage",
  "reqwest",
  "serde",
@@ -4595,7 +4595,7 @@ dependencies = [
  "once_cell",
  "pageserver_api",
  "pin-project-lite",
- "rand 0.8.5",
+ "rand 0.9.1",
  "svg_fmt",
  "tokio",
  "tracing",
@@ -4968,7 +4968,7 @@ dependencies = [
  "fallible-iterator",
  "hmac",
  "memchr",
- "rand 0.8.5",
+ "rand 0.9.1",
  "sha2",
  "stringprep",
  "tokio",
@@ -5160,7 +5160,7 @@ dependencies = [
  "bytes",
  "itertools 0.10.5",
  "postgres-protocol",
- "rand 0.8.5",
+ "rand 0.9.1",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -5424,8 +5424,9 @@ dependencies = [
  "postgres-protocol2",
  "postgres_backend",
  "pq_proto",
- "rand 0.8.5",
- "rand_distr 0.4.3",
+ "rand 0.9.1",
+ "rand_core 0.6.4",
+ "rand_distr",
  "rcgen",
  "redis",
  "regex",
@@ -5625,16 +5626,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom 0.3.3",
-]
-
-[[package]]
-name = "rand_distr"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
-dependencies = [
- "num-traits",
- "rand 0.8.5",
 ]
 
 [[package]]
@@ -5850,7 +5841,7 @@ dependencies = [
  "metrics",
  "once_cell",
  "pin-project-lite",
- "rand 0.8.5",
+ "rand 0.9.1",
  "reqwest",
  "scopeguard",
  "serde",
@@ -6340,7 +6331,7 @@ dependencies = [
  "postgres_versioninfo",
  "pprof",
  "pq_proto",
- "rand 0.8.5",
+ "rand 0.9.1",
  "regex",
  "remote_storage",
  "reqwest",
@@ -7034,7 +7025,7 @@ dependencies = [
  "pageserver_client",
  "postgres_connection",
  "posthog_client_lite",
- "rand 0.8.5",
+ "rand 0.9.1",
  "regex",
  "reqwest",
  "routerify",
@@ -8315,7 +8306,7 @@ dependencies = [
  "postgres_connection",
  "pprof",
  "pq_proto",
- "rand 0.8.5",
+ "rand 0.9.1",
  "regex",
  "scopeguard",
  "sentry",
