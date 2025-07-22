@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 # If index size is smaller than segment size, the problem is avoided by file descriptor cache which prevents file deletion.
 def test_unlogged_build(neon_env_builder: NeonEnvBuilder):
     n_connections = 4
-    shared_buffers = 1024
+    shared_buffers = 128
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start(
         "main", config_lines=[f"shared_buffers='{shared_buffers}MB'"]
