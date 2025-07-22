@@ -120,6 +120,11 @@ pub struct ComputeNodeParams {
     /// Interval for installed extensions collection
     pub installed_extensions_collection_interval: Arc<AtomicU64>,
 
+    /// Timeout of PG compute startup in the Init state.
+    pub pg_init_timeout: Option<Duration>,
+
+    pub lakebase_mode: bool,
+
     // Hadron-added params
     // Path to the compute node spec.json file on the local file system containing the compute
     // spec, if specified. This is only used in tests.
@@ -1615,7 +1620,7 @@ impl ComputeNode {
         })?;
 
         // Update pg_hba.conf received with basebackup.
-        update_pg_hba(pgdata_path)?;
+        update_pg_hba(pgdata_path, None)?;
 
         if let Some(settings) = databricks_settings {
             copy_tls_certificates(

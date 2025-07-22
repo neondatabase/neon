@@ -368,7 +368,14 @@ def test_max_wal_rate(neon_simple_env: NeonEnv):
     superuser_name = "databricks_superuser"
 
     # Connect to postgres and create a database called "regression".
-    endpoint = env.endpoints.create_start("main")
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            # we need this option because default max_cluster_size < 0 will disable throttling completely
+            "neon.max_cluster_size=10GB",
+        ],
+    )
+
     endpoint.safe_psql_many(
         [
             f"CREATE ROLE {superuser_name}",

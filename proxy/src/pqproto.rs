@@ -7,7 +7,7 @@ use std::io::{self, Cursor};
 
 use bytes::{Buf, BufMut};
 use itertools::Itertools;
-use rand::distributions::{Distribution, Standard};
+use rand::distr::{Distribution, StandardUniform};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zerocopy::{FromBytes, Immutable, IntoBytes, big_endian};
 
@@ -458,9 +458,9 @@ impl fmt::Display for CancelKeyData {
             .finish()
     }
 }
-impl Distribution<CancelKeyData> for Standard {
+impl Distribution<CancelKeyData> for StandardUniform {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> CancelKeyData {
-        id_to_cancel_key(rng.r#gen())
+        id_to_cancel_key(rng.random())
     }
 }
 

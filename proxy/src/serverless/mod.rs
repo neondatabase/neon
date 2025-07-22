@@ -77,7 +77,7 @@ pub async fn task_main(
     {
         let conn_pool = Arc::clone(&conn_pool);
         tokio::spawn(async move {
-            conn_pool.gc_worker(StdRng::from_entropy()).await;
+            conn_pool.gc_worker(StdRng::from_os_rng()).await;
         });
     }
 
@@ -97,7 +97,7 @@ pub async fn task_main(
     {
         let http_conn_pool = Arc::clone(&http_conn_pool);
         tokio::spawn(async move {
-            http_conn_pool.gc_worker(StdRng::from_entropy()).await;
+            http_conn_pool.gc_worker(StdRng::from_os_rng()).await;
         });
     }
 
