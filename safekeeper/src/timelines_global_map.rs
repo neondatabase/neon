@@ -43,7 +43,7 @@ struct GlobalTimelinesState {
     /// A tombstone indicates this timeline used to exist has been deleted. These are used to prevent
     /// on-demand timeline creation from recreating deleted timelines. This is only soft-enforced, as
     /// this map is dropped on restart.
-    /// The timeline might also be deleted (excluded) via safekeeper migration algorithm. In that case
+    /// The timeline might also be locally deleted (excluded) via safekeeper migration algorithm. In that case,
     /// the tombsone contains the corresponding safekeeper generation. The pull_timeline requests with
     /// higher generation ignore such tombstones and can recreate the timeline.
     timeline_tombstones: HashMap<TenantTimelineId, TimelineTombstone>,
