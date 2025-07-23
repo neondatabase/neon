@@ -526,7 +526,7 @@ class NeonProject:
         )
         self.wait()
         new_branch_def = self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
-        # The restored branch will lose the parent after, but it has it during the restoration.
+        # The restored branch will lose the parent afterward, but it has it during the restoration.
         # So, we delete parent_id
         new_branch_def["branch"].pop("parent_id")
         new_branch = NeonBranch(self, new_branch_def)
