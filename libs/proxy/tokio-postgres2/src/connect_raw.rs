@@ -2,9 +2,9 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use futures_util::{Sink, SinkExt, Stream, TryStreamExt};
+use futures_util::{SinkExt, Stream, TryStreamExt};
 use postgres_protocol2::authentication::sasl;
 use postgres_protocol2::authentication::sasl::ScramSha256;
 use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message};
@@ -21,30 +21,6 @@ use crate::tls::TlsStream;
 pub struct StartupStream<S, T> {
     inner: FramedWrite<MaybeTlsStream<S, T>, PostgresCodec>,
     read_buf: BytesMut,
-}
-
-impl<S, T> Sink<Bytes> for StartupStream<S, T>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    type Error = io::Error;
-
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_ready(cx)
-    }
-
-    fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> io::Result<()> {
-        Pin::new(&mut self.inner).start_send(item)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_close(cx)
-    }
 }
 
 impl<S, T> Stream for StartupStream<S, T>
@@ -137,20 +113,6 @@ where
     }
 }
 
-pub(crate) async fn startup<S, T>(
-    stream: &mut StartupStream<S, T>,
-    config: &Config,
-) -> Result<(), Error>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut buf = BytesMut::new();
-    frontend::startup_message(&config.server_params, &mut buf).map_err(Error::encode)?;
-
-    stream.send(buf.freeze()).await.map_err(Error::io)
-}
-
 pub(crate) async fn authenticate<S, T>(
     stream: &mut StartupStream<S, T>,
     config: &Config,
@@ -159,6 +121,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsStream + Unpin,
 {
+    frontend::startup_message(&config.server_params, stream.inner.write_buffer_mut())
+        .map_err(Error::encode)?;
+
+    stream.inner.flush().await.map_err(Error::io)?;
     match stream.try_next().await.map_err(Error::io)? {
         Some(Message::AuthenticationOk) => {
             can_skip_channel_binding(config)?;
@@ -172,7 +138,8 @@ where
                 .as_ref()
                 .ok_or_else(|| Error::config("password missing".into()))?;
 
-            authenticate_password(stream, pass).await?;
+            frontend::password_message(pass, stream.inner.write_buffer_mut())
+                .map_err(Error::encode)?;
         }
         Some(Message::AuthenticationSasl(body)) => {
             authenticate_sasl(stream, body, config).await?;
@@ -191,6 +158,7 @@ where
         None => return Err(Error::closed()),
     }
 
+    stream.inner.flush().await.map_err(Error::io)?;
     match stream.try_next().await.map_err(Error::io)? {
         Some(Message::AuthenticationOk) => Ok(()),
         Some(Message::ErrorResponse(body)) => Err(Error::db(body)),
@@ -206,20 +174,6 @@ fn can_skip_channel_binding(config: &Config) -> Result<(), Error> {
             "server did not use channel binding".into(),
         )),
     }
-}
-
-async fn authenticate_password<S, T>(
-    stream: &mut StartupStream<S, T>,
-    password: &[u8],
-) -> Result<(), Error>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut buf = BytesMut::new();
-    frontend::password_message(password, &mut buf).map_err(Error::encode)?;
-
-    stream.send(buf.freeze()).await.map_err(Error::io)
 }
 
 async fn authenticate_sasl<S, T>(
@@ -276,10 +230,10 @@ where
         return Err(Error::config("password or auth keys missing".into()));
     };
 
-    let mut buf = BytesMut::new();
-    frontend::sasl_initial_response(mechanism, scram.message(), &mut buf).map_err(Error::encode)?;
-    stream.send(buf.freeze()).await.map_err(Error::io)?;
+    frontend::sasl_initial_response(mechanism, scram.message(), stream.inner.write_buffer_mut())
+        .map_err(Error::encode)?;
 
+    stream.inner.flush().await.map_err(Error::io)?;
     let body = match stream.try_next().await.map_err(Error::io)? {
         Some(Message::AuthenticationSaslContinue(body)) => body,
         Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
@@ -292,10 +246,10 @@ where
         .await
         .map_err(|e| Error::authentication(e.into()))?;
 
-    let mut buf = BytesMut::new();
-    frontend::sasl_response(scram.message(), &mut buf).map_err(Error::encode)?;
-    stream.send(buf.freeze()).await.map_err(Error::io)?;
+    frontend::sasl_response(scram.message(), stream.inner.write_buffer_mut())
+        .map_err(Error::encode)?;
 
+    stream.inner.flush().await.map_err(Error::io)?;
     let body = match stream.try_next().await.map_err(Error::io)? {
         Some(Message::AuthenticationSaslFinal(body)) => body,
         Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
