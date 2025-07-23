@@ -23,8 +23,7 @@ use pageserver_page_api::{self as page_api, SlruKind};
 /// Request from a Postgres backend to the communicator process
 #[allow(clippy::large_enum_variant)]
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
-#[derive(strum_macros::EnumDiscriminants)]
+#[derive(Copy, Clone, Debug, strum_macros::EnumDiscriminants)]
 #[strum_discriminants(derive(measured::FixedCardinalityLabel))]
 pub enum NeonIORequest {
     Empty,
