@@ -826,6 +826,18 @@ impl TenantManager {
         peek_slot.is_some()
     }
 
+    /// Returns whether a local slot exists for a child shard of the given tenant and shard count.
+    /// Note that this just checks for a shard with a larger shard count, and it may not be a
+    /// direct child of the given shard.
+    pub(crate) fn has_child_shard(&self, tenant_id: TenantId, shard_index: ShardIndex) -> bool {
+        match &*self.tenants.read().unwrap() {
+            TenantsMap::Initializing => false,
+            TenantsMap::Open(slots) | TenantsMap::ShuttingDown(slots) => slots
+                .range(TenantShardId::tenant_range(tenant_id))
+                .any(|(tsid, _)| tsid.shard_count > shard_index.shard_count),
+        }
+    }
+
     #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(crate) async fn upsert_location(
         &self,
