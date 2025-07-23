@@ -150,6 +150,7 @@ communicator_new_bgworker_main(Datum main_arg)
 	}
 	else
 	{
+		proc_handle = NULL;
 		success = communicator_worker_process_launch_legacy(&errmsg);
 	}
 	if (!success)
