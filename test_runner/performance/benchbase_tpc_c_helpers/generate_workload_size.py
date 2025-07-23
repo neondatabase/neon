@@ -1,4 +1,5 @@
 import argparse
+import html
 import math
 import os
 import sys
@@ -214,6 +215,11 @@ def write_file(path, content):
         os.chmod(path, 0o755)
 
 
+def escape_xml_password(password):
+    """Escape XML special characters in password."""
+    return html.escape(password, quote=True)
+
+
 def get_docker_arch_tag(runner_arch):
     """Map GitHub Actions runner.arch to Docker image architecture tag."""
     arch_mapping = {"X64": "amd64", "ARM64": "arm64"}
@@ -237,6 +243,9 @@ def main():
     password = args.password
     runner_arch = args.runner_arch
 
+    # Escape password for safe XML insertion
+    escaped_password = escape_xml_password(password)
+
     # Get the appropriate Docker architecture tag
     docker_arch = get_docker_arch_tag(runner_arch)
     docker_image = f"ghcr.io/neondatabase-labs/benchbase-postgres:latest-{docker_arch}"
@@ -252,7 +261,7 @@ def main():
         WARMUP_XML.format(
             warehouses=warehouses,
             hostname=hostname,
-            password=password,
+            password=escaped_password,
             terminals=terminals,
             batch_size=BATCH_SIZE,
             warmup_time=WARMUP_TIME_SECONDS,
@@ -264,7 +273,7 @@ def main():
         MAX_RATE_XML.format(
             warehouses=warehouses,
             hostname=hostname,
-            password=password,
+            password=escaped_password,
             terminals=terminals,
             batch_size=BATCH_SIZE,
             benchmark_time=BENCHMARK_TIME_SECONDS,
@@ -277,7 +286,7 @@ def main():
             warehouses=warehouses,
             opt_rate=opt_rate,
             hostname=hostname,
-            password=password,
+            password=escaped_password,
             terminals=terminals,
             batch_size=BATCH_SIZE,
             benchmark_time=BENCHMARK_TIME_SECONDS,
@@ -292,7 +301,7 @@ def main():
             warehouses=warehouses,
             works=ramp_works,
             hostname=hostname,
-            password=password,
+            password=escaped_password,
             terminals=terminals,
             batch_size=BATCH_SIZE,
         ),
@@ -304,7 +313,7 @@ def main():
         LOAD_XML.format(
             warehouses=warehouses,
             hostname=hostname,
-            password=password,
+            password=escaped_password,
             batch_size=BATCH_SIZE,
             loader_threads=LOADER_THREADS,
         ),

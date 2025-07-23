@@ -132,10 +132,8 @@ jobs:
         
         echo "Extracted hostname: ${HOSTNAME}"
         
-        # Set up working directories in runner temp (NVMe)
-        BENCHMARK_WORKDIR="${RUNNER_TEMP}/benchbase-tpcc"
-        mkdir -p "${BENCHMARK_WORKDIR}"
-        cd "${BENCHMARK_WORKDIR}"
+        # Use runner temp (NVMe) as working directory
+        cd "${RUNNER_TEMP}"
         
         # Copy the generator script
         cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/generate_workload_size.py" .
@@ -151,15 +149,12 @@ jobs:
         # Fix path mismatch: move generated configs and scripts to expected locations
         mv ../configs ./configs
         mv ../scripts ./scripts
-        
-        # Save working directory for subsequent steps
-        echo "BENCHMARK_WORKDIR=${BENCHMARK_WORKDIR}" >> $GITHUB_ENV
 
     - name: Prepare database (load data)
       env:
         WAREHOUSES: ${{ matrix.warehouses }}
       run: |
-        cd "${BENCHMARK_WORKDIR}"
+        cd "${RUNNER_TEMP}"
         
         echo "Loading ${WAREHOUSES} warehouses into database..."
         
@@ -172,7 +167,7 @@ jobs:
       env:
         WAREHOUSES: ${{ matrix.warehouses }}
       run: |
-        cd "${BENCHMARK_WORKDIR}"
+        cd "${RUNNER_TEMP}"
         
         echo "Running TPC-C benchmark with ${WAREHOUSES} warehouses..."
         
@@ -190,7 +185,7 @@ jobs:
         REVISION: ${{ github.sha }}
         PERF_DB_CONNSTR: ${{ secrets.PERF_TEST_RESULT_CONNSTR }}
       run: |
-        cd "${BENCHMARK_WORKDIR}"
+        cd "${RUNNER_TEMP}"
         
         echo "Creating temporary Python environment for results processing..."
         
@@ -306,26 +301,15 @@ jobs:
         echo "Redacting passwords from configuration files before upload..."
         
         # Mask all passwords in XML config files
-        find "${BENCHMARK_WORKDIR}/configs" -name "*.xml" -type f -exec sed -i 's|<password>[^<]*</password>|<password>redacted</password>|g' {} \;
+        find "${RUNNER_TEMP}/configs" -name "*.xml" -type f -exec sed -i 's|<password>[^<]*</password>|<password>redacted</password>|g' {} \;
         
         echo "Uploading benchmark results to s3://${S3_BUCKET}/${S3_PREFIX}/"
         
         # Upload the entire benchmark directory recursively
-        aws s3 cp --only-show-errors --recursive "${BENCHMARK_WORKDIR}" s3://${S3_BUCKET}/${S3_PREFIX}/
+        aws s3 cp --only-show-errors --recursive "${RUNNER_TEMP}" s3://${S3_BUCKET}/${S3_PREFIX}/
         
         echo "Upload completed"
-
-    - name: Clean up benchmark working directory
-      if: ${{ always() }}
-      run: |
-        if [ -n "${BENCHMARK_WORKDIR}" ] && [ -d "${BENCHMARK_WORKDIR}" ]; then
-          echo "Cleaning up benchmark working directory: ${BENCHMARK_WORKDIR}"
-          rm -rf "${BENCHMARK_WORKDIR}"
-          echo "Cleanup completed"
-        else
-          echo "No benchmark working directory to clean up"
-        fi
-
+        
     - name: Delete Neon Project
       if: ${{ always() }}
       uses: ./.github/actions/neon-project-delete
