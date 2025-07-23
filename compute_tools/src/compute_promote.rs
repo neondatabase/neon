@@ -23,7 +23,7 @@ impl ComputeNode {
             };
             tracing::error!(%err, "promoting");
             PromoteState::Failed {
-                error: err.to_string(),
+                error: format!("{:#}", err),
             }
         };
 
@@ -107,11 +107,10 @@ impl ComputeNode {
             .await
             .context("reloading postgres config")?;
 
-        if cfg!(feature = "testing") {
-            fail::fail_point!("compute-promotion", |_| {
-                bail!("promotion configured to fail because of a failpoint")
-            });
-        }
+        #[cfg(feature = "testing")]
+        fail::fail_point!("compute-promotion", |_| {
+            bail!("promotion configured to fail because of a failpoint")
+        });
 
         let row = client
             .query_one("SELECT * FROM pg_promote()", &[])
