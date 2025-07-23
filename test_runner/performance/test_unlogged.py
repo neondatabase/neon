@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 #
 # This test demonstrates effect of relpersistence cache. Postgres doesn't store relation persistence in shared buffer tag.
-# It means that if page is evicted from shared buffers and relation is not cache in relation cache, then persistence=0 (auto) is used.
+# It means that if page is evicted from shared buffers and relation is not in the backend's relation cache, then persistence=0 (auto) is used.
 # For vanilla Postgres it is not important, because in both cases we need to write changes to the file.
 # In Neon, neon_write does nothing nothing for a permanent relation, while for an unlogged relation, it writes the page to the local file.
 # Originally Neon always called `mdexists` to check if the local file exists and determine if it's an unlogged relation. Now we check the cache first.
