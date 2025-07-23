@@ -1535,40 +1535,40 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 }
 
 /*
- * Return an array of LfcStatsEntrys, terminated by an entry with NULL name
+ * Return an array of LfcStatsEntrys
  */
 LfcStatsEntry *
-get_lfc_stats(void)
+get_lfc_stats(uint32 *num_entries)
 {
 	LfcStatsEntry *entries;
-	int			i = 0;
+	int			n = 0;
 
 #define NUM_ENTRIES 10
-	entries = palloc(sizeof(LfcStatsEntry) * (NUM_ENTRIES + 1));
+	entries = palloc(sizeof(LfcStatsEntry) * NUM_ENTRIES);
 
-	entries[i++] = (LfcStatsEntry) {"file_cache_chunk_size_pages", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_chunk_size_pages", lfc_ctl == NULL,
 									lfc_ctl ? lfc_blocks_per_chunk : 0 };
-	entries[i++] = (LfcStatsEntry) {"file_cache_misses", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_misses", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->misses : 0};
-	entries[i++] = (LfcStatsEntry) {"file_cache_hits", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_hits", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->hits : 0 };
-	entries[i++] = (LfcStatsEntry) {"file_cache_used", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_used", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->used : 0 };
-	entries[i++] = (LfcStatsEntry) {"file_cache_writes", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_writes", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->writes : 0 };
-	entries[i++] = (LfcStatsEntry) {"file_cache_size", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_size", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->size : 0 };
-	entries[i++] = (LfcStatsEntry) {"file_cache_used_pages", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_used_pages", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->used_pages : 0 };
-	entries[i++] = (LfcStatsEntry) {"file_cache_evicted_pages", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_evicted_pages", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->evicted_pages : 0 };
-	entries[i++] = (LfcStatsEntry) {"file_cache_limit", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_limit", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->limit : 0 };
-	entries[i++] = (LfcStatsEntry) {"file_cache_chunks_pinned", lfc_ctl == NULL,
+	entries[n++] = (LfcStatsEntry) {"file_cache_chunks_pinned", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->pinned : 0 };
-	entries[i++] = (LfcStatsEntry) { NULL, false, 0 };
-	Assert(i <= NUM_ENTRIES);
+	Assert(n <= NUM_ENTRIES);
 
+	*num_entries = n;
 	return entries;
 }
 

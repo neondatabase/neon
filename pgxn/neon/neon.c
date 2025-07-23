@@ -720,18 +720,18 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 #define NUM_NEON_GET_STATS_COLS	2
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	LfcStatsEntry *entries;
-	LfcStatsEntry *entry;
+	uint32		num_entries;
 
 	InitMaterializedSRF(fcinfo, 0);
 
 	if (neon_use_communicator_worker)
-		entries = communicator_new_get_lfc_stats();
+		entries = communicator_new_get_lfc_stats(&num_entries);
 	else
-		entries = get_lfc_stats();
+		entries = get_lfc_stats(&num_entries);
 
-	entry = entries;
-	while (entry->metric_name != NULL)
+	for (uint32 i = 0; i < num_entries; i++)
 	{
+		LfcStatsEntry *entry = &entries[i];
 		Datum		values[NUM_NEON_GET_STATS_COLS];
 		bool		nulls[NUM_NEON_GET_STATS_COLS];
 
@@ -739,7 +739,6 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 		nulls[1] = entry->isnull;
 		values[1] = Int64GetDatum(entry->isnull ? 0 : entry->value);
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-		entry++;
 	}
 
 	PG_RETURN_VOID();
