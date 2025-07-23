@@ -113,7 +113,7 @@ RelperstCacheShmemInit(void)
 }
 
 /*
- * Lookup existed entry or create new one
+ * Lookup existing entry or create a new one
  */
 static NeonRelPersistenceEntry*
 get_pinned_entry(NRelFileInfo rinfo)
