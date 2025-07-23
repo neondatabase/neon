@@ -29,18 +29,17 @@
 #endif
 
 /*
- * The main goal of this cache is to avoid calls of mdexists in neon_write,
+ * The main goal of this cache is to avoid repeated calls of mdexists in neon_write,
  * which is needed to distinguish unlogged relations.
+ * It has a fixed size, implementing eviction with the LRU algorithm.
  *
- * This hash is also used to mark relation during unlogged build.
- * It has limited size, implementing eviction based on LRU algorithm.
- * Relations involved in unlogged build are pinned in the cache (assuming that
- * number of concurrent unlogged build is small.
- *
- * Another task of this hash is to prevent race condition during unlogged build termination.
- * Some backend may want to evict page which backenf performing unlogged build can complete it and unlinking local files.
- * We are using shared lock which is hold during all write operation. As far as lock is shared is doesn't prevent concurrent writes.
- * Exclusive lock is taken by unlogged_build_end to change relation kind.
+ * This hash is also used to mark a relation during an unlogged build.
+ * Relations involved in unlogged build are pinned in the cache and never evicted. (Relying 
+ * on the fact that the number of concurrent unlogged builds is small). Evicting a page
+ * belonging to an unlogged build involves an extra locking step to eliminate a race condition
+ * between unlogged build completing and deleted the local file, at the same time that
+ * another backend is evicting a page belonging to it. See how `finish_unlogged_build_lock`
+ * is used in `neon_write`
  */
 
 typedef struct
