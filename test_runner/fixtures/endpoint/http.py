@@ -87,7 +87,7 @@ class EndpointHttpClient(requests.Session):
         def prewarmed():
             json = self.prewarm_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "failed" or status == "completed", f"{status}, {err=}"
+            assert status in ["failed", "completed", "skipped"], f"{status}, {err=}"
 
         wait_until(prewarmed, timeout=60)
         assert self.prewarm_lfc_status()["status"] != "failed"
@@ -106,9 +106,10 @@ class EndpointHttpClient(requests.Session):
         def offloaded():
             json = self.offload_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"{status}, {err=}"
+            assert status in ["failed", "completed"], f"{status}, {err=}"
 
         wait_until(offloaded)
+        assert self.offload_lfc_status()["status"] != "failed"
 
     def promote(self, promote_spec: dict[str, Any], disconnect: bool = False):
         url = f"http://localhost:{self.external_port}/promote"

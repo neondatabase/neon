@@ -217,16 +217,22 @@ impl ComputeNode {
         let EndpointStoragePair { url, token } = self.endpoint_storage_pair(None)?;
         info!(%url, "requesting LFC state from Postgres");
 
-        let mut compressed = Vec::new();
-        ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
+        let row = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
             .context("connecting to postgres")?
             .query_one("select neon.get_local_cache_state()", &[])
             .await
-            .context("querying LFC state")?
-            .try_get::<usize, &[u8]>(0)
-            .context("deserializing LFC state")
-            .map(ZstdEncoder::new)?
+            .context("querying LFC state")?;
+        let state = row
+            .try_get::<usize, Option<&[u8]>>(0)
+            .context("deserializing LFC state")?;
+        let Some(state) = state else {
+            info!(%url, "empty LFC state, not exporting");
+            return Ok(());
+        };
+
+        let mut compressed = Vec::new();
+        ZstdEncoder::new(state)
             .read_to_end(&mut compressed)
             .await
             .context("compressing LFC state")?;

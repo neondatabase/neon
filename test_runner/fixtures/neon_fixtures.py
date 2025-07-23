@@ -4794,9 +4794,10 @@ class Endpoint(PgProtocol, LogUtils):
                     m = re.search(r"=\s*(\S+)", line)
                     assert m is not None, f"malformed config line {line}"
                     size = m.group(1)
-                    assert size_to_bytes(size) >= size_to_bytes("1MB"), (
-                        "LFC size cannot be set less than 1MB"
-                    )
+                    if size_to_bytes(size) > 0:
+                        assert size_to_bytes(size) >= size_to_bytes("1MB"), (
+                            "LFC size cannot be set less than 1MB"
+                        )
             lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
                 f"neon.file_cache_path = '{lfc_path_escaped}'",
