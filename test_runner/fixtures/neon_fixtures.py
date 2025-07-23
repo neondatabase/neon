@@ -4794,9 +4794,10 @@ class Endpoint(PgProtocol, LogUtils):
                     m = re.search(r"=\s*(\S+)", line)
                     assert m is not None, f"malformed config line {line}"
                     size = m.group(1)
-                    assert size_to_bytes(size) >= size_to_bytes("1MB"), (
-                        "LFC size cannot be set less than 1MB"
-                    )
+                    if size_to_bytes(size) > 0:
+                        assert size_to_bytes(size) >= size_to_bytes("1MB"), (
+                            "LFC size cannot be set less than 1MB"
+                        )
             lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
                 f"neon.file_cache_path = '{lfc_path_escaped}'",
@@ -4950,6 +4951,10 @@ class Endpoint(PgProtocol, LogUtils):
         with open(config_path, "w") as file:
             log.debug(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
+
+    def get_compute_spec(self) -> dict[str, Any]:
+        out = json.loads((Path(self.endpoint_path()) / "config.json").read_text())["spec"]
+        return cast("dict[str, Any]", out)
 
     def respec_deep(self, **kwargs: Any) -> None:
         """
