@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use futures::{FutureExt, TryFutureExt};
+use postgres_client::RawCancelToken;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info};
 
 use crate::auth::backend::ConsoleRedirectBackend;
-use crate::cancellation::CancellationHandler;
+use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::error::ReportableError;
@@ -16,7 +17,7 @@ use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::{ErrorSource, finish_client_init};
+use crate::proxy::{ErrorSource, forward_compute_params_to_client, send_client_greeting};
 use crate::util::run_until_cancelled;
 
 pub async fn task_main(
@@ -226,21 +227,19 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
     .await?;
 
-    let pg_settings = auth_info
-        .authenticate(ctx, &mut node, &user_info)
+    auth_info
+        .authenticate(ctx, &mut node)
         .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
         .await?;
+    send_client_greeting(ctx, &config.greetings, &mut stream);
 
     let session = cancellation_handler.get_key();
 
-    finish_client_init(
-        ctx,
-        &pg_settings,
-        *session.key(),
-        &mut stream,
-        &config.greetings,
-    );
+    let (process_id, secret_key) =
+        forward_compute_params_to_client(ctx, *session.key(), &mut stream, &mut node.stream)
+            .await?;
     let stream = stream.flush_and_into_inner().await?;
+    let hostname = node.hostname.to_string();
 
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
@@ -249,7 +248,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .maintain_cancel_key(
                 session_id,
                 cancel,
-                &pg_settings.cancel_closure,
+                &CancelClosure {
+                    socket_addr: node.socket_addr,
+                    cancel_token: RawCancelToken {
+                        ssl_mode: node.ssl_mode,
+                        process_id,
+                        secret_key,
+                    },
+                    hostname,
+                    user_info,
+                },
                 &config.connect_to_compute,
             )
             .await;
@@ -257,7 +265,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     Ok(Some(ProxyPassthrough {
         client: stream,
-        compute: node.stream,
+        compute: node.stream.into_framed().into_inner(),
 
         aux: node.aux,
         private_link_id: None,
