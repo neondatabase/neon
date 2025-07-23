@@ -44,17 +44,13 @@ pub extern "C" fn communicator_worker_process_launch(
 ) -> Option<&'static CommunicatorWorkerProcessStruct<'static>> {
     tracing::warn!("starting threads in rust code");
     // Convert the arguments into more convenient Rust types
-    let tenant_id = if tenant_id.is_null() {
-        None
-    } else {
+    let tenant_id = {
         let cstr = unsafe { CStr::from_ptr(tenant_id) };
-        Some(cstr.to_str().expect("assume UTF-8"))
+        cstr.to_str().expect("assume UTF-8")
     };
-    let timeline_id = if timeline_id.is_null() {
-        None
-    } else {
+    let timeline_id = {
         let cstr = unsafe { CStr::from_ptr(timeline_id) };
-        Some(cstr.to_str().expect("assume UTF-8"))
+        cstr.to_str().expect("assume UTF-8")
     };
     let auth_token = if auth_token.is_null() {
         None
@@ -102,6 +98,25 @@ pub extern "C" fn communicator_worker_process_launch(
 
             unsafe { *error_p = p };
             None
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn communicator_worker_process_launch_legacy(error_p: *mut *const c_char) -> bool {
+    // The `init` function does all the work.
+    let result = main_loop::init_legacy();
+
+    // On failure, return the error message to the C caller in *error_p.
+    match result {
+        Ok(()) => true,
+        Err(errmsg) => {
+            let errmsg = CString::new(errmsg).expect("no nuls within error message");
+            let errmsg = Box::leak(errmsg.into_boxed_c_str());
+            let p: *const c_char = errmsg.as_ptr();
+
+            unsafe { *error_p = p };
+            false
         }
     }
 }

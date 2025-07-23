@@ -22,71 +22,87 @@ use measured::MetricGroup;
 use measured::text::BufferedTextEncoder;
 
 use std::io::ErrorKind;
+use std::sync::Arc;
 
 use tokio::net::UnixListener;
 
 use crate::NEON_COMMUNICATOR_SOCKET_NAME;
 use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 
-impl<'a> CommunicatorWorkerProcessStruct<'a> {
-    /// Launch the listener
-    pub(crate) async fn launch_control_socket_listener(
-        &'static self,
-    ) -> Result<(), std::io::Error> {
-        use axum::routing::get;
-        let app = Router::new()
-            .route("/metrics", get(get_metrics))
-            .route("/autoscaling_metrics", get(get_autoscaling_metrics))
-            .route("/debug/panic", get(handle_debug_panic))
-            .route("/debug/dump_cache_map", get(dump_cache_map))
-            .with_state(self);
+enum ControlSocketState<'a> {
+    Full(&'a CommunicatorWorkerProcessStruct<'a>),
+    Legacy(LegacyControlSocketState),
+}
 
-        // If the server is restarted, there might be an old socket still
-        // lying around. Remove it first.
-        match std::fs::remove_file(NEON_COMMUNICATOR_SOCKET_NAME) {
-            Ok(()) => {
-                tracing::warn!("removed stale control socket");
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => {
-                tracing::error!("could not remove stale control socket: {e:#}");
-                // Try to proceed anyway. It will likely fail below though.
-            }
-        };
+struct LegacyControlSocketState;
 
-        // Create the unix domain socket and start listening on it
-        let listener = UnixListener::bind(NEON_COMMUNICATOR_SOCKET_NAME)?;
+/// Launch the listener
+pub(crate) async fn launch_listener(
+    worker: Option<&'static CommunicatorWorkerProcessStruct<'static>>,
+) -> Result<(), std::io::Error> {
+    use axum::routing::get;
 
-        tokio::spawn(async {
-            tracing::info!("control socket listener spawned");
-            axum::serve(listener, app)
-                .await
-                .expect("axum::serve never returns")
-        });
+    let state = match worker {
+        Some(worker) => ControlSocketState::Full(worker),
+        None => ControlSocketState::Legacy(LegacyControlSocketState),
+    };
 
-        Ok(())
-    }
+    let app = Router::new()
+        .route("/metrics", get(get_metrics))
+        .route("/autoscaling_metrics", get(get_autoscaling_metrics))
+        .route("/debug/panic", get(handle_debug_panic))
+        .route("/debug/dump_cache_map", get(dump_cache_map))
+        .with_state(Arc::new(state));
+
+    // If the server is restarted, there might be an old socket still
+    // lying around. Remove it first.
+    match std::fs::remove_file(NEON_COMMUNICATOR_SOCKET_NAME) {
+        Ok(()) => {
+            tracing::warn!("removed stale control socket");
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::error!("could not remove stale control socket: {e:#}");
+            // Try to proceed anyway. It will likely fail below though.
+        }
+    };
+
+    // Create the unix domain socket and start listening on it
+    let listener = UnixListener::bind(NEON_COMMUNICATOR_SOCKET_NAME)?;
+
+    tokio::spawn(async {
+        tracing::info!("control socket listener spawned");
+        axum::serve(listener, app)
+            .await
+            .expect("axum::serve never returns")
+    });
+
+    Ok(())
 }
 
 /// Expose all Prometheus metrics.
-async fn get_metrics(State(state): State<&CommunicatorWorkerProcessStruct<'_>>) -> Response {
-    tracing::trace!("/metrics requested");
-    metrics_to_response(&state).await
+async fn get_metrics(State(state): State<Arc<ControlSocketState<'_>>>) -> Response {
+    match state.as_ref() {
+        ControlSocketState::Full(worker) => metrics_to_response(&worker).await,
+        ControlSocketState::Legacy(_) => {
+            todo!()
+        }
+    }
 }
 
 /// Expose Prometheus metrics, for use by the autoscaling agent.
 ///
 /// This is a subset of all the metrics.
-async fn get_autoscaling_metrics(
-    State(state): State<&CommunicatorWorkerProcessStruct<'_>>,
-) -> Response {
-    tracing::trace!("/metrics requested");
-    metrics_to_response(&state.lfc_metrics).await
+async fn get_autoscaling_metrics(State(state): State<Arc<ControlSocketState<'_>>>) -> Response {
+    match state.as_ref() {
+        ControlSocketState::Full(worker) => metrics_to_response(&worker.lfc_metrics).await,
+        ControlSocketState::Legacy(_) => {
+            todo!()
+        }
+    }
 }
 
-async fn handle_debug_panic(
-    State(_state): State<&CommunicatorWorkerProcessStruct<'_>>,
-) -> Response {
+async fn handle_debug_panic(State(_state): State<Arc<ControlSocketState<'_>>>) -> Response {
     panic!("test HTTP handler task panic");
 }
 
@@ -104,15 +120,20 @@ async fn metrics_to_response(metrics: &(dyn MetricGroup<BufferedTextEncoder> + S
         .unwrap()
 }
 
-async fn dump_cache_map(
-    State(state): State<&CommunicatorWorkerProcessStruct<'static>>,
-) -> Response {
-    let mut buf: Vec<u8> = Vec::new();
-    state.cache.dump_map(&mut buf);
+async fn dump_cache_map(State(state): State<Arc<ControlSocketState<'_>>>) -> Response {
+    match state.as_ref() {
+        ControlSocketState::Full(worker) => {
+            let mut buf: Vec<u8> = Vec::new();
+            worker.cache.dump_map(&mut buf);
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "application/text")
-        .body(Body::from(buf))
-        .unwrap()
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "application/text")
+                .body(Body::from(buf))
+                .unwrap()
+        }
+        ControlSocketState::Legacy(_) => {
+            todo!()
+        }
+    }
 }

@@ -201,6 +201,10 @@ communicator_new_shmem_size(void)
 void
 CommunicatorNewShmemRequest(void)
 {
+	if (!neon_use_communicator_worker)
+		return;
+	if (neon_tenant[0] == '\0' || neon_timeline[0] == '\0')
+		return;
 	RequestAddinShmemSpace(communicator_new_shmem_size());
 }
 
@@ -216,7 +220,14 @@ CommunicatorNewShmemInit(void)
 	uint64		initial_file_cache_size;
 	uint64		max_file_cache_size;
 
-	/* FIXME: much of this could be skipped if !neon_use_communicator_worker */
+	if (!neon_use_communicator_worker)
+		return;
+
+	if (neon_tenant[0] == '\0' || neon_timeline[0] == '\0')
+	{
+		elog(LOG, "disabling communicator worker because neon_tenant is empty");
+		return;
+	}
 
 	rc = pipe(pipefd);
 	if (rc != 0)
@@ -276,7 +287,6 @@ void
 notify_proc_unsafe(int procno)
 {
 	SetLatch(&communicator_shmem_ptr->backends[procno].io_completion_latch);
-
 }
 
 /**** Backend functions. These run in each backend ****/

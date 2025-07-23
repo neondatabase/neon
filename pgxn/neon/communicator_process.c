@@ -82,6 +82,7 @@ communicator_new_bgworker_main(Datum main_arg)
 	struct LoggingReceiver *logging;
 	const char *errmsg = NULL;
 	const struct CommunicatorWorkerProcessStruct *proc_handle;
+	bool		success;
 
 	/*
 	 * Pretend that this process is a WAL sender. That affects the shutdown
@@ -103,20 +104,6 @@ communicator_new_bgworker_main(Datum main_arg)
 
 	BackgroundWorkerUnblockSignals();
 
-	/* lfc_size_limit is in MBs */
-	file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
-	if (file_cache_size < 100)
-		file_cache_size = 100;
-
-	if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
-	{
-		/* shouldn't happen, as the GUC was verified already */
-		elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
-	}
-	connstrings = palloc(shard_map.num_shards * sizeof(char *));
-	for (int i = 0; i < shard_map.num_shards; i++)
-		connstrings[i] = shard_map.connstring[i];
-
 	/*
 	 * By default, INFO messages are not printed to the log. We want
 	 * `tracing::info!` messages emitted from the communicator to be printed,
@@ -131,21 +118,41 @@ communicator_new_bgworker_main(Datum main_arg)
 
 	logging = communicator_worker_configure_logging();
 
-	Assert(cis != NULL);
-	proc_handle = communicator_worker_process_launch(
-									   cis,
-									   neon_tenant[0] == '\0' ? NULL : neon_tenant,
-									   neon_timeline[0] == '\0' ? NULL : neon_timeline,
-									   neon_auth_token,
-									   connstrings,
-									   shard_map.num_shards,
-									   neon_stripe_size,
-									   lfc_path,
-									   file_cache_size,
-									   &errmsg);
-	pfree(connstrings);
-	cis = NULL;
-	if (proc_handle == NULL)
+	if (cis != NULL)
+	{
+		/* lfc_size_limit is in MBs */
+		file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
+		if (file_cache_size < 100)
+			file_cache_size = 100;
+
+		if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
+		{
+			/* shouldn't happen, as the GUC was verified already */
+			elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
+		}
+		connstrings = palloc(shard_map.num_shards * sizeof(char *));
+		for (int i = 0; i < shard_map.num_shards; i++)
+			connstrings[i] = shard_map.connstring[i];
+		proc_handle = communicator_worker_process_launch(
+			cis,
+			neon_tenant,
+			neon_timeline,
+			neon_auth_token,
+			connstrings,
+			shard_map.num_shards,
+			neon_stripe_size,
+			lfc_path,
+			file_cache_size,
+			&errmsg);
+		pfree(connstrings);
+		cis = NULL;
+		success = proc_handle != NULL;
+	}
+	else
+	{
+		success = communicator_worker_process_launch_legacy(&errmsg);
+	}
+	if (!success)
 	{
 		/*
 		 * Something went wrong. Before exiting, forward any log messages that
@@ -206,26 +213,29 @@ communicator_new_bgworker_main(Datum main_arg)
 			ConfigReloadPending = false;
 			ProcessConfigFile(PGC_SIGHUP);
 
-			/* lfc_size_limit is in MBs */
-			file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
-			if (file_cache_size < 100)
-				file_cache_size = 100;
-
-			/* Reload pageserver URLs */
-			if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
+			if (proc_handle)
 			{
-				/* shouldn't happen, as the GUC was verified already */
-				elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
-			}
-			connstrings = palloc(shard_map.num_shards * sizeof(char *));
-			for (int i = 0; i < shard_map.num_shards; i++)
-				connstrings[i] = shard_map.connstring[i];
+				/* lfc_size_limit is in MBs */
+				file_cache_size = lfc_size_limit * (1024 * 1024 / BLCKSZ);
+				if (file_cache_size < 100)
+					file_cache_size = 100;
 
-			communicator_worker_config_reload(proc_handle,
-											  file_cache_size,
-											  connstrings,
-											  shard_map.num_shards);
-			pfree(connstrings);
+				/* Reload pageserver URLs */
+				if (!parse_shard_map(pageserver_grpc_urls, &shard_map))
+				{
+					/* shouldn't happen, as the GUC was verified already */
+					elog(FATAL, "could not parse neon.pageserver_grpcs_urls");
+				}
+				connstrings = palloc(shard_map.num_shards * sizeof(char *));
+				for (int i = 0; i < shard_map.num_shards; i++)
+					connstrings[i] = shard_map.connstring[i];
+
+				communicator_worker_config_reload(proc_handle,
+												  file_cache_size,
+												  connstrings,
+												  shard_map.num_shards);
+				pfree(connstrings);
+			}
 		}
 
 		duration = TimestampDifferenceMilliseconds(before, GetCurrentTimestamp());

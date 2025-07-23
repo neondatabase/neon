@@ -11,6 +11,7 @@ use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
 use crate::neon_request::{INVALID_BLOCK_NUMBER, NeonIORequest, NeonIOResult};
+use crate::worker_process::control_socket;
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
 use crate::worker_process::lfc_metrics::LfcMetricsCollector;
 use pageserver_client_grpc::{PageserverClient, ShardSpec, ShardStripeSize};
@@ -38,7 +39,7 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     runtime: tokio::runtime::Runtime,
 
     /// Client to communicate with the pageserver
-    client: Option<PageserverClient>,
+    client: PageserverClient,
 
     /// Request slots that backends use to send IO requests to the communicator.
     neon_request_slots: &'a [NeonIORequestSlot],
@@ -90,10 +91,29 @@ impl RequestTypeLabelGroup {
 
 /// Launch the communicator process's Rust subsystems
 #[allow(clippy::too_many_arguments)]
+pub(super) fn init_legacy() -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("communicator thread")
+        .build()
+        .unwrap();
+
+    // Start the listener on the control socket
+    runtime
+        .block_on(control_socket::launch_listener(None))
+        .map_err(|e| e.to_string())?;
+
+    Box::leak(Box::new(runtime));
+
+    Ok(())
+}
+
+/// Launch the communicator process's Rust subsystems
+#[allow(clippy::too_many_arguments)]
 pub(super) fn init(
     cis: CommunicatorInitStruct,
-    tenant_id: Option<&str>,
-    timeline_id: Option<&str>,
+    tenant_id: &str,
+    timeline_id: &str,
     auth_token: Option<&str>,
     shard_map: HashMap<utils::shard::ShardIndex, String>,
     stripe_size: Option<ShardStripeSize>,
@@ -101,13 +121,9 @@ pub(super) fn init(
     file_cache_path: Option<PathBuf>,
 ) -> Result<&'static CommunicatorWorkerProcessStruct<'static>, String> {
     // The caller validated these already
-    let tenant_id = tenant_id
-        .map(TenantId::from_str)
-        .transpose()
+    let tenant_id = TenantId::from_str(tenant_id)
         .map_err(|e| format!("invalid tenant ID: {e}"))?;
-    let timeline_id = timeline_id
-        .map(TimelineId::from_str)
-        .transpose()
+    let timeline_id = TimelineId::from_str(timeline_id)
         .map_err(|e| format!("invalid timeline ID: {e}"))?;
     let shard_spec =
         ShardSpec::new(shard_map, stripe_size).map_err(|e| format!("invalid shard spec: {e}:"))?;
@@ -137,20 +153,16 @@ pub(super) fn init(
 
     debug!("Initialised integrated cache: {cache:?}");
 
-    let client = if let (Some(tenant_id), Some(timeline_id)) = (tenant_id, timeline_id) {
+    let client = {
         let _guard = runtime.enter();
-        Some(
-            PageserverClient::new(
-                tenant_id,
-                timeline_id,
-                shard_spec,
-                auth_token.map(|s| s.to_string()),
-                None,
-            )
-            .expect("could not create client"),
+        PageserverClient::new(
+            tenant_id,
+            timeline_id,
+            shard_spec,
+            auth_token.map(|s| s.to_string()),
+            None,
         )
-    } else {
-        None
+        .expect("could not create client")
     };
 
     let worker_struct = CommunicatorWorkerProcessStruct {
@@ -188,7 +200,7 @@ pub(super) fn init(
     // Start the listener on the control socket
     worker_struct
         .runtime
-        .block_on(worker_struct.launch_control_socket_listener())
+        .block_on(control_socket::launch_listener(Some(worker_struct)))
         .map_err(|e| e.to_string())?;
 
     Ok(worker_struct)
@@ -200,13 +212,12 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         &self,
         new_shard_map: HashMap<utils::shard::ShardIndex, String>,
     ) {
-        let client = self.client.as_ref().unwrap();
         let shard_spec =
             ShardSpec::new(new_shard_map, self.stripe_size).expect("invalid shard spec");
 
         {
             let _in_runtime = self.runtime.enter();
-            if let Err(err) = client.update_shards(shard_spec) {
+            if let Err(err) = self.client.update_shards(shard_spec) {
                 tracing::error!("could not update shard map: {err:?}");
             }
         }
@@ -331,11 +342,6 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
     /// Handle one IO request
     async fn handle_request(&'static self, request: &'_ NeonIORequest) -> NeonIOResult {
-        let client = self
-            .client
-            .as_ref()
-            .expect("cannot handle requests without client");
-
         self.request_counters
             .inc(RequestTypeLabelGroup::from_req(request));
         match request {
@@ -363,7 +369,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 };
 
                 let read_lsn = self.request_lsns(not_modified_since);
-                match client
+                match self.client
                     .get_rel_size(page_api::GetRelSizeRequest {
                         read_lsn,
                         rel,
@@ -402,7 +408,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 let lsn = Lsn(req.request_lsn);
                 let file_path = req.destination_file_path();
 
-                match client
+                match self
+                    .client
                     .get_slru_segment(page_api::GetSlruSegmentRequest {
                         read_lsn: self.request_lsns(lsn),
                         kind: req.slru_kind,
@@ -448,7 +455,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     CacheResult::NotFound(lsn) => lsn,
                 };
 
-                match client
+                match self
+                    .client
                     .get_db_size(page_api::GetDbSizeRequest {
                         read_lsn: self.request_lsns(not_modified_since),
                         db_oid: req.db_oid,
@@ -543,10 +551,6 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     /// Subroutine to handle a GetPageV request, since it's a little more complicated than
     /// others.
     async fn handle_get_pagev_request(&'t self, req: &CGetPageVRequest) -> Result<(), i32> {
-        let client = self
-            .client
-            .as_ref()
-            .expect("cannot handle requests without client");
         let rel = req.reltag();
 
         // Check the cache first
@@ -605,7 +609,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             "sending getpage request for blocks {:?} in rel {:?} lsns {}",
             block_numbers, rel, read_lsn
         );
-        match client
+        match self
+            .client
             .get_page(page_api::GetPageRequest {
                 request_id: req.request_id.into(),
                 request_class: page_api::GetPageClass::Normal,
@@ -665,10 +670,6 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     ///
     /// This is very similar to a GetPageV request, but the results are only stored in the cache.
     async fn handle_prefetchv_request(&'static self, req: &CPrefetchVRequest) -> Result<(), i32> {
-        let client = self
-            .client
-            .as_ref()
-            .expect("cannot handle requests without client");
         let rel = req.reltag();
 
         // Check the cache first
@@ -709,7 +710,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
         // TODO: spawn separate tasks for these. Use the integrated cache to keep track of the
         // in-flight requests
 
-        match client
+        match self
+            .client
             .get_page(page_api::GetPageRequest {
                 request_id: req.request_id.into(),
                 request_class: page_api::GetPageClass::Prefetch,
