@@ -156,7 +156,6 @@ def insert_metrics(conn, metrics_data):
             )
 
     except Exception as e:
-        conn.rollback()
         print(f"Error inserting metrics into database: {e}")
         sys.exit(1)
 
@@ -194,7 +193,6 @@ def create_benchbase_results_details_table(conn):
         conn.commit()
         print("Successfully created/verified benchbase_results_details table")
     except Exception as e:
-        conn.rollback()
         print(f"Error creating benchbase_results_details table: {e}")
         sys.exit(1)
 
@@ -291,14 +289,12 @@ def insert_csv_results(conn, csv_data):
         )
 
         # Log some sample data for verification
-        if csv_data:
-            sample = csv_data[0]
-            print(
-                f"Sample detail: {sample['requests_per_second']} req/s at {sample['recorded_at_timestamp']}"
-            )
+        sample = csv_data[0]
+        print(
+            f"Sample detail: {sample['requests_per_second']} req/s at {sample['recorded_at_timestamp']}"
+        )
 
     except Exception as e:
-        conn.rollback()
         print(f"Error inserting CSV results into database: {e}")
         sys.exit(1)
 
@@ -395,7 +391,6 @@ def insert_load_metrics(conn, load_metrics, suit, revision, platform, labels_jso
         print(f"Successfully inserted {len(load_metrics_data)} load metrics into perf_test_results")
 
     except Exception as e:
-        conn.rollback()
         print(f"Error inserting load metrics into database: {e}")
         sys.exit(1)
 
@@ -501,6 +496,15 @@ def main():
             start_timestamp_ms = (
                 current_timestamp_ms or datetime.now(timezone.utc).timestamp() * 1000
             )
+
+        # Print Grafana dashboard link for cross-service endpoint debugging
+        if start_timestamp_ms and current_timestamp_ms:
+            grafana_url = (
+                f"https://neonprod.grafana.net/d/cdya0okb81zwga/cross-service-endpoint-debugging"
+                f"?orgId=1&from={int(start_timestamp_ms)}&to={int(current_timestamp_ms)}"
+                f"&timezone=utc&var-env=prod&var-input_project_id={args.project_id}"
+            )
+            print(f'Cross service endpoint dashboard for "{args.run_type}" phase: {grafana_url}')
 
     # Prepare metrics data for database insertion (only if we have summary metrics)
     metrics_data = []
