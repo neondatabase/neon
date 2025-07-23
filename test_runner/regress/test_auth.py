@@ -32,7 +32,6 @@ def assert_client_not_authorized(env: NeonEnv, http_client: PageserverHttpClient
         assert_client_authorized(env, http_client)
 
 
-
 @pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
 def test_pageserver_auth(neon_env_builder: NeonEnvBuilder, use_hadron_auth_tokens: bool):
     neon_env_builder.auth_enabled = True
@@ -75,6 +74,7 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder, use_hadron_auth_token
     ):
         env.pageserver.tenant_create(TenantId.generate(), auth_token=tenant_token)
 
+
 @pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
 def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder, use_hadron_auth_tokens: bool):
     neon_env_builder.auth_enabled = True
@@ -94,6 +94,7 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder, use_hadron
             cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
             cur.execute("SELECT sum(key) FROM t")
             assert cur.fetchone() == (5000050000,)
+
 
 @pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
 def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder, use_hadron_auth_tokens: bool):
@@ -150,6 +151,7 @@ def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder, use_hadron_a
     assert_client_not_authorized(env, pageserver_http_client_old)
     assert_client_authorized(env, pageserver_http_client_new)
 
+
 @pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
 def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder, use_hadron_auth_tokens: bool):
     neon_env_builder.auth_enabled = True
@@ -191,7 +193,9 @@ def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder, use_hadron_auth
 
 @pytest.mark.parametrize("auth_enabled", [False, True])
 @pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
-def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool, use_hadron_auth_tokens: bool):
+def test_auth_failures(
+    neon_env_builder: NeonEnvBuilder, auth_enabled: bool, use_hadron_auth_tokens: bool
+):
     neon_env_builder.auth_enabled = auth_enabled
     neon_env_builder.use_hadron_auth_tokens = use_hadron_auth_tokens
     neon_env_builder.auth_enabled = auth_enabled

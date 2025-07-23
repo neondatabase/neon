@@ -28,15 +28,16 @@ import asyncpg
 import backoff
 import boto3
 import httpx
+import jwt
 import psycopg2
 import psycopg2.sql
 import pytest
 import requests
 import toml
-from jwcrypto import jwk
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
+from jwcrypto import jwk
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -411,7 +412,7 @@ class HadronTokenDecoder:
     public_key: str
     algorithm: str
 
-    def decode_token(self, token: str) -> Dict[str, Any]:
+    def decode_token(self, token: str) -> dict[str, Any]:
         return jwt.decode(token, self.public_key, algorithms=[self.algorithm])
 
 
