@@ -116,10 +116,9 @@ pub(super) fn init(
     file_cache_path: Option<PathBuf>,
 ) -> Result<&'static CommunicatorWorkerProcessStruct<'static>, String> {
     // The caller validated these already
-    let tenant_id = TenantId::from_str(tenant_id)
-        .map_err(|e| format!("invalid tenant ID: {e}"))?;
-    let timeline_id = TimelineId::from_str(timeline_id)
-        .map_err(|e| format!("invalid timeline ID: {e}"))?;
+    let tenant_id = TenantId::from_str(tenant_id).map_err(|e| format!("invalid tenant ID: {e}"))?;
+    let timeline_id =
+        TimelineId::from_str(timeline_id).map_err(|e| format!("invalid timeline ID: {e}"))?;
     let shard_spec =
         ShardSpec::new(shard_map, stripe_size).map_err(|e| format!("invalid shard spec: {e}:"))?;
 
@@ -363,7 +362,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 };
 
                 let read_lsn = self.request_lsns(not_modified_since);
-                match self.client
+                match self
+                    .client
                     .get_rel_size(page_api::GetRelSizeRequest {
                         read_lsn,
                         rel,
