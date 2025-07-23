@@ -164,9 +164,12 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
     check_prewarmed(method, client, desired)
 
 
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_prewarm_empty(neon_simple_env: NeonEnv):
     """
     Test there are no errors when trying to offload or prewarm endpoint without cache using compute_ctl.
+    Endpoint without cache is simulated by turning off LFC manually, but in cloud/ setup this is
+    also reproduced on fresh endpoints
     """
     env = neon_simple_env
     ep = env.endpoints.create_start("main", config_lines=["neon.file_cache_size_limit=0"])
