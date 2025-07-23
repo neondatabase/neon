@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "communicator"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "atomic_enum",
  "axum",
