@@ -10,7 +10,7 @@ use crate::global_allocator::MyAllocatorCollector;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
-use crate::neon_request::{NeonIORequest, NeonIOResult, INVALID_BLOCK_NUMBER};
+use crate::neon_request::{INVALID_BLOCK_NUMBER, NeonIORequest, NeonIOResult};
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
 use crate::worker_process::lfc_metrics::LfcMetricsCollector;
 use pageserver_client_grpc::{PageserverClient, ShardSpec, ShardStripeSize};
@@ -89,8 +89,9 @@ impl RequestTypeLabelGroup {
 }
 
 /// Launch the communicator process's Rust subsystems
+#[allow(clippy::too_many_arguments)]
 pub(super) fn init(
-    cis: Box<CommunicatorInitStruct>,
+    cis: CommunicatorInitStruct,
     tenant_id: Option<&str>,
     timeline_id: Option<&str>,
     auth_token: Option<&str>,
@@ -201,7 +202,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     ) {
         let client = self.client.as_ref().unwrap();
         let shard_spec =
-            ShardSpec::new(new_shard_map, self.stripe_size.clone()).expect("invalid shard spec");
+            ShardSpec::new(new_shard_map, self.stripe_size).expect("invalid shard spec");
 
         {
             let _in_runtime = self.runtime.enter();
@@ -335,7 +336,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             .as_ref()
             .expect("cannot handle requests without client");
 
-        self.request_counters.inc(RequestTypeLabelGroup::from_req(request));
+        self.request_counters
+            .inc(RequestTypeLabelGroup::from_req(request));
         match request {
             NeonIORequest::Empty => {
                 error!("unexpected Empty IO request");
@@ -392,12 +394,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     }
                 }
             }
-            NeonIORequest::GetPageV(req) => {
-                match self.handle_get_pagev_request(req).await {
-                    Ok(()) => NeonIOResult::GetPageV,
-                    Err(errno) => NeonIOResult::Error(errno),
-                }
-            }
+            NeonIORequest::GetPageV(req) => match self.handle_get_pagev_request(req).await {
+                Ok(()) => NeonIOResult::GetPageV,
+                Err(errno) => NeonIOResult::Error(errno),
+            },
             NeonIORequest::ReadSlruSegment(req) => {
                 let lsn = Lsn(req.request_lsn);
                 let file_path = req.destination_file_path();
@@ -427,7 +427,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 }
             }
             NeonIORequest::PrefetchV(req) => {
-                self.request_nblocks_counters.inc_by(RequestTypeLabelGroup::from_req(request), req.nblocks as i64);
+                self.request_nblocks_counters
+                    .inc_by(RequestTypeLabelGroup::from_req(request), req.nblocks as i64);
                 let req = *req;
                 tokio::spawn(async move { self.handle_prefetchv_request(&req).await });
                 NeonIOResult::PrefetchVLaunched
@@ -500,7 +501,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelZeroExtend(req) => {
-                self.request_nblocks_counters.inc_by(RequestTypeLabelGroup::from_req(request), req.nblocks as i64);
+                self.request_nblocks_counters
+                    .inc_by(RequestTypeLabelGroup::from_req(request), req.nblocks as i64);
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
                 // TODO: We could put the empty pages to the cache. Maybe have
@@ -756,8 +758,10 @@ where
         use measured::metric::name::MetricName;
 
         self.lfc_metrics.collect_group_into(enc)?;
-        self.request_counters.collect_family_into(MetricName::from_str("request_counters"), enc)?;
-        self.request_nblocks_counters.collect_family_into(MetricName::from_str("request_nblocks_counters"), enc)?;
+        self.request_counters
+            .collect_family_into(MetricName::from_str("request_counters"), enc)?;
+        self.request_nblocks_counters
+            .collect_family_into(MetricName::from_str("request_nblocks_counters"), enc)?;
 
         // FIXME: allocator metrics
 

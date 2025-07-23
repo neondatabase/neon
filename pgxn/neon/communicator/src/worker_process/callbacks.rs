@@ -19,7 +19,7 @@ unsafe extern "C" {
 // package, but the code coverage build still builds these and tries to link with the
 // external C code.)
 #[cfg(test)]
-unsafe fn notify_proc_unsafe(procno: std::ffi::c_int) {
+unsafe fn notify_proc_unsafe(_procno: std::ffi::c_int) {
     panic!("not usable in unit tests");
 }
 #[cfg(test)]

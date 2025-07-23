@@ -27,10 +27,7 @@ pub extern "C" fn rcommunicator_backend_init(
     my_proc_number: i32,
 ) -> &'static mut CommunicatorBackendStruct<'static> {
     if my_proc_number < 0 {
-        panic!(
-            "cannot attach to communicator shared memory with procnumber {}",
-            my_proc_number,
-        );
+        panic!("cannot attach to communicator shared memory with procnumber {my_proc_number}");
     }
 
     let integrated_cache = Box::leak(Box::new(cis.integrated_cache_init_struct.backend_init()));
@@ -155,10 +152,7 @@ pub extern "C" fn bcomm_get_request_slot_status(
             // leave a slot in this state, so if it sees that,
             // something's gone wrong and it's not clear what to do
             // with it.
-            panic!(
-                "unexpected Filling state in request slot {}",
-                request_slot_idx
-            );
+            panic!("unexpected Filling state in request slot {request_slot_idx}");
         }
         NeonIORequestSlotState::Submitted => true,
         NeonIORequestSlotState::Processing => true,
@@ -214,15 +208,18 @@ pub struct FileCacheIterator {
 }
 
 /// Iterate over LFC contents
+#[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-pub extern "C" fn bcomm_cache_iterate_begin(
+pub unsafe extern "C" fn bcomm_cache_iterate_begin(
     _bs: &mut CommunicatorBackendStruct,
     iter: *mut FileCacheIterator,
 ) {
     unsafe { (*iter).next_bucket = 0 };
 }
+
+#[allow(clippy::missing_safety_doc)]
 #[unsafe(no_mangle)]
-pub extern "C" fn bcomm_cache_iterate_next(
+pub unsafe extern "C" fn bcomm_cache_iterate_next(
     bs: &mut CommunicatorBackendStruct,
     iter: *mut FileCacheIterator,
 ) -> bool {

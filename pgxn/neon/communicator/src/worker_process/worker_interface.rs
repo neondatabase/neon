@@ -82,7 +82,7 @@ pub extern "C" fn communicator_worker_process_launch(
 
     // The `init` function does all the work.
     let result = main_loop::init(
-        cis,
+        *cis,
         tenant_id,
         timeline_id,
         auth_token,

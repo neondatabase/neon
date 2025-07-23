@@ -188,14 +188,14 @@ fn real_benchs(c: &mut Criterion) {
                     let key: FileCacheKey = rng.random();
                     let val = FileCacheEntry::dummy();
                     let entry = writer.entry(key);
-                    std::hint::black_box(match entry {
+                    match entry {
                         Entry::Occupied(mut e) => {
-                            e.insert(val);
+                            std::hint::black_box(e.insert(val));
                         }
                         Entry::Vacant(e) => {
-                            _ = e.insert(val).unwrap();
+                            let _ = std::hint::black_box(e.insert(val).unwrap());
                         }
-                    })
+                    }
                 }
             },
             BatchSize::SmallInput,
@@ -220,12 +220,12 @@ fn real_benchs(c: &mut Criterion) {
         let ideal_filled = 100_000_000;
         let mut writer = hashbrown::raw::RawTable::new();
         let mut rng = rand::rng();
-        let hasher = rustc_hash::FxBuildHasher::default();
+        let hasher = rustc_hash::FxBuildHasher;
         unsafe {
             writer
                 .resize(
                     size,
-                    |(k, _)| hasher.hash_one(&k),
+                    |(k, _)| hasher.hash_one(k),
                     hashbrown::raw::Fallibility::Infallible,
                 )
                 .unwrap();
@@ -234,7 +234,7 @@ fn real_benchs(c: &mut Criterion) {
             let key: FileCacheKey = rng.random();
             let val = FileCacheEntry::dummy();
             writer.insert(hasher.hash_one(&key), (key, val), |(k, _)| {
-                hasher.hash_one(&k)
+                hasher.hash_one(k)
             });
         }
         b.iter(|| unsafe {
@@ -282,12 +282,12 @@ fn real_benchs(c: &mut Criterion) {
                 let size = 125_000_000;
                 let mut writer = hashbrown::raw::RawTable::new();
                 let mut rng = rand::rng();
-                let hasher = rustc_hash::FxBuildHasher::default();
+                let hasher = rustc_hash::FxBuildHasher;
                 unsafe {
                     writer
                         .resize(
                             size,
-                            |(k, _)| hasher.hash_one(&k),
+                            |(k, _)| hasher.hash_one(k),
                             hashbrown::raw::Fallibility::Infallible,
                         )
                         .unwrap();
@@ -296,7 +296,7 @@ fn real_benchs(c: &mut Criterion) {
                     let key: FileCacheKey = rng.random();
                     let val = FileCacheEntry::dummy();
                     writer.insert(hasher.hash_one(&key), (key, val), |(k, _)| {
-                        hasher.hash_one(&k)
+                        hasher.hash_one(k)
                     });
                 }
                 b.iter(|| unsafe {
