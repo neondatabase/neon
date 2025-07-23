@@ -27,7 +27,7 @@ unsafe fn callback_set_my_latch_unsafe() {
     panic!("not usable in unit tests");
 }
 #[cfg(test)]
-unsafe fn callback_get_request_lsn_unsafe() -> Lsn {
+unsafe fn callback_get_request_lsn_unsafe() -> crate::neon_request::CLsn {
     panic!("not usable in unit tests");
 }
 #[cfg(test)]
