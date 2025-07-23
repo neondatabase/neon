@@ -143,8 +143,7 @@ class NeonBranch:
 
     def __str__(self):
         """
-        Prints the branch's id with all the predecessors
-        (r) means the branch is a reset one
+        Prints the branch's information with all the predecessors
         """
         return f"{self.id}{f'({self.name})' if self.name and self.name != self.id else ''}{f'(restored_from: {self.restored_from})' if self.restored_from else ''}, parent: {self.parent}"
 
