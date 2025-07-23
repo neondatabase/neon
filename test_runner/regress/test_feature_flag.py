@@ -50,11 +50,15 @@ def test_feature_flag(neon_env_builder: NeonEnvBuilder):
         )["result"]
     )
 
+    env.endpoints.create_start("main")  # trigger basebackup
     env.pageserver.http_client().force_refresh_feature_flag(env.initial_tenant)
 
     # Check if the properties exist
     result = env.pageserver.http_client().evaluate_feature_flag_multivariate(
         env.initial_tenant, "test-feature-flag"
     )
+
     assert "tenant_remote_size_mb" in result["properties"]
+    assert "tenant_db_count_max" in result["properties"]
+    assert "tenant_rel_count_max" in result["properties"]
     assert "tenant_id" in result["properties"]
