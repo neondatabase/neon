@@ -535,6 +535,7 @@ class NeonProject:
         # So, we delete parent_id
         new_branch_def["branch"].pop("parent_id")
         new_branch = NeonBranch(self, new_branch_def)
+        log.info("Restored snapshot to the branch: %s", new_branch)
         target_branch_def = self.neon_api.get_branch_details(self.id, target_branch.id)
         if "name" in target_branch_def["branch"]:
             target_branch.name = target_branch_def["branch"]["name"]
