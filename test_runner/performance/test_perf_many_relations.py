@@ -80,9 +80,7 @@ def test_perf_simple_many_relations_reldir(
     """
     Test creating many relations in a single database.
     """
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={"rel_size_v2_enabled": "true" if reldir != "v1" else "false"}
-    )
+    env = neon_env_builder.init_start(initial_tenant_conf={"rel_size_v2_enabled": reldir != "v1"})
     ep = env.endpoints.create_start(
         "main",
         config_lines=[
