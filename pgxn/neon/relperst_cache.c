@@ -145,7 +145,8 @@ get_pinned_entry(NRelFileInfo rinfo)
 	}
 	if (!found)
 	{
-		entry->relperst = NEON_RELPERSISTENCE_UNKNOWN; /* information about relation kind is not yet available */
+		/* the caller will fill this in by calling set_cached_relperst() later */
+		entry->relperst = NEON_RELPERSISTENCE_UNKNOWN;
 		relperst_ctl->pinned += 1;
 		entry->access_count = 1;
 		relperst_ctl->size += 1;
