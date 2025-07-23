@@ -79,7 +79,7 @@ RelperstCacheShmemRequest(void)
 }
 
 /*
- * Intialize shared memory
+ * Initialize shared memory
  */
 void
 RelperstCacheShmemInit(void)
