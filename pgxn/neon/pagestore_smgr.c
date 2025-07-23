@@ -878,6 +878,11 @@ neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
 	if (!NRelFileInfoBackendIsTemp(rinfo))
 	{
 		forget_cached_relsize(InfoFromNInfoB(rinfo), forkNum);
+		/*
+		 * This removes information about all forks from relpersistence cache, but it is ok because
+		 * the only relations pinned in this cache are one involved in unlogged build.
+		 * And relation should not be removed during unlogged build.
+		 */
 		forget_cached_relperst(InfoFromNInfoB(rinfo));
 	}
 }

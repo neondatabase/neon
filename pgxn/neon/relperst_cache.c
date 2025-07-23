@@ -53,10 +53,11 @@ typedef struct
 } NeonRelPersistenceHashControl;
 
 /*
- * Size of a cache entry is 32 bytes. So this default will take about 2 MB,
+ * Size of a cache entry is 32 bytes. So this default will take about 0.5 MB,
  * which seems reasonable.
  */
-#define DEFAULT_RELPERST_HASH_SIZE (64 * 1024)
+#define DEFAULT_RELPERST_HASH_SIZE (16 * 1024)
+#define MAX_RELPERST_HASH_SIZE (1024 * 1024)
 
 
 static HTAB *relperst_hash;
@@ -175,7 +176,7 @@ unpin_entry(NeonRelPersistenceEntry *entry)
 }
 
 /*
- * Intialize new entry. This function is used by neon_start_unlogged_build to mark relation involved in unlogged build.
+ * Get existed or intialize new entry. This function is used by neon_start_unlogged_build to mark relation involved in unlogged build.
  * In case of overflow removes least recently used entry.
  * Return pinned entry. It will be released by unpin_cached_relperst at the end of unlogged build.
  */
@@ -194,11 +195,10 @@ pin_cached_relperst(NRelFileInfo rinfo, NeonRelPersistence relperst)
 }
 
 /*
- * Lookup entry and create new one if not exists. This function is called by neon_write to detenmine if changes should be written to the local disk.
+ * Lookup entry or create new one if not exists. This function is called by neon_write to detenmine if changes should be written to the local disk.
  * In case of overflow removes least recently used entry.
- * If entry is found and its relperst is known, then it is stored in provided location and NULL is returned.
- * If entry is not found then new one is created, pinned and returned. Entry should be updated using store_cached_relperst.
- * Shared lock is obtained if relation is involved in inlogged build.
+ * If relation in involved in unlogged build, the caller should obtain shared lock on `finish_unlogged_build_lock` and recheck
+ * state under lock.
  */
 NeonRelPersistence
 get_cached_relperst(NRelFileInfo rinfo)
@@ -287,7 +287,7 @@ relperst_hash_init(void)
 							&relperst_hash_size,
 							DEFAULT_RELPERST_HASH_SIZE,
 							1,
-							INT_MAX,
+							MAX_RELPERST_HASH_SIZE,
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
