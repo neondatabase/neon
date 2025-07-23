@@ -206,6 +206,7 @@ get_cached_relperst(NRelFileInfo rinfo)
 	NeonRelPersistenceEntry *entry;
 	NeonRelPersistence relperst = NEON_RELPERSISTENCE_UNKNOWN;
 
+	/* we don't modify the hash table, but need an exclusive lock to manipulate the LRU list */
 	LWLockAcquire(relperst_hash_lock, LW_EXCLUSIVE);
 
 	entry = hash_search(relperst_hash, &rinfo, HASH_FIND, NULL);
