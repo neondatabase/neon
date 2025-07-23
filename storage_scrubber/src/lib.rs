@@ -266,6 +266,7 @@ impl BucketConfig {
                 "container {}, storage account {:?}, region {}",
                 config.container_name, config.storage_account, config.container_region
             ),
+            RemoteStorageKind::GCS(config) => format!("bucket {}", config.bucket_name),
         }
     }
     pub fn bucket_name(&self) -> Option<&str> {
@@ -381,6 +382,9 @@ async fn init_remote(
             config.prefix_in_container.get_or_insert(default_prefix);
         }
         RemoteStorageKind::LocalFs { .. } => (),
+        RemoteStorageKind::GCS(config) => {
+            config.prefix_in_bucket.get_or_insert(default_prefix);
+        }
     }
 
     // We already pass the prefix to the remote client above
