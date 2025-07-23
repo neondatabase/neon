@@ -3685,8 +3685,7 @@ impl GrpcPageServiceHandler {
 
         // Fast path: the request fits in a single shard.
         if let Some(shard_index) =
-            GetPageSplitter::for_single_shard(&req, shard_id.count, Some(shard_id.stripe_size))
-                .map_err(|err| tonic::Status::internal(err.to_string()))?
+            GetPageSplitter::for_single_shard(&req, shard_id.count, Some(shard_id.stripe_size))?
         {
             // We got the shard ID from the first page, so these must be equal.
             assert_eq!(shard_index.shard_number, shard_id.number);
@@ -3697,8 +3696,7 @@ impl GrpcPageServiceHandler {
         // The request spans multiple shards; split it and dispatch parallel requests. All pages
         // were originally in the parent shard, and during a split all children are local, so we
         // expect to find local shards for all pages.
-        let mut splitter = GetPageSplitter::split(req, shard_id.count, Some(shard_id.stripe_size))
-            .map_err(|err| tonic::Status::internal(err.to_string()))?;
+        let mut splitter = GetPageSplitter::split(req, shard_id.count, Some(shard_id.stripe_size))?;
 
         let mut shard_requests = FuturesUnordered::new();
         for (shard_index, shard_req) in splitter.drain_requests() {
@@ -3717,14 +3715,10 @@ impl GrpcPageServiceHandler {
         }
 
         while let Some((shard_index, shard_response)) = shard_requests.next().await.transpose()? {
-            splitter
-                .add_response(shard_index, shard_response)
-                .map_err(|err| tonic::Status::internal(err.to_string()))?;
+            splitter.add_response(shard_index, shard_response)?;
         }
 
-        splitter
-            .get_response()
-            .map_err(|err| tonic::Status::internal(err.to_string()))
+        Ok(splitter.collect_response()?)
     }
 }
 
