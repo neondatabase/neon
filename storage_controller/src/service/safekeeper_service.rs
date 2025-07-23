@@ -991,6 +991,7 @@ impl Service {
         timeline_id: TimelineId,
         to_safekeepers: &[Safekeeper],
         from_safekeepers: &[Safekeeper],
+        mconf: membership::Configuration,
     ) -> Result<(), ApiError> {
         let http_hosts = from_safekeepers
             .iter()
@@ -1009,14 +1010,11 @@ impl Service {
                 .collect::<Vec<_>>()
         );
 
-        // TODO(diko): need to pass mconf/generation with the request
-        // to properly handle tombstones. Ignore tombstones for now.
-        // Worst case: we leave a timeline on a safekeeper which is not in the current set.
         let req = PullTimelineRequest {
             tenant_id,
             timeline_id,
             http_hosts,
-            ignore_tombstone: Some(true),
+            mconf: Some(mconf),
         };
 
         const SK_PULL_TIMELINE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1336,6 +1334,7 @@ impl Service {
             timeline_id,
             &pull_to_safekeepers,
             &cur_safekeepers,
+            joint_config.clone(),
         )
         .await?;
 
