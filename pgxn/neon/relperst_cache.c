@@ -63,8 +63,10 @@ static HTAB *relperst_hash;
 static int	relperst_hash_size = DEFAULT_RELPERST_HASH_SIZE;
 static NeonRelPersistenceHashControl* relperst_ctl;
 
+/* Protects unlogged build completing while another backend is writing to it */ 
 LWLockId finish_unlogged_build_lock;
-LWLockId relperst_hash_lock;
+/* Protects 'relperst_hash' */
+static LWLockId relperst_hash_lock;
 
 /*
  * Shared memory registration
