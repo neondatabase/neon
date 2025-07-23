@@ -226,7 +226,7 @@ get_cached_relperst(NRelFileInfo rinfo)
 
 
 /*
- * Store relation kind as a result of mdexists check. Unpin entry.
+ * Store relation kind as a result of mdexists check.
  */
 void
 set_cached_relperst(NRelFileInfo rinfo, NeonRelPersistence relperst)
