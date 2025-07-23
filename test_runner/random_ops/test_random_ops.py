@@ -480,6 +480,7 @@ class NeonProject:
         snapshot_name = self.gen_snapshot_name()
         with psycopg2.connect(self.connection_uri) as conn:
             with conn.cursor() as cur:
+                # We will check the value we set now after the snapshot restored to verify consistency
                 cur.execute(
                     f"INSERT INTO sanity_check (name, value) VALUES "
                     f"('snapsot_name', '{snapshot_name}') ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
@@ -496,6 +497,7 @@ class NeonProject:
                     ),
                 )
                 self.wait()
+                # Now we taint the value after the snapshot was taken
                 cur.execute("UPDATE sanity_check SET value = 'tainted' || value")
                 conn.commit()
         return snapshot
@@ -563,6 +565,8 @@ class NeonProject:
                 snapshot_name = None
                 if row := cur.fetchone():
                     snapshot_name = row[0]
+                # We verify here that the value we select from the table matches with the snapshot name
+                # To ensure consistency
                 assert snapshot_name == self.snapshots[snapshot_id].name
         self.wait()
         target_branch.start_benchmark()
@@ -687,7 +691,7 @@ def test_api_random(
         ("delete_branch", 1.2),
         ("restore_random_time", 0.9),
         ("reset_to_parent", 0.3),
-        ("create_snapshot", 0.15),
+        ("create_snapshot", 0.2),
         ("restore_snapshot", 0.1),
         ("delete_snapshot", 0.1),
     )
