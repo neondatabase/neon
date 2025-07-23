@@ -1540,6 +1540,17 @@ class NeonEnv:
 
         raise RuntimeError(f"Pageserver with ID {id} not found")
 
+    def get_safekeeper(self, id: int) -> Safekeeper:
+        """
+        Look up a safekeeper by its ID.
+        """
+
+        for sk in self.safekeepers:
+            if sk.id == id:
+                return sk
+
+        raise RuntimeError(f"Safekeeper with ID {id} not found")
+
     def get_tenant_pageserver(self, tenant_id: TenantId | TenantShardId):
         """
         Get the NeonPageserver where this tenant shard is currently attached, according
