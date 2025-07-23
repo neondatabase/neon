@@ -286,3 +286,91 @@ def test_sk_generation_aware_tombstones(neon_env_builder: NeonEnvBuilder):
     assert re.match(r".*Timeline .* deleted.*", exc.value.response.text)
     # The timeline should remain deleted.
     expect_deleted(second_sk)
+
+
+def test_abort_safekeeper_migration(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that safekeeper migration can be aborted.
+    1. Insert failpoints and ensure the abort successfully reverts the timeline state.
+    2. Check that endpoint is operational after the abort.
+    """
+    neon_env_builder.num_safekeepers = 2
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+        "timeline_safekeeper_count": 1,
+    }
+    env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(PAGESERVER_ALLOWED_ERRORS)
+
+    mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+    assert len(mconf["sk_set"]) == 1
+    cur_sk = mconf["sk_set"][0]
+    cur_gen = 1
+
+    ep = env.endpoints.create("main", tenant_id=env.initial_tenant)
+    ep.start(safekeeper_generation=1, safekeepers=mconf["sk_set"])
+    ep.safe_psql("CREATE EXTENSION neon_test_utils;")
+    ep.safe_psql("CREATE TABLE t(a int)")
+    ep.safe_psql("INSERT INTO t VALUES (1)")
+
+    another_sk = [sk.id for sk in env.safekeepers if sk.id != cur_sk][0]
+
+    failpoints = [
+        "sk-migration-after-step-3",
+        "sk-migration-after-step-4",
+        "sk-migration-after-step-5",
+        "sk-migration-after-step-7",
+    ]
+
+    for fp in failpoints:
+        env.storage_controller.configure_failpoints((fp, "return(1)"))
+
+        with pytest.raises(StorageControllerApiException, match=f"failpoint {fp}"):
+            env.storage_controller.migrate_safekeepers(
+                env.initial_tenant, env.initial_timeline, [another_sk]
+            )
+        cur_gen += 1
+
+        env.storage_controller.configure_failpoints((fp, "off"))
+
+        # We should have a joint mconf after the failure.
+        mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+        assert mconf["generation"] == cur_gen
+        assert mconf["sk_set"] == [cur_sk]
+        assert mconf["new_sk_set"] == [another_sk]
+
+        env.storage_controller.abort_safekeeper_migration(env.initial_tenant, env.initial_timeline)
+        cur_gen += 1
+
+        # Abort should revert the timeline to the previous sk_set and increment the generation.
+        mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+        assert mconf["generation"] == cur_gen
+        assert mconf["sk_set"] == [cur_sk]
+        assert mconf["new_sk_set"] is None
+
+        assert ep.safe_psql("SHOW neon.safekeepers")[0][0].startswith(f"g#{cur_gen}:")
+        ep.safe_psql(f"INSERT INTO t VALUES ({cur_gen})")
+
+    # After step-8 the final mconf is committed and the migration is not abortable anymore.
+    # So the abort should not abort anything.
+    env.storage_controller.configure_failpoints(("sk-migration-after-step-8", "return(1)"))
+
+    with pytest.raises(StorageControllerApiException, match="failpoint sk-migration-after-step-8"):
+        env.storage_controller.migrate_safekeepers(
+            env.initial_tenant, env.initial_timeline, [another_sk]
+        )
+    cur_gen += 2
+
+    env.storage_controller.configure_failpoints((fp, "off"))
+
+    env.storage_controller.abort_safekeeper_migration(env.initial_tenant, env.initial_timeline)
+
+    # The migration is fully committed, no abort should have been performed.
+    mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+    assert mconf["generation"] == cur_gen
+    assert mconf["sk_set"] == [another_sk]
+    assert mconf["new_sk_set"] is None
+
+    ep.safe_psql(f"INSERT INTO t VALUES ({cur_gen})")
+    ep.clear_buffers()
+    assert ep.safe_psql("SELECT * FROM t") == [(i + 1,) for i in range(cur_gen) if i % 2 == 0]
