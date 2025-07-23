@@ -206,12 +206,16 @@ mod tests {
     use axum::{body::Body, extract::Request, response::Response};
     use http_body_util::BodyExt;
     use itertools::iproduct;
+    use jsonwebtoken::DecodingKey;
     use std::env::var;
     use std::sync::Arc;
     use std::time::Duration;
     use test_log::test as testlog;
     use tower::{Service, util::ServiceExt};
-    use utils::id::{TenantId, TimelineId};
+    use utils::{
+        auth::JwtAuth,
+        id::{TenantId, TimelineId},
+    };
 
     // see libs/remote_storage/tests/test_real_s3.rs
     const REAL_S3_ENV: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
@@ -251,7 +255,9 @@ mod tests {
         };
 
         let proxy = Storage {
-            auth: endpoint_storage::JwtAuth::new(TEST_PUB_KEY_ED25519).unwrap(),
+            auth: JwtAuth::new(vec![
+                DecodingKey::from_ed_pem(TEST_PUB_KEY_ED25519).unwrap(),
+            ]),
             storage,
             cancel: cancel.clone(),
             max_upload_file_limit: usize::MAX,
@@ -352,7 +358,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             exp: u64::MAX,
         };
         let key = jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIV_KEY_ED25519).unwrap();
-        let header = jsonwebtoken::Header::new(endpoint_storage::VALIDATION_ALGO);
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
 
@@ -501,7 +507,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             exp: u64::MAX,
         };
         let key = jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIV_KEY_ED25519).unwrap();
-        let header = jsonwebtoken::Header::new(endpoint_storage::VALIDATION_ALGO);
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
 
