@@ -98,8 +98,8 @@ class NeonBranch:
         if "name" in branch["branch"]:
             self.name = branch["branch"]["name"]
         self.restored_from: str | None = None
-        if "restored_from" in branch:
-            self.restored_from = branch["restored_from"]
+        if "restored_from" in branch["branch"]:
+            self.restored_from = branch["branch"]["restored_from"]
         self.project: NeonProject = project
         self.neon_api: NeonAPI = project.neon_api
         self.project_id: str = branch["branch"]["project_id"]
@@ -146,7 +146,7 @@ class NeonBranch:
         Prints the branch's id with all the predecessors
         (r) means the branch is a reset one
         """
-        return f"{self.id}{f'({self.name})' if self.name and self.name != self.id else ''}, {f'restored_from: {self.restored_from}' if self.restored_from else ''} parent: {self.parent}"
+        return f"{self.id}{f'({self.name})' if self.name and self.name != self.id else ''}{f'(restored_from: {self.restored_from})' if self.restored_from else ''}, parent: {self.parent}"
 
     def random_time(self) -> datetime:
         min_time = max(
