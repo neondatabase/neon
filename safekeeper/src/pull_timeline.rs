@@ -13,8 +13,8 @@ use http_utils::error::ApiError;
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::GenericRemoteStorage;
 use reqwest::Certificate;
-use safekeeper_api::Term;
 use safekeeper_api::models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus};
+use safekeeper_api::{Term, membership};
 use safekeeper_client::mgmt_api;
 use safekeeper_client::mgmt_api::Client;
 use serde::Deserialize;
@@ -453,12 +453,40 @@ pub async fn handle_request(
     global_timelines: Arc<GlobalTimelines>,
     wait_for_peer_timeline_status: bool,
 ) -> Result<PullTimelineResponse, ApiError> {
+    if let Some(mconf) = &request.mconf {
+        let sk_id = global_timelines.get_sk_id();
+        if !mconf.contains(sk_id) {
+            return Err(ApiError::BadRequest(anyhow!(
+                "refused to pull timeline with {mconf}, node {sk_id} is not member of it",
+            )));
+        }
+    }
+
     let existing_tli = global_timelines.get(TenantTimelineId::new(
         request.tenant_id,
         request.timeline_id,
     ));
-    if existing_tli.is_ok() {
-        info!("Timeline {} already exists", request.timeline_id);
+    if let Ok(timeline) = existing_tli {
+        let cur_generation = timeline
+            .read_shared_state()
+            .await
+            .sk
+            .state()
+            .mconf
+            .generation;
+
+        info!(
+            "Timeline {} already exists with generation {cur_generation}",
+            request.timeline_id,
+        );
+
+        if let Some(mconf) = request.mconf {
+            timeline
+                .membership_switch(mconf)
+                .await
+                .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
+        }
+
         return Ok(PullTimelineResponse {
             safekeeper_host: None,
         });
@@ -495,6 +523,19 @@ pub async fn handle_request(
         for (i, response) in responses.into_iter().enumerate() {
             match response {
                 Ok(status) => {
+                    if let Some(mconf) = &request.mconf {
+                        if status.mconf.generation > mconf.generation {
+                            // We probably raced with another timeline membership change with higher generation.
+                            // Ignore this request.
+                            return Err(ApiError::Conflict(format!(
+                                "cannot pull timeline with generation {}: timeline {} already exists with generation {} on {}",
+                                mconf.generation,
+                                request.timeline_id,
+                                status.mconf.generation,
+                                http_hosts[i],
+                            )));
+                        }
+                    }
                     statuses.push((status, i));
                 }
                 Err(e) => {
@@ -593,15 +634,13 @@ pub async fn handle_request(
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    let check_tombstone = !request.ignore_tombstone.unwrap_or_default();
-
     match pull_timeline(
         status,
         safekeeper_host,
         sk_auth_token,
         http_client,
         global_timelines,
-        check_tombstone,
+        request.mconf,
     )
     .await
     {
@@ -611,6 +650,10 @@ pub async fn handle_request(
                 Some(TimelineError::AlreadyExists(_)) => Ok(PullTimelineResponse {
                     safekeeper_host: None,
                 }),
+                Some(TimelineError::Deleted(_)) => Err(ApiError::Conflict(format!(
+                    "Timeline {}/{} deleted",
+                    request.tenant_id, request.timeline_id
+                ))),
                 Some(TimelineError::CreationInProgress(_)) => {
                     // We don't return success here because creation might still fail.
                     Err(ApiError::Conflict("Creation in progress".to_owned()))
@@ -627,7 +670,7 @@ async fn pull_timeline(
     sk_auth_token: Option<SecretString>,
     http_client: reqwest::Client,
     global_timelines: Arc<GlobalTimelines>,
-    check_tombstone: bool,
+    mconf: Option<membership::Configuration>,
 ) -> Result<PullTimelineResponse> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
@@ -689,8 +732,11 @@ async fn pull_timeline(
     // fsync temp timeline directory to remember its contents.
     fsync_async_opt(&tli_dir_path, !conf.no_sync).await?;
 
+    let generation = mconf.as_ref().map(|c| c.generation);
+
     // Let's create timeline from temp directory and verify that it's correct
-    let (commit_lsn, flush_lsn) = validate_temp_timeline(conf, ttid, &tli_dir_path).await?;
+    let (commit_lsn, flush_lsn) =
+        validate_temp_timeline(conf, ttid, &tli_dir_path, generation).await?;
     info!(
         "finished downloading timeline {}, commit_lsn={}, flush_lsn={}",
         ttid, commit_lsn, flush_lsn
@@ -698,9 +744,19 @@ async fn pull_timeline(
     assert!(status.commit_lsn <= status.flush_lsn);
 
     // Finally, load the timeline.
-    let _tli = global_timelines
-        .load_temp_timeline(ttid, &tli_dir_path, check_tombstone)
+    let timeline = global_timelines
+        .load_temp_timeline(ttid, &tli_dir_path, generation)
         .await?;
+
+    if let Some(mconf) = mconf {
+        // Switch to provided mconf to guarantee that the timeline will not
+        // be deleted by request with older generation.
+        // The generation might already be higer than the one in mconf, e.g.
+        // if another membership_switch request was executed between `load_temp_timeline`
+        // and `membership_switch`, but that's totaly fine. `membership_switch` will
+        // ignore switch to older generation.
+        timeline.membership_switch(mconf).await?;
+    }
 
     Ok(PullTimelineResponse {
         safekeeper_host: Some(host),

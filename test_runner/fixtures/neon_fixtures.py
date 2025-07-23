@@ -1540,6 +1540,17 @@ class NeonEnv:
 
         raise RuntimeError(f"Pageserver with ID {id} not found")
 
+    def get_safekeeper(self, id: int) -> Safekeeper:
+        """
+        Look up a safekeeper by its ID.
+        """
+
+        for sk in self.safekeepers:
+            if sk.id == id:
+                return sk
+
+        raise RuntimeError(f"Safekeeper with ID {id} not found")
+
     def get_tenant_pageserver(self, tenant_id: TenantId | TenantShardId):
         """
         Get the NeonPageserver where this tenant shard is currently attached, according
@@ -5391,15 +5402,24 @@ class Safekeeper(LogUtils):
         return timeline_status.commit_lsn
 
     def pull_timeline(
-        self, srcs: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId
+        self,
+        srcs: list[Safekeeper],
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        mconf: MembershipConfiguration | None = None,
     ) -> dict[str, Any]:
         """
         pull_timeline from srcs to self.
         """
         src_https = [f"http://localhost:{sk.port.http}" for sk in srcs]
-        res = self.http_client().pull_timeline(
-            {"tenant_id": str(tenant_id), "timeline_id": str(timeline_id), "http_hosts": src_https}
-        )
+        body: dict[str, Any] = {
+            "tenant_id": str(tenant_id),
+            "timeline_id": str(timeline_id),
+            "http_hosts": src_https,
+        }
+        if mconf is not None:
+            body["mconf"] = mconf.__dict__
+        res = self.http_client().pull_timeline(body)
         src_ids = [sk.id for sk in srcs]
         log.info(f"finished pulling timeline from {src_ids} to {self.id}")
         return res
