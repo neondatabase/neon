@@ -81,8 +81,12 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
             Server::External {
                 config, compute_id, ..
             } => {
-                let unauthenticated_router =
-                    Router::<Arc<ComputeNode>>::new().route("/metrics", get(metrics::get_metrics));
+                let unauthenticated_router = Router::<Arc<ComputeNode>>::new()
+                    .route("/metrics", get(metrics::get_metrics))
+                    .route(
+                        "/autoscaling_metrics",
+                        get(metrics::get_autoscaling_metrics),
+                    );
 
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
                     .route("/lfc/prewarm", get(lfc::prewarm_state).post(lfc::prewarm))

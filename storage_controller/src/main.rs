@@ -242,6 +242,10 @@ struct Cli {
 
     #[arg(long)]
     shard_split_request_timeout: Option<humantime::Duration>,
+
+    /// **Feature Flag** Whether the storage controller should act to rectify pageserver-reported local disk loss.
+    #[arg(long, default_value = "false")]
+    handle_ps_local_disk_loss: bool,
 }
 
 enum StrictMode {
@@ -508,6 +512,7 @@ async fn async_main() -> anyhow::Result<()> {
             .shard_split_request_timeout
             .map(humantime::Duration::into)
             .unwrap_or(Duration::MAX),
+        handle_ps_local_disk_loss: args.handle_ps_local_disk_loss,
     };
 
     // Validate that we can connect to the database

@@ -20,3 +20,13 @@ pub async fn run_until<F1: Future, F2: Future>(
         Either::Right((f2, _)) => Err(f2),
     }
 }
+
+pub fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: for<'de2> serde::Deserialize<'de2>,
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let s = String::deserialize(deserializer)?;
+    serde_json::from_str(&s).map_err(<D::Error as serde::de::Error>::custom)
+}

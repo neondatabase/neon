@@ -126,7 +126,6 @@ fn main() -> anyhow::Result<()> {
         Some(cfg) => tracing_utils::OtelEnablement::Enabled {
             service_name: "pageserver".to_string(),
             export_config: (&cfg.export_config).into(),
-            runtime: *COMPUTE_REQUEST_RUNTIME,
         },
         None => tracing_utils::OtelEnablement::Disabled,
     };

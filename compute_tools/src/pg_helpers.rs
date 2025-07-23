@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use compute_api::responses::TlsConfig;
-use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
+use compute_api::spec::{
+    Database, DatabricksSettings, GenericOption, GenericOptions, PgIdent, Role,
+};
 use futures::StreamExt;
 use indexmap::IndexMap;
 use ini::Ini;
@@ -181,6 +183,42 @@ impl DatabaseExt for Database {
             .expect("String is documented to not to error during write operations");
 
         params
+    }
+}
+
+pub trait DatabricksSettingsExt {
+    fn as_pg_settings(&self) -> String;
+}
+
+impl DatabricksSettingsExt for DatabricksSettings {
+    fn as_pg_settings(&self) -> String {
+        // Postgres GUCs rendered from DatabricksSettings
+        vec![
+            // ssl_ca_file
+            Some(format!(
+                "ssl_ca_file = '{}'",
+                self.pg_compute_tls_settings.ca_file
+            )),
+            // [Optional] databricks.workspace_url
+            Some(format!(
+                "databricks.workspace_url = '{}'",
+                &self.databricks_workspace_host
+            )),
+            // todo(vikas.jain): these are not required anymore as they are moved to static
+            // conf but keeping these to avoid image mismatch between hcc and pg.
+            // Once hcc and pg are in sync, we can remove these.
+            //
+            // databricks.enable_databricks_identity_login
+            Some("databricks.enable_databricks_identity_login = true".to_string()),
+            // databricks.enable_sql_restrictions
+            Some("databricks.enable_sql_restrictions = true".to_string()),
+        ]
+        .into_iter()
+        // Removes `None`s
+        .flatten()
+        .collect::<Vec<String>>()
+        .join("\n")
+            + "\n"
     }
 }
 

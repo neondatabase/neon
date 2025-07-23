@@ -56,6 +56,7 @@ pub struct NeonStorageControllerStartArgs {
     pub instance_id: u8,
     pub base_port: Option<u16>,
     pub start_timeout: humantime::Duration,
+    pub handle_ps_local_disk_loss: Option<bool>,
 }
 
 impl NeonStorageControllerStartArgs {
@@ -64,6 +65,7 @@ impl NeonStorageControllerStartArgs {
             instance_id: 1,
             base_port: None,
             start_timeout,
+            handle_ps_local_disk_loss: None,
         }
     }
 }
@@ -731,6 +733,10 @@ impl StorageController {
         }
 
         println!("Starting storage controller at {scheme}://{host}:{listen_port}");
+
+        if start_args.handle_ps_local_disk_loss.unwrap_or_default() {
+            args.push("--handle-ps-local-disk-loss".to_string());
+        }
 
         background_process::start_process(
             COMMAND,
