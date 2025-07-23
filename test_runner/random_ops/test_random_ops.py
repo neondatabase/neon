@@ -209,8 +209,6 @@ class NeonBranch:
         )
         if res is None:
             return
-        # XXX do not merge, debug only
-        log.info("res: %s", res)
         self.updated_at = datetime.fromisoformat(res["branch"]["updated_at"])
         self.parent_timestamp = datetime.fromisoformat(res["branch"]["parent_timestamp"])
         parent_id: str = res["branch"]["parent_id"]
@@ -533,9 +531,9 @@ class NeonProject:
         )
         self.wait()
         new_branch_def = self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
+        # The restored branch will lose the parent after, but it has it during the restoration.
+        # So, we delete parent_id
         new_branch_def["branch"].pop("parent_id")
-        # XXX do not merge, debug only
-        log.info("new_branch: %s", new_branch_def)
         new_branch = NeonBranch(self, new_branch_def)
         target_branch_def = self.neon_api.get_branch_details(self.id, target_branch.id)
         if "name" in target_branch_def["branch"]:
