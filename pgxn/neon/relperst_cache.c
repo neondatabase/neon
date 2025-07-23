@@ -244,6 +244,7 @@ set_cached_relperst(NRelFileInfo rinfo, NeonRelPersistence relperst)
 	LWLockRelease(relperst_hash_lock);
 }
 
+/* Release a pin that was acquired earlier with pin_cached_relperst() */
 void
 unpin_cached_relperst(NeonRelPersistenceEntry* entry)
 {
