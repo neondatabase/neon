@@ -374,7 +374,7 @@ class NeonProject:
     def get_random_parent_branch(self) -> NeonBranch:
         return self.branches[random.choice(list(set(self.branches.keys()) - self.reset_branches))]
 
-    def generate_branch_name(self) -> str:
+    def gen_branch_name(self) -> str:
         self.branch_num += 1
         return f"branch{self.branch_num}"
 
@@ -522,7 +522,7 @@ class NeonProject:
             self.id,
             snapshot_id,
             target_branch.id,
-            self.generate_branch_name(),
+            self.gen_branch_name(),
         )
         self.wait()
         new_branch_def = self.neon_api.get_branch_details(self.id, new_branch_def["branch"]["id"])
