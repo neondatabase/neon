@@ -19,6 +19,9 @@ use http::StatusCode;
 use http::header::CONTENT_TYPE;
 
 use measured::MetricGroup;
+use measured::metric::MetricEncoding;
+use measured::metric::gauge::GaugeState;
+use measured::metric::group::Encoding;
 use measured::text::BufferedTextEncoder;
 
 use std::io::ErrorKind;
@@ -28,13 +31,27 @@ use tokio::net::UnixListener;
 
 use crate::NEON_COMMUNICATOR_SOCKET_NAME;
 use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
+use crate::worker_process::lfc_metrics::LfcMetricsCollector;
 
 enum ControlSocketState<'a> {
     Full(&'a CommunicatorWorkerProcessStruct<'a>),
     Legacy(LegacyControlSocketState),
 }
 
-struct LegacyControlSocketState;
+struct LegacyControlSocketState {
+    pub(crate) lfc_metrics: LfcMetricsCollector,
+}
+
+impl<T> MetricGroup<T> for LegacyControlSocketState
+where
+    T: Encoding,
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_group_into(&self, enc: &mut T) -> Result<(), T::Err> {
+        self.lfc_metrics.collect_group_into(enc)?;
+        Ok(())
+    }
+}
 
 /// Launch the listener
 pub(crate) async fn launch_listener(
@@ -44,7 +61,9 @@ pub(crate) async fn launch_listener(
 
     let state = match worker {
         Some(worker) => ControlSocketState::Full(worker),
-        None => ControlSocketState::Legacy(LegacyControlSocketState),
+        None => ControlSocketState::Legacy(LegacyControlSocketState {
+            lfc_metrics: LfcMetricsCollector,
+        }),
     };
 
     let app = Router::new()
@@ -84,9 +103,7 @@ pub(crate) async fn launch_listener(
 async fn get_metrics(State(state): State<Arc<ControlSocketState<'_>>>) -> Response {
     match state.as_ref() {
         ControlSocketState::Full(worker) => metrics_to_response(&worker).await,
-        ControlSocketState::Legacy(_) => {
-            todo!()
-        }
+        ControlSocketState::Legacy(legacy) => metrics_to_response(&legacy).await,
     }
 }
 
@@ -96,9 +113,7 @@ async fn get_metrics(State(state): State<Arc<ControlSocketState<'_>>>) -> Respon
 async fn get_autoscaling_metrics(State(state): State<Arc<ControlSocketState<'_>>>) -> Response {
     match state.as_ref() {
         ControlSocketState::Full(worker) => metrics_to_response(&worker.lfc_metrics).await,
-        ControlSocketState::Legacy(_) => {
-            todo!()
-        }
+        ControlSocketState::Legacy(legacy) => metrics_to_response(&legacy.lfc_metrics).await,
     }
 }
 
@@ -133,7 +148,11 @@ async fn dump_cache_map(State(state): State<Arc<ControlSocketState<'_>>>) -> Res
                 .unwrap()
         }
         ControlSocketState::Legacy(_) => {
-            todo!()
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header(CONTENT_TYPE, "application/text")
+                .body(Body::from(Vec::new()))
+                .unwrap()
         }
     }
 }
