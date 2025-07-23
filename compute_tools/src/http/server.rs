@@ -27,6 +27,7 @@ use super::{
     },
 };
 use crate::compute::ComputeNode;
+use crate::http::routes::{hadron_liveness_probe, refresh_configuration};
 
 /// `compute_ctl` has two servers: internal and external. The internal server
 /// binds to the loopback interface and handles communication from clients on
@@ -43,6 +44,7 @@ pub enum Server {
         port: u16,
         config: ComputeCtlConfig,
         compute_id: String,
+        instance_id: Option<String>,
     },
 }
 
@@ -67,7 +69,12 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                         post(extension_server::download_extension),
                     )
                     .route("/extensions", post(extensions::install_extension))
-                    .route("/grants", post(grants::add_grant));
+                    .route("/grants", post(grants::add_grant))
+                    // Hadron: Compute-initiated configuration refresh
+                    .route(
+                        "/refresh_configuration",
+                        post(refresh_configuration::refresh_configuration),
+                    );
 
                 // Add in any testing support
                 if cfg!(feature = "testing") {
@@ -79,7 +86,10 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 router
             }
             Server::External {
-                config, compute_id, ..
+                config,
+                compute_id,
+                instance_id,
+                ..
             } => {
                 let unauthenticated_router = Router::<Arc<ComputeNode>>::new()
                     .route("/metrics", get(metrics::get_metrics))
@@ -100,8 +110,13 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route("/metrics.json", get(metrics_json::get_metrics))
                     .route("/status", get(status::get_status))
                     .route("/terminate", post(terminate::terminate))
+                    .route(
+                        "/hadron_liveness_probe",
+                        get(hadron_liveness_probe::hadron_liveness_probe),
+                    )
                     .layer(AsyncRequireAuthorizationLayer::new(Authorize::new(
                         compute_id.clone(),
+                        instance_id.clone(),
                         config.jwks.clone(),
                     )));
 
