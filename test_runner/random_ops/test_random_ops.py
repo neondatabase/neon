@@ -146,7 +146,7 @@ class NeonBranch:
         Prints the branch's id with all the predecessors
         (r) means the branch is a reset one
         """
-        return f"{self.id}{'(r)' if self.id in self.project.reset_branches else ''} {f'({self.name})' if self.name and self.name != self.id else ''}, parent: {self.parent}"
+        return f"{self.id}{f'({self.name})' if self.name and self.name != self.id else ''}, {f"restored_from: {self.restored_from}" if self.restored_from else ''} parent: {self.parent}"
 
     def random_time(self) -> datetime:
         min_time = max(
@@ -341,7 +341,7 @@ class NeonProject:
     def delete_branch(self, branch_id: str) -> None:
         parent = self.branches[branch_id].parent
         if not parent or branch_id == self.main_branch.id:
-            raise RuntimeError("Cannot delete the main branch")
+            raise RuntimeError("Cannot delete the main branch or a branch restored from a snapshot")
         if branch_id not in self.leaf_branches and branch_id not in self.reset_branches:
             raise RuntimeError(f"The branch {branch_id}, probably, has ancestors")
         if branch_id not in self.branches:
@@ -354,7 +354,7 @@ class NeonProject:
         if branch_id not in self.reset_branches:
             self.terminate_benchmark(branch_id)
         self.neon_api.delete_branch(self.id, branch_id)
-        if len(parent.children) == 1 and parent.id != self.main_branch.id and parent.restored_from is None:
+        if len(parent.children) == 1 and parent.id != self.main_branch.id and parent.parent is not None:
             self.leaf_branches[parent.id] = parent
         parent.children.pop(branch_id)
         if branch_id in self.leaf_branches:
