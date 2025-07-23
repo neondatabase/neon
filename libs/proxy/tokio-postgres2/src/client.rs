@@ -238,6 +238,7 @@ impl Client {
         rx
     }
 
+    /// Wait until this connection has no more active queries.
     pub async fn wait_until_ready(&mut self) -> Result<ReadyForQueryStatus, Error> {
         self.inner_mut().responses.wait_until_ready().await
     }
@@ -327,11 +328,6 @@ impl Client {
         )?;
 
         Ok(())
-    }
-
-    /// Commit the transaction.
-    pub async fn commit(&mut self) -> Result<ReadyForQueryStatus, Error> {
-        self.batch_execute("COMMIT").await
     }
 
     /// Constructs a cancellation token that can later be used to request cancellation of a query running on the
