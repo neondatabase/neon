@@ -351,11 +351,7 @@ class NeonProject:
         if branch_id not in self.reset_branches:
             self.terminate_benchmark(branch_id)
         self.neon_api.delete_branch(self.id, branch_id)
-        if (
-            len(parent.children) == 1
-            and parent.id != self.main_branch.id
-            and parent.parent is not None
-        ):
+        if len(parent.children) == 1 and parent.parent is not None:
             self.leaf_branches[parent.id] = parent
         parent.children.pop(branch_id)
         if branch_id in self.leaf_branches:
