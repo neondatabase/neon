@@ -230,16 +230,14 @@ impl PageserverClient {
     ) -> tonic::Result<page_api::GetPageResponse> {
         // Fast path: request is for a single shard.
         if let Some(shard_id) =
-            GetPageSplitter::for_single_shard(&req, shards.count, shards.stripe_size)
-                .map_err(|err| tonic::Status::internal(err.to_string()))?
+            GetPageSplitter::for_single_shard(&req, shards.count, shards.stripe_size)?
         {
             return Self::get_page_with_shard(req, shards.get(shard_id)?).await;
         }
 
         // Request spans multiple shards. Split it, dispatch concurrent per-shard requests, and
         // reassemble the responses.
-        let mut splitter = GetPageSplitter::split(req, shards.count, shards.stripe_size)
-            .map_err(|err| tonic::Status::internal(err.to_string()))?;
+        let mut splitter = GetPageSplitter::split(req, shards.count, shards.stripe_size)?;
 
         let mut shard_requests = FuturesUnordered::new();
         for (shard_id, shard_req) in splitter.drain_requests() {
@@ -249,14 +247,10 @@ impl PageserverClient {
         }
 
         while let Some((shard_id, shard_response)) = shard_requests.next().await.transpose()? {
-            splitter
-                .add_response(shard_id, shard_response)
-                .map_err(|err| tonic::Status::internal(err.to_string()))?;
+            splitter.add_response(shard_id, shard_response)?;
         }
 
-        splitter
-            .get_response()
-            .map_err(|err| tonic::Status::internal(err.to_string()))
+        Ok(splitter.collect_response()?)
     }
 
     /// Fetches pages on the given shard. Does not retry internally.

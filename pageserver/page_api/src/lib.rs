@@ -24,4 +24,4 @@ mod split;
 
 pub use client::Client;
 pub use model::*;
-pub use split::GetPageSplitter;
+pub use split::{GetPageSplitter, SplitError};
