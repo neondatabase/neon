@@ -396,6 +396,7 @@ impl GcCompactionQueue {
                     }),
                     compact_lsn_range: None,
                     sub_compaction_max_job_size_mb: None,
+                    gc_compaction_do_metadata_compaction: false,
                 },
                 permit,
             );
@@ -512,6 +513,7 @@ impl GcCompactionQueue {
                     compact_key_range: Some(job.compact_key_range.into()),
                     compact_lsn_range: Some(job.compact_lsn_range.into()),
                     sub_compaction_max_job_size_mb: None,
+                    gc_compaction_do_metadata_compaction: false,
                 };
                 pending_tasks.push(GcCompactionQueueItem::SubCompactionJob {
                     options,
@@ -785,6 +787,8 @@ pub(crate) struct GcCompactJob {
     /// as specified here. The true range being compacted is `min_lsn/max_lsn` in [`GcCompactionJobDescription`].
     /// min_lsn will always <= the lower bound specified here, and max_lsn will always >= the upper bound specified here.
     pub compact_lsn_range: Range<Lsn>,
+    /// See [`CompactOptions::gc_compaction_do_metadata_compaction`].
+    pub do_metadata_compaction: bool,
 }
 
 impl GcCompactJob {
@@ -799,6 +803,7 @@ impl GcCompactJob {
                 .compact_lsn_range
                 .map(|x| x.into())
                 .unwrap_or(Lsn::INVALID..Lsn::MAX),
+            do_metadata_compaction: options.gc_compaction_do_metadata_compaction,
         }
     }
 }
@@ -1321,13 +1326,7 @@ impl Timeline {
                 .max()
         };
 
-        let (partition_mode, partition_lsn) = if cfg!(test)
-            || cfg!(feature = "testing")
-            || self
-                .feature_resolver
-                .evaluate_boolean("image-compaction-boundary")
-                .is_ok()
-        {
+        let (partition_mode, partition_lsn) = {
             let last_repartition_lsn = self.partitioning.read().1;
             let lsn = match l0_l1_boundary_lsn {
                 Some(boundary) => gc_cutoff
@@ -1343,8 +1342,6 @@ impl Timeline {
             } else {
                 ("l0_l1_boundary", lsn)
             }
-        } else {
-            ("latest_record", self.get_last_record_lsn())
         };
 
         // 2. Repartition and create image layers if necessary
@@ -3174,6 +3171,7 @@ impl Timeline {
                         dry_run: job.dry_run,
                         compact_key_range: start..end,
                         compact_lsn_range: job.compact_lsn_range.start..compact_below_lsn,
+                        do_metadata_compaction: false,
                     });
                     current_start = Some(end);
                 }
@@ -3236,13 +3234,35 @@ impl Timeline {
     async fn compact_with_gc_inner(
         self: &Arc<Self>,
         cancel: &CancellationToken,
-        job: GcCompactJob,
+        mut job: GcCompactJob,
         ctx: &RequestContext,
         yield_for_l0: bool,
     ) -> Result<CompactionOutcome, CompactionError> {
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
         // with legacy compaction tasks in the future. Always ensure the lock order is compaction -> gc.
         // Note that we already acquired the compaction lock when the outer `compact` function gets called.
+
+        // If the job is not configured to compact the metadata key range, shrink the key range
+        // to exclude the metadata key range. The check is done by checking if the end of the key range
+        // is larger than the start of the metadata key range. Note that metadata keys cover the entire
+        // second half of the keyspace, so it's enough to only check the end of the key range.
+        if !job.do_metadata_compaction
+            && job.compact_key_range.end > Key::metadata_key_range().start
+        {
+            tracing::info!(
+                "compaction for metadata key range is not supported yet, overriding compact_key_range from {} to {}",
+                job.compact_key_range.end,
+                Key::metadata_key_range().start
+            );
+            // Shrink the key range to exclude the metadata key range.
+            job.compact_key_range.end = Key::metadata_key_range().start;
+
+            // Skip the job if the key range completely lies within the metadata key range.
+            if job.compact_key_range.start >= job.compact_key_range.end {
+                tracing::info!("compact_key_range is empty, skipping compaction");
+                return Ok(CompactionOutcome::Done);
+            }
+        }
 
         let timer = Instant::now();
         let begin_timer = timer;

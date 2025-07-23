@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::cancel_token::RawCancelToken;
-use crate::codec::{BackendMessages, FrontendMessage};
+use crate::codec::{BackendMessages, FrontendMessage, RecordNotices};
 use crate::config::{Host, SslMode};
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
@@ -219,6 +219,18 @@ impl Client {
 
     pub(crate) fn inner_mut(&mut self) -> &mut InnerClient {
         &mut self.inner
+    }
+
+    pub fn record_notices(&mut self, limit: usize) -> mpsc::UnboundedReceiver<Box<str>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let notices = RecordNotices { sender: tx, limit };
+        self.inner
+            .sender
+            .send(FrontendMessage::RecordNotices(notices))
+            .ok();
+
+        rx
     }
 
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and

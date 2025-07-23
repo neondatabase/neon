@@ -51,7 +51,7 @@ impl ThreadPool {
                         *state = Some(ThreadRt {
                             pool: pool.clone(),
                             id: ThreadPoolWorkerId(worker_id.fetch_add(1, Ordering::Relaxed)),
-                            rng: SmallRng::from_entropy(),
+                            rng: SmallRng::from_os_rng(),
                             // used to determine whether we should temporarily skip tasks for fairness.
                             // 99% of estimates will overcount by no more than 4096 samples
                             countmin: CountMinSketch::with_params(
@@ -120,7 +120,7 @@ impl ThreadRt {
         // in which case the SKETCH_RESET_INTERVAL represents 1 second. Thus, the rates above
         // are in requests per second.
         let probability = P.ln() / (P + rate as f64).ln();
-        self.rng.gen_bool(probability)
+        self.rng.random_bool(probability)
     }
 }
 

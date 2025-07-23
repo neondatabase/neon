@@ -33,11 +33,13 @@ use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 
 use crate::debug_dump::TimelineDigestRequest;
+use crate::hadron::{get_filesystem_capacity, get_filesystem_usage};
 use crate::safekeeper::TermLsn;
 use crate::timelines_global_map::DeleteOrExclude;
 use crate::{
     GlobalTimelines, SafeKeeperConf, copy_timeline, debug_dump, patch_control_file, pull_timeline,
 };
+use serde_json::json;
 
 /// Healthcheck handler.
 async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -125,6 +127,21 @@ async fn utilization_handler(request: Request<Body>) -> Result<Response<Body>, A
     let global_timelines = get_global_timelines(&request);
     let utilization = global_timelines.get_timeline_counts();
     json_response(StatusCode::OK, utilization)
+}
+
+/// Returns filesystem capacity and current utilization for the safekeeper data directory.
+async fn filesystem_usage_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let conf = get_conf(&request);
+    let path = conf.workdir.as_std_path();
+    let capacity = get_filesystem_capacity(path).map_err(ApiError::InternalServerError)?;
+    let usage = get_filesystem_usage(path);
+    let resp = json!({
+        "data_dir": path,
+        "capacity_bytes": capacity,
+        "usage_bytes": usage,
+    });
+    json_response(StatusCode::OK, resp)
 }
 
 /// List all (not deleted) timelines.
@@ -335,7 +352,7 @@ async fn timeline_exclude_handler(mut request: Request<Body>) -> Result<Response
     // instead.
     if data.mconf.contains(my_id) {
         return Err(ApiError::Forbidden(format!(
-            "refused to switch into {}, node {} is member of it",
+            "refused to exclude timeline with {}, node {} is member of it",
             data.mconf, my_id
         )));
     }
@@ -730,6 +747,11 @@ pub fn make_router(
             })
         })
         .get("/v1/utilization", |r| request_span(r, utilization_handler))
+        /* BEGIN_HADRON */
+        .get("/v1/debug/filesystem_usage", |r| {
+            request_span(r, filesystem_usage_handler)
+        })
+        /* END_HADRON */
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
         })

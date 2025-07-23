@@ -7,17 +7,15 @@ use std::net::{IpAddr, SocketAddr};
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use postgres_client::config::{AuthKeys, ChannelBinding, SslMode};
+use postgres_client::connect_raw::StartupStream;
 use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::MakeTlsConnect;
-use postgres_client::{NoTls, RawCancelToken, RawConnection};
-use postgres_protocol::message::backend::NoticeResponseBody;
 use thiserror::Error;
 use tokio::net::{TcpStream, lookup_host};
 use tracing::{debug, error, info, warn};
 
-use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
+use crate::auth::backend::ComputeCredentialKeys;
 use crate::auth::parse_endpoint_param;
-use crate::cancellation::CancelClosure;
 use crate::compute::tls::TlsError;
 use crate::config::ComputeConfig;
 use crate::context::RequestContext;
@@ -236,8 +234,7 @@ impl AuthInfo {
         &self,
         ctx: &RequestContext,
         compute: &mut ComputeConnection,
-        user_info: &ComputeUserInfo,
-    ) -> Result<PostgresSettings, PostgresError> {
+    ) -> Result<(), PostgresError> {
         // client config with stubbed connect info.
         // TODO(conrad): should we rewrite this to bypass tokio-postgres2 entirely,
         // utilising pqproto.rs.
@@ -247,39 +244,10 @@ impl AuthInfo {
         let tmp_config = self.enrich(tmp_config);
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let connection = tmp_config
-            .tls_and_authenticate(&mut compute.stream, NoTls)
-            .await?;
+        tmp_config.authenticate(&mut compute.stream).await?;
         drop(pause);
 
-        let RawConnection {
-            stream: _,
-            parameters,
-            delayed_notice,
-            process_id,
-            secret_key,
-        } = connection;
-
-        tracing::Span::current().record("pid", tracing::field::display(process_id));
-
-        // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
-        // Yet another reason to rework the connection establishing code.
-        let cancel_closure = CancelClosure::new(
-            compute.socket_addr,
-            RawCancelToken {
-                ssl_mode: compute.ssl_mode,
-                process_id,
-                secret_key,
-            },
-            compute.hostname.to_string(),
-            user_info.clone(),
-        );
-
-        Ok(PostgresSettings {
-            params: parameters,
-            cancel_closure,
-            delayed_notice,
-        })
+        Ok(())
     }
 }
 
@@ -343,21 +311,9 @@ impl ConnectInfo {
 pub type RustlsStream = <ComputeConfig as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
 pub type MaybeRustlsStream = MaybeTlsStream<tokio::net::TcpStream, RustlsStream>;
 
-// TODO(conrad): we don't need to parse these.
-// These are just immediately forwarded back to the client.
-// We could instead stream them out instead of reading them into memory.
-pub struct PostgresSettings {
-    /// PostgreSQL connection parameters.
-    pub params: std::collections::HashMap<String, String>,
-    /// Query cancellation token.
-    pub cancel_closure: CancelClosure,
-    /// Notices received from compute after authenticating
-    pub delayed_notice: Vec<NoticeResponseBody>,
-}
-
 pub struct ComputeConnection {
     /// Socket connected to a compute node.
-    pub stream: MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
+    pub stream: StartupStream<tokio::net::TcpStream, RustlsStream>,
     /// Labels for proxy's metrics.
     pub aux: MetricsAuxInfo,
     pub hostname: Host,
@@ -390,6 +346,7 @@ impl ConnectInfo {
             ctx.get_testodrome_id().unwrap_or_default(),
         );
 
+        let stream = StartupStream::new(stream);
         let connection = ComputeConnection {
             stream,
             socket_addr,

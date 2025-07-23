@@ -742,7 +742,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
 
-    use pageserver_api::shard::{ShardIdentity, ShardStripeSize};
+    use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardIdentity};
     use postgres_ffi::{MAX_SEND_SIZE, PgMajorVersion};
     use tokio::sync::mpsc::error::TryRecvError;
     use utils::id::{NodeId, TenantTimelineId};
@@ -786,19 +786,13 @@ mod tests {
             MAX_SEND_SIZE,
         );
 
-        let shard_0 = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_0 =
+            ShardIdentity::new(ShardNumber(0), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
-        let shard_1 = ShardIdentity::new(
-            ShardNumber(1),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_1 =
+            ShardIdentity::new(ShardNumber(1), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
         let mut shards = HashMap::new();
 
@@ -806,7 +800,7 @@ mod tests {
             let shard_id = ShardIdentity::new(
                 ShardNumber(shard_number),
                 ShardCount(SHARD_COUNT),
-                ShardStripeSize::default(),
+                DEFAULT_STRIPE_SIZE,
             )
             .unwrap();
             let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(MSG_COUNT * 2);
@@ -934,12 +928,9 @@ mod tests {
             MAX_SEND_SIZE,
         );
 
-        let shard_0 = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_0 =
+            ShardIdentity::new(ShardNumber(0), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
         struct Sender {
             tx: Option<tokio::sync::mpsc::Sender<Batch>>,
@@ -1088,19 +1079,13 @@ mod tests {
             WAL_READER_BATCH_SIZE,
         );
 
-        let shard_0 = ShardIdentity::new(
-            ShardNumber(0),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_0 =
+            ShardIdentity::new(ShardNumber(0), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
-        let shard_1 = ShardIdentity::new(
-            ShardNumber(1),
-            ShardCount(SHARD_COUNT),
-            ShardStripeSize::default(),
-        )
-        .unwrap();
+        let shard_1 =
+            ShardIdentity::new(ShardNumber(1), ShardCount(SHARD_COUNT), DEFAULT_STRIPE_SIZE)
+                .unwrap();
 
         let mut shards = HashMap::new();
 
@@ -1108,7 +1093,7 @@ mod tests {
             let shard_id = ShardIdentity::new(
                 ShardNumber(shard_number),
                 ShardCount(SHARD_COUNT),
-                ShardStripeSize::default(),
+                DEFAULT_STRIPE_SIZE,
             )
             .unwrap();
             let (tx, rx) = tokio::sync::mpsc::channel::<Batch>(MSG_COUNT * 2);

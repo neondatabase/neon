@@ -72,6 +72,7 @@ http-utils.workspace = true
 utils.workspace = true
 wal_decoder.workspace = true
 env_logger.workspace = true
+nix.workspace = true
 
 workspace_hack.workspace = true
 

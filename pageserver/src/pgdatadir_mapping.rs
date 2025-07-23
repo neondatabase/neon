@@ -8,6 +8,7 @@
 //!
 use std::collections::{HashMap, HashSet, hash_map};
 use std::ops::{ControlFlow, Range};
+use std::sync::Arc;
 
 use crate::walingest::{WalIngestError, WalIngestErrorKind};
 use crate::{PERF_TRACE_TARGET, ensure_walingest};
@@ -286,6 +287,10 @@ impl Timeline {
     /// Like [`Self::get_rel_page_at_lsn`], but returns a batch of pages.
     ///
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
+    ///
+    /// NB: the read path must be cancellation-safe. The Tonic gRPC service will drop the future
+    /// if the client goes away (e.g. due to timeout or cancellation).
+    /// TODO: verify that it actually is cancellation-safe.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
         pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, LsnRange, RequestContext)>,
@@ -500,8 +505,9 @@ impl Timeline {
 
         for rel in rels {
             let n_blocks = self
-                .get_rel_size_in_reldir(rel, version, Some((reldir_key, &reldir)), ctx)
-                .await?;
+                .get_rel_size_in_reldir(rel, version, Some((reldir_key, &reldir)), false, ctx)
+                .await?
+                .expect("allow_missing=false");
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -517,10 +523,16 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
-        self.get_rel_size_in_reldir(tag, version, None, ctx).await
+        Ok(self
+            .get_rel_size_in_reldir(tag, version, None, false, ctx)
+            .await?
+            .expect("allow_missing=false"))
     }
 
-    /// Get size of a relation file. The relation must exist, otherwise an error is returned.
+    /// Get size of a relation file. If `allow_missing` is true, returns None for missing relations,
+    /// otherwise errors.
+    ///
+    /// INVARIANT: never returns None if `allow_missing=false`.
     ///
     /// See [`Self::get_rel_exists_in_reldir`] on why we need `deserialized_reldir_v1`.
     pub(crate) async fn get_rel_size_in_reldir(
@@ -528,8 +540,9 @@ impl Timeline {
         tag: RelTag,
         version: Version<'_>,
         deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
+        allow_missing: bool,
         ctx: &RequestContext,
-    ) -> Result<BlockNumber, PageReconstructError> {
+    ) -> Result<Option<BlockNumber>, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
                 RelationError::InvalidRelnode.into(),
@@ -537,7 +550,15 @@ impl Timeline {
         }
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, version) {
-            return Ok(nblocks);
+            return Ok(Some(nblocks));
+        }
+
+        if allow_missing
+            && !self
+                .get_rel_exists_in_reldir(tag, version, deserialized_reldir_v1, ctx)
+                .await?
+        {
+            return Ok(None);
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
@@ -549,7 +570,7 @@ impl Timeline {
             // FSM, and smgrnblocks() on it immediately afterwards,
             // without extending it.  Tolerate that by claiming that
             // any non-existent FSM fork has size 0.
-            return Ok(0);
+            return Ok(Some(0));
         }
 
         let key = rel_size_to_key(tag);
@@ -558,7 +579,7 @@ impl Timeline {
 
         self.update_cached_rel_size(tag, version, nblocks);
 
-        Ok(nblocks)
+        Ok(Some(nblocks))
     }
 
     /// Does the relation exist?
@@ -813,6 +834,7 @@ impl Timeline {
         let gc_cutoff_lsn_guard = self.get_applied_gc_cutoff_lsn();
         let gc_cutoff_planned = {
             let gc_info = self.gc_info.read().unwrap();
+            info!(cutoffs=?gc_info.cutoffs, applied_cutoff=%*gc_cutoff_lsn_guard, "starting find_lsn_for_timestamp");
             gc_info.min_cutoff()
         };
         // Usually the planned cutoff is newer than the cutoff of the last gc run,
@@ -1233,11 +1255,16 @@ impl Timeline {
         let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: u64 = 0;
+        let mut dbdir_cnt = 0;
+        let mut rel_cnt = 0;
+
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
+            dbdir_cnt += 1;
             for rel in self
                 .list_rels(*spcnode, *dbnode, Version::at(lsn), ctx)
                 .await?
             {
+                rel_cnt += 1;
                 if self.cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
@@ -1248,6 +1275,10 @@ impl Timeline {
                 total_size += relsize as u64;
             }
         }
+
+        self.db_rel_count
+            .store(Some(Arc::new((dbdir_cnt, rel_cnt))));
+
         Ok(total_size * BLCKSZ as u64)
     }
 
@@ -2907,9 +2938,8 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 mod tests {
     use hex_literal::hex;
     use pageserver_api::models::ShardParameters;
-    use pageserver_api::shard::ShardStripeSize;
     use utils::id::TimelineId;
-    use utils::shard::{ShardCount, ShardNumber};
+    use utils::shard::{ShardCount, ShardNumber, ShardStripeSize};
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
