@@ -5,8 +5,10 @@
 mod app;
 use anyhow::Context;
 use clap::Parser;
+use postgres_backend::AuthType;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing::info;
+use utils::auth::JwtAuth;
 use utils::logging;
 
 //see set()
@@ -16,6 +18,10 @@ const fn max_upload_file_limit() -> usize {
 
 const fn listen() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 51243)
+}
+
+const fn default_auth_type() -> AuthType {
+    AuthType::NeonJWT
 }
 
 #[derive(Parser)]
@@ -39,6 +45,8 @@ struct Config {
     storage_kind: remote_storage::TypedRemoteStorageKind,
     #[serde(default = "max_upload_file_limit")]
     max_upload_file_limit: usize,
+    #[serde(default = "default_auth_type")]
+    auth_type: AuthType,
 }
 
 #[tokio::main]
@@ -61,10 +69,15 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("Supply either config file path or --config=inline-config");
     };
 
-    info!("Reading pemfile from {}", config.pemfile.clone());
-    let pemfile = std::fs::read(config.pemfile.clone())?;
-    info!("Loading public key from {}", config.pemfile.clone());
-    let auth = endpoint_storage::JwtAuth::new(&pemfile)?;
+    if config.auth_type == AuthType::Trust {
+        anyhow::bail!("Trust based auth is not supported");
+    }
+
+    let auth = match config.auth_type {
+        AuthType::NeonJWT => JwtAuth::from_key_path(&config.pemfile)?,
+        AuthType::HadronJWT => JwtAuth::from_cert_path(&config.pemfile)?,
+        AuthType::Trust => unreachable!(),
+    };
 
     let listener = tokio::net::TcpListener::bind(config.listen).await.unwrap();
     info!("listening on {}", listener.local_addr().unwrap());

@@ -37,18 +37,8 @@
 //!         <other PostgreSQL files>
 //! ```
 //!
-use std::collections::BTreeMap;
-use std::fmt::Display;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::path::PathBuf;
-use std::process::Command;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use anyhow::{Context, Result, anyhow, bail};
-use base64::Engine;
-use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use compute_api::requests::{
     COMPUTE_AUDIENCE, ComputeClaims, ComputeClaimsScope, ConfigurationRequest,
 };
@@ -62,21 +52,31 @@ use compute_api::spec::{
 };
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations,
-    OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
+    OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse, RSAKeyParameters, RSAKeyType,
 };
 use nix::sys::signal::{Signal, kill};
 use pem::Pem;
 use reqwest::header::CONTENT_TYPE;
+use rsa::{RsaPublicKey, pkcs1::DecodeRsaPublicKey, traits::PublicKeyParts};
 use safekeeper_api::PgMajorVersion;
 use safekeeper_api::membership::SafekeeperGeneration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use spki::der::Decode;
 use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
+use std::collections::BTreeMap;
+use std::fmt::Display;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::path::PathBuf;
+use std::process::Command;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::shard::ShardStripeSize;
+use x509_parser::parse_x509_certificate;
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
@@ -155,15 +155,68 @@ impl ComputeControlPlane {
             .unwrap_or(self.base_port)
     }
 
+    // BEGIN HADRON
+
+    /// Extract SubjectPublicKeyInfo from a PEM that can be either a X509 certificate or a public key
+    fn extract_spki_from_pem(pem: &Pem) -> Result<Vec<u8>> {
+        if pem.tag() == "CERTIFICATE" {
+            // Handle X509 certificate
+            let (_, cert) = parse_x509_certificate(pem.contents())?;
+            let public_key = cert.public_key();
+            Ok(public_key.subject_public_key.data.to_vec())
+        } else {
+            // Handle public key directly
+            let spki: SubjectPublicKeyInfoRef = SubjectPublicKeyInfo::from_der(pem.contents())?;
+            Ok(spki.subject_public_key.raw_bytes().to_vec())
+        }
+    }
+
+    /// Create RSA JWK from certificate PEM
+    fn create_rsa_jwk_from_cert(pem: &Pem, key_hash: &[u8]) -> Result<Jwk> {
+        let public_key = Self::extract_spki_from_pem(pem)?;
+
+        // Extract RSA parameters (n, e) from RSA public key DER data
+        let rsa_key = RsaPublicKey::from_pkcs1_der(&public_key)?;
+        let n = rsa_key.n().to_bytes_be();
+        let e = rsa_key.e().to_bytes_be();
+
+        Ok(Jwk {
+            common: CommonParameters {
+                public_key_use: Some(PublicKeyUse::Signature),
+                key_operations: Some(vec![KeyOperations::Verify]),
+                key_algorithm: Some(KeyAlgorithm::RS256),
+                key_id: Some(URL_SAFE_NO_PAD.encode(key_hash)),
+                x509_url: None::<String>,
+                x509_chain: None::<Vec<String>>,
+                x509_sha1_fingerprint: None::<String>,
+                x509_sha256_fingerprint: None::<String>,
+            },
+            algorithm: AlgorithmParameters::RSA(RSAKeyParameters {
+                key_type: RSAKeyType::RSA,
+                n: URL_SAFE_NO_PAD.encode(n),
+                e: URL_SAFE_NO_PAD.encode(e),
+            }),
+        })
+    }
+
+    // END HADRON
+
     /// Create a JSON Web Key Set. This ideally matches the way we create a JWKS
     /// from the production control plane.
     fn create_jwks_from_pem(pem: &Pem) -> Result<JwkSet> {
-        let spki: SubjectPublicKeyInfoRef = SubjectPublicKeyInfo::from_der(pem.contents())?;
-        let public_key = spki.subject_public_key.raw_bytes();
+        let public_key = Self::extract_spki_from_pem(pem)?;
 
         let mut hasher = Sha256::new();
-        hasher.update(public_key);
+        hasher.update(&public_key);
         let key_hash = hasher.finalize();
+
+        // BEGIN HADRON
+        if pem.tag() == "CERTIFICATE" {
+            // Assume RSA if we are parsing keys from a certificate.
+            let jwk = Self::create_rsa_jwk_from_cert(pem, &key_hash)?;
+            return Ok(JwkSet { keys: vec![jwk] });
+        }
+        // END HADRON
 
         Ok(JwkSet {
             keys: vec![Jwk {
@@ -171,7 +224,7 @@ impl ComputeControlPlane {
                     public_key_use: Some(PublicKeyUse::Signature),
                     key_operations: Some(vec![KeyOperations::Verify]),
                     key_algorithm: Some(KeyAlgorithm::EdDSA),
-                    key_id: Some(BASE64_URL_SAFE_NO_PAD.encode(key_hash)),
+                    key_id: Some(URL_SAFE_NO_PAD.encode(key_hash)),
                     x509_url: None::<String>,
                     x509_chain: None::<Vec<String>>,
                     x509_sha1_fingerprint: None::<String>,
@@ -180,7 +233,7 @@ impl ComputeControlPlane {
                 algorithm: AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
                     key_type: OctetKeyPairType::OctetKeyPair,
                     curve: EllipticCurve::Ed25519,
-                    x: BASE64_URL_SAFE_NO_PAD.encode(public_key),
+                    x: URL_SAFE_NO_PAD.encode(public_key),
                 }),
             }],
         })

@@ -467,8 +467,9 @@ fn start_pageserver(
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
         info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
 
-        let use_hadron_jwt =
-            conf.http_auth_type == AuthType::HadronJWT || conf.pg_auth_type == AuthType::HadronJWT;
+        let use_hadron_jwt = conf.http_auth_type == AuthType::HadronJWT
+            || conf.pg_auth_type == AuthType::HadronJWT
+            || conf.grpc_auth_type == AuthType::HadronJWT;
 
         let jwt_auth = if use_hadron_jwt {
             // To validate Hadron JWTs we need to extract decoding keys from X509 certificates.

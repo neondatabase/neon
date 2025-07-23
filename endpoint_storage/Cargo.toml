@@ -20,6 +20,7 @@ tokio.workspace = true
 tracing.workspace = true
 utils = { path = "../libs/utils", default-features = false }
 workspace_hack.workspace = true
+postgres_backend.workspace = true
 [dev-dependencies]
 camino-tempfile.workspace = true
 http-body-util.workspace = true

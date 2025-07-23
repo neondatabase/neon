@@ -23,6 +23,18 @@ pub(in crate::http) struct Authorize {
 impl Authorize {
     pub fn new(compute_id: String, jwks: JwkSet) -> Self {
         let mut validation = Validation::new(Algorithm::EdDSA);
+
+        // BEGIN HADRON
+        let use_rsa = jwks.keys.iter().any(|jwk| {
+            jwk.common
+                .key_algorithm
+                .is_some_and(|alg| alg == jsonwebtoken::jwk::KeyAlgorithm::RS256)
+        });
+        if use_rsa {
+            validation = Validation::new(Algorithm::RS256);
+        }
+        // END HADRON
+
         validation.validate_exp = true;
         // Unused by the control plane
         validation.validate_nbf = false;

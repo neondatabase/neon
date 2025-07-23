@@ -618,24 +618,24 @@ impl StorageController {
             if let StorageControllerPrivateKey::HadronPrivateKey(key_path, _) = private_key {
                 args.push(format!("--private-key-path={key_path}"));
             }
-            // We are setting --jwt-token for Hadron as well in this test to avoid bifurcation between Neon and
+            // We are setting all JWT tokens for Hadron as well in this test to avoid bifurcation between Neon and
             // Hadron test cases. In production we do not need to set this as HTTP auth is not enabled on the
             // pageserver. We use network segmentation to ensure that only trusted components can talk to
             // pageserver's http port
             let jwt_token = private_key.encode_token(&claims)?;
             args.push(format!("--jwt-token={jwt_token}"));
 
-            if let StorageControllerPrivateKey::EdPrivateKey(key) = private_key {
-                let peer_claims = Claims::new(None, Scope::Admin);
-                let peer_jwt_token =
-                    encode_from_key_file(&peer_claims, key).expect("failed to generate jwt token");
-                args.push(format!("--peer-jwt-token={peer_jwt_token}"));
+            let peer_claims = Claims::new(None, Scope::Admin);
+            let peer_jwt_token = private_key
+                .encode_token(&peer_claims)
+                .expect("failed to generate jwt token");
+            args.push(format!("--peer-jwt-token={peer_jwt_token}"));
 
-                let claims = Claims::new(None, Scope::SafekeeperData);
-                let jwt_token =
-                    encode_from_key_file(&claims, key).expect("failed to generate jwt token");
-                args.push(format!("--safekeeper-jwt-token={jwt_token}"));
-            }
+            let claims = Claims::new(None, Scope::SafekeeperData);
+            let jwt_token = private_key
+                .encode_token(&claims)
+                .expect("failed to generate jwt token");
+            args.push(format!("--safekeeper-jwt-token={jwt_token}"));
         }
 
         if let Some(public_key) = &self.public_key {
@@ -903,7 +903,7 @@ impl StorageController {
         if let Some(private_key) = &self.private_key {
             println!("Getting claims for path {path}");
             if let Some(required_claims) = Self::get_claims_for_path(&path)? {
-                println!("Got claims {:?} for path {}", required_claims, path);
+                println!("Got claims {required_claims:?} for path {path}");
                 let jwt_token = private_key.encode_token(&required_claims)?;
                 builder = builder.header(
                     reqwest::header::AUTHORIZATION,

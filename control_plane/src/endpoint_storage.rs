@@ -2,6 +2,7 @@ use crate::background_process::{self, start_process, stop_process};
 use crate::local_env::LocalEnv;
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
+use postgres_backend::AuthType;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -16,15 +17,22 @@ pub struct EndpointStorage {
     pub data_dir: Utf8PathBuf,
     pub pemfile: Utf8PathBuf,
     pub addr: SocketAddr,
+    pub auth_type: AuthType,
 }
 
 impl EndpointStorage {
     pub fn from_env(env: &LocalEnv) -> EndpointStorage {
+        let auth_type = match env.token_auth_type {
+            AuthType::HadronJWT => AuthType::HadronJWT,
+            AuthType::NeonJWT | AuthType::Trust => AuthType::NeonJWT,
+        };
+
         EndpointStorage {
             bin: Utf8PathBuf::from_path_buf(env.endpoint_storage_bin()).unwrap(),
             data_dir: Utf8PathBuf::from_path_buf(env.endpoint_storage_data_dir()).unwrap(),
             pemfile: Utf8PathBuf::from_path_buf(env.public_key_path.clone()).unwrap(),
             addr: env.endpoint_storage.listen_addr,
+            auth_type,
         }
     }
 
@@ -46,12 +54,14 @@ impl EndpointStorage {
             pemfile: Utf8PathBuf,
             local_path: Utf8PathBuf,
             r#type: String,
+            auth_type: AuthType,
         }
         let cfg = Cfg {
             listen: self.listen_addr(),
             pemfile: parent.join(self.pemfile.clone()),
             local_path: parent.join(ENDPOINT_STORAGE_REMOTE_STORAGE_DIR),
             r#type: "LocalFs".to_string(),
+            auth_type: self.auth_type,
         };
         std::fs::create_dir_all(self.config_path().parent().unwrap())?;
         std::fs::write(self.config_path(), serde_json::to_string(&cfg)?)
