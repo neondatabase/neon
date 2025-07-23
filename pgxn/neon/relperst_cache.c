@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * relperst_cache.c
- *      Cache to track the relperst of relations
+ *      Cache to track the relpersistence of relations
  *
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
