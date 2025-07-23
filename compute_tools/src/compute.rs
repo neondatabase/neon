@@ -113,6 +113,11 @@ pub struct ComputeNodeParams {
 
     /// Interval for installed extensions collection
     pub installed_extensions_collection_interval: Arc<AtomicU64>,
+
+    /// Timeout of PG compute startup in the Init state.
+    pub pg_init_timeout: Option<Duration>,
+
+    pub lakebase_mode: bool,
 }
 
 type TaskHandle = Mutex<Option<JoinHandle<()>>>;
@@ -154,6 +159,7 @@ pub struct RemoteExtensionMetrics {
 #[derive(Clone, Debug)]
 pub struct ComputeState {
     pub start_time: DateTime<Utc>,
+    pub pg_start_time: Option<DateTime<Utc>>,
     pub status: ComputeStatus,
     /// Timestamp of the last Postgres activity. It could be `None` if
     /// compute wasn't used since start.
@@ -191,6 +197,7 @@ impl ComputeState {
     pub fn new() -> Self {
         Self {
             start_time: Utc::now(),
+            pg_start_time: None,
             status: ComputeStatus::Empty,
             last_active: None,
             error: None,
@@ -647,6 +654,9 @@ impl ComputeNode {
                 }
             };
             _this_entered = start_compute_span.enter();
+
+            // Hadron: Record postgres start time (used to enforce pg_init_timeout).
+            state_guard.pg_start_time.replace(Utc::now());
 
             state_guard.set_status(ComputeStatus::Init, &self.state_changed);
             compute_state = state_guard.clone()
@@ -1441,7 +1451,7 @@ impl ComputeNode {
         })?;
 
         // Update pg_hba.conf received with basebackup.
-        update_pg_hba(pgdata_path)?;
+        update_pg_hba(pgdata_path, None)?;
 
         // Place pg_dynshmem under /dev/shm. This allows us to use
         // 'dynamic_shared_memory_type = mmap' so that the files are placed in
@@ -1746,6 +1756,7 @@ impl ComputeNode {
         }
 
         // Run migrations separately to not hold up cold starts
+        let lakebase_mode = self.params.lakebase_mode;
         let params = self.params.clone();
         tokio::spawn(async move {
             let mut conf = conf.as_ref().clone();
@@ -1758,7 +1769,7 @@ impl ComputeNode {
                             eprintln!("connection error: {e}");
                         }
                     });
-                    if let Err(e) = handle_migrations(params, &mut client).await {
+                    if let Err(e) = handle_migrations(params, &mut client, lakebase_mode).await {
                         error!("Failed to run migrations: {}", e);
                     }
                 }
@@ -2450,14 +2461,31 @@ LIMIT 100",
     pub fn spawn_lfc_offload_task(self: &Arc<Self>, interval: Duration) {
         self.terminate_lfc_offload_task();
         let secs = interval.as_secs();
-        info!("spawning lfc offload worker with {secs}s interval");
         let this = self.clone();
+
+        info!("spawning LFC offload worker with {secs}s interval");
         let handle = spawn(async move {
             let mut interval = time::interval(interval);
             interval.tick().await; // returns immediately
             loop {
                 interval.tick().await;
-                this.offload_lfc_async().await;
+
+                let prewarm_state = this.state.lock().unwrap().lfc_prewarm_state.clone();
+                // Do not offload LFC state if we are currently prewarming or any issue occurred.
+                // If we'd do that, we might override the LFC state in endpoint storage with some
+                // incomplete state. Imagine a situation:
+                // 1. Endpoint started with `autoprewarm: true`
+                // 2. While prewarming is not completed, we upload the new incomplete state
+                // 3. Compute gets interrupted and restarts
+                // 4. We start again and try to prewarm with the state from 2. instead of the previous complete state
+                if matches!(
+                    prewarm_state,
+                    LfcPrewarmState::Completed
+                        | LfcPrewarmState::NotPrewarmed
+                        | LfcPrewarmState::Skipped
+                ) {
+                    this.offload_lfc_async().await;
+                }
             }
         });
         *self.lfc_offload_task.lock().unwrap() = Some(handle);

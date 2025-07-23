@@ -195,6 +195,8 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         enable_pull_timeline_on_startup: false,
         advertise_pg_addr_tenant_only: None,
         hcc_base_url: None,
+        global_disk_check_interval: Duration::from_secs(10),
+        max_global_disk_usage_ratio: 0.0,
         /* END_HADRON */
     };
 

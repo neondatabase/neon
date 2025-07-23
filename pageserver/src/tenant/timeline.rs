@@ -287,7 +287,7 @@ pub struct Timeline {
     ancestor_lsn: Lsn,
 
     // The LSN of gc-compaction that was last applied to this timeline.
-    gc_compaction_state: ArcSwap<Option<GcCompactionState>>,
+    gc_compaction_state: ArcSwapOption<GcCompactionState>,
 
     pub(crate) metrics: Arc<TimelineMetrics>,
 
@@ -441,14 +441,18 @@ pub struct Timeline {
     /// heatmap on demand.
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
 
-    pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
+    pub(crate) rel_size_v2_status: ArcSwap<(Option<RelSizeMigration>, Option<Lsn>)>,
 
     wait_lsn_log_slow: tokio::sync::Semaphore,
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
+    #[expect(dead_code)]
     feature_resolver: Arc<TenantFeatureResolver>,
+
+    /// Basebackup will collect the count and store it here. Used for reldirv2 rollout.
+    pub(crate) db_rel_count: ArcSwapOption<(usize, usize)>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -939,6 +943,20 @@ pub(crate) struct CompactOptions {
     /// Set job size for the GC compaction.
     /// This option is only used by GC compaction.
     pub sub_compaction_max_job_size_mb: Option<u64>,
+    /// Only for GC compaction.
+    /// If set, the compaction will compact the metadata layers. Should be only set to true in unit tests
+    /// because metadata compaction is not fully supported yet.
+    pub gc_compaction_do_metadata_compaction: bool,
+}
+
+impl CompactOptions {
+    #[cfg(test)]
+    pub fn default_for_gc_compaction_unit_tests() -> Self {
+        Self {
+            gc_compaction_do_metadata_compaction: true,
+            ..Default::default()
+        }
+    }
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1310,6 +1328,9 @@ impl Timeline {
     ///
     /// This naive implementation will be replaced with a more efficient one
     /// which actually vectorizes the read path.
+    ///
+    /// NB: the read path must be cancellation-safe. The Tonic gRPC service will drop the future
+    /// if the client goes away (e.g. due to timeout or cancellation).
     pub(crate) async fn get_vectored(
         &self,
         query: VersionedKeySpaceQuery,
@@ -2185,6 +2206,7 @@ impl Timeline {
                     compact_lsn_range: None,
                     sub_compaction: false,
                     sub_compaction_max_job_size_mb: None,
+                    gc_compaction_do_metadata_compaction: false,
                 },
                 ctx,
             )
@@ -2808,7 +2830,7 @@ impl Timeline {
                 if r.numerator == 0 {
                     false
                 } else {
-                    rand::thread_rng().gen_range(0..r.denominator) < r.numerator
+                    rand::rng().random_range(0..r.denominator) < r.numerator
                 }
             }
             None => false,
@@ -2872,12 +2894,9 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled)
     }
 
-    pub(crate) fn get_rel_size_v2_status(&self) -> RelSizeMigration {
-        self.rel_size_v2_status
-            .load()
-            .as_ref()
-            .map(|s| s.as_ref().clone())
-            .unwrap_or(RelSizeMigration::Legacy)
+    pub(crate) fn get_rel_size_v2_status(&self) -> (RelSizeMigration, Option<Lsn>) {
+        let (status, migrated_at) = self.rel_size_v2_status.load().as_ref().clone();
+        (status.unwrap_or(RelSizeMigration::Legacy), migrated_at)
     }
 
     fn get_compaction_upper_limit(&self) -> usize {
@@ -3152,6 +3171,7 @@ impl Timeline {
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
         rel_size_v2_status: Option<RelSizeMigration>,
+        rel_size_migrated_at: Option<Lsn>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -3218,7 +3238,7 @@ impl Timeline {
                 }),
                 disk_consistent_lsn: AtomicLsn::new(disk_consistent_lsn.0),
 
-                gc_compaction_state: ArcSwap::new(Arc::new(gc_compaction_state)),
+                gc_compaction_state: ArcSwapOption::from_pointee(gc_compaction_state),
 
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
@@ -3316,13 +3336,18 @@ impl Timeline {
 
                 heatmap_layers_downloader: Mutex::new(None),
 
-                rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
+                rel_size_v2_status: ArcSwap::from_pointee((
+                    rel_size_v2_status,
+                    rel_size_migrated_at,
+                )),
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
 
                 basebackup_cache: resources.basebackup_cache,
 
                 feature_resolver: resources.feature_resolver.clone(),
+
+                db_rel_count: ArcSwapOption::from_pointee(None),
             };
 
             result.repartition_threshold =
@@ -3394,7 +3419,7 @@ impl Timeline {
         gc_compaction_state: GcCompactionState,
     ) -> anyhow::Result<()> {
         self.gc_compaction_state
-            .store(Arc::new(Some(gc_compaction_state.clone())));
+            .store(Some(Arc::new(gc_compaction_state.clone())));
         self.remote_client
             .schedule_index_upload_for_gc_compaction_state_update(gc_compaction_state)
     }
@@ -3402,15 +3427,24 @@ impl Timeline {
     pub(crate) fn update_rel_size_v2_status(
         &self,
         rel_size_v2_status: RelSizeMigration,
+        rel_size_migrated_at: Option<Lsn>,
     ) -> anyhow::Result<()> {
-        self.rel_size_v2_status
-            .store(Some(Arc::new(rel_size_v2_status.clone())));
+        self.rel_size_v2_status.store(Arc::new((
+            Some(rel_size_v2_status.clone()),
+            rel_size_migrated_at,
+        )));
         self.remote_client
-            .schedule_index_upload_for_rel_size_v2_status_update(rel_size_v2_status)
+            .schedule_index_upload_for_rel_size_v2_status_update(
+                rel_size_v2_status,
+                rel_size_migrated_at,
+            )
     }
 
     pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {
-        self.gc_compaction_state.load_full().as_ref().clone()
+        self.gc_compaction_state
+            .load()
+            .as_ref()
+            .map(|x| x.as_ref().clone())
     }
 
     /// Creates and starts the wal receiver.
@@ -3890,7 +3924,7 @@ impl Timeline {
                                 // 1hour base
                                 (60_i64 * 60_i64)
                                     // 10min jitter
-                                    + rand::thread_rng().gen_range(-10 * 60..10 * 60),
+                                    + rand::rng().random_range(-10 * 60..10 * 60),
                             )
                             .expect("10min < 1hour"),
                         );

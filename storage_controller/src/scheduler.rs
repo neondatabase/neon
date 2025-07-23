@@ -981,7 +981,7 @@ mod tests {
     use pageserver_api::models::utilization::test_utilization;
     use pageserver_api::shard::ShardIdentity;
     use utils::id::TenantId;
-    use utils::shard::{ShardCount, ShardNumber, TenantShardId};
+    use utils::shard::{ShardCount, ShardNumber, ShardStripeSize, TenantShardId};
 
     use super::*;
     use crate::tenant_shard::IntentState;
@@ -1337,7 +1337,7 @@ mod tests {
             let shard_identity = ShardIdentity::new(
                 tenant_shard_id.shard_number,
                 tenant_shard_id.shard_count,
-                pageserver_api::shard::ShardStripeSize(1),
+                ShardStripeSize(1),
             )
             .unwrap();
             let mut shard = TenantShard::new(
@@ -1411,7 +1411,7 @@ mod tests {
             let shard_identity = ShardIdentity::new(
                 tenant_shard_id.shard_number,
                 tenant_shard_id.shard_count,
-                pageserver_api::shard::ShardStripeSize(1),
+                ShardStripeSize(1),
             )
             .unwrap();
             let mut shard = TenantShard::new(
@@ -1573,7 +1573,7 @@ mod tests {
         let shard_identity = ShardIdentity::new(
             tenant_shard_id.shard_number,
             tenant_shard_id.shard_count,
-            pageserver_api::shard::ShardStripeSize(1),
+            ShardStripeSize(1),
         )
         .unwrap();
         // 1 attached and 1 secondary.

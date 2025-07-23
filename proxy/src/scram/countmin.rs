@@ -86,11 +86,11 @@ mod tests {
 
         for _ in 0..n {
             // number to insert at once
-            let n = rng.gen_range(1..4096);
+            let n = rng.random_range(1..4096);
             // number of insert operations
-            let m = rng.gen_range(1..100);
+            let m = rng.random_range(1..100);
 
-            let id = uuid::Builder::from_random_bytes(rng.r#gen()).into_uuid();
+            let id = uuid::Builder::from_random_bytes(rng.random()).into_uuid();
             ids.push((id, n, m));
 
             // N = sum(actual)
@@ -140,8 +140,8 @@ mod tests {
         // probably numbers are too small to truly represent the probabilities.
         assert_eq!(eval_precision(100, 4096.0, 0.90), 100);
         assert_eq!(eval_precision(1000, 4096.0, 0.90), 1000);
-        assert_eq!(eval_precision(100, 4096.0, 0.1), 96);
-        assert_eq!(eval_precision(1000, 4096.0, 0.1), 988);
+        assert_eq!(eval_precision(100, 4096.0, 0.1), 100);
+        assert_eq!(eval_precision(1000, 4096.0, 0.1), 978);
     }
 
     // returns memory usage in bytes, and the time complexity per insert.
