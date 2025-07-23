@@ -53,11 +53,6 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     /// Local File Cache, relation size tracking, last-written LSN tracking
     pub(crate) cache: IntegratedCacheWriteAccess<'a>,
 
-    /*** Static configuration ***/
-    /// Stripe size doesn't change after startup. (The shard map is not stored here, it's passed
-    /// directly to the client)
-    stripe_size: Option<ShardStripeSize>,
-
     /*** Metrics ***/
     pub(crate) lfc_metrics: LfcMetricsCollector,
 
@@ -157,7 +152,6 @@ pub(super) fn init(
         // Note: it's important to not drop the runtime, or all the tasks are dropped
         // too. Including it in the returned struct is one way to keep it around.
         runtime,
-        stripe_size,
         neon_request_slots: cis.neon_request_slots,
         client,
         cache,
@@ -199,10 +193,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     pub(super) fn update_shard_map(
         &self,
         new_shard_map: HashMap<utils::shard::ShardIndex, String>,
+        stripe_size: Option<ShardStripeSize>,
     ) {
         let client = self.client.as_ref().unwrap();
-        let shard_spec =
-            ShardSpec::new(new_shard_map, self.stripe_size).expect("invalid shard spec");
+        let shard_spec = ShardSpec::new(new_shard_map, stripe_size).expect("invalid shard spec");
 
         {
             let _in_runtime = self.runtime.enter();
