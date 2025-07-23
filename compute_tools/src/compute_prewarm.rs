@@ -114,7 +114,7 @@ impl ComputeNode {
                     crate::metrics::LFC_PREWARM_ERRORS.inc();
                     error!(%err, "could not prewarm LFC");
                     LfcPrewarmState::Failed {
-                        error: format!("{:#}", err),
+                        error: format!("{err:#}"),
                     }
                 }
             };
@@ -209,7 +209,7 @@ impl ComputeNode {
         crate::metrics::LFC_OFFLOAD_ERRORS.inc();
         error!(%err, "could not offload LFC state to endpoint storage");
         self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
-            error: format!("{:#}", err),
+            error: format!("{err:#}"),
         };
     }
 

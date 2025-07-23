@@ -23,7 +23,7 @@ impl ComputeNode {
             };
             tracing::error!(%err, "promoting");
             PromoteState::Failed {
-                error: format!("{:#}", err),
+                error: format!("{err:#}"),
             }
         };
 
