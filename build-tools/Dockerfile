@@ -12,8 +12,8 @@ ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 #       -I | grep -i docker-content-digest
 # 3. As a next step, TODO(fedordikarev): create script and schedule workflow to run these checks
 #    and updates on regular bases and in automated way.
-ARG BOOKWORM_SLIM_SHA=sha256:40b107342c492725bc7aacbe93a49945445191ae364184a6d24fedb28172f6f7
-ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
+ARG BOOKWORM_SLIM_SHA=sha256:2424c1850714a4d94666ec928e24d86de958646737b1d113f5b2207be44d37d8
+ARG BULLSEYE_SLIM_SHA=sha256:c2c58af6e3ceeb3ed40adba85d24cfa62b7432091597ada9b76b56a51b62f4c6
 
 # Here we use ${var/search/replace} syntax, to check
 # if base image is one of the images, we pin image index for.

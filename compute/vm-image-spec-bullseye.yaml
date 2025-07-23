@@ -101,7 +101,7 @@ build: |
   # At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
   # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
   # requires cgroup v2, so we'll build cgroup-tools ourselves.
-  ARG BULLSEYE_SLIM_SHA=sha256:e831d9a884d63734fe3dd9c491ed9a5a3d4c6a6d32c5b14f2067357c49b0b7e1
+  ARG BULLSEYE_SLIM_SHA=sha256:c2c58af6e3ceeb3ed40adba85d24cfa62b7432091597ada9b76b56a51b62f4c6
   FROM debian@$BULLSEYE_SLIM_SHA as libcgroup-builder
   ENV LIBCGROUP_VERSION=v2.0.3
 
