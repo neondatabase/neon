@@ -723,6 +723,9 @@ impl Timeline {
                             v2_exists
                         );
                     }
+                    Err(e) if e.is_cancel() => {
+                        // Cancellation errors are fine to ignore, do not log.
+                    }
                     Err(e) => {
                         tracing::warn!("failed to get rel exists in v2: {e}");
                     }
@@ -862,6 +865,9 @@ impl Timeline {
                             rels_v1.len(),
                             rels_v2.len()
                         );
+                    }
+                    Err(e) if e.is_cancel() => {
+                        // Cancellation errors are fine to ignore, do not log.
                     }
                     Err(e) => {
                         tracing::warn!("failed to list rels in v2: {e}");
@@ -2599,6 +2605,12 @@ impl DatadirModification<'_> {
                                 dropped_rels_v2.len()
                             );
                         }
+                    }
+                    Err(WalIngestError {
+                        kind: WalIngestErrorKind::Cancelled,
+                        ..
+                    }) => {
+                        // Cancellation errors are fine to ignore, do not log.
                     }
                     Err(e) => {
                         tracing::warn!("error dropping rels: {}", e);

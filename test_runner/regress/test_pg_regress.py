@@ -123,9 +123,9 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
 def patch_tenant_conf(tenant_conf: dict[str, Any], reldir_type: str) -> dict[str, Any]:
     tenant_conf = tenant_conf.copy()
     if reldir_type == "v2":
-        tenant_conf["rel_size_v2_enabled"] = "true"
+        tenant_conf["rel_size_v2_enabled"] = True
     else:
-        tenant_conf["rel_size_v2_enabled"] = "false"
+        tenant_conf["rel_size_v2_enabled"] = False
     return tenant_conf
 
 
@@ -439,6 +439,14 @@ def test_tx_abort_with_many_relations(
             "max_locks_per_transaction=16384",
         ],
     )
+
+    if reldir_type == "v2":
+        # v2-only mode instead of v1-v2 validation mode
+        env.pageserver.http_client().timeline_patch_index_part(
+            env.initial_tenant,
+            env.initial_timeline,
+            {"rel_size_migration": "migrated"},
+        )
 
     # How many relations: this number is tuned to be long enough to take tens of seconds
     # if the rollback code path is buggy, tripping the test's timeout.
