@@ -234,7 +234,8 @@ communicator_new_bgworker_main(Datum main_arg)
 				communicator_worker_config_reload(proc_handle,
 												  file_cache_size,
 												  connstrings,
-												  shard_map.num_shards);
+												  shard_map.num_shards,
+												  neon_stripe_size);
 				pfree(connstrings);
 			}
 		}
