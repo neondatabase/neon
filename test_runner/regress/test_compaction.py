@@ -687,7 +687,7 @@ def test_sharding_compaction(
     for _i in range(0, 10):
         # Each of these does some writes then a checkpoint: because we set image_creation_threshold to 1,
         # these should result in image layers each time we write some data into a shard, and also shards
-        # recieving less data hitting their "empty image layer" path (wherre they should skip writing the layer,
+        # receiving less data hitting their "empty image layer" path (where they should skip writing the layer,
         # rather than asserting)
         workload.churn_rows(64)
 

@@ -711,6 +711,9 @@ def test_api_random(
     # To not go to the past where pgbench tables do not exist
     time.sleep(1)
     project.min_time = datetime.now(UTC)
+    # To not go to the past where pgbench tables do not exist
+    time.sleep(1)
+    project.min_time = datetime.now(UTC)
     for _ in range(num_operations):
         log.info("Starting action #%s", _ + 1)
         while not do_action(

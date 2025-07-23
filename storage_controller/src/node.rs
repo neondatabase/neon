@@ -51,6 +51,39 @@ pub(crate) struct Node {
     cancel: CancellationToken,
 }
 
+#[allow(dead_code)]
+const ONE_MILLION: i64 = 1000000;
+
+// Converts a pool ID to a large number that can be used to assign unique IDs to pods in StatefulSets.
+/// For example, if pool_id is 1, then the pods have NodeIds 1000000, 1000001, 1000002, etc.
+/// If pool_id is None, then the pods have NodeIds 0, 1, 2, etc.
+#[allow(dead_code)]
+pub fn transform_pool_id(pool_id: Option<i32>) -> i64 {
+    match pool_id {
+        Some(id) => (id as i64) * ONE_MILLION,
+        None => 0,
+    }
+}
+
+#[allow(dead_code)]
+pub fn get_pool_id_from_node_id(node_id: i64) -> i32 {
+    (node_id / ONE_MILLION) as i32
+}
+
+/// Example pod name: page-server-0-1, safe-keeper-1-0
+#[allow(dead_code)]
+pub fn get_node_id_from_pod_name(pod_name: &str) -> anyhow::Result<NodeId> {
+    let parts: Vec<&str> = pod_name.split('-').collect();
+    if parts.len() != 4 {
+        return Err(anyhow::anyhow!("Invalid pod name: {}", pod_name));
+    }
+    let pool_id = parts[2].parse::<i32>()?;
+    let node_offset = parts[3].parse::<i64>()?;
+    let node_id = transform_pool_id(Some(pool_id)) + node_offset;
+
+    Ok(NodeId(node_id as u64))
+}
+
 /// When updating [`Node::availability`] we use this type to indicate to the caller
 /// whether/how they changed it.
 pub(crate) enum AvailabilityTransition {
@@ -401,5 +434,27 @@ impl std::fmt::Display for Node {
 impl std::fmt::Debug for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({})", self.id, self.listen_http_addr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use utils::id::NodeId;
+
+    use crate::node::get_node_id_from_pod_name;
+
+    #[test]
+    fn test_get_node_id_from_pod_name() {
+        let pod_name = "page-server-3-12";
+        let node_id = get_node_id_from_pod_name(pod_name).unwrap();
+        assert_eq!(node_id, NodeId(3000012));
+
+        let pod_name = "safe-keeper-1-0";
+        let node_id = get_node_id_from_pod_name(pod_name).unwrap();
+        assert_eq!(node_id, NodeId(1000000));
+
+        let pod_name = "invalid-pod-name";
+        let result = get_node_id_from_pod_name(pod_name);
+        assert!(result.is_err());
     }
 }

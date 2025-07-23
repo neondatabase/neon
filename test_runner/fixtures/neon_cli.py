@@ -400,6 +400,7 @@ class NeonLocalCli(AbstractNeonCli):
         timeout_in_seconds: int | None = None,
         instance_id: int | None = None,
         base_port: int | None = None,
+        handle_ps_local_disk_loss: bool | None = None,
     ):
         cmd = ["storage_controller", "start"]
         if timeout_in_seconds is not None:
@@ -408,6 +409,10 @@ class NeonLocalCli(AbstractNeonCli):
             cmd.append(f"--instance-id={instance_id}")
         if base_port is not None:
             cmd.append(f"--base-port={base_port}")
+        if handle_ps_local_disk_loss is not None:
+            cmd.append(
+                f"--handle-ps-local-disk-loss={'true' if handle_ps_local_disk_loss else 'false'}"
+            )
         return self.raw_cli(cmd)
 
     def storage_controller_stop(self, immediate: bool, instance_id: int | None = None):
@@ -503,6 +508,7 @@ class NeonLocalCli(AbstractNeonCli):
         pageserver_id: int | None = None,
         allow_multiple=False,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -534,6 +540,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--allow-multiple"])
         if update_catalog:
             args.extend(["--update-catalog"])
+        if privileged_role_name is not None:
+            args.extend(["--privileged-role-name", privileged_role_name])
 
         res = self.raw_cli(args)
         res.check_returncode()

@@ -407,6 +407,12 @@ struct StorageControllerStartCmdArgs {
         help = "Base port for the storage controller instance idenfified by instance-id (defaults to pageserver cplane api)"
     )]
     base_port: Option<u16>,
+
+    #[clap(
+        long,
+        help = "Whether the storage controller should handle pageserver-reported local disk loss events."
+    )]
+    handle_ps_local_disk_loss: Option<bool>,
 }
 
 #[derive(clap::Args)]
@@ -631,6 +637,10 @@ struct EndpointCreateCmdArgs {
         help = "Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but useful for tests."
     )]
     allow_multiple: bool,
+
+    /// Only allow changing it on creation
+    #[clap(long, help = "Name of the privileged role for the endpoint")]
+    privileged_role_name: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -1480,6 +1490,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 args.grpc,
                 !args.update_catalog,
                 false,
+                args.privileged_role_name.clone(),
             )?;
         }
         EndpointCmd::Start(args) => {
@@ -1804,6 +1815,7 @@ async fn handle_storage_controller(
                 instance_id: args.instance_id,
                 base_port: args.base_port,
                 start_timeout: args.start_timeout,
+                handle_ps_local_disk_loss: args.handle_ps_local_disk_loss,
             };
 
             if let Err(e) = svc.start(start_args).await {

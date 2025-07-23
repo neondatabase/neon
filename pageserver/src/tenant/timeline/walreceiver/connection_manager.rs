@@ -184,7 +184,7 @@ pub(super) async fn connection_manager_loop_step(
 
             // If we've not received any updates from the broker from a while, are waiting for WAL
             // and have no safekeeper connection or connection candidates, then it might be that
-            // the broker subscription is wedged. Drop the currrent subscription and re-subscribe
+            // the broker subscription is wedged. Drop the current subscription and re-subscribe
             // with the goal of unblocking it.
             _ = broker_reset_interval.tick() => {
                 let awaiting_lsn = wait_lsn_status.borrow().is_some();
@@ -192,7 +192,7 @@ pub(super) async fn connection_manager_loop_step(
                 let no_connection = connection_manager_state.wal_connection.is_none();
 
                 if awaiting_lsn && no_candidates && no_connection {
-                    tracing::warn!("No broker updates received for a while, but waiting for WAL. Re-setting stream ...");
+                    tracing::info!("No broker updates received for a while, but waiting for WAL. Re-setting stream ...");
                     broker_subscription = subscribe_for_timeline_updates(broker_client, id, cancel).await?;
                 }
             },

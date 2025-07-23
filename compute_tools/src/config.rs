@@ -9,6 +9,7 @@ use std::path::Path;
 use compute_api::responses::TlsConfig;
 use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
 
+use crate::compute::ComputeNodeParams;
 use crate::pg_helpers::{
     GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
 };
@@ -41,6 +42,7 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
 /// Create or completely rewrite configuration file specified by `path`
 pub fn write_postgres_conf(
     pgdata_path: &Path,
+    params: &ComputeNodeParams,
     spec: &ComputeSpec,
     extension_server_port: u16,
     tls_config: &Option<TlsConfig>,
@@ -54,13 +56,14 @@ pub fn write_postgres_conf(
         writeln!(file, "{conf}")?;
     }
 
+    // Stripe size GUC should be defined prior to connection string
+    if let Some(stripe_size) = spec.shard_stripe_size {
+        writeln!(file, "neon.stripe_size={stripe_size}")?;
+    }
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
     if let Some(s) = &spec.pageserver_connstring {
         writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
-    }
-    if let Some(stripe_size) = spec.shard_stripe_size {
-        writeln!(file, "neon.stripe_size={stripe_size}")?;
     }
     if !spec.safekeeper_connstrings.is_empty() {
         let mut neon_safekeepers_value = String::new();
@@ -160,6 +163,12 @@ pub fn write_postgres_conf(
             writeln!(file, "{}", opt.to_pg_setting())?;
         }
     }
+
+    writeln!(
+        file,
+        "neon.privileged_role_name={}",
+        escape_conf_value(params.privileged_role_name.as_str())
+    )?;
 
     // If there are any extra options in the 'settings' field, append those
     if spec.cluster.settings.is_some() {

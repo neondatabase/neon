@@ -13,14 +13,14 @@ use tokio_postgres::Client;
 use tokio_postgres::error::SqlState;
 use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 
-use crate::compute::{ComputeNode, ComputeState};
+use crate::compute::{ComputeNode, ComputeNodeParams, ComputeState};
 use crate::pg_helpers::{
     DatabaseExt, Escaping, GenericOptionsSearch, RoleExt, get_existing_dbs_async,
     get_existing_roles_async,
 };
 use crate::spec_apply::ApplySpecPhase::{
-    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreateNeonSuperuser,
-    CreatePgauditExtension, CreatePgauditlogtofileExtension, CreateSchemaNeon,
+    CreateAndAlterDatabases, CreateAndAlterRoles, CreateAvailabilityCheck, CreatePgauditExtension,
+    CreatePgauditlogtofileExtension, CreatePrivilegedRole, CreateSchemaNeon,
     DisablePostgresDBPgAudit, DropInvalidDatabases, DropRoles, FinalizeDropLogicalSubscriptions,
     HandleNeonExtension, HandleOtherExtensions, RenameAndDeleteDatabases, RenameRoles,
     RunInEachDatabase,
@@ -49,6 +49,7 @@ impl ComputeNode {
             // Proceed with post-startup configuration. Note, that order of operations is important.
             let client = Self::get_maintenance_client(&conf).await?;
             let spec = spec.clone();
+            let params = Arc::new(self.params.clone());
 
             let databases = get_existing_dbs_async(&client).await?;
             let roles = get_existing_roles_async(&client)
@@ -157,6 +158,7 @@ impl ComputeNode {
 
                     let conf = Arc::new(conf);
                     let fut = Self::apply_spec_sql_db(
+                        params.clone(),
                         spec.clone(),
                         conf,
                         ctx.clone(),
@@ -185,7 +187,7 @@ impl ComputeNode {
             }
 
             for phase in [
-                CreateNeonSuperuser,
+                CreatePrivilegedRole,
                 DropInvalidDatabases,
                 RenameRoles,
                 CreateAndAlterRoles,
@@ -195,6 +197,7 @@ impl ComputeNode {
             ] {
                 info!("Applying phase {:?}", &phase);
                 apply_operations(
+                    params.clone(),
                     spec.clone(),
                     ctx.clone(),
                     jwks_roles.clone(),
@@ -243,6 +246,7 @@ impl ComputeNode {
                     }
 
                     let fut = Self::apply_spec_sql_db(
+                        params.clone(),
                         spec.clone(),
                         conf,
                         ctx.clone(),
@@ -293,6 +297,7 @@ impl ComputeNode {
             for phase in phases {
                 debug!("Applying phase {:?}", &phase);
                 apply_operations(
+                    params.clone(),
                     spec.clone(),
                     ctx.clone(),
                     jwks_roles.clone(),
@@ -313,7 +318,9 @@ impl ComputeNode {
     /// May opt to not connect to databases that don't have any scheduled
     /// operations.  The function is concurrency-controlled with the provided
     /// semaphore.  The caller has to make sure the semaphore isn't exhausted.
+    #[allow(clippy::too_many_arguments)] // TODO: needs bigger refactoring
     async fn apply_spec_sql_db(
+        params: Arc<ComputeNodeParams>,
         spec: Arc<ComputeSpec>,
         conf: Arc<tokio_postgres::Config>,
         ctx: Arc<tokio::sync::RwLock<MutableApplyContext>>,
@@ -328,6 +335,7 @@ impl ComputeNode {
 
         for subphase in subphases {
             apply_operations(
+                params.clone(),
                 spec.clone(),
                 ctx.clone(),
                 jwks_roles.clone(),
@@ -403,7 +411,8 @@ impl ComputeNode {
             .map(|limit| match limit {
                 0..10 => limit,
                 10..30 => 10,
-                30.. => limit / 3,
+                30..300 => limit / 3,
+                300.. => 100,
             })
             // If we didn't find max_connections, default to 10 concurrent connections.
             .unwrap_or(10)
@@ -467,7 +476,7 @@ pub enum PerDatabasePhase {
 
 #[derive(Clone, Debug)]
 pub enum ApplySpecPhase {
-    CreateNeonSuperuser,
+    CreatePrivilegedRole,
     DropInvalidDatabases,
     RenameRoles,
     CreateAndAlterRoles,
@@ -510,6 +519,7 @@ pub struct MutableApplyContext {
 /// - No timeouts have (yet) been implemented.
 /// - The caller is responsible for limiting and/or applying concurrency.
 pub async fn apply_operations<'a, Fut, F>(
+    params: Arc<ComputeNodeParams>,
     spec: Arc<ComputeSpec>,
     ctx: Arc<RwLock<MutableApplyContext>>,
     jwks_roles: Arc<HashSet<String>>,
@@ -527,7 +537,7 @@ where
         debug!("Processing phase {:?}", &apply_spec_phase);
         let ctx = ctx;
 
-        let mut ops = get_operations(&spec, &ctx, &jwks_roles, &apply_spec_phase)
+        let mut ops = get_operations(&params, &spec, &ctx, &jwks_roles, &apply_spec_phase)
             .await?
             .peekable();
 
@@ -588,14 +598,18 @@ where
 /// sort/merge/batch execution, but for now this is a nice way to improve
 /// batching behavior of the commands.
 async fn get_operations<'a>(
+    params: &'a ComputeNodeParams,
     spec: &'a ComputeSpec,
     ctx: &'a RwLock<MutableApplyContext>,
     jwks_roles: &'a HashSet<String>,
     apply_spec_phase: &'a ApplySpecPhase,
 ) -> Result<Box<dyn Iterator<Item = Operation> + 'a + Send>> {
     match apply_spec_phase {
-        ApplySpecPhase::CreateNeonSuperuser => Ok(Box::new(once(Operation {
-            query: include_str!("sql/create_neon_superuser.sql").to_string(),
+        ApplySpecPhase::CreatePrivilegedRole => Ok(Box::new(once(Operation {
+            query: format!(
+                include_str!("sql/create_privileged_role.sql"),
+                privileged_role_name = params.privileged_role_name
+            ),
             comment: None,
         }))),
         ApplySpecPhase::DropInvalidDatabases => {
@@ -697,8 +711,9 @@ async fn get_operations<'a>(
                         None => {
                             let query = if !jwks_roles.contains(role.name.as_str()) {
                                 format!(
-                                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser {}",
+                                    "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE {} {}",
                                     role.name.pg_quote(),
+                                    params.privileged_role_name,
                                     role.to_pg_options(),
                                 )
                             } else {
@@ -849,8 +864,9 @@ async fn get_operations<'a>(
                                 // ALL PRIVILEGES grants CREATE, CONNECT, and TEMPORARY on the database
                                 // (see https://www.postgresql.org/docs/current/ddl-priv.html)
                                 query: format!(
-                                    "GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser",
-                                    db.name.pg_quote()
+                                    "GRANT ALL PRIVILEGES ON DATABASE {} TO {}",
+                                    db.name.pg_quote(),
+                                    params.privileged_role_name
                                 ),
                                 comment: None,
                             },

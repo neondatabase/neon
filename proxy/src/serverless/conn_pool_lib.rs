@@ -428,7 +428,7 @@ where
         loop {
             interval.tick().await;
 
-            let shard = rng.gen_range(0..self.global_pool.shards().len());
+            let shard = rng.random_range(0..self.global_pool.shards().len());
             self.gc(shard);
         }
     }

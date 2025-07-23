@@ -873,6 +873,22 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    pub async fn reset_alert_gauges(&self) -> Result<()> {
+        let uri = format!(
+            "{}/hadron-internal/reset_alert_gauges",
+            self.mgmt_api_endpoint
+        );
+        self.start_request(Method::POST, uri)
+            .send()
+            .await
+            .map_err(Error::SendRequest)?
+            .error_from_body()
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn wait_lsn(
         &self,
         tenant_shard_id: TenantShardId,

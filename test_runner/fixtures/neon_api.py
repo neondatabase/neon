@@ -24,6 +24,7 @@ def connection_parameters_to_env(params: dict[str, str]) -> dict[str, str]:
 
 # Some API calls not yet implemented.
 # You may want to copy not-yet-implemented methods from the PR https://github.com/neondatabase/neon/pull/11305
+@final
 class NeonAPI:
     def __init__(self, neon_api_key: str, neon_api_base_url: str):
         self.__neon_api_key = neon_api_key
@@ -171,7 +172,7 @@ class NeonAPI:
         protected: bool | None = None,
         archived: bool | None = None,
         init_source: str | None = None,
-        add_endpoint=True,
+        add_endpoint: bool = True,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {}
         if add_endpoint:
