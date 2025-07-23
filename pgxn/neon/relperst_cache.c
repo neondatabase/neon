@@ -125,7 +125,8 @@ get_pinned_entry(NRelFileInfo rinfo)
 	{
 		if (dlist_is_empty(&relperst_ctl->lru))
 		{
-			neon_log(PANIC, "Not unpinned relperst entries");
+			/* Cannot happen, because we size the hash table to be large enough for the worst case */
+			neon_log(PANIC, "No unpinned relperst entries");
 		}
 		else
 		{
