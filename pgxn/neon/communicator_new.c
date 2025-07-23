@@ -86,6 +86,10 @@ typedef struct CommunicatorShmemPerBackendData
 	 */
 	uint64		request_counter;
 
+	/* Counters, for metrics. */
+	uint64		cache_misses;
+	uint64		cache_hits;
+
 	/*
 	 * Normally, when reading or writing pages from shared buffer cache, the
 	 * worker process can operate directly on the shared buffer. But when
@@ -122,7 +126,8 @@ typedef struct CommunicatorShmemData
 
 static CommunicatorShmemData *communicator_shmem_ptr;
 
-#define MyIOCompletionLatch (&communicator_shmem_ptr->backends[MyProcNumber].io_completion_latch)
+static CommunicatorShmemPerBackendData *my_per_backend_data;
+#define MyIOCompletionLatch (&my_per_backend_data->io_completion_latch)
 
 #define MAX_INFLIGHT_ASYNC_REQUESTS 5
 
@@ -307,6 +312,8 @@ communicator_new_init(void)
 	/* The communicator process performs different initialization */
 	if (MyBgworkerEntry && strcmp(MyBgworkerEntry->bgw_function_name, "communicator_new_bgworker_main") == 0)
 		return;
+
+	my_per_backend_data = &communicator_shmem_ptr->backends[MyProcNumber];
 
 	OwnLatch(MyIOCompletionLatch);
 
@@ -753,6 +760,7 @@ retry:
 		}
 
 		pgBufferUsage.file_cache.hits += nblocks;
+		my_per_backend_data->cache_hits += nblocks;
 
 		return;
 	}
@@ -768,6 +776,7 @@ retry:
 	 * as a cache miss.
 	 */
 	pgBufferUsage.file_cache.misses += nblocks;
+	my_per_backend_data->cache_misses += nblocks;
 
 	wait_request_completion(request_idx, &result);
 	Assert(num_inflight_requests == 1);
@@ -1363,7 +1372,42 @@ communicator_new_approximate_working_set_size_seconds(time_t duration, bool rese
 LfcStatsEntry *
 communicator_new_get_lfc_stats(uint32 *num_entries)
 {
-	// TODO
-	*num_entries = 0;
-	return NULL;
+	LfcStatsEntry *entries;
+	int			n = 0;
+	uint64		cache_misses = 0;
+	uint64		cache_hits = 0;
+
+	for (int i = 0; i < MaxProcs; i++)
+	{
+		cache_misses += communicator_shmem_ptr->backends[i].cache_misses;
+		cache_hits += communicator_shmem_ptr->backends[i].cache_hits;
+	}
+
+#define NUM_ENTRIES 10
+	entries = palloc(sizeof(LfcStatsEntry) * NUM_ENTRIES);
+
+	entries[n++] = (LfcStatsEntry) {"file_cache_misses", false, cache_misses};
+	entries[n++] = (LfcStatsEntry) {"file_cache_hits", false, cache_hits };
+
+	entries[n++] = (LfcStatsEntry) {"file_cache_used_pages", false,
+									bcomm_cache_get_num_pages_used(my_bs) };
+
+	/* TODO: these stats are exposed by the legacy LFC implementation */
+#if 0
+	entries[n++] = (LfcStatsEntry) {"file_cache_used", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->used : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_writes", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->writes : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_size", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->size : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_evicted_pages", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->evicted_pages : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_limit", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->limit : 0 };
+#endif
+
+	Assert(n <= NUM_ENTRIES);
+
+	*num_entries = n;
+	return entries;
 }

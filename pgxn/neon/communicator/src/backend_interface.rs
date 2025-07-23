@@ -252,6 +252,14 @@ pub unsafe extern "C" fn bcomm_cache_iterate_next(
     }
 }
 
+#[allow(clippy::missing_safety_doc)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bcomm_cache_get_num_pages_used(
+    bs: &mut CommunicatorBackendStruct,
+) -> u64 {
+    bs.integrated_cache.get_num_buckets_in_use() as u64
+}
+
 impl<'t> CommunicatorBackendStruct<'t> {
     /// The slot must be free, or this panics.
     pub(crate) fn start_neon_io_request(&mut self, request_slot_idx: i32, request: &NeonIORequest) {

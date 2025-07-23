@@ -759,6 +759,10 @@ impl<'t> IntegratedCacheReadAccess<'t> {
             Some((key, _)) => GetBucketResult::Occupied(key.rel, key.block_number),
         }
     }
+
+    pub fn get_num_buckets_in_use(&self) -> usize {
+        self.block_map.get_num_buckets_in_use()
+    }
 }
 
 pub struct BackendCacheReadOp<'t> {

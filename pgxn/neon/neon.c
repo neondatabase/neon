@@ -735,6 +735,7 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 		Datum		values[NUM_NEON_GET_STATS_COLS];
 		bool		nulls[NUM_NEON_GET_STATS_COLS];
 
+		nulls[0] = false;
 		values[0] = CStringGetTextDatum(entry->metric_name);
 		nulls[1] = entry->isnull;
 		values[1] = Int64GetDatum(entry->isnull ? 0 : entry->value);
