@@ -53,21 +53,17 @@ struct EndpointInfo {
 type ControlPlaneResult<T> = Result<T, Box<ControlPlaneErrorMessage>>;
 
 impl EndpointInfo {
-    pub(crate) fn get_role_secret_with_ttl(
+    pub(crate) fn get_role_secret(
         &self,
         role_name: RoleNameInt,
-    ) -> Option<(ControlPlaneResult<RoleAccessControl>, Duration)> {
+    ) -> Option<ControlPlaneResult<RoleAccessControl>> {
         let entry = self.role_controls.get(&role_name)?;
-        let ttl = entry.expires_at - Instant::now();
-        Some((entry.get()?.clone(), ttl))
+        Some(entry.get()?.clone())
     }
 
-    pub(crate) fn get_controls_with_ttl(
-        &self,
-    ) -> Option<(ControlPlaneResult<EndpointAccessControl>, Duration)> {
+    pub(crate) fn get_controls(&self) -> Option<ControlPlaneResult<EndpointAccessControl>> {
         let entry = self.controls.as_ref()?;
-        let ttl = entry.expires_at - Instant::now();
-        Some((entry.get()?.clone(), ttl))
+        Some(entry.get()?.clone())
     }
 
     pub(crate) fn invalidate_endpoint(&mut self) {
@@ -169,22 +165,22 @@ impl ProjectInfoCacheImpl {
         self.cache.get(&endpoint_id)
     }
 
-    pub(crate) fn get_role_secret_with_ttl(
+    pub(crate) fn get_role_secret(
         &self,
         endpoint_id: &EndpointId,
         role_name: &RoleName,
-    ) -> Option<(ControlPlaneResult<RoleAccessControl>, Duration)> {
+    ) -> Option<ControlPlaneResult<RoleAccessControl>> {
         let role_name = RoleNameInt::get(role_name)?;
         let endpoint_info = self.get_endpoint_cache(endpoint_id)?;
-        endpoint_info.get_role_secret_with_ttl(role_name)
+        endpoint_info.get_role_secret(role_name)
     }
 
-    pub(crate) fn get_endpoint_access_with_ttl(
+    pub(crate) fn get_endpoint_access(
         &self,
         endpoint_id: &EndpointId,
-    ) -> Option<(ControlPlaneResult<EndpointAccessControl>, Duration)> {
+    ) -> Option<ControlPlaneResult<EndpointAccessControl>> {
         let endpoint_info = self.get_endpoint_cache(endpoint_id)?;
-        endpoint_info.get_controls_with_ttl()
+        endpoint_info.get_controls()
     }
 
     pub(crate) fn insert_endpoint_access(
@@ -423,17 +419,11 @@ mod tests {
             },
         );
 
-        let (cached, ttl) = cache
-            .get_role_secret_with_ttl(&endpoint_id, &user1)
-            .unwrap();
+        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
         assert_eq!(cached.unwrap().secret, secret1);
-        assert_eq!(ttl, cache.config.ttl);
 
-        let (cached, ttl) = cache
-            .get_role_secret_with_ttl(&endpoint_id, &user2)
-            .unwrap();
+        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
         assert_eq!(cached.unwrap().secret, secret2);
-        assert_eq!(ttl, cache.config.ttl);
 
         // Shouldn't add more than 2 roles.
         let user3: RoleName = "user3".into();
@@ -455,25 +445,17 @@ mod tests {
             },
         );
 
-        assert!(
-            cache
-                .get_role_secret_with_ttl(&endpoint_id, &user3)
-                .is_none()
-        );
+        assert!(cache.get_role_secret(&endpoint_id, &user3).is_none());
 
-        let cached = cache
-            .get_endpoint_access_with_ttl(&endpoint_id)
-            .unwrap()
-            .0
-            .unwrap();
+        let cached = cache.get_endpoint_access(&endpoint_id).unwrap().unwrap();
         assert_eq!(cached.allowed_ips, allowed_ips);
 
         tokio::time::advance(Duration::from_secs(2)).await;
-        let cached = cache.get_role_secret_with_ttl(&endpoint_id, &user1);
+        let cached = cache.get_role_secret(&endpoint_id, &user1);
         assert!(cached.is_none());
-        let cached = cache.get_role_secret_with_ttl(&endpoint_id, &user2);
+        let cached = cache.get_role_secret(&endpoint_id, &user2);
         assert!(cached.is_none());
-        let cached = cache.get_endpoint_access_with_ttl(&endpoint_id);
+        let cached = cache.get_endpoint_access(&endpoint_id);
         assert!(cached.is_none());
     }
 
@@ -519,14 +501,9 @@ mod tests {
             status: None,
         });
 
-        let get_role_secret = |endpoint_id, role_name| {
-            cache
-                .get_role_secret_with_ttl(endpoint_id, role_name)
-                .unwrap()
-                .0
-        };
-        let get_endpoint_access =
-            |endpoint_id| cache.get_endpoint_access_with_ttl(endpoint_id).unwrap().0;
+        let get_role_secret =
+            |endpoint_id, role_name| cache.get_role_secret(endpoint_id, role_name).unwrap();
+        let get_endpoint_access = |endpoint_id| cache.get_endpoint_access(endpoint_id).unwrap();
 
         // stores role-specific errors only for get_role_secret
         cache.insert_endpoint_access_err(
@@ -539,7 +516,7 @@ mod tests {
             get_role_secret(&endpoint_id, &user1).unwrap_err().error,
             role_msg.error
         );
-        assert!(cache.get_endpoint_access_with_ttl(&endpoint_id).is_none());
+        assert!(cache.get_endpoint_access(&endpoint_id).is_none());
 
         // stores non-role specific errors for both get_role_secret and get_endpoint_access
         cache.insert_endpoint_access_err(
@@ -558,11 +535,7 @@ mod tests {
         );
 
         // error isn't returned for other roles in the same endpoint
-        assert!(
-            cache
-                .get_role_secret_with_ttl(&endpoint_id, &user2)
-                .is_none()
-        );
+        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
 
         // success for a role does not overwrite errors for other roles
         cache.insert_endpoint_access(

@@ -347,11 +347,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
     ) -> Result<RoleAccessControl, GetAuthInfoError> {
         let key = endpoint.normalize();
 
-        if let Some((role_control, _)) = self
-            .caches
-            .project_info
-            .get_role_secret_with_ttl(&key, role)
-        {
+        if let Some(role_control) = self.caches.project_info.get_role_secret(&key, role) {
             return match role_control {
                 Err(msg) => {
                     info!(key = &*key, "found cached get_role_access_control error");
@@ -380,7 +376,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
     ) -> Result<EndpointAccessControl, GetAuthInfoError> {
         let key = endpoint.normalize();
 
-        if let Some((control, _)) = self.caches.project_info.get_endpoint_access_with_ttl(&key) {
+        if let Some(control) = self.caches.project_info.get_endpoint_access(&key) {
             return match control {
                 Err(msg) => {
                     info!(
@@ -420,8 +416,8 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
 
         macro_rules! check_cache {
             () => {
-                if let Some(cached) = self.caches.node_info.get_with_created_at(&key) {
-                    let (cached, (info, _)) = cached.take_value();
+                if let Some(cached) = self.caches.node_info.get(&key) {
+                    let (cached, info) = cached.take_value();
                     return match info {
                         Err(msg) => {
                             info!(key = &*key, "found cached wake_compute error");
