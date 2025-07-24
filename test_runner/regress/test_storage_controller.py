@@ -3318,7 +3318,7 @@ def test_ps_unavailable_after_delete(
     # Running pageserver CLI init in a separate thread
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         log.info("Restarting tombstoned pageserver...")
-        ps.stop()
+        ps.stop(immediate=True)
         ps_start_fut = executor.submit(lambda: ps.start(await_active=False))
 
         # After deleted pageserver restart, the node count must remain the same
