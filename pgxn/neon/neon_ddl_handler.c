@@ -91,8 +91,6 @@ typedef struct
 	OpType		type;
 } RoleEntry;
 
-static int OtherDdlCommandCount = 0;
-
 /*
  * We keep one of these for each subtransaction in a stack. When a subtransaction
  * commits, we merge the top of the stack into the table below it. It is allocated in the
@@ -104,6 +102,7 @@ typedef struct DdlHashTable
 	size_t		subtrans_level;
 	HTAB	   *db_table;
 	HTAB	   *role_table;
+	int			other_ddl_count;
 } DdlHashTable;
 
 static DdlHashTable RootTable;
@@ -210,12 +209,12 @@ ConstructDeltaMessage()
 		pushJsonbValue(&state, WJB_END_ARRAY, NULL);
 	}
 
-	if (OtherDdlCommandCount > 0)
+	if (RootTable.other_ddl_count > 0)
 	{
 		JsonbValue	other_key, other_value;
 		char		count_str[32];
 
-		snprintf(count_str, sizeof(count_str), "%d", OtherDdlCommandCount);
+		snprintf(count_str, sizeof(count_str), "%d", RootTable.other_ddl_count);
 
 		other_key.type = jbvString;
 		other_key.val.string.val = "other";
@@ -256,7 +255,7 @@ ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
 	if (str->size + nmemb + 1 >= ERROR_SIZE)
 		to_write = ERROR_SIZE - str->size - 1;
 
-	/* Ignore everyrthing past the first ERROR_SIZE bytes */
+	/* Ignore everything past the first ERROR_SIZE bytes */
 	if (to_write == 0)
 		return nmemb;
 	memcpy(str->str + str->size, ptr, to_write);
@@ -367,6 +366,7 @@ InitCurrentDdlTableIfNeeded()
 		new_table->subtrans_level = SubtransLevel;
 		new_table->role_table = NULL;
 		new_table->db_table = NULL;
+		new_table->other_ddl_count = 0;
 		CurrentDdlTable = new_table;
 	}
 }
@@ -514,6 +514,8 @@ MergeTable()
 		}
 		hash_destroy(old_table->role_table);
 	}
+
+	CurrentDdlTable->other_ddl_count += old_table->other_ddl_count;
 }
 
 static void
@@ -559,7 +561,7 @@ NeonXactCallback(XactEvent event, void *arg)
 	}
 	RootTable.role_table = NULL;
 	RootTable.db_table = NULL;
-	OtherDdlCommandCount = 0;
+	RootTable.other_ddl_count = 0;
 	Assert(CurrentDdlTable == &RootTable);
 }
 
@@ -853,7 +855,8 @@ HandleRename(RenameStmt *stmt)
 static void
 HandleOtherDDLCommand()
 {
-	OtherDdlCommandCount++;
+	InitCurrentDdlTableIfNeeded();
+	CurrentDdlTable->other_ddl_count++;
 }
 
 /*
