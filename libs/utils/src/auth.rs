@@ -228,9 +228,9 @@ impl JwtAuth {
 
     /// Create a `JwtAuth` that can decode tokens using RSA public keys in X509 certificates from the given path.
     /// - `cert_path`: the path to a directory or a file containing X509 certificates. If it is a directory, all files
-    ///                under the first level of the directory will be inspected for certificates.
-    /// Returns the `JwtAuth` with the decoding keys extracted from the certificates, or error.
-    /// Used by Hadron.
+    ///   under the first level of the directory will be inspected for certificates.
+    ///   Returns the `JwtAuth` with the decoding keys extracted from the certificates, or error.
+    ///   Used by Hadron.
     pub fn from_cert_path(cert_path: &Utf8Path) -> Result<Self> {
         tracing::info!(
             "Loading public keys in certificates from path: {}",
