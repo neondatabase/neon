@@ -177,6 +177,7 @@ impl Planner {
                 .iter()
                 .map(|db| ((db.spcnode, db.dboid), true))
                 .collect(),
+            rel_dir_migration_status: None,
         })?);
         self.tasks
             .push(ImportSingleKeyTask::new(DBDIR_KEY, dbdir_buf).into());
