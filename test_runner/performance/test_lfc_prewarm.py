@@ -131,9 +131,10 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
     prewarmed_id = ep_prewarmed["id"]
 
     offload_secs = 20
-    test_duration_min = 5
+    test_duration_min = 3
     pgbench_duration = f"-T{test_duration_min * 60}"
-    pgbench_cmd = ["pgbench", "-P10", "-S", "-n", "-c10", pgbench_duration, "-Mprepared"]
+    pgbench_init_cmd = ["pgbench", "-P10", "-n", "-c10", pgbench_duration, "-Mprepared"]
+    pgbench_perf_cmd = pgbench_init_cmd + ["-S"]
     prewarmed_sleep_secs = 180
 
     ordinary_uri = neon_api.get_connection_uri(project_id, ordinary_branch_id, ordinary_id)["uri"]
@@ -143,7 +144,7 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
 
     def bench(endpoint_name, endpoint_id, env):
         log.info(f"Running pgbench for {pgbench_duration}s to warm up the cache")
-        pg_bin.run_capture(pgbench_cmd, env)  # capture useful for debugging
+        pg_bin.run_capture(pgbench_init_cmd, env)  # capture useful for debugging
 
         log.info(f"Initialized {endpoint_name}")
         if endpoint_name == "prewarmed":
@@ -158,7 +159,7 @@ def test_compare_prewarmed_pgbench_perf_benchmark(
         log.info(f"Starting benchmark for {endpoint_name}")
         run_start_timestamp = utc_now_timestamp()
         t0 = timeit.default_timer()
-        out = pg_bin.run_capture(pgbench_cmd, env)
+        out = pg_bin.run_capture(pgbench_perf_cmd, env)
         run_duration = timeit.default_timer() - t0
         run_end_timestamp = utc_now_timestamp()
 

@@ -15,10 +15,8 @@ if TYPE_CHECKING:
 
 
 def connstr_to_env(connstr: str) -> dict[str, str]:
-    # postgresql://neondb_owner:npg_kuv6Rqi1cB@ep-old-silence-w26pxsvz-pooler.us-east-2.aws.neon.build/neondb?sslmode=require'
-    parts = re.split(
-        ":|@|/", connstr.removeprefix("postgresql://").removesuffix("?sslmode=require")
-    )
+    # postgresql://neondb_owner:npg_kuv6Rqi1cB@ep-old-silence-w26pxsvz-pooler.us-east-2.aws.neon.build/neondb?sslmode=require&channel_binding=...'
+    parts = re.split(r":|@|\/|\?", connstr.removeprefix("postgresql://"))
     return {
         "PGUSER": parts[0],
         "PGPASSWORD": parts[1],
