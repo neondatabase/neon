@@ -13,6 +13,7 @@
 
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
@@ -42,6 +43,11 @@ NeonPerfCountersShmemRequest(void)
 }
 
 
+static void
+NeonPerfCountersReset(int code, Datum arg)
+{
+	memset(MyNeonCounters, 0, sizeof(*MyNeonCounters));
+}
 
 void
 NeonPerfCountersShmemInit(void)
@@ -58,6 +64,7 @@ NeonPerfCountersShmemInit(void)
 	{
 		/* shared memory is initialized to zeros, so nothing to do here */
 	}
+	on_shmem_exit(NeonPerfCountersReset, 0);
 }
 
 static inline void
