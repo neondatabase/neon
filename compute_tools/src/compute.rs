@@ -2742,7 +2742,7 @@ LIMIT 100",
                 // 4. We start again and try to prewarm with the state from 2. instead of the previous complete state
                 if matches!(
                     prewarm_state,
-                    LfcPrewarmState::Completed
+                    LfcPrewarmState::Completed { .. }
                         | LfcPrewarmState::NotPrewarmed
                         | LfcPrewarmState::Skipped
                 ) {

@@ -617,9 +617,6 @@ components:
       type: object
       required:
         - status
-        - total
-        - prewarmed
-        - skipped
       properties:
         status:
           description: LFC prewarm status
@@ -637,6 +634,15 @@ components:
         skipped:
           description: Pages processed but not prewarmed
           type: integer
+        state_download_time_ms:
+          description: Time it takes to download LFC state to compute
+          type: integer
+        uncompress_time_ms:
+          description: Time it takes to uncompress LFC state
+          type: integer
+        prewarm_time_ms:
+          description: Time it takes to prewarm LFC state in Postgres
+          type: integer
 
     LfcOffloadState:
       type: object
@@ -650,6 +656,16 @@ components:
         error:
           description: LFC offload error, if any
           type: string
+        state_query_time_ms:
+          description: Time it takes to get LFC state from Postgres
+          type: integer
+        compress_time_ms:
+          description: Time it takes to compress LFC state
+          type: integer
+        state_upload_time_ms:
+          description: Time it takes to upload LFC state to endpoint storage
+          type: integer
+
 
     PromoteState:
       type: object
@@ -663,6 +679,15 @@ components:
         error:
           description: Promote error, if any
           type: string
+        lsn_wait_time_ms:
+          description: Time it takes for secondary to catch up with primary WAL flush LSN
+          type: integer
+        pg_promote_time_ms:
+          description: Time it takes to call pg_promote on secondary
+          type: integer
+        reconfigure_time_ms:
+          description: Time it takes to reconfigure promoted secondary
+          type: integer
 
     SetRoleGrantsRequest:
       type: object
