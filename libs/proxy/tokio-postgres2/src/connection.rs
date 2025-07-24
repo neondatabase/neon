@@ -45,11 +45,10 @@ pub struct Connection<S, T> {
 }
 
 pub const INITIAL_CAPACITY: usize = 2 * 1024;
+pub const GC_THRESHOLD: usize = 16 * 1024;
 
 /// Gargabe collect the [`BytesMut`] if it has too much spare capacity.
 pub fn gc_bytesmut(buf: &mut BytesMut) {
-    const GC_THRESHOLD: usize = 16 * 1024;
-
     // We use a different mode to shrink the buf when above the threshold.
     // When above the threshold, we only re-allocate when the buf has 2x spare capacity.
     let reclaim = GC_THRESHOLD.checked_sub(buf.len()).unwrap_or(buf.len());

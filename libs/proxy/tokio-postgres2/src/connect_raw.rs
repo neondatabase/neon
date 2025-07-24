@@ -10,16 +10,17 @@ use postgres_protocol2::authentication::sasl::ScramSha256;
 use postgres_protocol2::message::backend::{AuthenticationSaslBody, Message};
 use postgres_protocol2::message::frontend;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_util::codec::{Framed, FramedParts, FramedWrite};
+use tokio_util::codec::{Framed, FramedParts};
 
 use crate::Error;
 use crate::codec::PostgresCodec;
 use crate::config::{self, AuthKeys, Config};
+use crate::connection::{GC_THRESHOLD, INITIAL_CAPACITY};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::TlsStream;
 
 pub struct StartupStream<S, T> {
-    inner: FramedWrite<MaybeTlsStream<S, T>, PostgresCodec>,
+    inner: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
     read_buf: BytesMut,
 }
 
@@ -31,6 +32,8 @@ where
     type Item = io::Result<Message>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // We don't use `self.inner.poll_next()` as that might over-read into the read buffer.
+
         // read 1 byte tag, 4 bytes length.
         let header = ready!(self.as_mut().poll_fill_buf_exact(cx, 5)?);
 
@@ -97,18 +100,24 @@ where
     }
 
     pub fn into_framed(mut self) -> Framed<MaybeTlsStream<S, T>, PostgresCodec> {
-        let write_buf = std::mem::take(self.inner.write_buffer_mut());
-        let io = self.inner.into_inner();
-        let mut parts = FramedParts::new(io, PostgresCodec);
-        parts.read_buf = self.read_buf;
-        parts.write_buf = write_buf;
-        Framed::from_parts(parts)
+        *self.inner.read_buffer_mut() = self.read_buf;
+        self.inner
     }
 
     pub fn new(io: MaybeTlsStream<S, T>) -> Self {
+        let mut parts = FramedParts::new(io, PostgresCodec);
+        parts.write_buf = BytesMut::with_capacity(INITIAL_CAPACITY);
+
+        let mut inner = Framed::from_parts(parts);
+
+        // This is the default already, but nice to be explicit.
+        // We divide by two because writes will overshoot the boundary.
+        // We don't want constant overshoots to cause us to constantly re-shrink the buffer.
+        inner.set_backpressure_boundary(GC_THRESHOLD / 2);
+
         Self {
-            inner: FramedWrite::new(io, PostgresCodec),
-            read_buf: BytesMut::new(),
+            inner,
+            read_buf: BytesMut::with_capacity(INITIAL_CAPACITY),
         }
     }
 }
