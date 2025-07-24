@@ -1357,6 +1357,8 @@ impl TenantShard {
             }) => {
                 // It's legal to remove a secondary that is not present in the intent state
                 !self.intent.secondary.contains(&new_node_id)
+                    // Ensure the secondary hasn't already been promoted to attached by a concurrent
+                    // optimization/migration.
                     && self.intent.attached != Some(new_node_id)
             }
             ScheduleOptimizationAction::CreateSecondary(new_node_id) => {
