@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use clashmap::ClashMap;
 use tracing::{debug, info};
 
@@ -14,14 +13,6 @@ use crate::control_plane::{EndpointAccessControl, RoleAccessControl};
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::types::{EndpointId, RoleName};
 
-#[async_trait]
-pub(crate) trait ProjectInfoCache {
-    fn invalidate_endpoint_access(&self, endpoint_id: EndpointIdInt);
-    fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt);
-    fn invalidate_endpoint_access_for_org(&self, account_id: AccountIdInt);
-    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
-}
-
 /// Cache for project info.
 /// This is used to cache auth data for endpoints.
 /// Invalidation is done by console notifications or by TTL (if console notifications are disabled).
@@ -29,7 +20,7 @@ pub(crate) trait ProjectInfoCache {
 /// We also store endpoint-to-project mapping in the cache, to be able to access per-endpoint data.
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
-pub struct ProjectInfoCacheImpl {
+pub struct ProjectInfoCache {
     ttl_policy: CplaneExpiry,
     role_controls: TimedLru<(EndpointIdInt, RoleNameInt), ControlPlaneResult<RoleAccessControl>>,
     ep_controls: TimedLru<EndpointIdInt, ControlPlaneResult<EndpointAccessControl>>,
@@ -41,14 +32,13 @@ pub struct ProjectInfoCacheImpl {
     config: ProjectInfoCacheOptions,
 }
 
-#[async_trait]
-impl ProjectInfoCache for ProjectInfoCacheImpl {
-    fn invalidate_endpoint_access(&self, endpoint_id: EndpointIdInt) {
+impl ProjectInfoCache {
+    pub fn invalidate_endpoint_access(&self, endpoint_id: EndpointIdInt) {
         info!("invalidating endpoint access for `{endpoint_id}`");
         self.ep_controls.invalidate(&endpoint_id);
     }
 
-    fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt) {
+    pub fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt) {
         info!("invalidating endpoint access for project `{project_id}`");
         let endpoints = self
             .project2ep
@@ -60,7 +50,7 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
         }
     }
 
-    fn invalidate_endpoint_access_for_org(&self, account_id: AccountIdInt) {
+    pub fn invalidate_endpoint_access_for_org(&self, account_id: AccountIdInt) {
         info!("invalidating endpoint access for org `{account_id}`");
         let endpoints = self
             .account2ep
@@ -72,7 +62,11 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
         }
     }
 
-    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt) {
+    pub fn invalidate_role_secret_for_project(
+        &self,
+        project_id: ProjectIdInt,
+        role_name: RoleNameInt,
+    ) {
         info!(
             "invalidating role secret for project_id `{}` and role_name `{}`",
             project_id, role_name,
@@ -88,7 +82,7 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
     }
 }
 
-impl ProjectInfoCacheImpl {
+impl ProjectInfoCache {
     pub(crate) fn new(config: ProjectInfoCacheOptions) -> Self {
         // we cache errors for 30 seconds, unless retry_at is set.
         let expiry = CplaneExpiry {
@@ -239,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn test_project_info_cache_settings() {
         tokio::time::pause();
-        let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
+        let cache = ProjectInfoCache::new(ProjectInfoCacheOptions {
             size: 2,
             max_roles: 2,
             ttl: Duration::from_secs(1),
@@ -332,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_caching_project_info_errors() {
-        let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
+        let cache = ProjectInfoCache::new(ProjectInfoCacheOptions {
             size: 10,
             max_roles: 10,
             ttl: Duration::from_secs(1),
