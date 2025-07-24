@@ -16,15 +16,6 @@ on:
       - 'test_runner/logical_repl/**/*.py'
       - 'poetry.lock'
   workflow_dispatch:
-    inputs:
-      clickhouse_version:
-        required: false
-        description: "The ClickHouse version"
-        type: choice
-        options:
-          - "24.8"
-          - "24.9"
-        default: "24.8"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}
@@ -57,8 +48,21 @@ jobs:
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
+  generate-ch-password:
+    runs-on: ubuntu-22.04
+    outputs:
+      password: ${{ steps.pwgen.outputs.password }}
+    steps:
+      - name: Generate a random password
+        id: pwgen
+        run: |
+          set +x
+          DBPASS=$(dd if=/dev/random bs=14 count=1 2>/dev/null | base64)
+          echo "::add-mask::${DBPASS//\//}"
+          echo DBPASS="${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
+
   test-logical-replication:
-    needs: [ build-build-tools-image ]
+    needs: [ build-build-tools-image, generate-ch-password ]
     runs-on: ubuntu-22.04
 
     container:
@@ -69,9 +73,9 @@ jobs:
       options: --init --user root
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:${{ inputs.clickhouse_version }}
+        image: clickhouse/clickhouse-server:24.8
         env:
-          CLICKHOUSE_PASSWORD: "4yXDXt4fu2zZTv"
+          CLICKHOUSE_PASSWORD: ${{ needs.generate-ch-password.outputs.password }}
         ports:
           - 9000:9000
           - 8123:8123
@@ -138,7 +142,7 @@ jobs:
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-          CLICKHOUSE_PASSWORD: "4yXDXt4fu2zZTv"
+          CLICKHOUSE_PASSWORD: ${{ needs.generate-ch-password.outputs.password }}
 
       - name: Delete Neon Project
         if: always()
