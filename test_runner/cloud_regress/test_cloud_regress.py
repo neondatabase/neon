@@ -40,6 +40,7 @@ def test_cloud_regress(
         "PGUSER": remote_pg.default_options["user"],
         "PGPASSWORD": remote_pg.default_options["password"],
         "PGDATABASE": remote_pg.default_options["dbname"],
+        "NEON_MOTD": "",  # Disable MOTD for tests
     }
     regress_cmd = [
         str(regress_bin),
