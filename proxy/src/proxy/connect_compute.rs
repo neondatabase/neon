@@ -2,7 +2,7 @@ use tokio::time;
 use tracing::{debug, info, warn};
 
 use crate::compute::{self, COULD_NOT_CONNECT, ComputeConnection};
-use crate::config::{ComputeConfig, RetryConfig};
+use crate::config::{ComputeConfig, ProxyConfig, RetryConfig};
 use crate::context::RequestContext;
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::{self, NodeInfo};
@@ -42,10 +42,10 @@ pub(crate) trait ConnectMechanism {
     ) -> Result<Self::Connection, compute::ConnectionError>;
 }
 
-pub(crate) struct TcpMechanism {
+struct TcpMechanism<'a> {
     /// connect_to_compute concurrency lock
-    pub(crate) locks: &'static ApiLocks<Host>,
-    pub(crate) tls: TlsNegotiation,
+    locks: &'a ApiLocks<Host>,
+    tls: TlsNegotiation,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,7 +56,7 @@ pub enum TlsNegotiation {
     Postgres,
 }
 
-impl ConnectMechanism for TcpMechanism {
+impl ConnectMechanism for TcpMechanism<'_> {
     type Connection = ComputeConnection;
 
     #[tracing::instrument(skip_all, fields(
@@ -82,7 +82,27 @@ impl ConnectMechanism for TcpMechanism {
 
 /// Try to connect to the compute node, retrying if necessary.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn connect_to_compute<M: ConnectMechanism, B: WakeComputeBackend>(
+pub(crate) async fn connect_to_compute<B: WakeComputeBackend>(
+    ctx: &RequestContext,
+    config: &ProxyConfig,
+    user_info: &B,
+    tls: TlsNegotiation,
+) -> Result<ComputeConnection, compute::ConnectionError> {
+    connect_to_compute_inner(
+        ctx,
+        &TcpMechanism {
+            locks: &config.connect_compute_locks,
+            tls,
+        },
+        user_info,
+        config.wake_compute_retry_config,
+        &config.connect_to_compute,
+    )
+    .await
+}
+
+/// Try to connect to the compute node, retrying if necessary.
+pub(crate) async fn connect_to_compute_inner<M: ConnectMechanism, B: WakeComputeBackend>(
     ctx: &RequestContext,
     mechanism: &M,
     user_info: &B,

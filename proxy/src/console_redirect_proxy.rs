@@ -16,8 +16,9 @@ use crate::pglb::ClientRequestError;
 use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
-use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::{ErrorSource, forward_compute_params_to_client, send_client_greeting};
+use crate::proxy::{
+    ErrorSource, connect_compute, forward_compute_params_to_client, send_client_greeting,
+};
 use crate::util::run_until_cancelled;
 
 pub async fn task_main(
@@ -215,15 +216,11 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     };
     auth_info.set_startup_params(&params, true);
 
-    let mut node = connect_to_compute(
+    let mut node = connect_compute::connect_to_compute(
         ctx,
-        &TcpMechanism {
-            locks: &config.connect_compute_locks,
-            tls: crate::proxy::connect_compute::TlsNegotiation::Postgres,
-        },
+        config,
         &node_info,
-        config.wake_compute_retry_config,
-        &config.connect_to_compute,
+        connect_compute::TlsNegotiation::Postgres,
     )
     .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
     .await?;

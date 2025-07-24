@@ -189,13 +189,9 @@ impl PoolingBackend {
 
         let mut node = connect_compute::connect_to_compute(
             ctx,
-            &connect_compute::TcpMechanism {
-                locks: &self.config.connect_compute_locks,
-                tls: connect_compute::TlsNegotiation::Direct,
-            },
+            self.config,
             &backend,
-            self.config.wake_compute_retry_config,
-            &self.config.connect_to_compute,
+            connect_compute::TlsNegotiation::Postgres,
         )
         .await?;
 
@@ -251,13 +247,9 @@ impl PoolingBackend {
 
         let node = connect_compute::connect_to_compute(
             ctx,
-            &connect_compute::TcpMechanism {
-                locks: &self.config.connect_compute_locks,
-                tls: connect_compute::TlsNegotiation::Direct,
-            },
+            self.config,
             &backend,
-            self.config.wake_compute_retry_config,
-            &self.config.connect_to_compute,
+            connect_compute::TlsNegotiation::Direct,
         )
         .await?;
 

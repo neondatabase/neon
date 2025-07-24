@@ -32,7 +32,6 @@ use crate::control_plane::client::ControlPlaneClient;
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use crate::pglb::{ClientMode, ClientRequestError};
 use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
-use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
 use crate::proxy::retry::ShouldRetryWakeCompute;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
@@ -97,10 +96,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let mut node;
     let mut attempt = 0;
-    let connect = TcpMechanism {
-        locks: &config.connect_compute_locks,
-        tls: connect_compute::TlsNegotiation::Postgres,
-    };
     let backend = auth::Backend::ControlPlane(cplane, creds.info);
 
     // NOTE: This is messy, but should hopefully be detangled with PGLB.
@@ -115,12 +110,11 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         attempt += 1;
 
         // TODO: callback to pglb
-        let res = connect_to_compute(
+        let res = connect_compute::connect_to_compute(
             ctx,
-            &connect,
+            config,
             &backend,
-            config.wake_compute_retry_config,
-            &config.connect_to_compute,
+            connect_compute::TlsNegotiation::Postgres,
         )
         .await;
 
