@@ -3424,18 +3424,6 @@ impl GrpcPageServiceHandler {
         Ok(CancellableTask { task, cancel })
     }
 
-    /// Errors if the request is executed on a non-zero shard. Only shard 0 has a complete view of
-    /// relations and their sizes, as well as SLRU segments and similar data.
-    #[allow(clippy::result_large_err)]
-    fn ensure_shard_zero(timeline: &Handle<TenantManagerTypes>) -> Result<(), tonic::Status> {
-        match timeline.get_shard_index().shard_number.0 {
-            0 => Ok(()),
-            shard => Err(tonic::Status::invalid_argument(format!(
-                "request must execute on shard zero (is shard {shard})",
-            ))),
-        }
-    }
-
     /// Generates a PagestreamRequest header from a ReadLsn and request ID.
     fn make_hdr(
         read_lsn: page_api::ReadLsn,
@@ -3470,7 +3458,8 @@ impl GrpcPageServiceHandler {
             .await
     }
 
-    /// Acquires a timeline handle for the given request, which must be for shard zero.
+    /// Acquires a timeline handle for the given request, which must be for shard zero. Most
+    /// metadata requests are only valid on shard zero.
     ///
     /// NB: during an ongoing shard split, the compute will keep talking to the parent shard until
     /// the split is committed, but the parent shard may have been removed in the meanwhile. In that
@@ -4071,7 +4060,6 @@ impl proto::PageService for GrpcPageServiceHandler {
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetSlruSegmentRequest = req.into_inner().try_into()?;
 
         span_record!(kind=%req.kind, segno=%req.segno, lsn=%req.read_lsn);
