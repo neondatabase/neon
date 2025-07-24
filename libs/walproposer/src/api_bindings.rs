@@ -450,6 +450,9 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         replica_promote: false,
         min_ps_feedback: empty_feedback,
         wal_rate_limiter: empty_wal_rate_limiter,
+        num_safekeepers: 0,
+        safekeeper_status: [0; 32],
+        safekeeper_commit_lsn: [0; 32],
     }
 }
 

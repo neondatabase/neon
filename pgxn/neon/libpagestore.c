@@ -1312,7 +1312,6 @@ check_neon_id(char **newval, void **extra, GucSource source)
 	return **newval == '\0' || HexDecodeString(id, *newval, 16);
 }
 
-
 void
 PagestoreShmemInit(void)
 {

@@ -81,6 +81,8 @@ uint32		WAIT_EVENT_NEON_PS_READ;
 uint32		WAIT_EVENT_NEON_WAL_DL;
 #endif
 
+int databricks_test_hook = 0;
+
 enum RunningXactsOverflowPolicies {
 	OP_IGNORE,
 	OP_SKIP,
@@ -445,6 +447,20 @@ ReportSearchPath(void)
 static int neon_pgstat_file_size_limit;
 #endif
 
+#if PG_VERSION_NUM >= 160000 && PG_VERSION_NUM < 170000
+if (lakebase_mode) {
+	static void DatabricksSqlErrorHookImpl(int sqlerrcode) {
+		if (sqlerrcode == ERRCODE_DATA_CORRUPTED) {
+			pg_atomic_fetch_add_u32(&databricks_metrics_shared->data_corruption_count, 1);
+		} else if (sqlerrcode == ERRCODE_INDEX_CORRUPTED) {
+			pg_atomic_fetch_add_u32(&databricks_metrics_shared->index_corruption_count, 1);
+		} else if (sqlerrcode == ERRCODE_INTERNAL_ERROR) {
+			pg_atomic_fetch_add_u32(&databricks_metrics_shared->internal_error_count, 1);
+		}
+	}
+}
+#endif
+
 void
 _PG_init(void)
 {
@@ -454,6 +470,12 @@ _PG_init(void)
 	 */
 #if PG_VERSION_NUM >= 160000
 	load_file("$libdir/neon_rmgr", false);
+#endif
+
+#if PG_VERSION_NUM >= 160000 && PG_VERSION_NUM < 170000
+	if (lakebase_mode) {
+		SqlErrorCode_hook = DatabricksSqlErrorHookImpl;
+	}
 #endif
 
 	/*
@@ -591,6 +613,19 @@ _PG_init(void)
 							&lakebase_mode,
 							false,
 							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
+
+	// A test hook used in sql regress to trigger specific behaviors
+	// to test features easily.
+	DefineCustomIntVariable(
+							"databricks.test_hook",
+							"The test hook used in sql regress tests only",
+							NULL,
+							&databricks_test_hook,
+							0,
+							0, INT32_MAX,
+							PGC_SUSET,
 							0,
 							NULL, NULL, NULL);
 
@@ -743,6 +778,9 @@ neon_shmem_startup_hook(void)
 
 	LfcShmemInit();
 	NeonPerfCountersShmemInit();
+	if (lakebase_mode) {
+		DatabricksMetricsShmemInit();
+	}
 	PagestoreShmemInit();
 	RelsizeCacheShmemInit();
 	WalproposerShmemInit();

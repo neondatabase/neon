@@ -430,6 +430,12 @@ typedef struct WalproposerShmemState
 	/* BEGIN_HADRON */
 	/* The WAL rate limiter */
 	WalRateLimiter wal_rate_limiter;
+	/* Number of safekeepers in the config */
+	uint32 num_safekeepers;
+	/* Per-safekeeper status flags: 0=inactive, 1=active */
+	uint8 safekeeper_status[MAX_SAFEKEEPERS];
+	/* Per-safekeeper commit LSN for metrics */
+	XLogRecPtr safekeeper_commit_lsn[MAX_SAFEKEEPERS];
 	/* END_HADRON */
 } WalproposerShmemState;
 
