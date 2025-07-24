@@ -15,6 +15,7 @@ use rstest::rstest;
 use rustls::crypto::ring;
 use rustls::pki_types;
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream};
+use tokio::time::Instant;
 use tracing_test::traced_test;
 
 use super::retry::CouldRetry;
@@ -501,7 +502,7 @@ impl TestControlPlaneClient for TestConnectMechanism {
                             details: Details {
                                 error_info: None,
                                 retry_info: Some(control_plane::messages::RetryInfo {
-                                    retry_delay_ms: 1,
+                                    retry_at: Instant::now() + Duration::from_millis(1),
                                 }),
                                 user_facing_message: None,
                             },
