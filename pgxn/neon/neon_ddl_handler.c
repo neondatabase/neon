@@ -269,7 +269,7 @@ SendDeltasToControlPlane()
 {
 	static CURL		*handle = NULL;
 
-	if (!RootTable.db_table && !RootTable.role_table)
+	if (!RootTable.db_table && !RootTable.role_table && RootTable.other_ddl_count == 0)
 		return;
 	if (!ConsoleURL)
 	{
@@ -1309,6 +1309,7 @@ NeonProcessUtility(
 				   QueryCompletion *qc)
 {
 	Node	   *parseTree = pstmt->utilityStmt;
+	bool isCompleteQuery = (context != PROCESS_UTILITY_SUBCOMMAND);
 
 	/*
 	 * The process utility hook for CREATE EVENT TRIGGER is its own
@@ -1404,7 +1405,6 @@ NeonProcessUtility(
 		// Grants (object type dependent)
 		case T_GrantStmt:               // GRANT/REVOKE (if object supports event triggers)
 		case T_GrantRoleStmt:           // GRANT/REVOKE role membership
-			bool isCompleteQuery = (context != PROCESS_UTILITY_SUBCOMMAND);
 			if (isCompleteQuery)
 			{
 				HandleOtherDDLCommand();
