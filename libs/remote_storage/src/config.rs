@@ -41,6 +41,7 @@ impl RemoteStorageKind {
             RemoteStorageKind::LocalFs { .. } => None,
             RemoteStorageKind::AwsS3(config) => Some(&config.bucket_name),
             RemoteStorageKind::AzureContainer(config) => Some(&config.container_name),
+            RemoteStorageKind::GCS(config) => Some(&config.bucket_name),
         }
     }
 }
@@ -51,6 +52,7 @@ impl RemoteStorageConfig {
         match &self.storage {
             RemoteStorageKind::LocalFs { .. } => DEFAULT_REMOTE_STORAGE_LOCALFS_CONCURRENCY_LIMIT,
             RemoteStorageKind::AwsS3(c) => c.concurrency_limit.into(),
+            RemoteStorageKind::GCS(c) => c.concurrency_limit.into(),
             RemoteStorageKind::AzureContainer(c) => c.concurrency_limit.into(),
         }
     }
@@ -85,6 +87,9 @@ pub enum RemoteStorageKind {
     /// Azure Blob based storage, storing all files in the container
     /// specified by the config
     AzureContainer(AzureConfig),
+    /// Google Cloud based storage, storing all files in the GCS bucket
+    /// specified by the config
+    GCS(GCSConfig),
 }
 
 #[derive(Deserialize)]
@@ -166,6 +171,32 @@ impl Debug for S3Config {
         f.debug_struct("S3Config")
             .field("bucket_name", &self.bucket_name)
             .field("bucket_region", &self.bucket_region)
+            .field("prefix_in_bucket", &self.prefix_in_bucket)
+            .field("concurrency_limit", &self.concurrency_limit)
+            .field(
+                "max_keys_per_list_response",
+                &self.max_keys_per_list_response,
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct GCSConfig {
+    /// Name of the bucket to connect to.
+    pub bucket_name: String,
+    /// A "subfolder" in the bucket, to use the same bucket separately by multiple remote storage users at once.
+    pub prefix_in_bucket: Option<String>,
+    #[serde(default = "default_remote_storage_s3_concurrency_limit")]
+    pub concurrency_limit: NonZeroUsize,
+    #[serde(default = "default_max_keys_per_list_response")]
+    pub max_keys_per_list_response: Option<i32>,
+}
+
+impl Debug for GCSConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GCSConfig")
+            .field("bucket_name", &self.bucket_name)
             .field("prefix_in_bucket", &self.prefix_in_bucket)
             .field("concurrency_limit", &self.concurrency_limit)
             .field(
@@ -299,6 +330,30 @@ timeout = '5s'";
                     local_path: Utf8PathBuf::from(".")
                 },
                 timeout: Duration::from_secs(5),
+                small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
+            }
+        );
+    }
+
+    #[test]
+    fn test_gcs_parsing() {
+        let toml = "\
+    bucket_name = 'foo-bar'
+    prefix_in_bucket = '/pageserver'
+    ";
+
+        let config = parse(toml).unwrap();
+
+        assert_eq!(
+            config,
+            RemoteStorageConfig {
+                storage: RemoteStorageKind::GCS(GCSConfig {
+                    bucket_name: "foo-bar".into(),
+                    prefix_in_bucket: Some("pageserver/".into()),
+                    max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+                    concurrency_limit: std::num::NonZero::new(100).unwrap(),
+                }),
+                timeout: Duration::from_secs(120),
                 small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT
             }
         );
