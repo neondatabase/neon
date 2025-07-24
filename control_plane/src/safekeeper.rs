@@ -210,6 +210,15 @@ impl SafekeeperNode {
                 "--http-auth-public-key-path".to_owned(),
                 key_path_string.clone(),
             ]);
+
+            let token_path = self.datadir_path().join("peer_jwt_token");
+            let token_path_str = token_path
+                .to_str()
+                .with_context(|| {
+                    format!("Token path {token_path:?} cannot be represented as a unicode string")
+                })?
+                .to_owned();
+            args.extend(["--auth-token-path".to_owned(), token_path_str]);
         }
 
         if let Some(https_port) = self.conf.https_port {
