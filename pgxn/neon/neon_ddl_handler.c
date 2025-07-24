@@ -91,6 +91,8 @@ typedef struct
 	OpType		type;
 } RoleEntry;
 
+static int OtherDdlCommandCount = 0;
+
 /*
  * We keep one of these for each subtransaction in a stack. When a subtransaction
  * commits, we merge the top of the stack into the table below it. It is allocated in the
@@ -206,6 +208,25 @@ ConstructDeltaMessage()
 			pushJsonbValue(&state, WJB_END_OBJECT, NULL);
 		}
 		pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+	}
+
+	if (OtherDdlCommandCount > 0)
+	{
+		JsonbValue	other_key, other_value;
+		char		count_str[32];
+
+		snprintf(count_str, sizeof(count_str), "%d", OtherDdlCommandCount);
+
+		other_key.type = jbvString;
+		other_key.val.string.val = "other";
+		other_key.val.string.len = strlen("other");
+
+		other_value.type = jbvString;
+		other_value.val.string.val = count_str;
+		other_value.val.string.len = strlen(count_str);
+
+		pushJsonbValue(&state, WJB_KEY, &other_key);
+		pushJsonbValue(&state, WJB_VALUE, &other_value);
 	}
 	{
 		JsonbValue *result = pushJsonbValue(&state, WJB_END_OBJECT, NULL);
@@ -538,6 +559,7 @@ NeonXactCallback(XactEvent event, void *arg)
 	}
 	RootTable.role_table = NULL;
 	RootTable.db_table = NULL;
+	OtherDdlCommandCount = 0;
 	Assert(CurrentDdlTable == &RootTable);
 }
 
@@ -828,6 +850,11 @@ HandleRename(RenameStmt *stmt)
 		return HandleRoleRename(stmt);
 }
 
+static void
+HandleOtherDDLCommand()
+{
+	OtherDdlCommandCount++;
+}
 
 /*
  * Support for Event Triggers.
@@ -1323,7 +1350,55 @@ NeonProcessUtility(
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					errmsg("CREATE TABLESPACE is not supported on Neon")));
 			}
-   			break;
+			break;
+		
+		// all the other commands we are interested in for the purposes of
+		// tracking schema changes and forwarding to data-api
+		// Schema & Database Structure
+		case T_CreateSchemaStmt:
+		case T_CreateStmt:              // CREATE TABLE
+		case T_CreateForeignTableStmt:
+		case T_AlterTableStmt:
+		case T_AlterDomainStmt:
+		case T_CreateTableAsStmt:       // CREATE TABLE AS
+
+		// Views & Materialized Views  
+		case T_ViewStmt:                // CREATE VIEW
+
+		// Functions & Procedures
+		case T_CreateFunctionStmt:
+		case T_AlterFunctionStmt:
+
+		// Types & Domains
+		case T_CompositeTypeStmt:       // CREATE TYPE (composite)
+		case T_CreateEnumStmt:          // CREATE TYPE (enum)
+		case T_CreateRangeStmt:         // CREATE TYPE (range)
+		case T_AlterEnumStmt:
+		case T_AlterTypeStmt:
+		case T_CreateDomainStmt:
+
+		// Policies
+		case T_CreatePolicyStmt:
+		case T_AlterPolicyStmt:
+
+		// Generic Operations (object type dependent)
+		case T_DropStmt:                // DROP (tables, views, functions, etc.)
+		case T_RenameStmt:              // ALTER ... RENAME TO
+		case T_AlterOwnerStmt:          // ALTER ... OWNER TO  
+		case T_AlterObjectDependsStmt:  // ALTER ... DEPENDS ON
+		case T_AlterObjectSchemaStmt:   // ALTER ... SET SCHEMA
+		case T_CommentStmt:             // COMMENT ON
+		case T_SecLabelStmt:            // SECURITY LABEL
+
+		// Grants (object type dependent)
+		case T_GrantStmt:               // GRANT/REVOKE (if object supports event triggers)
+		case T_GrantRoleStmt:           // GRANT/REVOKE role membership
+			bool isCompleteQuery = (context != PROCESS_UTILITY_SUBCOMMAND);
+			if (isCompleteQuery)
+			{
+				HandleOtherDDLCommand();
+			}
+			break;
 		default:
 			break;
 	}
