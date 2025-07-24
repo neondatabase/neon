@@ -57,9 +57,9 @@ jobs:
         id: pwgen
         run: |
           set +x
-          DBPASS=$(dd if=/dev/random bs=14 count=1 2>/dev/null | base64)
+          password=$(dd if=/dev/random bs=14 count=1 2>/dev/null | base64)
           echo "::add-mask::${DBPASS//\//}"
-          echo DBPASS="${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
+          echo password="${password//\//}" >> "${GITHUB_OUTPUT}"
 
   test-logical-replication:
     needs: [ build-build-tools-image, generate-ch-password ]
