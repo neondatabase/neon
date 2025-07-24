@@ -51,6 +51,7 @@ use compute_tools::compute::{
 use compute_tools::extension_server::get_pg_version_string;
 use compute_tools::logger::*;
 use compute_tools::params::*;
+use compute_tools::pg_isready::get_pg_isready_bin;
 use compute_tools::spec::*;
 use rlimit::{Resource, setrlimit};
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
@@ -194,7 +195,12 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    let tracing_provider = init(cli.dev)?;
+    let mut log_dir = None;
+    if cli.lakebase_mode {
+        log_dir = std::env::var("COMPUTE_CTL_LOG_DIRECTORY").ok();
+    }
+
+    let (tracing_provider, _file_logs_guard) = init(cli.dev, log_dir)?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
@@ -226,6 +232,8 @@ fn main() -> Result<()> {
                 cli.installed_extensions_collection_interval,
             )),
             pg_init_timeout: cli.pg_init_timeout.map(Duration::from_secs),
+            pg_isready_bin: get_pg_isready_bin(&cli.pgbin),
+            instance_id: std::env::var("INSTANCE_ID").ok(),
             lakebase_mode: cli.lakebase_mode,
         },
         config,
@@ -238,8 +246,14 @@ fn main() -> Result<()> {
     deinit_and_exit(tracing_provider, exit_code);
 }
 
-fn init(dev_mode: bool) -> Result<Option<tracing_utils::Provider>> {
-    let provider = init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+fn init(
+    dev_mode: bool,
+    log_dir: Option<String>,
+) -> Result<(
+    Option<tracing_utils::Provider>,
+    Option<tracing_appender::non_blocking::WorkerGuard>,
+)> {
+    let (provider, file_logs_guard) = init_tracing_and_logging(DEFAULT_LOG_LEVEL, &log_dir)?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
@@ -250,7 +264,7 @@ fn init(dev_mode: bool) -> Result<Option<tracing_utils::Provider>> {
 
     info!("compute build_tag: {}", &BUILD_TAG.to_string());
 
-    Ok(provider)
+    Ok((provider, file_logs_guard))
 }
 
 fn get_config(cli: &Cli) -> Result<ComputeConfig> {

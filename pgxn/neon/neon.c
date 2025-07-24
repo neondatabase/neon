@@ -48,6 +48,7 @@
 PG_MODULE_MAGIC;
 void		_PG_init(void);
 
+bool lakebase_mode = false;
 
 static int  running_xacts_overflow_policy;
 static bool monitor_query_exec_time = false;
@@ -582,6 +583,16 @@ _PG_init(void)
 							&privileged_role_name,
 							"neon_superuser",
 							PGC_POSTMASTER, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							"neon.lakebase_mode",
+							"Is neon running in Lakebase?",
+							NULL,
+							&lakebase_mode,
+							false,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
 
 	/*
 	 * Important: This must happen after other parts of the extension are

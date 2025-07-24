@@ -113,10 +113,12 @@ pub struct ComputeNodeParams {
 
     /// Interval for installed extensions collection
     pub installed_extensions_collection_interval: Arc<AtomicU64>,
-
+    /// Hadron instance ID of the compute node.
+    pub instance_id: Option<String>,
     /// Timeout of PG compute startup in the Init state.
     pub pg_init_timeout: Option<Duration>,
-
+    // Path to the `pg_isready` binary.
+    pub pg_isready_bin: String,
     pub lakebase_mode: bool,
 }
 
@@ -486,6 +488,7 @@ impl ComputeNode {
             port: this.params.external_http_port,
             config: this.compute_ctl_config.clone(),
             compute_id: this.params.compute_id.clone(),
+            instance_id: this.params.instance_id.clone(),
         }
         .launch(&this);
 
@@ -1783,6 +1786,34 @@ impl ComputeNode {
         });
 
         Ok::<(), anyhow::Error>(())
+    }
+
+    // Signal to the configurator to refresh the configuration by pulling a new spec from the HCC.
+    // Note that this merely triggers a notification on a condition variable the configurator thread
+    // waits on. The configurator thread (in configurator.rs) pulls the new spec from the HCC and
+    // applies it.
+    pub async fn signal_refresh_configuration(&self) -> Result<()> {
+        let states_allowing_configuration_refresh = [
+            ComputeStatus::Running,
+            ComputeStatus::Failed,
+            // ComputeStatus::RefreshConfigurationPending,
+        ];
+
+        let state = self.state.lock().expect("state lock poisoned");
+        if states_allowing_configuration_refresh.contains(&state.status) {
+            // state.status = ComputeStatus::RefreshConfigurationPending;
+            self.state_changed.notify_all();
+            Ok(())
+        } else if state.status == ComputeStatus::Init {
+            // If the compute is in Init state, we can't refresh the configuration immediately,
+            // but we should be able to do that soon.
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Cannot refresh compute configuration in state {:?}",
+                state.status
+            ))
+        }
     }
 
     // Wrapped this around `pg_ctl reload`, but right now we don't use

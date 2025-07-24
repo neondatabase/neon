@@ -1517,7 +1517,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             let endpoint = cplane
                 .endpoints
                 .get(endpoint_id.as_str())
-                .ok_or_else(|| anyhow::anyhow!("endpoint {endpoint_id} not found"))?;
+                .ok_or_else(|| anyhow!("endpoint {endpoint_id} not found"))?;
 
             if !args.allow_multiple {
                 cplane.check_conflicting_endpoints(

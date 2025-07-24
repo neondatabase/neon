@@ -108,11 +108,10 @@ pub enum PromoteState {
     Failed { error: String },
 }
 
-#[derive(Deserialize, Serialize, Default, Debug, Clone)]
+#[derive(Deserialize, Default, Debug)]
 #[serde(rename_all = "snake_case")]
-/// Result of /safekeepers_lsn
-pub struct SafekeepersLsn {
-    pub safekeepers: String,
+pub struct PromoteConfig {
+    pub spec: ComputeSpec,
     pub wal_flush_lsn: utils::lsn::Lsn,
 }
 

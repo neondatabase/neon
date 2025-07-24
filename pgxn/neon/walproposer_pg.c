@@ -68,6 +68,14 @@ int			safekeeper_proto_version = 3;
 char	   *safekeeper_conninfo_options = "";
 /* BEGIN_HADRON */
 int         databricks_max_wal_mb_per_second = -1;
+// during throttling, we will limit the effective WAL write rate to 10KB.
+// PG can still push some WAL to SK, but at a very low rate.
+int 		databricks_throttled_max_wal_bytes_per_second = 10 * 1024;
+// The max sleep time of a batch. This is to make sure the rate limiter does not
+// overshoot too much and block PG for a very long time.
+// This is set as 5 minuetes for now. PG can send as much as 10MB of WALs to SK in one batch,
+// so this effectively caps the write rate to ~30KB/s in the worst case.
+static uint64 kRateLimitMaxBatchUSecs = 300 * USECS_PER_SEC;
 /* END_HADRON */
 
 /* Set to true in the walproposer bgw. */
@@ -86,6 +94,7 @@ static HotStandbyFeedback agg_hs_feedback;
 static void nwp_register_gucs(void);
 static void assign_neon_safekeepers(const char *newval, void *extra);
 static uint64 backpressure_lag_impl(void);
+static uint64 hadron_backpressure_lag_impl(void);
 static uint64 startup_backpressure_wrap(void);
 static bool backpressure_throttling_impl(void);
 static void walprop_register_bgworker(void);
@@ -110,8 +119,21 @@ static void rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk);
 
 static void CheckGracefulShutdown(WalProposer *wp);
 
-// HADRON
+/* BEGIN_HADRON */
 shardno_t get_num_shards(void);
+
+static int positive_mb_to_bytes(int mb)
+{
+	if (mb <= 0)
+	{
+		return mb;
+	}
+	else
+	{
+		return mb * 1024 * 1024;
+	}
+}
+/* END_HADRON */
 
 static void
 init_walprop_config(bool syncSafekeepers)
@@ -260,6 +282,16 @@ nwp_register_gucs(void)
                             PGC_SUSET,
                             GUC_UNIT_MB,
                             NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+							"databricks.throttled_max_wal_bytes_per_second",
+							"The maximum WAL bytes per second when PG is being throttled.",
+							NULL,
+							&databricks_throttled_max_wal_bytes_per_second,
+							10 * 1024, 0, INT_MAX,
+							PGC_SUSET,
+							GUC_UNIT_BYTE,
+							NULL, NULL, NULL);
     /* END_HADRON */
 }
 
@@ -398,19 +430,65 @@ assign_neon_safekeepers(const char *newval, void *extra)
 	pfree(oldval);
 }
 
-/* Check if we need to suspend inserts because of lagging replication. */
-static uint64
-backpressure_lag_impl(void)
+/* BEGIN_HADRON */
+static uint64 hadron_backpressure_lag_impl(void)
 {
 	struct WalproposerShmemState* state = NULL;
+	uint64 lag = 0;
 
-	/* BEGIN_HADRON */
 	if(max_cluster_size < 0){
 		// if max cluster size is not set, then we don't apply backpressure because we're reconfiguring PG
 		return 0;
 	}
-	/* END_HADRON */
 
+	lag = backpressure_lag_impl();
+	state = GetWalpropShmemState();
+	if ( state != NULL && databricks_max_wal_mb_per_second != -1 )
+	{
+		int old_limit = pg_atomic_read_u32(&state->wal_rate_limiter.effective_max_wal_bytes_per_second);
+		int new_limit = (lag == 0)? positive_mb_to_bytes(databricks_max_wal_mb_per_second) : databricks_throttled_max_wal_bytes_per_second;
+		if( old_limit != new_limit )
+		{
+			uint64 batch_start_time = pg_atomic_read_u64(&state->wal_rate_limiter.batch_start_time_us);
+			uint64 batch_end_time = pg_atomic_read_u64(&state->wal_rate_limiter.batch_end_time_us);
+			// the rate limit has changed, we need to reset the rate limiter's batch end time
+			pg_atomic_write_u32(&state->wal_rate_limiter.effective_max_wal_bytes_per_second, new_limit);
+			pg_atomic_write_u64(&state->wal_rate_limiter.batch_end_time_us, Min(batch_start_time + USECS_PER_SEC, batch_end_time));
+		}
+		if( new_limit == -1 )
+		{
+			return 0;
+		}
+
+		if (pg_atomic_read_u32(&state->wal_rate_limiter.should_limit) == true)
+		{
+			TimestampTz now = GetCurrentTimestamp();
+			struct WalRateLimiter *limiter = &state->wal_rate_limiter;
+			uint64 batch_end_time = pg_atomic_read_u64(&limiter->batch_end_time_us);
+			if ( now >= batch_end_time )
+			{
+				/*
+				* The backend has past the batch end time and it's time to push more WALs.
+				* If the backends are pushing WALs too fast, the wal proposer will rate limit them again.
+				*/
+				uint32 expected = true;
+				pg_atomic_compare_exchange_u32(&state->wal_rate_limiter.should_limit, &expected, false);
+				return 0;
+			}
+			return Max(lag, 1);
+		}
+		// rate limiter decides to not throttle, then return 0.
+		return 0;
+	}
+
+	return lag;
+}
+/* END_HADRON */
+
+/* Check if we need to suspend inserts because of lagging replication. */
+static uint64
+backpressure_lag_impl(void)
+{
 	if (max_replication_apply_lag > 0 || max_replication_flush_lag > 0 || max_replication_write_lag > 0)
 	{
 		XLogRecPtr	writePtr;
@@ -444,30 +522,6 @@ backpressure_lag_impl(void)
 			return (myFlushLsn - applyPtr - max_replication_apply_lag * MB);
 		}
 	}
-
-	/* BEGIN_HADRON */
-	if (databricks_max_wal_mb_per_second == -1) {
-		return 0;
-	}
-
-	state = GetWalpropShmemState();
-	if (state != NULL && !!pg_atomic_read_u32(&state->wal_rate_limiter.should_limit))
-	{
-		TimestampTz now = GetCurrentTimestamp();
-		struct WalRateLimiter *limiter = &state->wal_rate_limiter;
-		uint64 last_recorded_time = pg_atomic_read_u64(&limiter->last_recorded_time_us);
-		if (now - last_recorded_time > USECS_PER_SEC)
-		{
-			/*
-			 * The backend has past 1 second since the last recorded time and it's time to push more WALs.
-			 * If the backends are pushing WALs too fast, the wal proposer will rate limit them again.
-			 */
-			uint32 expected = true;
-			pg_atomic_compare_exchange_u32(&state->wal_rate_limiter.should_limit, &expected, false);
-		}
-		return 1;
-	}
-	/* END_HADRON */
 	return 0;
 }
 
@@ -482,9 +536,9 @@ startup_backpressure_wrap(void)
 	if (AmStartupProcess() || !IsUnderPostmaster)
 		return 0;
 
-	delay_backend_us = &backpressure_lag_impl;
+	delay_backend_us = &hadron_backpressure_lag_impl;
 
-	return backpressure_lag_impl();
+	return hadron_backpressure_lag_impl();
 }
 
 /*
@@ -514,8 +568,10 @@ WalproposerShmemInit(void)
 		pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
 		pg_atomic_init_u64(&walprop_shared->currentClusterSize, 0);
 		/* BEGIN_HADRON */
+		pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.effective_max_wal_bytes_per_second, -1);
 		pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.should_limit, 0);
-		pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.last_recorded_time_us, 0);
+		pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.batch_start_time_us, 0);
+		pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.batch_end_time_us, 0);
 		/* END_HADRON */
 	}
 }
@@ -530,8 +586,10 @@ WalproposerShmemInit_SyncSafekeeper(void)
 	pg_atomic_init_u64(&walprop_shared->mineLastElectedTerm, 0);
 	pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
 	/* BEGIN_HADRON */
+	pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.effective_max_wal_bytes_per_second, -1);
 	pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.should_limit, 0);
-	pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.last_recorded_time_us, 0);
+	pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.batch_start_time_us, 0);
+	pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.batch_end_time_us, 0);
 	/* END_HADRON */
 }
 
@@ -563,7 +621,7 @@ backpressure_throttling_impl(void)
 		return retry;
 
 	/* Calculate replicas lag */
-	lag = backpressure_lag_impl();
+	lag = hadron_backpressure_lag_impl();
 	if (lag == 0)
 		return retry;
 
@@ -659,7 +717,7 @@ record_pageserver_feedback(PageserverFeedback *ps_feedback, shardno_t num_shards
 
 	SpinLockAcquire(&walprop_shared->mutex);
 
-	// Hadron: Update the num_shards from the source-of-truth (shard map) lazily when we receive 
+	// Hadron: Update the num_shards from the source-of-truth (shard map) lazily when we receive
 	// a new pageserver feedback.
 	walprop_shared->num_shards = Max(walprop_shared->num_shards, num_shards);
 
@@ -1479,6 +1537,7 @@ XLogBroadcastWalProposer(WalProposer *wp)
 	XLogRecPtr	endptr;
 	struct WalproposerShmemState *state = NULL;
 	TimestampTz now = 0;
+	int effective_max_wal_bytes_per_second = 0;
 
 	/* Start from the last sent position */
 	startptr = sentPtr;
@@ -1533,22 +1592,36 @@ XLogBroadcastWalProposer(WalProposer *wp)
 
 	/* BEGIN_HADRON */
 	state = GetWalpropShmemState();
-	if (databricks_max_wal_mb_per_second != -1 && state != NULL)
+	effective_max_wal_bytes_per_second = pg_atomic_read_u32(&state->wal_rate_limiter.effective_max_wal_bytes_per_second);
+	if (effective_max_wal_bytes_per_second != -1 && state != NULL)
 	{
-		uint64 max_wal_bytes = (uint64) databricks_max_wal_mb_per_second * 1024 * 1024;
 		struct WalRateLimiter *limiter = &state->wal_rate_limiter;
-		uint64 last_recorded_time = pg_atomic_read_u64(&limiter->last_recorded_time_us);
-		if (now - last_recorded_time > USECS_PER_SEC)
+		uint64 batch_end_time = pg_atomic_read_u64(&limiter->batch_end_time_us);
+		if ( now >= batch_end_time )
 		{
-			/* Reset the rate limiter */
+			// Reset the rate limiter to start a new batch
 			limiter->sent_bytes = 0;
-			pg_atomic_write_u64(&limiter->last_recorded_time_us, now);
 			pg_atomic_write_u32(&limiter->should_limit, false);
+			pg_atomic_write_u64(&limiter->batch_start_time_us, now);
+			/* tentatively assign the batch end time as 1s from now. This could result in one of the following cases:
+			1. If sent_bytes does not reach effective_max_wal_bytes_per_second in 1s,
+			then we will reset the current batch and clear sent_bytes. No throttling happens.
+			2. Otherwise, we will recompute the end time (below) based on how many bytes are actually written,
+			and throttle PG until the batch end time. */
+			pg_atomic_write_u64(&limiter->batch_end_time_us, now + USECS_PER_SEC);
 		}
 		limiter->sent_bytes += (endptr - startptr);
-		if (limiter->sent_bytes > max_wal_bytes)
+		if (limiter->sent_bytes > effective_max_wal_bytes_per_second)
 		{
+			uint64_t batch_start_time = pg_atomic_read_u64(&limiter->batch_start_time_us);
+			uint64 throttle_usecs = USECS_PER_SEC * limiter->sent_bytes / Max(effective_max_wal_bytes_per_second, 1);
+			if (throttle_usecs > kRateLimitMaxBatchUSecs){
+				elog(LOG, "throttle_usecs %lu is too large, limiting to %lu", throttle_usecs, kRateLimitMaxBatchUSecs);
+				throttle_usecs = kRateLimitMaxBatchUSecs;
+			}
+
 			pg_atomic_write_u32(&limiter->should_limit, true);
+			pg_atomic_write_u64(&limiter->batch_end_time_us, batch_start_time + throttle_usecs);
 		}
 	}
 	/* END_HADRON */
@@ -2052,7 +2125,7 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 			/* Only one main shard sends non-zero currentClusterSize */
 			if (sk->appendResponse.ps_feedback.currentClusterSize > 0)
 				SetNeonCurrentClusterSize(sk->appendResponse.ps_feedback.currentClusterSize);
-	
+
 			if (min_feedback.disk_consistent_lsn != standby_apply_lsn)
 			{
 				standby_apply_lsn = min_feedback.disk_consistent_lsn;
