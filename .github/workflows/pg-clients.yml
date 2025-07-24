@@ -48,21 +48,20 @@ jobs:
     uses: ./.github/workflows/build-build-tools-image.yml
     secrets: inherit
 
-  generate-ch-password:
+  generate-ch-tmppw:
     runs-on: ubuntu-22.04
     outputs:
-      password: ${{ steps.pwgen.outputs.password }}
+      tmp_val: ${{ steps.pwgen.outputs.tmp_val }}
     steps:
       - name: Generate a random password
         id: pwgen
         run: |
           set +x
-          password=$(dd if=/dev/random bs=14 count=1 2>/dev/null | base64)
-          echo "::add-mask::${password//\//}"
-          echo password="${password//\//}" >> "${GITHUB_OUTPUT}"
+          p=$(dd if=/dev/random bs=14 count=1 2>/dev/null | base64)
+          echo tmp_val="${p//\//}" >> "${GITHUB_OUTPUT}"
 
   test-logical-replication:
-    needs: [ build-build-tools-image, generate-ch-password ]
+    needs: [ build-build-tools-image, generate-ch-tmppw ]
     runs-on: ubuntu-22.04
 
     container:
@@ -75,7 +74,7 @@ jobs:
       clickhouse:
         image: clickhouse/clickhouse-server:24.8
         env:
-          CLICKHOUSE_PASSWORD: ${{ needs.generate-ch-password.outputs.password }}
+          CLICKHOUSE_PASSWORD: ${{ needs.generate-ch-tmppw.outputs.tmp_val }}
         ports:
           - 9000:9000
           - 8123:8123
@@ -142,7 +141,7 @@ jobs:
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         env:
           BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
-          CLICKHOUSE_PASSWORD: ${{ needs.generate-ch-password.outputs.password }}
+          CLICKHOUSE_PASSWORD: ${{ needs.generate-ch-tmppw.outputs.tmp_val }}
 
       - name: Delete Neon Project
         if: always()
