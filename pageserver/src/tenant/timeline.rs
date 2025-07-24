@@ -2799,11 +2799,6 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
-    pub(crate) fn is_gc_blocked_by_lsn_lease_deadline(&self) -> bool {
-        let tenant_conf = self.tenant_conf.load();
-        tenant_conf.is_gc_blocked_by_lsn_lease_deadline()
-    }
-
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
