@@ -286,3 +286,33 @@ def test_sk_generation_aware_tombstones(neon_env_builder: NeonEnvBuilder):
     assert re.match(r".*Timeline .* deleted.*", exc.value.response.text)
     # The timeline should remain deleted.
     expect_deleted(second_sk)
+
+
+def test_migrate_from_unavailable_sk(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that we can migrate from an unavailable safekeeper
+    if the quorum is still alive.
+    """
+    neon_env_builder.num_safekeepers = 4
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": True,
+        "timeline_safekeeper_count": 3,
+    }
+    env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(PAGESERVER_ALLOWED_ERRORS)
+
+    mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+    assert len(mconf["sk_set"]) == 3
+
+    another_sk = [sk.id for sk in env.safekeepers if sk.id not in mconf["sk_set"]][0]
+
+    unavailable_sk = mconf["sk_set"][0]
+    env.get_safekeeper(unavailable_sk).stop()
+
+    new_sk_set = mconf["sk_set"][1:] + [another_sk]
+
+    env.storage_controller.migrate_safekeepers(env.initial_tenant, env.initial_timeline, new_sk_set)
+
+    mconf = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+    assert mconf["sk_set"] == new_sk_set
+    assert mconf["generation"] == 3
