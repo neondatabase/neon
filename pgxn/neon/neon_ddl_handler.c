@@ -574,6 +574,13 @@ IsPrivilegedRole(const char *role_name)
 }
 
 static void
+HandleOtherDDLCommand()
+{
+	InitCurrentDdlTableIfNeeded();
+	CurrentDdlTable->other_ddl_count++;
+}
+
+static void
 HandleCreateDb(CreatedbStmt *stmt)
 {
 	DefElem    *downer = NULL;
@@ -622,8 +629,11 @@ HandleAlterOwner(AlterOwnerStmt *stmt)
 	DbEntry    *entry;
 	const char *new_owner;
 
-	if (stmt->objectType != OBJECT_DATABASE)
-		return;
+	if (stmt->objectType != OBJECT_DATABASE){
+		HandleOtherDDLCommand();
+		return ;
+	}
+
 	InitDbTableIfNeeded();
 
 	name = strVal(stmt->object);
@@ -850,14 +860,12 @@ HandleRename(RenameStmt *stmt)
 		return HandleDbRename(stmt);
 	else if (stmt->renameType == OBJECT_ROLE)
 		return HandleRoleRename(stmt);
+	else {
+		HandleOtherDDLCommand();
+		return;
+	}
 }
 
-static void
-HandleOtherDDLCommand()
-{
-	InitCurrentDdlTableIfNeeded();
-	CurrentDdlTable->other_ddl_count++;
-}
 
 /*
  * Support for Event Triggers.
@@ -1386,8 +1394,8 @@ NeonProcessUtility(
 
 		// Generic Operations (object type dependent)
 		case T_DropStmt:                // DROP (tables, views, functions, etc.)
-		case T_RenameStmt:              // ALTER ... RENAME TO
-		case T_AlterOwnerStmt:          // ALTER ... OWNER TO  
+		// case T_RenameStmt:              // ALTER ... RENAME TO
+		// case T_AlterOwnerStmt:          // ALTER ... OWNER TO  
 		case T_AlterObjectDependsStmt:  // ALTER ... DEPENDS ON
 		case T_AlterObjectSchemaStmt:   // ALTER ... SET SCHEMA
 		case T_CommentStmt:             // COMMENT ON
