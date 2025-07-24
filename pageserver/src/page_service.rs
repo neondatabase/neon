@@ -453,7 +453,6 @@ impl TimelineHandles {
             handles: Default::default(),
         }
     }
-
     async fn get(
         &mut self,
         tenant_id: TenantId,
@@ -472,13 +471,6 @@ impl TimelineHandles {
 
     fn tenant_id(&self) -> Option<TenantId> {
         self.wrapper.tenant_id.get().copied()
-    }
-
-    /// Returns whether a child shard exists locally for the given shard.
-    fn has_child_shard(&self, tenant_id: TenantId, shard_index: ShardIndex) -> bool {
-        self.wrapper
-            .tenant_manager
-            .has_child_shard(tenant_id, shard_index)
     }
 }
 
@@ -3465,14 +3457,16 @@ impl GrpcPageServiceHandler {
         &self,
         req: &tonic::Request<impl Any>,
     ) -> Result<Handle<TenantManagerTypes>, GetActiveTimelineError> {
-        let ttid = *extract::<TenantTimelineId>(req);
+        let TenantTimelineId {
+            tenant_id,
+            timeline_id,
+        } = *extract::<TenantTimelineId>(req);
         let shard_index = *extract::<ShardIndex>(req);
-        let shard_selector = ShardSelector::Known(shard_index);
 
         // TODO: untangle acquisition from TenantManagerWrapper::resolve() and Cache::get(), to
         // avoid the unnecessary overhead.
         TimelineHandles::new(self.tenant_manager.clone())
-            .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
+            .get(tenant_id, timeline_id, ShardSelector::Known(shard_index))
             .await
     }
 
@@ -3675,10 +3669,12 @@ impl GrpcPageServiceHandler {
     /// * Notify the compute about each subsplit.
     /// * Return an error that updates the compute's shard map.
     #[instrument(skip_all)]
+    #[allow(clippy::too_many_arguments)]
     async fn maybe_split_get_page(
         ctx: &RequestContext,
         handles: &mut TimelineHandles,
-        ttid: TenantTimelineId,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         parent: ShardIndex,
         req: page_api::GetPageRequest,
         io_concurrency: IoConcurrency,
@@ -3689,8 +3685,8 @@ impl GrpcPageServiceHandler {
         // the page must have a higher shard count.
         let timeline = handles
             .get(
-                ttid.tenant_id,
-                ttid.timeline_id,
+                tenant_id,
+                timeline_id,
                 ShardSelector::Page(rel_block_to_key(req.rel, req.block_numbers[0])),
             )
             .await?;
@@ -3720,11 +3716,7 @@ impl GrpcPageServiceHandler {
         let mut shard_requests = FuturesUnordered::new();
         for (shard_index, shard_req) in splitter.drain_requests() {
             let timeline = handles
-                .get(
-                    ttid.tenant_id,
-                    ttid.timeline_id,
-                    ShardSelector::Known(shard_index),
-                )
+                .get(tenant_id, timeline_id, ShardSelector::Known(shard_index))
                 .await?;
             let future = Self::get_page(
                 ctx,
@@ -3933,22 +3925,21 @@ impl proto::PageService for GrpcPageServiceHandler {
         //
         // TODO: TimelineHandles.get() does internal retries, which will delay requests during shard
         // splits. It shouldn't.
-        let ttid = *extract::<TenantTimelineId>(&req);
+        let TenantTimelineId {
+            tenant_id,
+            timeline_id,
+        } = *extract::<TenantTimelineId>(&req);
         let shard_index = *extract::<ShardIndex>(&req);
 
         let mut handles = TimelineHandles::new(self.tenant_manager.clone());
         let timeline = match handles
-            .get(
-                ttid.tenant_id,
-                ttid.timeline_id,
-                ShardSelector::Known(shard_index),
-            )
+            .get(tenant_id, timeline_id, ShardSelector::Known(shard_index))
             .await
         {
             // The timeline shard exists. Keep a weak handle to reuse for each request.
             Ok(timeline) => Some(timeline.downgrade()),
             // The shard doesn't exist, but a child shard does. We'll reroute requests later.
-            Err(_) if handles.has_child_shard(ttid.tenant_id, shard_index) => None,
+            Err(_) if self.tenant_manager.has_child_shard(tenant_id, shard_index) => None,
             // Failed to fetch the timeline, and no child shard exists. Error out.
             Err(err) => return Err(err.into()),
         };
@@ -4004,7 +3995,8 @@ impl proto::PageService for GrpcPageServiceHandler {
                     Self::maybe_split_get_page(
                         &ctx,
                         &mut handles,
-                        ttid,
+                        tenant_id,
+                        timeline_id,
                         shard_index,
                         req,
                         io_concurrency.clone(),
