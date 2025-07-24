@@ -273,7 +273,8 @@ SendDeltasToControlPlane()
 		return;
 	if (!ConsoleURL)
 	{
-		elog(LOG, "ConsoleURL not set, skipping forwarding");
+		if (!RegressTestMode)
+			elog(LOG, "ConsoleURL not set, skipping forwarding");
 		return;
 	}
 	if (!ForwardDDL)
