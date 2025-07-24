@@ -1,4 +1,5 @@
 use std::{
+    hash::{BuildHasher, Hash},
     ops::{Deref, DerefMut},
     time::{Duration, Instant},
 };
@@ -38,6 +39,21 @@ impl<C: Cache> Cache for &C {
     }
 }
 
+impl<K, V, S> Cache for moka::sync::Cache<K, V, S>
+where
+    K: Hash + Eq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    S: BuildHasher + Clone + Sync + Send + 'static,
+{
+    type Key = K;
+    type Value = V;
+    type LookupInfo<Key> = Key;
+
+    fn invalidate(&self, info: &Self::LookupInfo<K>) {
+        moka::sync::Cache::invalidate(self, info);
+    }
+}
+
 /// Wrapper for convenient entry invalidation.
 pub(crate) struct Cached<C: Cache, V = <C as Cache>::Value> {
     /// Cache + lookup info.
@@ -51,23 +67,6 @@ impl<C: Cache, V> Cached<C, V> {
     /// Place any entry into this wrapper; invalidation will be a no-op.
     pub(crate) fn new_uncached(value: V) -> Self {
         Self { token: None, value }
-    }
-
-    pub(crate) fn take_value(self) -> (Cached<C, ()>, V) {
-        (
-            Cached {
-                token: self.token,
-                value: (),
-            },
-            self.value,
-        )
-    }
-
-    pub(crate) fn map<U>(self, f: impl FnOnce(V) -> U) -> Cached<C, U> {
-        Cached {
-            token: self.token,
-            value: f(self.value),
-        }
     }
 
     /// Drop this entry from a cache if it's still there.

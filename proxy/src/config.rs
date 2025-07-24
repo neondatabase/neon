@@ -107,7 +107,7 @@ pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<RemoteStorageConfig> 
 #[derive(Debug)]
 pub struct CacheOptions {
     /// Max number of entries.
-    pub size: usize,
+    pub size: u64,
     /// Entry's time-to-live.
     pub ttl: Duration,
 }

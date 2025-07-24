@@ -20,6 +20,7 @@ use tracing_test::traced_test;
 
 use super::retry::CouldRetry;
 use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
+use crate::cache::CplaneExpiry;
 use crate::config::{ComputeConfig, RetryConfig, TlsConfig};
 use crate::context::RequestContext;
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
@@ -418,12 +419,13 @@ impl TestConnectMechanism {
         Self {
             counter: Arc::new(std::sync::Mutex::new(0)),
             sequence,
-            cache: Box::leak(Box::new(NodeInfoCache::new(
-                "test",
-                1,
-                Duration::from_secs(100),
-                false,
-            ))),
+            cache: Box::leak(Box::new(
+                moka::sync::Cache::builder()
+                    .expire_after(CplaneExpiry::default())
+                    .max_capacity(1)
+                    .time_to_live(Duration::from_secs(100))
+                    .build(),
+            )),
         }
     }
 }
@@ -547,8 +549,11 @@ fn helper_create_uncached_node_info() -> NodeInfo {
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
     let node = helper_create_uncached_node_info();
-    let (_, node2) = cache.insert_unit("key".into(), Ok(node.clone()));
-    node2.map(|()| node)
+    cache.insert("key".into(), Ok(node.clone()));
+    CachedNodeInfo {
+        token: Some((cache, "key".into())),
+        value: node,
+    }
 }
 
 fn helper_create_connect_info(

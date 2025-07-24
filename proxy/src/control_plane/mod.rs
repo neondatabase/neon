@@ -12,13 +12,14 @@ pub(crate) mod errors;
 use std::sync::Arc;
 
 use messages::EndpointRateLimitConfig;
+use moka::sync::Cache;
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::{AuthError, IpPattern, check_peer_addr_is_in_list};
-use crate::cache::{Cached, TimedLru};
+use crate::cache::{Cached, ControlPlaneResult};
 use crate::context::RequestContext;
-use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
+use crate::control_plane::messages::MetricsAuxInfo;
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::rate_limiter::{EndpointRateLimiter, LeakyBucketConfig};
@@ -77,8 +78,7 @@ pub(crate) struct AccessBlockerFlags {
     pub vpc_access_blocked: bool,
 }
 
-pub(crate) type NodeInfoCache =
-    TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ControlPlaneErrorMessage>>>;
+pub(crate) type NodeInfoCache = Cache<EndpointCacheKey, ControlPlaneResult<NodeInfo>>;
 pub(crate) type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
 
 #[derive(Clone, Debug)]
