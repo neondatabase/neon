@@ -2193,7 +2193,7 @@ impl PageServerHandler {
         //
         // We may have older data available, but we make a best effort to detect this case and return an error,
         // to distinguish a misbehaving client (asking for old LSN) from a storage issue (data missing at a legitimate LSN).
-        if request_lsn < **latest_gc_cutoff_lsn && !timeline.is_gc_blocked_by_lsn_lease_deadline() {
+        if request_lsn < **latest_gc_cutoff_lsn {
             let gc_info = &timeline.gc_info.read().unwrap();
             if !gc_info.lsn_covered_by_lease(request_lsn) {
                 return Err(
