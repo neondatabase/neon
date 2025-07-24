@@ -41,8 +41,9 @@ use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
+use crate::hadron_metrics::COMPUTE_ATTACHED;
 use crate::installed_extensions::get_installed_extensions;
-use crate::logger::startup_context_from_env;
+use crate::logger::{self, startup_context_from_env};
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
@@ -2548,6 +2549,34 @@ LIMIT 100",
                 spec.suspend_timeout_seconds as u64,
                 std::sync::atomic::Ordering::SeqCst,
             );
+        }
+    }
+
+    /// Set the compute spec and update related metrics.
+    /// This is the central place where pspec is updated.
+    pub fn set_spec(params: &ComputeNodeParams, state: &mut ComputeState, pspec: ParsedSpec) {
+        state.pspec = Some(pspec);
+        ComputeNode::update_attached_metric(params, state);
+        let _ = logger::update_ids(&params.instance_id, &Some(params.compute_id.clone()));
+    }
+
+    pub fn update_attached_metric(params: &ComputeNodeParams, state: &mut ComputeState) {
+        // Update the pg_cctl_attached gauge when all identifiers are available.
+        if let Some(instance_id) = &params.instance_id {
+            if let Some(pspec) = &state.pspec {
+                // Clear all values in the metric
+                COMPUTE_ATTACHED.reset();
+
+                // Set new metric value
+                COMPUTE_ATTACHED
+                    .with_label_values(&[
+                        &params.compute_id,
+                        instance_id,
+                        &pspec.tenant_id.to_string(),
+                        &pspec.timeline_id.to_string(),
+                    ])
+                    .set(1);
+            }
         }
     }
 }
