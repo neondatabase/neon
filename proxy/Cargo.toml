@@ -33,7 +33,6 @@ env_logger.workspace = true
 framed-websockets.workspace = true
 futures.workspace = true
 hashbrown.workspace = true
-hashlink.workspace = true
 hex.workspace = true
 hmac.workspace = true
 hostname.workspace = true
