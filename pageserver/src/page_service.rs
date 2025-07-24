@@ -3483,16 +3483,19 @@ impl GrpcPageServiceHandler {
     /// case, we reroute the request to the new child shard. See [`Self::maybe_split_get_page`].
     ///
     /// TODO: revamp the split protocol to avoid this child routing.
-    async fn get_shard_zero_request_timeline(
+    async fn get_request_timeline_shard_zero(
         &self,
         req: &tonic::Request<impl Any>,
     ) -> Result<Handle<TenantManagerTypes>, tonic::Status> {
-        let ttid = *extract::<TenantTimelineId>(req);
+        let TenantTimelineId {
+            tenant_id,
+            timeline_id,
+        } = *extract::<TenantTimelineId>(req);
         let shard_index = *extract::<ShardIndex>(req);
 
         if shard_index.shard_number.0 != 0 {
             return Err(tonic::Status::invalid_argument(format!(
-                "request must use shard zero (requested shard {shard_index})",
+                "request only valid on shard zero (requested shard {shard_index})",
             )));
         }
 
@@ -3503,18 +3506,14 @@ impl GrpcPageServiceHandler {
         // look for the child until the parent's retries are exhausted). Don't do that.
         let mut handles = TimelineHandles::new(self.tenant_manager.clone());
         match handles
-            .get(
-                ttid.tenant_id,
-                ttid.timeline_id,
-                ShardSelector::Known(shard_index),
-            )
+            .get(tenant_id, timeline_id, ShardSelector::Known(shard_index))
             .await
         {
             Ok(timeline) => Ok(timeline),
             Err(err) => {
                 // We may be in the middle of a shard split. Try to find a child shard 0.
                 if let Ok(timeline) = handles
-                    .get(ttid.tenant_id, ttid.timeline_id, ShardSelector::Zero)
+                    .get(tenant_id, timeline_id, ShardSelector::Zero)
                     .await
                     && timeline.get_shard_index().shard_count > shard_index.shard_count
                 {
@@ -3775,7 +3774,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         // to be the sweet spot where throughput is saturated.
         const CHUNK_SIZE: usize = 256 * 1024;
 
-        let timeline = self.get_shard_zero_request_timeline(&req).await?;
+        let timeline = self.get_request_timeline_shard_zero(&req).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
 
         // Validate the request and decorate the span.
@@ -3894,7 +3893,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         req: tonic::Request<proto::GetDbSizeRequest>,
     ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
         let received_at = extract::<ReceivedAt>(&req).0;
-        let timeline = self.get_shard_zero_request_timeline(&req).await?;
+        let timeline = self.get_request_timeline_shard_zero(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
@@ -4040,7 +4039,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         req: tonic::Request<proto::GetRelSizeRequest>,
     ) -> Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
         let received_at = extract::<ReceivedAt>(&req).0;
-        let timeline = self.get_shard_zero_request_timeline(&req).await?;
+        let timeline = self.get_request_timeline_shard_zero(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
@@ -4076,7 +4075,7 @@ impl proto::PageService for GrpcPageServiceHandler {
         req: tonic::Request<proto::GetSlruSegmentRequest>,
     ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
         let received_at = extract::<ReceivedAt>(&req).0;
-        let timeline = self.get_shard_zero_request_timeline(&req).await?;
+        let timeline = self.get_request_timeline_shard_zero(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
