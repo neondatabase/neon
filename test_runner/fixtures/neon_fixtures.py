@@ -3910,6 +3910,41 @@ class NeonProxy(PgProtocol):
             assert response.status_code == expected_code, f"response: {response.json()}"
         return response.json()
 
+    def http_multiquery(self, *queries, **kwargs):
+        # TODO maybe use default values if not provided
+        user = quote(kwargs["user"])
+        password = quote(kwargs["password"])
+        expected_code = kwargs.get("expected_code")
+        timeout = kwargs.get("timeout")
+
+        json_queries = []
+        for query in queries:
+            if type(query) is str:
+                json_queries.append({"query": query})
+            else:
+                [query, params] = query
+                json_queries.append({"query": query, "params": params})
+
+        queries_str = [j["query"] for j in json_queries]
+        log.info(f"Executing http queries: {queries_str}")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        response = requests.post(
+            f"https://{self.domain}:{self.external_http_port}/sql",
+            data=json.dumps({"queries": json_queries}),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Pool-Opt-In": "true",
+            },
+            verify=str(self.test_output_dir / "proxy.crt"),
+            timeout=timeout,
+        )
+
+        if expected_code is not None:
+            assert response.status_code == expected_code, f"response: {response.json()}"
+        return response.json()
+
     async def http2_query(self, query, args, **kwargs):
         # TODO maybe use default values if not provided
         user = kwargs["user"]
@@ -4759,9 +4794,10 @@ class Endpoint(PgProtocol, LogUtils):
                     m = re.search(r"=\s*(\S+)", line)
                     assert m is not None, f"malformed config line {line}"
                     size = m.group(1)
-                    assert size_to_bytes(size) >= size_to_bytes("1MB"), (
-                        "LFC size cannot be set less than 1MB"
-                    )
+                    if size_to_bytes(size) > 0:
+                        assert size_to_bytes(size) >= size_to_bytes("1MB"), (
+                            "LFC size cannot be set less than 1MB"
+                        )
             lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
                 f"neon.file_cache_path = '{lfc_path_escaped}'",
@@ -4915,6 +4951,10 @@ class Endpoint(PgProtocol, LogUtils):
         with open(config_path, "w") as file:
             log.debug(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
+
+    def get_compute_spec(self) -> dict[str, Any]:
+        out = json.loads((Path(self.endpoint_path()) / "config.json").read_text())["spec"]
+        return cast("dict[str, Any]", out)
 
     def respec_deep(self, **kwargs: Any) -> None:
         """

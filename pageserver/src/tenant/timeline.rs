@@ -441,7 +441,7 @@ pub struct Timeline {
     /// heatmap on demand.
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
 
-    pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
+    pub(crate) rel_size_v2_status: ArcSwap<(Option<RelSizeMigration>, Option<Lsn>)>,
 
     wait_lsn_log_slow: tokio::sync::Semaphore,
 
@@ -2894,12 +2894,9 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled)
     }
 
-    pub(crate) fn get_rel_size_v2_status(&self) -> RelSizeMigration {
-        self.rel_size_v2_status
-            .load()
-            .as_ref()
-            .map(|s| s.as_ref().clone())
-            .unwrap_or(RelSizeMigration::Legacy)
+    pub(crate) fn get_rel_size_v2_status(&self) -> (RelSizeMigration, Option<Lsn>) {
+        let (status, migrated_at) = self.rel_size_v2_status.load().as_ref().clone();
+        (status.unwrap_or(RelSizeMigration::Legacy), migrated_at)
     }
 
     fn get_compaction_upper_limit(&self) -> usize {
@@ -3174,6 +3171,7 @@ impl Timeline {
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
         rel_size_v2_status: Option<RelSizeMigration>,
+        rel_size_migrated_at: Option<Lsn>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -3338,7 +3336,10 @@ impl Timeline {
 
                 heatmap_layers_downloader: Mutex::new(None),
 
-                rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
+                rel_size_v2_status: ArcSwap::from_pointee((
+                    rel_size_v2_status,
+                    rel_size_migrated_at,
+                )),
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
 
@@ -3426,11 +3427,17 @@ impl Timeline {
     pub(crate) fn update_rel_size_v2_status(
         &self,
         rel_size_v2_status: RelSizeMigration,
+        rel_size_migrated_at: Option<Lsn>,
     ) -> anyhow::Result<()> {
-        self.rel_size_v2_status
-            .store(Some(Arc::new(rel_size_v2_status.clone())));
+        self.rel_size_v2_status.store(Arc::new((
+            Some(rel_size_v2_status.clone()),
+            rel_size_migrated_at,
+        )));
         self.remote_client
-            .schedule_index_upload_for_rel_size_v2_status_update(rel_size_v2_status)
+            .schedule_index_upload_for_rel_size_v2_status_update(
+                rel_size_v2_status,
+                rel_size_migrated_at,
+            )
     }
 
     pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {

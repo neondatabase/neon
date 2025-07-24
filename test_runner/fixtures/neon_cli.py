@@ -212,11 +212,13 @@ class NeonLocalCli(AbstractNeonCli):
             pg_version,
         ]
         if conf is not None:
-            args.extend(
-                chain.from_iterable(
-                    product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
-                )
-            )
+            for key, value in conf.items():
+                if isinstance(value, bool):
+                    args.extend(
+                        ["-c", f"{key}:{str(value).lower()}"]
+                    )  # only accepts true/false not True/False
+                else:
+                    args.extend(["-c", f"{key}:{value}"])
 
         if set_default:
             args.append("--set-default")
