@@ -448,15 +448,13 @@ static int neon_pgstat_file_size_limit;
 #endif
 
 #if PG_VERSION_NUM >= 160000 && PG_VERSION_NUM < 170000
-if (lakebase_mode) {
-	static void DatabricksSqlErrorHookImpl(int sqlerrcode) {
-		if (sqlerrcode == ERRCODE_DATA_CORRUPTED) {
-			pg_atomic_fetch_add_u32(&databricks_metrics_shared->data_corruption_count, 1);
-		} else if (sqlerrcode == ERRCODE_INDEX_CORRUPTED) {
-			pg_atomic_fetch_add_u32(&databricks_metrics_shared->index_corruption_count, 1);
-		} else if (sqlerrcode == ERRCODE_INTERNAL_ERROR) {
-			pg_atomic_fetch_add_u32(&databricks_metrics_shared->internal_error_count, 1);
-		}
+static void DatabricksSqlErrorHookImpl(int sqlerrcode) {
+	if (sqlerrcode == ERRCODE_DATA_CORRUPTED) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->data_corruption_count, 1);
+	} else if (sqlerrcode == ERRCODE_INDEX_CORRUPTED) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->index_corruption_count, 1);
+	} else if (sqlerrcode == ERRCODE_INTERNAL_ERROR) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->internal_error_count, 1);
 	}
 }
 #endif
