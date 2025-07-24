@@ -2551,12 +2551,17 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 void
 communicator_reconfigure_timeout_if_needed(void)
 {
-	bool	needs_set = (MyPState->ring_receive != MyPState->ring_unused ||
-						 (MIN_BACKEND_PREFETCH_LSN != InvalidXLogRecPtr &&
-						  MIN_BACKEND_PREFETCH_LSN != GetXLogReplayRecPtr(NULL))) &&
+	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused &&
 						!AmPrewarmWorker && /* do not pump prefetch state in prewarm worker */
 						readahead_getpage_pull_timeout_ms > 0;
 
+	if (!needs_set && MIN_BACKEND_PREFETCH_LSN != InvalidXLogRecPtr)
+	{
+		if (last_replay_lsn == InvalidXLogRecPtr)
+			MIN_BACKEND_PREFETCH_LSN = InvalidXLogRecPtr;
+		else
+			needs_set = true; /* Can not reset MIN_BACKEND_PREFETCH_LSN now, have to do it later */
+	}
 	if (needs_set != timeout_set)
 	{
 		/*
