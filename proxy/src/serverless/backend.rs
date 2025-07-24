@@ -28,7 +28,7 @@ use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
 use crate::pqproto::StartupMessageParams;
-use crate::proxy::connect_compute;
+use crate::proxy::{connect_auth, connect_compute};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, LOCAL_PROXY_SUFFIX};
 
@@ -187,15 +187,14 @@ impl PoolingBackend {
         let mut auth_info = compute::AuthInfo::with_auth_keys(keys.keys);
         auth_info.set_startup_params(&params, true);
 
-        let mut node = connect_compute::connect_to_compute(
+        let node = connect_auth::connect_to_compute_and_auth(
             ctx,
             self.config,
             &backend,
+            auth_info,
             connect_compute::TlsNegotiation::Postgres,
         )
         .await?;
-
-        auth_info.authenticate(ctx, &mut node).await?;
 
         let (client, connection) = postgres_client::connect::managed(
             node.stream,
@@ -436,10 +435,13 @@ pub(crate) enum HttpConnError {
     TooManyConnectionAttempts(#[from] ApiLockError),
 }
 
-impl From<compute::PostgresError> for HttpConnError {
-    fn from(value: compute::PostgresError) -> Self {
+impl From<connect_auth::AuthError> for HttpConnError {
+    fn from(value: connect_auth::AuthError) -> Self {
         match value {
-            compute::PostgresError::Postgres(error) => Self::PostgresConnectionError(error),
+            connect_auth::AuthError::Auth(compute::PostgresError::Postgres(error)) => {
+                Self::PostgresConnectionError(error)
+            }
+            connect_auth::AuthError::Connect(error) => Self::ConnectError(error),
         }
     }
 }
