@@ -43,11 +43,30 @@ NeonPerfCountersShmemRequest(void)
 }
 
 
+static int my_proc_num = -1;
+
 static void
-NeonPerfCountersReset(int code, Datum arg)
+my_perf_counters_reset(int code, Datum arg)
 {
-	memset(MyNeonCounters, 0, sizeof(*MyNeonCounters));
+	Assert(my_proc_num >= 0);
+	memset(&neon_per_backend_counters_shared[my_proc_num], 0, sizeof(neon_per_backend_counters));
 }
+
+neon_per_backend_counters*
+get_my_perf_counters(void)
+{
+	if (my_proc_num < 0)
+	{
+#if PG_MAJORVERSION_NUM < 17
+		my_proc_num = MyProc->pgprocno;
+#else
+		my_proc_num = MyProcNumber;
+#endif
+		on_shmem_exit(my_perf_counters_reset, 0);
+	}
+	return &neon_per_backend_counters_shared[my_proc_num];
+}
+
 
 void
 NeonPerfCountersShmemInit(void)
@@ -64,7 +83,6 @@ NeonPerfCountersShmemInit(void)
 	{
 		/* shared memory is initialized to zeros, so nothing to do here */
 	}
-	on_shmem_exit(NeonPerfCountersReset, 0);
 }
 
 static inline void

@@ -172,11 +172,8 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
  */
 #define NUM_NEON_PERF_COUNTER_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
 
-#if PG_VERSION_NUM >= 170000
-#define MyNeonCounters (&neon_per_backend_counters_shared[MyProcNumber])
-#else
-#define MyNeonCounters (&neon_per_backend_counters_shared[MyProc->pgprocno])
-#endif
+extern neon_per_backend_counters* get_my_perf_counters(void);
+#define MyNeonCounters get_my_perf_counters()
 
 /*
  * Backend-local minimal in-flight prefetch LSN.
