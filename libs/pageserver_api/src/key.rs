@@ -519,6 +519,15 @@ pub fn rel_dir_to_key(spcnode: Oid, dbnode: Oid) -> Key {
     }
 }
 
+pub const REL_DIR_MIGRATION_KEY: Key = Key {
+    field1: REL_DIR_KEY_PREFIX,
+    field2: 0,
+    field3: 0,
+    field4: 0,
+    field5: 0,
+    field6: 0,
+};
+
 #[inline(always)]
 pub fn rel_tag_sparse_key(spcnode: Oid, dbnode: Oid, relnode: Oid, forknum: u8) -> Key {
     Key {
