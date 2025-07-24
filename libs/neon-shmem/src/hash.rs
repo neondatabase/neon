@@ -16,6 +16,7 @@
 //!
 //! Concurrency is managed very simply: the entire map is guarded by one shared-memory RwLock.
 
+use std::fmt::Debug;
 use std::hash::{BuildHasher, Hash};
 use std::mem::MaybeUninit;
 
@@ -56,6 +57,22 @@ pub struct HashMapInit<'a, K, V, S = rustc_hash::FxBuildHasher> {
     num_buckets: u32,
 }
 
+impl<'a, K, V, S> Debug for HashMapInit<'a, K, V, S>
+where
+    K: Debug,
+    V: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HashMapInit")
+            .field("shmem_handle", &self.shmem_handle)
+            .field("shared_ptr", &self.shared_ptr)
+            .field("shared_size", &self.shared_size)
+            // .field("hasher", &self.hasher)
+            .field("num_buckets", &self.num_buckets)
+            .finish()
+    }
+}
+
 /// This is a per-process handle to a hash table that (possibly) lives in shared memory.
 /// If a child process is launched with fork(), the child process should
 /// get its own HashMapAccess by calling HashMapInit::attach_writer/reader().
@@ -70,6 +87,20 @@ pub struct HashMapAccess<'a, K, V, S = rustc_hash::FxBuildHasher> {
 
 unsafe impl<K: Sync, V: Sync, S> Sync for HashMapAccess<'_, K, V, S> {}
 unsafe impl<K: Send, V: Send, S> Send for HashMapAccess<'_, K, V, S> {}
+
+impl<'a, K, V, S> Debug for HashMapAccess<'a, K, V, S>
+where
+    K: Debug,
+    V: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HashMapAccess")
+            .field("shmem_handle", &self.shmem_handle)
+            .field("shared_ptr", &self.shared_ptr)
+            // .field("hasher", &self.hasher)
+            .finish()
+    }
+}
 
 impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
     /// Change the 'hasher' used by the hash table.
@@ -298,7 +329,7 @@ where
 
     /// Get a reference to the entry containing a key.
     ///
-    /// NB: THis takes a write lock as there's no way to distinguish whether the intention
+    /// NB: This takes a write lock as there's no way to distinguish whether the intention
     /// is to use the entry for reading or for writing in advance.
     pub fn entry(&self, key: K) -> Entry<'a, '_, K, V> {
         let hash = self.get_hash_value(&key);

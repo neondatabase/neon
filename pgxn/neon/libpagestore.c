@@ -69,7 +69,8 @@ char	   *neon_project_id;
 char	   *neon_branch_id;
 char	   *neon_endpoint_id;
 int32		max_cluster_size;
-char	   *page_server_connstring;
+char	   *pageserver_connstring;
+char	   *pageserver_grpc_urls;
 char	   *neon_auth_token;
 
 int			readahead_buffer_size = 128;
@@ -79,19 +80,12 @@ int         neon_protocol_version = 3;
 
 static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
-static int	stripe_size;
+int		neon_stripe_size;
 static int	max_sockets;
 
 static int pageserver_response_log_timeout = 10000;
 /* 2.5 minutes. A bit higher than highest default TCP retransmission timeout */
 static int pageserver_response_disconnect_timeout = 150000;
-
-typedef struct
-{
-	char		connstring[MAX_SHARDS][MAX_PAGESERVER_CONNSTRING_SIZE];
-	size_t		num_shards;
-	size_t		stripe_size;
-} ShardMap;
 
 /*
  * PagestoreShmemState is kept in shared memory. It contains the connection
@@ -130,7 +124,7 @@ static uint64 pagestore_local_counter = 0;
 typedef enum PSConnectionState {
 	PS_Disconnected,			/* no connection yet */
 	PS_Connecting_Startup,		/* connection starting up */
-	PS_Connecting_PageStream,	/* negotiating pagestream */ 
+	PS_Connecting_PageStream,	/* negotiating pagestream */
 	PS_Connected,				/* connected, pagestream established */
 } PSConnectionState;
 
@@ -181,6 +175,8 @@ static void pageserver_disconnect_shard(shardno_t shard_no);
 // HADRON
 shardno_t get_num_shards(void);
 
+static void AssignShardMap(const char *newval);
+
 static bool
 PagestoreShmemIsValid(void)
 {
@@ -194,8 +190,8 @@ PagestoreShmemIsValid(void)
  * not valid, returns false. The contents of *result are undefined in
  * that case, and must not be relied on.
  */
-static bool
-ParseShardMap(const char *connstr, ShardMap *result)
+bool
+parse_shard_map(const char *connstr, ShardMap *result)
 {
 	const char *p;
 	int			nshards = 0;
@@ -240,24 +236,31 @@ ParseShardMap(const char *connstr, ShardMap *result)
 	if (result)
 	{
 		result->num_shards = nshards;
-		result->stripe_size = stripe_size;
+		result->stripe_size = neon_stripe_size;
 	}
 
 	return true;
 }
 
+/* GUC hooks for neon.pageserver_connstring */
 static bool
 CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 {
 	char	   *p = *newval;
 
-	return ParseShardMap(p, NULL);
+	return parse_shard_map(p, NULL);
 }
 
 static void
 AssignPageserverConnstring(const char *newval, void *extra)
 {
-	ShardMap	shard_map;
+	/*
+	 * 'neon.pageserver_connstring' is ignored if the new communicator is used.
+	 * In that case, the shard map is loaded from 'neon.pageserver_grpc_urls'
+	 * instead, and that happens in the communicator process only.
+	 */
+	if (neon_use_communicator_worker)
+		return;
 
 	/*
 	 * Only postmaster updates the copy in shared memory.
@@ -265,11 +268,29 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	if (!PagestoreShmemIsValid() || IsUnderPostmaster)
 		return;
 
-	if (!ParseShardMap(newval, &shard_map))
+	AssignShardMap(newval);
+}
+
+
+/* GUC hooks for neon.pageserver_connstring */
+static bool
+CheckPageserverGrpcUrls(char **newval, void **extra, GucSource source)
+{
+	char	   *p = *newval;
+
+	return parse_shard_map(p, NULL);
+}
+
+static void
+AssignShardMap(const char *newval)
+{
+	ShardMap	shard_map;
+
+	if (!parse_shard_map(newval, &shard_map))
 	{
 		/*
 		 * shouldn't happen, because we already checked the value in
-		 * CheckPageserverConnstring
+		 * CheckPageserverConnstring/CheckPageserverGrpcUrls
 		 */
 		elog(ERROR, "could not parse shard map");
 	}
@@ -391,17 +412,17 @@ get_shard_number(BufferTag *tag)
 
 #if PG_MAJORVERSION_NUM < 16
 	hash = murmurhash32(tag->rnode.relNode);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / neon_stripe_size));
 #else
 	hash = murmurhash32(tag->relNumber);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / neon_stripe_size));
 #endif
 
 	return hash % n_shards;
 }
 
 static inline void
-CLEANUP_AND_DISCONNECT(PageServer *shard) 
+CLEANUP_AND_DISCONNECT(PageServer *shard)
 {
 	if (shard->wes_read)
 	{
@@ -423,7 +444,7 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
  * complete the connection (e.g. due to receiving an earlier cancellation
  * during connection start).
  * Returns true if successfully connected; false if the connection failed.
- * 
+ *
  * Throws errors in unrecoverable situations, or when this backend's query
  * is canceled.
  */
@@ -1326,7 +1347,7 @@ PagestoreShmemInit(void)
 		pg_atomic_init_u64(&pagestore_shared->begin_update_counter, 0);
 		pg_atomic_init_u64(&pagestore_shared->end_update_counter, 0);
 		memset(&pagestore_shared->shard_map, 0, sizeof(ShardMap));
-		AssignPageserverConnstring(page_server_connstring, NULL);
+		AssignPageserverConnstring(pageserver_connstring, NULL);
 	}
 }
 
@@ -1345,11 +1366,20 @@ pg_init_libpagestore(void)
 	DefineCustomStringVariable("neon.pageserver_connstring",
 							   "connection string to the page server",
 							   NULL,
-							   &page_server_connstring,
+							   &pageserver_connstring,
 							   "",
 							   PGC_SIGHUP,
 							   0,	/* no flags required */
 							   CheckPageserverConnstring, AssignPageserverConnstring, NULL);
+
+	DefineCustomStringVariable("neon.pageserver_grpc_urls",
+							   "list of gRPC URLs for the page servers",
+							   NULL,
+							   &pageserver_grpc_urls,
+							   "",
+							   PGC_SIGHUP,
+							   0,	/* no flags required */
+							   CheckPageserverGrpcUrls, NULL, NULL);
 
 	DefineCustomStringVariable("neon.timeline_id",
 							   "Neon timeline_id the server is running on",
@@ -1397,7 +1427,7 @@ pg_init_libpagestore(void)
 	DefineCustomIntVariable("neon.stripe_size",
 							"sharding stripe size",
 							NULL,
-							&stripe_size,
+							&neon_stripe_size,
 							2048, 1, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_BLOCKS,
@@ -1506,7 +1536,7 @@ pg_init_libpagestore(void)
 	if (neon_auth_token)
 		neon_log(LOG, "using storage auth token from NEON_AUTH_TOKEN environment variable");
 
-	if (page_server_connstring && page_server_connstring[0])
+	if (pageserver_connstring[0] || pageserver_grpc_urls[0])
 	{
 		neon_log(PageStoreTrace, "set neon_smgr hook");
 		smgr_hook = smgr_neon;

@@ -21,6 +21,7 @@
 #include "replication/logicallauncher.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
+#include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/ipc.h"
 #include "funcapi.h"
@@ -31,6 +32,7 @@
 #include "utils/guc_tables.h"
 
 #include "communicator.h"
+#include "communicator_new.h"
 #include "communicator_process.h"
 #include "extension_server.h"
 #include "file_cache.h"
@@ -456,6 +458,16 @@ _PG_init(void)
 	load_file("$libdir/neon_rmgr", false);
 #endif
 
+	DefineCustomBoolVariable(
+							"neon.use_communicator_worker",
+							"Uses the communicator worker implementation",
+							NULL,
+							&neon_use_communicator_worker,
+							true,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
+
 	/*
 	 * Initializing a pre-loaded Postgres extension happens in three stages:
 	 *
@@ -490,12 +502,14 @@ _PG_init(void)
 	pg_init_libpagestore();
 	relsize_hash_init();
 	lfc_init();
+	pg_init_prewarm();
 	pg_init_walproposer();
 	init_lwlsncache();
 
 	pg_init_communicator_process();
 
 	pg_init_communicator();
+
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();
@@ -684,7 +698,10 @@ approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
 
 	duration = PG_ARGISNULL(0) ? (time_t) -1 : PG_GETARG_INT32(0);
 
-	dc = lfc_approximate_working_set_size_seconds(duration, false);
+	if (neon_use_communicator_worker)
+		dc = communicator_new_approximate_working_set_size_seconds(duration, false);
+	else
+		dc = lfc_approximate_working_set_size_seconds(duration, false);
 	if (dc < 0)
 		PG_RETURN_NULL();
 	else
@@ -697,12 +714,48 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 	bool		reset = PG_GETARG_BOOL(0);
 	int32		dc;
 
-	dc = lfc_approximate_working_set_size_seconds(-1, reset);
+	if (neon_use_communicator_worker)
+		dc = communicator_new_approximate_working_set_size_seconds(-1, reset);
+	else
+		dc = lfc_approximate_working_set_size_seconds(-1, reset);
 	if (dc < 0)
 		PG_RETURN_NULL();
 	else
 		PG_RETURN_INT32(dc);
 }
+
+PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
+Datum
+neon_get_lfc_stats(PG_FUNCTION_ARGS)
+{
+#define NUM_NEON_GET_STATS_COLS	2
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	LfcStatsEntry *entries;
+	uint32		num_entries;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	if (neon_use_communicator_worker)
+		entries = communicator_new_get_lfc_stats(&num_entries);
+	else
+		entries = get_lfc_stats(&num_entries);
+
+	for (uint32 i = 0; i < num_entries; i++)
+	{
+		LfcStatsEntry *entry = &entries[i];
+		Datum		values[NUM_NEON_GET_STATS_COLS];
+		bool		nulls[NUM_NEON_GET_STATS_COLS];
+
+		nulls[0] = false;
+		values[0] = CStringGetTextDatum(entry->metric_name);
+		nulls[1] = entry->isnull;
+		values[1] = Int64GetDatum(entry->isnull ? 0 : entry->value);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	PG_RETURN_VOID();
+}
+
 
 /*
  * Initialization stage 2: make requests for the amount of shared memory we
@@ -719,11 +772,13 @@ neon_shmem_request_hook(void)
 #endif
 
 	LfcShmemRequest();
+	PrewarmShmemRequest();
 	NeonPerfCountersShmemRequest();
 	PagestoreShmemRequest();
 	RelsizeCacheShmemRequest();
 	WalproposerShmemRequest();
 	LwLsnCacheShmemRequest();
+	CommunicatorNewShmemRequest();
 }
 
 
@@ -742,11 +797,13 @@ neon_shmem_startup_hook(void)
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
 	LfcShmemInit();
+	PrewarmShmemInit();
 	NeonPerfCountersShmemInit();
 	PagestoreShmemInit();
 	RelsizeCacheShmemInit();
 	WalproposerShmemInit();
 	LwLsnCacheShmemInit();
+	CommunicatorNewShmemInit();
 
 #if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");

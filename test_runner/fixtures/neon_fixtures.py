@@ -4778,7 +4778,18 @@ class Endpoint(PgProtocol, LogUtils):
 
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
-        config_lines = ["max_replication_write_lag=15MB"] + config_lines
+        config_lines += ["max_replication_write_lag=15MB"]
+
+        # If gRPC is enabled, use the new communicator too.
+        #
+        # NB: the communicator is enabled by default, so force it to false otherwise.
+        #
+        # XXX: By checking for None, we enable the new communicator for all tests
+        # by default
+        if grpc or grpc is None:
+            config_lines += ["neon.use_communicator_worker=on"]
+        else:
+            config_lines += ["neon.use_communicator_worker=off"]
 
         # Delete file cache if it exists (and we're recreating the endpoint)
         if USE_LFC:

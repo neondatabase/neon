@@ -14,9 +14,9 @@ use utils::logging::warn_slow;
 
 use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
 use crate::retry::Retry;
-use crate::split::GetPageSplitter;
 use compute_api::spec::PageserverProtocol;
 use pageserver_page_api as page_api;
+use pageserver_page_api::GetPageSplitter;
 use utils::id::{TenantId, TimelineId};
 use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
 
