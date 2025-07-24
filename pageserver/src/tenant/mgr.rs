@@ -826,9 +826,9 @@ impl TenantManager {
         peek_slot.is_some()
     }
 
-    /// Returns whether a local slot exists for a child shard of the given tenant and shard count.
-    /// Note that this just checks for a shard with a larger shard count, and it may not be a
-    /// direct child of the given shard.
+    /// Returns whether a local shard exists that's a child of the given tenant shard. Note that
+    /// this just checks for any shard with a larger shard count, and it may not be a direct child
+    /// of the given shard (their keyspace may not overlap).
     pub(crate) fn has_child_shard(&self, tenant_id: TenantId, shard_index: ShardIndex) -> bool {
         match &*self.tenants.read().unwrap() {
             TenantsMap::Initializing => false,
