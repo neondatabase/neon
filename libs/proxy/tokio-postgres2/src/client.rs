@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use crate::cancel_token::RawCancelToken;
 use crate::codec::{BackendMessages, FrontendMessage, RecordNotices};
 use crate::config::{Host, SslMode};
+use crate::connection::gc_bytesmut;
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
 use crate::types::{Oid, Type};
@@ -95,20 +96,13 @@ impl InnerClient {
         Ok(PartialQuery(Some(self)))
     }
 
-    // pub fn send_with_sync<F>(&mut self, f: F) -> Result<&mut Responses, Error>
-    // where
-    //     F: FnOnce(&mut BytesMut) -> Result<(), Error>,
-    // {
-    //     self.start()?.send_with_sync(f)
-    // }
-
     pub fn send_simple_query(&mut self, query: &str) -> Result<&mut Responses, Error> {
         self.responses.waiting += 1;
 
         self.buffer.clear();
         // simple queries do not need sync.
         frontend::query(query, &mut self.buffer).map_err(Error::encode)?;
-        let buf = self.buffer.split().freeze();
+        let buf = self.buffer.split();
         self.send_message(FrontendMessage::Raw(buf))
     }
 
@@ -125,7 +119,7 @@ impl Drop for PartialQuery<'_> {
         if let Some(client) = self.0.take() {
             client.buffer.clear();
             frontend::sync(&mut client.buffer);
-            let buf = client.buffer.split().freeze();
+            let buf = client.buffer.split();
             let _ = client.send_message(FrontendMessage::Raw(buf));
         }
     }
@@ -141,7 +135,7 @@ impl<'a> PartialQuery<'a> {
         client.buffer.clear();
         f(&mut client.buffer)?;
         frontend::flush(&mut client.buffer);
-        let buf = client.buffer.split().freeze();
+        let buf = client.buffer.split();
         client.send_message(FrontendMessage::Raw(buf))
     }
 
@@ -154,7 +148,7 @@ impl<'a> PartialQuery<'a> {
         client.buffer.clear();
         f(&mut client.buffer)?;
         frontend::sync(&mut client.buffer);
-        let buf = client.buffer.split().freeze();
+        let buf = client.buffer.split();
         let _ = client.send_message(FrontendMessage::Raw(buf));
 
         Ok(&mut self.0.take().unwrap().responses)
@@ -316,6 +310,9 @@ impl Client {
             DISCARD TEMP;
             DISCARD SEQUENCES;",
         )?;
+
+        // Clean up memory usage.
+        gc_bytesmut(&mut self.inner_mut().buffer);
 
         Ok(())
     }
