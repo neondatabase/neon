@@ -945,7 +945,9 @@ impl TenantConfig {
         patch
             .basebackup_cache_enabled
             .apply(&mut basebackup_cache_enabled);
-        patch.rel_size_v1_access_disabled.apply(&mut rel_size_v1_access_disabled);
+        patch
+            .rel_size_v1_access_disabled
+            .apply(&mut rel_size_v1_access_disabled);
 
         Ok(Self {
             checkpoint_distance,
