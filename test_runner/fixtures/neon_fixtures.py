@@ -4930,7 +4930,12 @@ class Endpoint(PgProtocol, LogUtils):
     def is_running(self):
         return self._running._value > 0
 
-    def reconfigure(self, pageserver_id: int | None = None, safekeepers: list[int] | None = None):
+    def reconfigure(
+        self,
+        pageserver_id: int | None = None,
+        safekeepers: list[int] | None = None,
+        timeout_sec: float = 120,
+    ):
         assert self.endpoint_id is not None
         # If `safekeepers` is not None, they are remember them as active and use
         # in the following commands.
@@ -4941,11 +4946,15 @@ class Endpoint(PgProtocol, LogUtils):
         while True:
             try:
                 self.env.neon_cli.endpoint_reconfigure(
-                    self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
+                    self.endpoint_id,
+                    self.tenant_id,
+                    pageserver_id,
+                    self.active_safekeepers,
+                    timeout_sec=timeout_sec,
                 )
                 return
             except RuntimeError as e:
-                if time.time() - start_time > 120:
+                if time.time() - start_time > timeout_sec:
                     raise e
                 log.warning(f"Reconfigure failed with error: {e}. Retrying...")
                 time.sleep(5)
