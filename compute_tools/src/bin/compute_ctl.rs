@@ -235,6 +235,9 @@ fn main() -> Result<()> {
             pg_isready_bin: get_pg_isready_bin(&cli.pgbin),
             instance_id: std::env::var("INSTANCE_ID").ok(),
             lakebase_mode: cli.lakebase_mode,
+            build_tag: BUILD_TAG.to_string(),
+            control_plane_uri: cli.control_plane_uri,
+            config_path_test_only: cli.config,
         },
         config,
     )?;

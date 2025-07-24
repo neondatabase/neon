@@ -4940,6 +4940,10 @@ class Endpoint(PgProtocol, LogUtils):
             self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
         )
 
+    def refresh_configuration(self):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_refresh_configuration(self.endpoint_id)
+
     def respec(self, **kwargs: Any) -> None:
         """Update the endpoint.json file used by control_plane."""
         # Read config
@@ -4985,6 +4989,10 @@ class Endpoint(PgProtocol, LogUtils):
         with open(config_path, "w") as file:
             log.debug("Updating compute config to: %s", json.dumps(config, indent=4))
             json.dump(config, file, indent=4)
+
+    def update_pageservers_in_config(self, pageserver_id: int | None = None):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_update_pageservers(self.endpoint_id, pageserver_id)
 
     def wait_for_migrations(self, wait_for: int = NUM_COMPUTE_MIGRATIONS) -> None:
         """

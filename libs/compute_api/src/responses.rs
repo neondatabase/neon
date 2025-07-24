@@ -172,6 +172,8 @@ pub enum ComputeStatus {
     TerminationPendingImmediate,
     // Terminated Postgres
     Terminated,
+    // A spec refresh is being requested
+    RefreshConfigurationPending,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -193,6 +195,9 @@ impl Display for ComputeStatus {
                 f.write_str("termination-pending-immediate")
             }
             ComputeStatus::Terminated => f.write_str("terminated"),
+            ComputeStatus::RefreshConfigurationPending => {
+                f.write_str("refresh-configuration-pending")
+            }
         }
     }
 }

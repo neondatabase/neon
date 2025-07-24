@@ -21,6 +21,7 @@ use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -120,6 +121,10 @@ pub struct ComputeNodeParams {
     // Path to the `pg_isready` binary.
     pub pg_isready_bin: String,
     pub lakebase_mode: bool,
+
+    pub build_tag: String,
+    pub control_plane_uri: Option<String>,
+    pub config_path_test_only: Option<OsString>,
 }
 
 type TaskHandle = Mutex<Option<JoinHandle<()>>>;
@@ -1796,12 +1801,12 @@ impl ComputeNode {
         let states_allowing_configuration_refresh = [
             ComputeStatus::Running,
             ComputeStatus::Failed,
-            // ComputeStatus::RefreshConfigurationPending,
+            ComputeStatus::RefreshConfigurationPending,
         ];
 
-        let state = self.state.lock().expect("state lock poisoned");
+        let mut state = self.state.lock().expect("state lock poisoned");
         if states_allowing_configuration_refresh.contains(&state.status) {
-            // state.status = ComputeStatus::RefreshConfigurationPending;
+            state.status = ComputeStatus::RefreshConfigurationPending;
             self.state_changed.notify_all();
             Ok(())
         } else if state.status == ComputeStatus::Init {
@@ -1988,6 +1993,7 @@ impl ComputeNode {
                             // wait
                             ComputeStatus::Init
                             | ComputeStatus::Configuration
+                            | ComputeStatus::RefreshConfigurationPending
                             | ComputeStatus::Empty => {
                                 state = self.state_changed.wait(state).unwrap();
                             }

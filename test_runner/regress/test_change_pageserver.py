@@ -3,14 +3,35 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+import pytest
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.remote_storage import RemoteStorageKind
 
 if TYPE_CHECKING:
-    from fixtures.neon_fixtures import NeonEnvBuilder
+    from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder
 
 
-def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
+def reconfigure_endpoint(endpoint: Endpoint, pageserver_id: int, use_explicit_reconfigure: bool):
+    # It's important that we always update config.json before issuing any reconfigure requests
+    # to make sure that PG-initiated config refresh doesn't mess things up by reverting to the old config.
+    endpoint.update_pageservers_in_config(pageserver_id=pageserver_id)
+
+    # PG will eventually automatically refresh its configuration if it detects connectivity issues with pageservers.
+    # We also allow the test to explicitly request a reconfigure so that the test can be sure that the
+    # endpoint is running with the latest configuration.
+    #
+    # Note that explicit reconfiguration is not required for the system to function or for this test to pass.
+    # It is kept for reference as this is how this test used to work before the capability of initiating
+    # configuration refreshes was added to compute nodes.
+    if use_explicit_reconfigure:
+        endpoint.reconfigure(pageserver_id=pageserver_id)
+
+
+@pytest.mark.parametrize("use_explicit_reconfigure_for_failover", [False, True])
+def test_change_pageserver(
+    neon_env_builder: NeonEnvBuilder, use_explicit_reconfigure_for_failover: bool
+):
     """
     A relatively low level test of reconfiguring a compute's pageserver at runtime.  Usually this
     is all done via the storage controller, but this test will disable the storage controller's compute
@@ -72,7 +93,10 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     execute("SELECT count(*) FROM foo")
     assert fetchone() == (100000,)
 
-    endpoint.reconfigure(pageserver_id=alt_pageserver_id)
+    # Reconfigure the endpoint to use the alt pageserver. We issue an explicit reconfigure request here
+    # regardless of test mode as this is testing the externally driven reconfiguration scenario, not the
+    # compute-initiated reconfiguration scenario upon detecting failures.
+    reconfigure_endpoint(endpoint, pageserver_id=alt_pageserver_id, use_explicit_reconfigure=True)
 
     # Verify that the neon.pageserver_connstring GUC is set to the correct thing
     execute("SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'")
@@ -100,6 +124,12 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.node_configure(env.pageservers[1].id, {"availability": "Offline"})
     env.storage_controller.reconcile_until_idle()
 
+    reconfigure_endpoint(
+        endpoint,
+        pageserver_id=env.pageservers[0].id,
+        use_explicit_reconfigure=use_explicit_reconfigure_for_failover,
+    )
+
     endpoint.reconfigure(pageserver_id=env.pageservers[0].id)
 
     execute("SELECT count(*) FROM foo")
@@ -116,7 +146,11 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
         await asyncio.sleep(
             1
         )  # Sleep for 1 second just to make sure we actually started our count(*) query
-        endpoint.reconfigure(pageserver_id=env.pageservers[1].id)
+        reconfigure_endpoint(
+            endpoint,
+            pageserver_id=env.pageservers[1].id,
+            use_explicit_reconfigure=use_explicit_reconfigure_for_failover,
+        )
 
     def execute_count():
         execute("SELECT count(*) FROM FOO")
