@@ -23,17 +23,12 @@ def query_clickhouse(
     client,
     query: str,
     digest: str,
-    conn: psycopg2.extensions.connection | None = None,
 ) -> None:
     """
     Run the query on the client
     return answer if successful, raise an exception otherwise
     """
     log.debug("Query: %s", query)
-    if conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM pg_replication_slots WHERE slot_type = 'logical'")
-        log.info("replication slots: %s", cur.fetchall())
     res = client.query(query)
     log.debug(res.result_rows)
     m = hashlib.sha1()
@@ -77,9 +72,8 @@ def test_clickhouse(remote_pg: RemotePostgres):
             client,
             "select * from db1_postgres.table1 order by 1",
             "ee600d8f7cd05bd0b169fa81f44300a9dd10085a",
-            conn,
         ),
-        timeout=90,
+        timeout=60,
     )
     cur.execute("INSERT INTO table1 (id, column1) VALUES (3, 'ghi'), (4, 'jkl');")
     conn.commit()
@@ -89,7 +83,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
             "select * from db1_postgres.table1 order by 1",
             "9eba2daaf7e4d7d27ac849525f68b562ab53947d",
         ),
-        timeout=90,
+        timeout=60,
     )
     log.debug("Sleeping before final checking if Neon is still alive")
     time.sleep(3)
