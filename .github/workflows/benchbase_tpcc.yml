@@ -173,6 +173,20 @@ jobs:
         
         echo "Benchmark execution completed"
 
+    - name: Run TPC-C benchmark (warmup phase, then ramp down TPS and up again in 5 minute intervals)
+
+      env:
+          WAREHOUSES: ${{ matrix.warehouses }}
+      run: |
+        cd "${RUNNER_TEMP}"
+        
+        echo "Running TPC-C ramp-down-up with ${WAREHOUSES} warehouses..."
+        
+        # Run the optimal rate benchmark
+        ./scripts/execute_${WAREHOUSES}_warehouses_ramp_up.sh
+        
+        echo "Benchmark execution completed"
+
     - name: Process results (upload to test results database and generate diagrams)
       env:
         WAREHOUSES: ${{ matrix.warehouses }}
@@ -218,7 +232,7 @@ jobs:
           echo "Warning: Load log file not found: load_${WAREHOUSES}_warehouses.log"
         fi
         
-        echo "Processing warmup results..."
+        echo "Processing warmup results for optimal rate..."
         
         # Find and process warmup results
         WARMUP_CSV=$(find results_warmup -name "*.results.csv" -type f | head -1)
@@ -270,6 +284,60 @@ jobs:
             --connection-string "${PERF_DB_CONNSTR}"
         else
           echo "Warning: Missing optimal rate results files (CSV: $OPTRATE_CSV, JSON: $OPTRATE_JSON)"
+        fi
+
+        echo "Processing warmup 2 results for ramp down/up phase..."
+        
+        # Find and process warmup results
+        WARMUP_CSV=$(find results_warmup -name "*.results.csv" -type f | tail -1)
+        WARMUP_JSON=$(find results_warmup -name "*.summary.json" -type f | tail -1)
+        
+        if [ -n "$WARMUP_CSV" ] && [ -n "$WARMUP_JSON" ]; then
+          echo "Generating warmup diagram from: $WARMUP_CSV"
+          python generate_diagrams.py \
+            --input-csv "$WARMUP_CSV" \
+            --output-svg "warmup_2_${WAREHOUSES}_warehouses_performance.svg" \
+            --title-suffix "Warmup at max TPS"
+            
+          echo "Uploading warmup metrics from: $WARMUP_JSON"
+          python upload_results_to_perf_test_results.py \
+            --summary-json "$WARMUP_JSON" \
+            --results-csv "$WARMUP_CSV" \
+            --run-type "warmup" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
+        else
+          echo "Warning: Missing warmup results files (CSV: $WARMUP_CSV, JSON: $WARMUP_JSON)"
+        fi
+        
+        echo "Processing ramp results..."
+        
+        # Find and process ramp results  
+        RAMPUP_CSV=$(find results_ramp_up -name "*.results.csv" -type f | head -1)
+        RAMPUP_JSON=$(find results_ramp_up -name "*.summary.json" -type f | head -1)
+        
+        if [ -n "$RAMPUP_CSV" ] && [ -n "$RAMPUP_JSON" ]; then
+          echo "Generating ramp diagram from: $RAMPUP_CSV"
+          python generate_diagrams.py \
+            --input-csv "$RAMPUP_CSV" \
+            --output-svg "ramp_${WAREHOUSES}_warehouses_performance.svg" \
+            --title-suffix "ramp TPS down and up in 5 minute intervals"
+            
+          echo "Uploading ramp metrics from: $RAMPUP_JSON"
+          python upload_results_to_perf_test_results.py \
+            --summary-json "$RAMPUP_JSON" \
+            --results-csv "$RAMPUP_CSV" \
+            --run-type "ramp-up" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
+        else
+          echo "Warning: Missing ramp results files (CSV: $RAMPUP_CSV, JSON: $RAMPUP_JSON)"
         fi
         
         # Deactivate and clean up virtual environment

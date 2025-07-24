@@ -20,7 +20,7 @@ BATCH_SIZE = 1000
 LOADER_THREADS = 4
 TRANSACTION_WEIGHTS = "45,43,4,4,4"  # NewOrder, Payment, OrderStatus, Delivery, StockLevel
 # Ramp-up rate multipliers
-RAMP_RATE_FACTORS = [0.4, 0.6, 0.7, 0.9, 1.0, 1.1, 2.0]
+RAMP_RATE_FACTORS = [1.5, 1.1, 0.9, 0.7, 0.6, 0.4, 0.6, 0.7, 0.9, 1.1]
 
 # Templates for XML configs
 WARMUP_XML = """<?xml version="1.0"?>
