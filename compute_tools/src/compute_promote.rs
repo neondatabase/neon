@@ -49,7 +49,7 @@ impl ComputeNode {
         task.borrow().clone()
     }
 
-    async fn promote_impl(&self, mut cfg: PromoteConfig) -> Result<()> {
+    async fn promote_impl(&self, cfg: PromoteConfig) -> Result<()> {
         {
             let state = self.state.lock().unwrap();
             let mode = &state.pspec.as_ref().unwrap().spec.mode;
@@ -134,25 +134,41 @@ impl ComputeNode {
         {
             let mut state = self.state.lock().unwrap();
             let spec = &mut state.pspec.as_mut().unwrap().spec;
-            spec.mode = ComputeMode::Primary;
-            let new_conf = cfg.spec.cluster.postgresql_conf.as_mut().unwrap();
-            let existing_conf = spec.cluster.postgresql_conf.as_ref().unwrap();
-            Self::merge_spec(new_conf, existing_conf);
+            tracing::debug!("old spec: {:#?}, new spec: {:#?}", spec, cfg.spec);
+
+            // Local setup has different ports for pg process (port=) for primary and secondary.
+            // In order for promotion to work, new spec needs to have port= with value for secondary
+            if cfg!(feature = "testing") {
+                let Some(existing_conf) = spec.cluster.postgresql_conf.as_ref() else {
+                    bail!("spec.cluster.postgresql_conf missing for endpoint");
+                };
+                let existing_conf = existing_conf.clone();
+
+                *spec = cfg.spec;
+
+                let Some(new_conf) = spec.cluster.postgresql_conf.as_mut() else {
+                    bail!("local setup was requested, but spec.cluster.postgresql_conf was not passed");
+                };
+                Self::update_conf_from_existing(new_conf, existing_conf);
+            } else {
+                *spec = cfg.spec;
+            }
+
+            tracing::debug!("applied spec: {:#?}", spec);
         }
+
         info!("applied new spec, reconfiguring as primary");
         self.reconfigure()
     }
 
     /// Merge old and new Postgres conf specs to apply on secondary.
-    /// Change new spec's port and safekeepers since they are supplied
-    /// differenly
-    fn merge_spec(new_conf: &mut String, existing_conf: &str) {
+    /// Change new spec's port to old spec's ports, as they're different in local setup and
+    /// if we don't change it, promoted primary connection won't be established
+    fn update_conf_from_existing(new_conf: &mut String, existing_conf: String) {
         let mut new_conf_set: HashMap<&str, &str> = new_conf
             .split_terminator('\n')
             .map(|e| e.split_once("=").expect("invalid item"))
             .collect();
-        new_conf_set.remove("neon.safekeepers");
-
         let existing_conf_set: HashMap<&str, &str> = existing_conf
             .split_terminator('\n')
             .map(|e| e.split_once("=").expect("invalid item"))
