@@ -118,7 +118,6 @@ impl NeonControlPlaneClient {
                         cache_key.into(),
                         role.into(),
                         msg.clone(),
-                        retry_info.map(|r| r.retry_at - Instant::now()),
                     );
 
                     Err(err)
