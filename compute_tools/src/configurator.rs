@@ -101,6 +101,19 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
                         // node out of the `RefreshConfigurationPending` state. Would be nice if we can encode this invariant
                         // into the type system.
                         assert_eq!(state.status, ComputeStatus::RefreshConfigurationPending);
+
+                        if state.pspec.as_ref().map(|ps| ps.pageserver_connstr.clone())
+                            == Some(pspec.pageserver_connstr.clone())
+                        {
+                            info!(
+                                "Refresh configuration: Retrieved spec is the same as the current spec. Waiting for control plane to update the spec before attempting reconfiguration."
+                            );
+                            state.status = ComputeStatus::Running;
+                            compute.state_changed.notify_all();
+                            drop(state);
+                            std::thread::sleep(std::time::Duration::from_secs(5));
+                            continue;
+                        }
                         // state.pspec is consumed by compute.reconfigure() below. Note that compute.reconfigure() will acquire
                         // the compute.state lock again so we need to have the lock guard go out of scope here. We could add a
                         // "locked" variant of compute.reconfigure() that takes the lock guard as an argument to make this cleaner,
