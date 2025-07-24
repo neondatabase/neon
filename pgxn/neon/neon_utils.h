@@ -2,6 +2,7 @@
 #define __NEON_UTILS_H__
 
 #include "lib/stringinfo.h"
+#include "storage/buf_internals.h"
 
 #ifndef WALPROPOSER_LIB
 #include <curl/curl.h>
@@ -15,6 +16,9 @@ uint64		pq_getmsgint64_le(StringInfo msg);
 void		pq_sendint32_le(StringInfo buf, uint32 i);
 void		pq_sendint64_le(StringInfo buf, uint64 i);
 void        disable_core_dump(void);
+
+/* Buffer tag validation function */
+bool		BufferTagIsValid(const BufferTag *tag);
 
 #ifndef WALPROPOSER_LIB
 
