@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use futures_util::{Sink, StreamExt, ready};
 use postgres_protocol2::message::backend::{Message, NoticeResponseBody};
@@ -50,13 +50,19 @@ pub const INITIAL_CAPACITY: usize = 2 * 1024;
 pub fn gc_bytesmut(buf: &mut BytesMut) {
     const GC_THRESHOLD: usize = 16 * 1024;
 
+    // We use a different mode to shrink the buf when above the threshold.
+    // When above the threshold, we only re-allocate when the buf has 2x spare capacity.
+    let reclaim = GC_THRESHOLD.checked_sub(buf.len()).unwrap_or(buf.len());
+
     // `try_reclaim` tries to get the capacity from any shared `BytesMut`s,
     // before then comparing the length against the capacity.
-    if buf.try_reclaim(GC_THRESHOLD + 1) {
+    if buf.try_reclaim(reclaim) {
+        let capacity = usize::max(buf.len(), INITIAL_CAPACITY);
+
         // Allocate a new `BytesMut` so that we deallocate the old version.
-        let new = BytesMut::with_capacity(buf.len() + INITIAL_CAPACITY);
-        let old = std::mem::replace(buf, new);
-        buf.put(old);
+        let mut new = BytesMut::with_capacity(capacity);
+        new.extend_from_slice(buf);
+        *buf = new;
     }
 }
 
