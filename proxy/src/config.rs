@@ -159,11 +159,11 @@ impl FromStr for CacheOptions {
 #[derive(Debug)]
 pub struct ProjectInfoCacheOptions {
     /// Max number of entries.
-    pub size: usize,
+    pub size: u64,
     /// Entry's time-to-live.
     pub ttl: Duration,
     /// Max number of roles per endpoint.
-    pub max_roles: usize,
+    pub max_roles: u64,
     /// Gc interval.
     pub gc_interval: Duration,
 }

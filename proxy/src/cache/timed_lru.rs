@@ -2,7 +2,6 @@ use std::borrow::Borrow;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-use hashlink::lru_cache;
 // This seems to make more sense than `lru` or `cached`:
 //
 // * `near/nearcore` ditched `cached` in favor of `lru`
@@ -205,59 +204,9 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
         self.insert_raw_ttl(key, value, ttl, false);
     }
 
+    #[cfg(feature = "rest_broker")]
     pub(crate) fn insert(&self, key: K, value: V) {
         self.insert_raw_ttl(key, value, self.ttl, self.update_ttl_on_retrieval);
-    }
-
-    pub(crate) fn insert_ttl_if(
-        &self,
-        key: K,
-        ttl: Duration,
-        f: impl FnOnce(Option<&V>) -> Option<V>,
-    ) {
-        let created_at = Instant::now();
-        let expires_at = created_at.checked_add(ttl).expect("time overflow");
-
-        let replaced = {
-            let mut lock = self.cache.lock();
-            let entry = lock.entry(key);
-            let current = match &entry {
-                lru_cache::Entry::Occupied(o) => Some(&o.get().value),
-                lru_cache::Entry::Vacant(_) => None,
-            };
-            let new = f(current);
-            if let Some(value) = new {
-                let value = Entry {
-                    created_at,
-                    expires_at,
-                    ttl,
-                    update_ttl_on_retrieval: self.update_ttl_on_retrieval,
-                    value,
-                };
-
-                match entry {
-                    lru_cache::Entry::Occupied(occupied_entry) => {
-                        occupied_entry.insert_entry(value);
-                        true
-                    }
-                    lru_cache::Entry::Vacant(vacant_entry) => {
-                        vacant_entry.insert(value);
-                        false
-                    }
-                }
-            } else {
-                false
-            }
-        };
-
-        debug!(
-            created_at = format_args!("{created_at:?}"),
-            expires_at = format_args!("{expires_at:?}"),
-            replaced,
-            "created a cache entry"
-        );
-
-        // self.insert_raw_ttl(key, value, self.ttl, self.update_ttl_on_retrieval);
     }
 
     pub(crate) fn insert_unit(&self, key: K, value: V) -> (Option<V>, Cached<&Self, ()>) {
@@ -271,7 +220,7 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
         (old, cached)
     }
 
-    // #[cfg(feature = "rest_broker")]
+    #[cfg(feature = "rest_broker")]
     pub(crate) fn flush(&self) {
         let now = Instant::now();
         let mut cache = self.cache.lock();

@@ -3,6 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use moka::Expiry;
+
 use crate::control_plane::messages::ControlPlaneErrorMessage;
 
 /// A generic trait which exposes types of cache's key and value,
@@ -117,5 +119,26 @@ impl CplaneExpiry {
             .as_ref()
             .and_then(|s| s.details.retry_info.as_ref())
             .map_or(self.error, |r| r.retry_at.into_std() - updated)
+    }
+}
+
+impl<K, V> Expiry<K, ControlPlaneResult<V>> for CplaneExpiry {
+    fn expire_after_create(
+        &self,
+        _key: &K,
+        value: &ControlPlaneResult<V>,
+        created_at: Instant,
+    ) -> Option<Duration> {
+        self.expire_early(value, created_at)
+    }
+
+    fn expire_after_update(
+        &self,
+        _key: &K,
+        value: &ControlPlaneResult<V>,
+        updated_at: Instant,
+        _duration_until_expiry: Option<Duration>,
+    ) -> Option<Duration> {
+        self.expire_early(value, updated_at)
     }
 }

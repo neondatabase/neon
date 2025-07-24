@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clashmap::ClashMap;
+use moka::sync::Cache;
 use tracing::{debug, info};
 
 use crate::cache::common::{ControlPlaneResult, CplaneExpiry};
-use crate::cache::{Cache, TimedLru};
 use crate::config::ProjectInfoCacheOptions;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Reason};
 use crate::control_plane::{EndpointAccessControl, RoleAccessControl};
@@ -21,9 +21,8 @@ use crate::types::{EndpointId, RoleName};
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
 pub struct ProjectInfoCache {
-    ttl_policy: CplaneExpiry,
-    role_controls: TimedLru<(EndpointIdInt, RoleNameInt), ControlPlaneResult<RoleAccessControl>>,
-    ep_controls: TimedLru<EndpointIdInt, ControlPlaneResult<EndpointAccessControl>>,
+    role_controls: Cache<(EndpointIdInt, RoleNameInt), ControlPlaneResult<RoleAccessControl>>,
+    ep_controls: Cache<EndpointIdInt, ControlPlaneResult<EndpointAccessControl>>,
 
     project2ep: ClashMap<ProjectIdInt, HashSet<EndpointIdInt>>,
     // FIXME(stefan): we need a way to GC the account2ep map.
@@ -89,19 +88,18 @@ impl ProjectInfoCache {
             error: Duration::from_secs(30),
         };
         Self {
-            ttl_policy: expiry,
-            role_controls: TimedLru::new(
-                "role_access_controls",
-                config.size * config.max_roles,
-                config.ttl,
-                false,
-            ),
-            ep_controls: TimedLru::new(
-                "endpoint_access_controls",
-                config.size * config.max_roles,
-                config.ttl,
-                false,
-            ),
+            role_controls: Cache::builder()
+                .name("role_access_controls")
+                .max_capacity(config.size * config.max_roles)
+                .time_to_live(config.ttl)
+                .expire_after(expiry)
+                .build(),
+            ep_controls: Cache::builder()
+                .name("endpoint_access_controls")
+                .max_capacity(config.size)
+                .time_to_live(config.ttl)
+                .expire_after(expiry)
+                .build(),
             project2ep: ClashMap::new(),
             account2ep: ClashMap::new(),
             config,
@@ -116,9 +114,7 @@ impl ProjectInfoCache {
         let endpoint_id = EndpointIdInt::get(endpoint_id)?;
         let role_name = RoleNameInt::get(role_name)?;
 
-        self.role_controls
-            .get(&(endpoint_id, role_name))
-            .map(|c| c.value)
+        self.role_controls.get(&(endpoint_id, role_name))
     }
 
     pub(crate) fn get_endpoint_access(
@@ -127,7 +123,7 @@ impl ProjectInfoCache {
     ) -> Option<ControlPlaneResult<EndpointAccessControl>> {
         let endpoint_id = EndpointIdInt::get(endpoint_id)?;
 
-        self.ep_controls.get(&endpoint_id).map(|c| c.value)
+        self.ep_controls.get(&endpoint_id)
     }
 
     pub(crate) fn insert_endpoint_access(
@@ -167,9 +163,6 @@ impl ProjectInfoCache {
             "created a cache entry for an endpoint access error"
         );
 
-        let now = Instant::now();
-        let ttl = self.ttl_policy.expire_err_early(&msg, now);
-
         // RoleProtected is the only role-specific error that control plane can give us.
         // If a given role name does not exist, it still returns a successful response,
         // just with an empty secret.
@@ -177,11 +170,12 @@ impl ProjectInfoCache {
             // We can cache all the other errors in ep_controls because they don't
             // depend on what role name we pass to control plane.
             self.ep_controls
-                .insert_ttl_if(endpoint_id, ttl, |entry| match entry {
+                .entry(endpoint_id)
+                .and_compute_with(|entry| match entry {
                     // leave the entry alone if it's already Ok
-                    Some(entry) if entry.is_ok() => None,
+                    Some(entry) if entry.value().is_ok() => moka::ops::compute::Op::Nop,
                     // replace the entry
-                    _ => Some(Err(msg.clone())),
+                    _ => moka::ops::compute::Op::Put(Err(msg.clone())),
                 });
         }
 
@@ -216,8 +210,8 @@ impl ProjectInfoCache {
         let mut interval = tokio::time::interval(self.config.gc_interval);
         loop {
             interval.tick().await;
-            self.ep_controls.flush();
-            self.role_controls.flush();
+            self.ep_controls.run_pending_tasks();
+            self.role_controls.run_pending_tasks();
         }
     }
 }
@@ -232,9 +226,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {
-        tokio::time::pause();
         let cache = ProjectInfoCache::new(ProjectInfoCacheOptions {
-            size: 2,
+            size: 1,
             max_roles: 2,
             ttl: Duration::from_secs(1),
             gc_interval: Duration::from_secs(600),
@@ -294,6 +287,7 @@ mod tests {
         let user3: RoleName = "user3".into();
         let secret3 = Some(AuthSecret::Scram(ServerSecret::mock([3; 32])));
 
+        cache.role_controls.run_pending_tasks();
         cache.insert_endpoint_access(
             account_id,
             project_id,
@@ -310,18 +304,13 @@ mod tests {
             },
         );
 
-        assert!(cache.get_role_secret(&endpoint_id, &user3).is_none());
+        cache.role_controls.run_pending_tasks();
+        assert_eq!(cache.role_controls.entry_count(), 2);
 
-        let cached = cache.get_endpoint_access(&endpoint_id).unwrap().unwrap();
-        assert_eq!(cached.allowed_ips, allowed_ips);
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
-        tokio::time::advance(Duration::from_secs(2)).await;
-        let cached = cache.get_role_secret(&endpoint_id, &user1);
-        assert!(cached.is_none());
-        let cached = cache.get_role_secret(&endpoint_id, &user2);
-        assert!(cached.is_none());
-        let cached = cache.get_endpoint_access(&endpoint_id);
-        assert!(cached.is_none());
+        cache.role_controls.run_pending_tasks();
+        assert_eq!(cache.role_controls.entry_count(), 0);
     }
 
     #[tokio::test]
