@@ -571,6 +571,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'basebackup_cache_enabled' as bool")?,
+            rel_size_v1_access_disabled: settings
+                .remove("rel_size_v1_access_disabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'rel_size_v1_access_disabled' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

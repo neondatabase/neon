@@ -484,7 +484,7 @@ async fn build_timeline_info_common(
         *timeline.get_applied_gc_cutoff_lsn(),
     );
 
-    let (rel_size_migration, rel_size_migrated_at) = timeline.get_rel_size_v2_status();
+    let (rel_size_migration, rel_size_migrated_at) = timeline.get_rel_size_v2_cached_status();
 
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,

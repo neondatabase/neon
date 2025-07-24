@@ -5090,7 +5090,7 @@ impl TenantShard {
             src_timeline.pg_version,
         );
 
-        let (rel_size_v2_status, rel_size_migrated_at) = src_timeline.get_rel_size_v2_status();
+        let (rel_size_v2_status, rel_size_migrated_at) = src_timeline.get_rel_size_v2_cached_status();
         let (uninitialized_timeline, _timeline_ctx) = self
             .prepare_new_timeline(
                 dst_id,

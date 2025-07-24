@@ -685,24 +685,16 @@ impl Timeline {
         // then check if the database was already initialized.
         // get_rel_exists can be called before dbdir is created.
         let buf = version.get(self, DBDIR_KEY, ctx).await?;
-        let dbdirs = DbDirectory::des(&buf)?.dbdirs;
+        let dbdir = DbDirectory::des(&buf)?;
+        let dbdirs = &dbdir.dbdirs;
         if !dbdirs.contains_key(&(tag.spcnode, tag.dbnode)) {
             return Ok(false);
         }
 
-        let (v2_status, migrated_lsn) = self.get_rel_size_v2_status();
+        let v2_status = dbdir.get_persistent_rel_size_v2_status();
 
         match v2_status {
             RelSizeMigration::Legacy => {
-                let v1_exists = self
-                    .get_rel_exists_in_reldir_v1(tag, version, deserialized_reldir_v1, ctx)
-                    .await?;
-                Ok(v1_exists)
-            }
-            RelSizeMigration::Migrating | RelSizeMigration::Migrated
-                if version.get_lsn() < migrated_lsn.unwrap_or(Lsn(0)) =>
-            {
-                // For requests below the migrated LSN, we still use the v1 read path.
                 let v1_exists = self
                     .get_rel_exists_in_reldir_v1(tag, version, deserialized_reldir_v1, ctx)
                     .await?;
@@ -720,7 +712,7 @@ impl Timeline {
                             "inconsistent v1/v2 reldir keyspace for rel {}: v1_exists={}, v2_exists={}",
                             tag,
                             v1_exists,
-                            v2_exists
+                            v2_exists,
                         );
                     }
                     Err(e) if e.is_cancel() => {
@@ -789,6 +781,10 @@ impl Timeline {
                     key
                 ))
             })?;
+            if key.field6 == 0 {
+                // The key that determines the current migration status, skip it.
+                continue;
+            }
             if key.field6 != 1 {
                 return Err(PageReconstructError::Other(anyhow::anyhow!(
                     "invalid reldir key: field6 != 1, {}",
@@ -838,17 +834,11 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<HashSet<RelTag>, PageReconstructError> {
-        let (v2_status, migrated_lsn) = self.get_rel_size_v2_status();
+        let dbdir = DbDirectory::des(&version.get(self, DBDIR_KEY, ctx).await?)?;
+        let v2_status = dbdir.get_persistent_rel_size_v2_status();
 
         match v2_status {
             RelSizeMigration::Legacy => {
-                let rels_v1 = self.list_rels_v1(spcnode, dbnode, version, ctx).await?;
-                Ok(rels_v1)
-            }
-            RelSizeMigration::Migrating | RelSizeMigration::Migrated
-                if version.get_lsn() < migrated_lsn.unwrap_or(Lsn(0)) =>
-            {
-                // For requests below the migrated LSN, we still use the v1 read path.
                 let rels_v1 = self.list_rels_v1(spcnode, dbnode, version, ctx).await?;
                 Ok(rels_v1)
             }
@@ -1730,6 +1720,8 @@ pub struct RelDirMode {
     current_status: RelSizeMigration,
     // Whether we should initialize the v2 keyspace or not.
     initialize: bool,
+    // Whether we should disable v1 access starting this LSNor not
+    disable_v1: bool,
 }
 
 impl DatadirModification<'_> {
@@ -1810,6 +1802,7 @@ impl DatadirModification<'_> {
     pub fn init_empty(&mut self) -> anyhow::Result<()> {
         let buf = DbDirectory::ser(&DbDirectory {
             dbdirs: HashMap::new(),
+            rel_dir_migration_status: None,
         })?;
         self.pending_directory_entries
             .push((DirectoryKind::Db, MetricsUpdate::Set(0)));
@@ -2091,44 +2084,71 @@ impl DatadirModification<'_> {
     ///
     /// As this function is only used on the write path, we do not need to read the migrated_at
     /// field.
-    pub fn maybe_enable_rel_size_v2(&mut self, is_create: bool) -> anyhow::Result<RelDirMode> {
+    pub(crate) fn maybe_enable_rel_size_v2(
+        &mut self,
+        dbdir: &DbDirectory,
+        is_create: bool,
+    ) -> anyhow::Result<RelDirMode> {
         // TODO: define the behavior of the tenant-level config flag and use feature flag to enable this feature
+        let expected_status = self.tline.get_rel_size_v2_expected_state();
+        let persistent_status = dbdir.get_persistent_rel_size_v2_status();
 
-        let (status, _) = self.tline.get_rel_size_v2_status();
-        let config = self.tline.get_rel_size_v2_enabled();
-        match (config, status) {
-            (false, RelSizeMigration::Legacy) => {
+        // Only initialize the v2 keyspace on new relation creation. No initialization
+        // during `timeline_create` (TODO: fix this, we should allow, but currently it
+        // hits consistency issues).
+        let can_update = is_create && !self.is_importing_pgdata;
+
+        match (expected_status, persistent_status) {
+            (RelSizeMigration::Legacy, RelSizeMigration::Legacy) => {
                 // tenant config didn't enable it and we didn't write any reldir_v2 key yet
                 Ok(RelDirMode {
                     current_status: RelSizeMigration::Legacy,
                     initialize: false,
+                    disable_v1: false,
                 })
             }
-            (false, status @ RelSizeMigration::Migrating | status @ RelSizeMigration::Migrated) => {
-                // index_part already persisted that the timeline has enabled rel_size_v2
+            (
+                RelSizeMigration::Legacy,
+                current_status @ RelSizeMigration::Migrating
+                | current_status @ RelSizeMigration::Migrated,
+            ) => {
+                // already persisted that the timeline has enabled rel_size_v2, cannot rollback
                 Ok(RelDirMode {
-                    current_status: status,
+                    current_status,
                     initialize: false,
+                    disable_v1: false,
                 })
             }
-            (true, RelSizeMigration::Legacy) => {
+            (
+                expected_status @ RelSizeMigration::Migrating
+                | expected_status @ RelSizeMigration::Migrated,
+                RelSizeMigration::Legacy,
+            ) => {
                 // The first time we enable it, we need to persist it in `index_part.json`
                 // The caller should update the reldir status once the initialization is done.
-                //
-                // Only initialize the v2 keyspace on new relation creation. No initialization
-                // during `timeline_create` (TODO: fix this, we should allow, but currently it
-                // hits consistency issues).
+
                 Ok(RelDirMode {
                     current_status: RelSizeMigration::Legacy,
-                    initialize: is_create && !self.is_importing_pgdata,
+                    initialize: can_update,
+                    disable_v1: can_update && expected_status == RelSizeMigration::Migrated,
                 })
             }
-            (true, status @ RelSizeMigration::Migrating | status @ RelSizeMigration::Migrated) => {
-                // index_part already persisted that the timeline has enabled rel_size_v2
-                // and we don't need to do anything
+            (RelSizeMigration::Migrating, current_status @ RelSizeMigration::Migrating)
+            | (RelSizeMigration::Migrated, current_status @ RelSizeMigration::Migrated)
+            | (RelSizeMigration::Migrating, current_status @ RelSizeMigration::Migrated) => {
+                // Keep the current state
                 Ok(RelDirMode {
-                    current_status: status,
+                    current_status,
                     initialize: false,
+                    disable_v1: false,
+                })
+            }
+            (RelSizeMigration::Migrated, RelSizeMigration::Migrating) => {
+                // Switch to v2-only mode
+                Ok(RelDirMode {
+                    current_status: RelSizeMigration::Migrating,
+                    initialize: false,
+                    disable_v1: can_update,
                 })
             }
         }
@@ -2142,13 +2162,13 @@ impl DatadirModification<'_> {
         img: Bytes,
         ctx: &RequestContext,
     ) -> Result<(), WalIngestError> {
-        let v2_mode = self
-            .maybe_enable_rel_size_v2(false)
-            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
-
         // Add it to the directory (if it doesn't exist already)
         let buf = self.get(DBDIR_KEY, ctx).await?;
         let mut dbdir = DbDirectory::des(&buf)?;
+
+        let v2_mode = self
+            .maybe_enable_rel_size_v2(&dbdir, false)
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
 
         let r = dbdir.dbdirs.insert((spcnode, dbnode), true);
         if r.is_none() || r == Some(false) {
@@ -2296,15 +2316,6 @@ impl DatadirModification<'_> {
                     sparse_rel_dir_key,
                     Value::Image(RelDirExists::Exists.encode()),
                 );
-                tracing::info!(
-                    "migrated rel_size_v2: {}",
-                    RelTag {
-                        spcnode,
-                        dbnode,
-                        relnode,
-                        forknum
-                    }
-                );
                 rel_cnt += 1;
             }
         }
@@ -2313,9 +2324,6 @@ impl DatadirModification<'_> {
             self.lsn,
             rel_cnt
         );
-        self.tline
-            .update_rel_size_v2_status(RelSizeMigration::Migrating, Some(self.lsn))
-            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
         Ok::<_, WalIngestError>(())
     }
 
@@ -2399,23 +2407,25 @@ impl DatadirModification<'_> {
         // tablespace.  Create the reldir entry for it if so.
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
 
+        let mut is_dbdir_dirty = false;
+        let mut is_reldirv2_index_part_dirty = false;
+
         let dbdir_exists =
             if let hash_map::Entry::Vacant(e) = dbdir.dbdirs.entry((rel.spcnode, rel.dbnode)) {
                 // Didn't exist. Update dbdir
                 e.insert(false);
-                let buf = DbDirectory::ser(&dbdir)?;
                 self.pending_directory_entries.push((
                     DirectoryKind::Db,
                     MetricsUpdate::Set(dbdir.dbdirs.len() as u64),
                 ));
-                self.put(DBDIR_KEY, Value::Image(buf.into()));
+                is_dbdir_dirty = true;
                 false
             } else {
                 true
             };
 
         let mut v2_mode = self
-            .maybe_enable_rel_size_v2(true)
+            .maybe_enable_rel_size_v2(&dbdir, true)
             .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
 
         if v2_mode.initialize {
@@ -2424,7 +2434,34 @@ impl DatadirModification<'_> {
                 // TODO: circuit breaker so that it won't retry forever
             } else {
                 v2_mode.current_status = RelSizeMigration::Migrating;
+                let migration_history = dbdir.rel_dir_migration_status.get_or_insert_default();
+                migration_history.status = Some(RelSizeMigration::Migrating);
+                migration_history.v2_enabled_at = Some(self.lsn);
+                is_dbdir_dirty = true;
+                is_reldirv2_index_part_dirty = true;
             }
+        }
+        if v2_mode.disable_v1 {
+            v2_mode.current_status = RelSizeMigration::Migrated;
+            let migration_history = dbdir.rel_dir_migration_status.get_or_insert_default();
+            migration_history.status = Some(RelSizeMigration::Migrated);
+            migration_history.v1_disabled_at = Some(self.lsn);
+            is_dbdir_dirty = true;
+            is_reldirv2_index_part_dirty = true;
+        }
+
+        if is_dbdir_dirty {
+            let buf = DbDirectory::ser(&dbdir)?;
+            self.put(DBDIR_KEY, Value::Image(buf.into()));
+        }
+
+        if is_reldirv2_index_part_dirty {
+            self.tline
+                .update_rel_size_v2_status(
+                    dbdir.get_persistent_rel_size_v2_status(),
+                    dbdir.get_persistent_rel_size_v2_migrated_at(),
+                )
+                .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
         }
 
         if v2_mode.current_status != RelSizeMigration::Migrated {
@@ -2586,8 +2623,9 @@ impl DatadirModification<'_> {
         drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
         ctx: &RequestContext,
     ) -> Result<(), WalIngestError> {
+        let dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
         let v2_mode = self
-            .maybe_enable_rel_size_v2(false)
+            .maybe_enable_rel_size_v2(&dbdir, false)
             .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
         match v2_mode.current_status {
             RelSizeMigration::Legacy => {
@@ -3161,10 +3199,33 @@ impl Version<'_> {
 
 //--- Metadata structs stored in key-value pairs in the repository.
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct RelSizeMigrationHistory {
+    pub(crate) status: Option<RelSizeMigration>,
+    pub(crate) v2_enabled_at: Option<Lsn>,
+    pub(crate) v1_disabled_at: Option<Lsn>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DbDirectory {
     // (spcnode, dbnode) -> (do relmapper and PG_VERSION files exist)
     pub(crate) dbdirs: HashMap<(Oid, Oid), bool>,
+    pub(crate) rel_dir_migration_status: Option<RelSizeMigrationHistory>,
+}
+
+impl DbDirectory {
+    pub(crate) fn get_persistent_rel_size_v2_status(&self) -> RelSizeMigration {
+        self.rel_dir_migration_status
+            .as_ref()
+            .and_then(|x| x.status.clone())
+            .unwrap_or(RelSizeMigration::Legacy)
+    }
+
+    pub(crate) fn get_persistent_rel_size_v2_migrated_at(&self) -> Option<Lsn> {
+        self.rel_dir_migration_status
+            .as_ref()
+            .and_then(|x| x.v1_disabled_at)
+    }
 }
 
 // The format of TwoPhaseDirectory changed in PostgreSQL v17, because the filenames of
