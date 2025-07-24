@@ -6,9 +6,9 @@ use crate::sync::{RwLockWriteGuard, ValueWriteGuard};
 use std::hash::Hash;
 use std::mem;
 
-pub enum Entry<'a, 'b, K, V> {
-    Occupied(OccupiedEntry<'a, 'b, K, V>),
-    Vacant(VacantEntry<'a, 'b, K, V>),
+pub enum Entry<'b, K: 'static, V: 'static> {
+    Occupied(OccupiedEntry<'b, K, V>),
+    Vacant(VacantEntry<'b, K, V>),
 }
 
 /// Enum representing the previous position within a chain.
@@ -22,9 +22,9 @@ pub(crate) enum PrevPos {
     Unknown(u64),
 }
 
-pub struct OccupiedEntry<'a, 'b, K, V> {
+pub struct OccupiedEntry<'b, K: 'static, V: 'static> {
     /// Mutable reference to the map containing this entry.
-    pub(crate) map: RwLockWriteGuard<'b, CoreHashMap<'a, K, V>>,
+    pub(crate) map: RwLockWriteGuard<'b, CoreHashMap<K, V>>,
     /// The key of the occupied entry
     pub(crate) _key: K,
     /// The index of the previous entry in the chain.
@@ -33,7 +33,7 @@ pub struct OccupiedEntry<'a, 'b, K, V> {
     pub(crate) bucket_pos: u32,
 }
 
-impl<K, V> OccupiedEntry<'_, '_, K, V> {
+impl<K: 'static, V: 'static> OccupiedEntry<'_, K, V> {
     pub fn get(&self) -> &V {
         &self.map.buckets[self.bucket_pos as usize]
             .inner
@@ -104,16 +104,16 @@ impl<K, V> OccupiedEntry<'_, '_, K, V> {
 }
 
 /// An abstract view into a vacant entry within the map.
-pub struct VacantEntry<'a, 'b, K, V> {
+pub struct VacantEntry<'b, K: 'static, V: 'static> {
     /// Mutable reference to the map containing this entry.
-    pub(crate) map: RwLockWriteGuard<'b, CoreHashMap<'a, K, V>>,
+    pub(crate) map: RwLockWriteGuard<'b, CoreHashMap<K, V>>,
     /// The key to be inserted into this entry.
     pub(crate) key: K,
     /// The position within the dictionary corresponding to the key's hash.
     pub(crate) dict_pos: u32,
 }
 
-impl<'b, K: Clone + Hash + Eq, V> VacantEntry<'_, 'b, K, V> {
+impl<'b, K: Clone + Hash + Eq + 'static, V: 'static> VacantEntry<'b, K, V> {
     /// Insert a value into the vacant entry, finding and populating an empty bucket in the process.
     ///
     /// # Errors

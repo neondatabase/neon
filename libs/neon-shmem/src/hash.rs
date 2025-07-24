@@ -49,15 +49,15 @@ pub enum HashMapShrinkError {
 /// If a new process is launched with fork(), the child process inherits
 /// this struct.
 #[must_use]
-pub struct HashMapInit<'a, K, V, S = rustc_hash::FxBuildHasher> {
+pub struct HashMapInit<K: 'static, V: 'static, S = rustc_hash::FxBuildHasher> {
     shmem_handle: Option<ShmemHandle>,
-    shared_ptr: *mut HashMapShared<'a, K, V>,
+    shared_ptr: *mut HashMapShared<K, V>,
     shared_size: usize,
     hasher: S,
     num_buckets: u32,
 }
 
-impl<'a, K, V, S> Debug for HashMapInit<'a, K, V, S>
+impl<K, V, S> Debug for HashMapInit<K, V, S>
 where
     K: Debug,
     V: Debug,
@@ -79,16 +79,16 @@ where
 ///
 /// XXX: We're not making use of it at the moment, but this struct could
 /// hold process-local information in the future.
-pub struct HashMapAccess<'a, K, V, S = rustc_hash::FxBuildHasher> {
+pub struct HashMapAccess<K: 'static, V: 'static, S = rustc_hash::FxBuildHasher> {
     shmem_handle: Option<ShmemHandle>,
-    shared_ptr: *mut HashMapShared<'a, K, V>,
+    shared_ptr: *mut HashMapShared<K, V>,
     hasher: S,
 }
 
-unsafe impl<K: Sync, V: Sync, S> Sync for HashMapAccess<'_, K, V, S> {}
-unsafe impl<K: Send, V: Send, S> Send for HashMapAccess<'_, K, V, S> {}
+unsafe impl<K: Sync, V: Sync, S> Sync for HashMapAccess<K, V, S> {}
+unsafe impl<K: Send, V: Send, S> Send for HashMapAccess<K, V, S> {}
 
-impl<'a, K, V, S> Debug for HashMapAccess<'a, K, V, S>
+impl<K, V, S> Debug for HashMapAccess<K, V, S>
 where
     K: Debug,
     V: Debug,
@@ -102,14 +102,14 @@ where
     }
 }
 
-impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
+impl<K: Clone + Hash + Eq + 'static, V: 'static, S> HashMapInit<K, V, S> {
     /// Change the 'hasher' used by the hash table.
     ///
     /// NOTE: This must be called right after creating the hash table,
     /// before inserting any entries and before calling attach_writer/reader.
     /// Otherwise different accessors could be using different hash function,
     /// with confusing results.
-    pub fn with_hasher<T: BuildHasher>(self, hasher: T) -> HashMapInit<'a, K, V, T> {
+    pub fn with_hasher<T: BuildHasher>(self, hasher: T) -> HashMapInit<K, V, T> {
         HashMapInit {
             hasher,
             shmem_handle: self.shmem_handle,
@@ -177,7 +177,7 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
     }
 
     /// Attach to a hash table for writing.
-    pub fn attach_writer(self) -> HashMapAccess<'a, K, V, S> {
+    pub fn attach_writer(self) -> HashMapAccess<K, V, S> {
         HashMapAccess {
             shmem_handle: self.shmem_handle,
             shared_ptr: self.shared_ptr,
@@ -189,7 +189,7 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
     ///
     /// This is a holdover from a previous implementation and is being kept around for
     /// backwards compatibility reasons.
-    pub fn attach_reader(self) -> HashMapAccess<'a, K, V, S> {
+    pub fn attach_reader(self) -> HashMapAccess<K, V, S> {
         self.attach_writer()
     }
 }
@@ -206,14 +206,14 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
 /// dictionary
 ///
 /// In between the above parts, there can be padding bytes to align the parts correctly.
-type HashMapShared<'a, K, V> = RwLock<CoreHashMap<'a, K, V>>;
+type HashMapShared<K, V> = RwLock<CoreHashMap<K, V>>;
 
-impl<'a, K, V> HashMapInit<'a, K, V, rustc_hash::FxBuildHasher>
+impl<K, V: 'static> HashMapInit<K, V, rustc_hash::FxBuildHasher>
 where
-    K: Clone + Hash + Eq,
+    K: Clone + Hash + Eq + 'static,
 {
     /// Place the hash table within a user-supplied fixed memory area.
-    pub fn with_fixed(num_buckets: u32, area: &'a mut [MaybeUninit<u8>]) -> Self {
+    pub fn with_fixed(num_buckets: u32, area: &'static mut [MaybeUninit<u8>]) -> Self {
         Self::new(
             num_buckets,
             None,
@@ -269,9 +269,10 @@ where
     }
 }
 
-impl<'a, K, V, S: BuildHasher> HashMapAccess<'a, K, V, S>
+impl<K, V, S: BuildHasher> HashMapAccess<K, V, S>
 where
-    K: Clone + Hash + Eq,
+    K: Clone + Hash + Eq + 'static,
+	V: 'static
 {
     /// Hash a key using the map's hasher.
     #[inline]
@@ -279,7 +280,7 @@ where
         self.hasher.hash_one(key)
     }
 
-    fn entry_with_hash(&self, key: K, hash: u64) -> Entry<'a, '_, K, V> {
+    fn entry_with_hash(&self, key: K, hash: u64) -> Entry<'_, K, V> {
         let mut map = unsafe { self.shared_ptr.as_ref() }.unwrap().write();
         let dict_pos = hash as usize % map.dictionary.len();
         let first = map.dictionary[dict_pos];
@@ -331,7 +332,7 @@ where
     ///
     /// NB: This takes a write lock as there's no way to distinguish whether the intention
     /// is to use the entry for reading or for writing in advance.
-    pub fn entry(&self, key: K) -> Entry<'a, '_, K, V> {
+    pub fn entry(&self, key: K) -> Entry<'_, K, V> {
         let hash = self.get_hash_value(&key);
         self.entry_with_hash(key, hash)
     }
@@ -365,7 +366,7 @@ where
     /// Has more overhead than one would intuitively expect: performs both a clone of the key
     /// due to the [`OccupiedEntry`] type owning the key and also a hash of the key in order
     /// to enable repairing the hash chain if the entry is removed.
-    pub fn entry_at_bucket(&self, pos: usize) -> Option<OccupiedEntry<'a, '_, K, V>> {
+    pub fn entry_at_bucket(&self, pos: usize) -> Option<OccupiedEntry<'_, K, V>> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
         if pos >= map.buckets.len() {
             return None;
@@ -430,7 +431,7 @@ where
     /// in the process.
     fn rehash_dict(
         &self,
-        inner: &mut CoreHashMap<'a, K, V>,
+        inner: &mut CoreHashMap<K, V>,
         buckets_ptr: *mut core::Bucket<K, V>,
         end_ptr: *mut u8,
         num_buckets: u32,

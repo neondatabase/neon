@@ -38,7 +38,7 @@ pub struct CommunicatorInitStruct {
 
     pub neon_request_slots: &'static [NeonIORequestSlot],
 
-    pub integrated_cache_init_struct: IntegratedCacheInitStruct<'static>,
+    pub integrated_cache_init_struct: IntegratedCacheInitStruct,
 }
 
 impl std::fmt::Debug for CommunicatorInitStruct {

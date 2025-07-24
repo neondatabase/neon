@@ -32,11 +32,11 @@ where
 }
 
 /// Core hash table implementation.
-pub(crate) struct CoreHashMap<'a, K, V> {
+pub(crate) struct CoreHashMap<K: 'static, V: 'static> {
     /// Dictionary used to map hashes to bucket indices.
-    pub(crate) dictionary: &'a mut [u32],
+    pub(crate) dictionary: &'static mut [u32],
     /// Buckets containing key-value pairs.
-    pub(crate) buckets: &'a mut [Bucket<K, V>],
+    pub(crate) buckets: &'static mut [Bucket<K, V>],
     /// Head of the freelist.
     pub(crate) free_head: u32,
     /// Maximum index of a bucket allowed to be allocated. [`INVALID_POS`] if no limit.
@@ -45,7 +45,7 @@ pub(crate) struct CoreHashMap<'a, K, V> {
     pub(crate) buckets_in_use: u32,
 }
 
-impl<'a, K, V> Debug for CoreHashMap<'a, K, V>
+impl<K, V> Debug for CoreHashMap<K, V>
 where
     K: Debug,
     V: Debug,
@@ -65,7 +65,7 @@ where
 #[derive(Debug, PartialEq)]
 pub struct FullError;
 
-impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
+impl<K: Clone + Hash + Eq, V> CoreHashMap<K, V> {
     const FILL_FACTOR: f32 = 0.60;
 
     /// Estimate the size of data contained within the the hash map.
@@ -83,8 +83,8 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
     }
 
     pub fn new(
-        buckets: &'a mut [MaybeUninit<Bucket<K, V>>],
-        dictionary: &'a mut [MaybeUninit<u32>],
+        buckets: &'static mut [MaybeUninit<Bucket<K, V>>],
+        dictionary: &'static mut [MaybeUninit<u32>],
     ) -> Self {
         // Initialize the buckets
         for i in 0..buckets.len() {

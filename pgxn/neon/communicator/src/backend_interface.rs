@@ -18,7 +18,7 @@ pub struct CommunicatorBackendStruct<'t> {
 
     pending_cache_read_op: Option<BackendCacheReadOp<'t>>,
 
-    integrated_cache: &'t IntegratedCacheReadAccess<'t>,
+    integrated_cache: &'t IntegratedCacheReadAccess,
 }
 
 #[unsafe(no_mangle)]

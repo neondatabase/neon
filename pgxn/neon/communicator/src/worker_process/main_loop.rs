@@ -46,7 +46,7 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     in_progress_table: RequestInProgressTable,
 
     /// Local File Cache, relation size tracking, last-written LSN tracking
-    pub(crate) cache: IntegratedCacheWriteAccess<'a>,
+    pub(crate) cache: IntegratedCacheWriteAccess,
 
     /*** Static configuration ***/
     /// Stripe size doesn't change after startup. (The shard map is not stored here, it's passed

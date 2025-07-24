@@ -24,6 +24,7 @@
 
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use utils::lsn::{AtomicLsn, Lsn};
 
@@ -40,16 +41,16 @@ use neon_shmem::shmem::ShmemHandle;
 const RELSIZE_CACHE_SIZE: u32 = 64 * 1024;
 
 /// This struct is initialized at postmaster startup, and passed to all the processes via fork().
-pub struct IntegratedCacheInitStruct<'t> {
-    relsize_cache_handle: HashMapInit<'t, RelKey, RelEntry>,
-    block_map_handle: HashMapInit<'t, BlockKey, BlockEntry>,
+pub struct IntegratedCacheInitStruct {
+    relsize_cache_handle: HashMapInit<RelKey, RelEntry>,
+    block_map_handle: HashMapInit<BlockKey, BlockEntry>,
 }
 
 /// Represents write-access to the integrated cache. This is used by the communicator process.
 #[derive(Debug)]
-pub struct IntegratedCacheWriteAccess<'t> {
-    relsize_cache: neon_shmem::hash::HashMapAccess<'t, RelKey, RelEntry>,
-    block_map: neon_shmem::hash::HashMapAccess<'t, BlockKey, BlockEntry>,
+pub struct IntegratedCacheWriteAccess {
+    relsize_cache: neon_shmem::hash::HashMapAccess<RelKey, RelEntry>,
+    block_map: Arc<neon_shmem::hash::HashMapAccess<BlockKey, BlockEntry>>,
 
     global_lw_lsn: AtomicU64,
 
@@ -71,12 +72,12 @@ pub struct IntegratedCacheWriteAccess<'t> {
 }
 
 /// Represents read-only access to the integrated cache. Backend processes have this.
-pub struct IntegratedCacheReadAccess<'t> {
-    relsize_cache: neon_shmem::hash::HashMapAccess<'t, RelKey, RelEntry>,
-    block_map: neon_shmem::hash::HashMapAccess<'t, BlockKey, BlockEntry>,
+pub struct IntegratedCacheReadAccess {
+    relsize_cache: neon_shmem::hash::HashMapAccess<RelKey, RelEntry>,
+    block_map: neon_shmem::hash::HashMapAccess<BlockKey, BlockEntry>,
 }
 
-impl<'t> IntegratedCacheInitStruct<'t> {
+impl IntegratedCacheInitStruct {
     /// Return the desired size in bytes of the fixed-size shared memory area to reserve for the
     /// integrated cache.
     pub fn shmem_size() -> usize {
@@ -88,10 +89,10 @@ impl<'t> IntegratedCacheInitStruct<'t> {
     /// Initialize the shared memory segment. This runs once in postmaster. Returns a struct which
     /// will be inherited by all processes through fork.
     pub fn shmem_init(
-        shmem_area: &'t mut [MaybeUninit<u8>],
+        shmem_area: &'static mut [MaybeUninit<u8>],
         initial_file_cache_size: u64,
         max_file_cache_size: u64,
-    ) -> IntegratedCacheInitStruct<'t> {
+    ) -> IntegratedCacheInitStruct {
         // Initialize the relsize cache in the fixed-size area
         let relsize_cache_handle =
             neon_shmem::hash::HashMapInit::with_fixed(RELSIZE_CACHE_SIZE, shmem_area);
@@ -115,14 +116,14 @@ impl<'t> IntegratedCacheInitStruct<'t> {
         self,
         lsn: Lsn,
         file_cache: Option<FileCache>,
-    ) -> IntegratedCacheWriteAccess<'t> {
+    ) -> IntegratedCacheWriteAccess {
         let IntegratedCacheInitStruct {
             relsize_cache_handle,
             block_map_handle,
         } = self;
         IntegratedCacheWriteAccess {
             relsize_cache: relsize_cache_handle.attach_writer(),
-            block_map: block_map_handle.attach_writer(),
+            block_map: block_map_handle.attach_writer().into(),
             global_lw_lsn: AtomicU64::new(lsn.0),
             file_cache,
             clock_hand: std::sync::Mutex::new(0),
@@ -164,7 +165,7 @@ impl<'t> IntegratedCacheInitStruct<'t> {
     }
 
     /// Initialize access to the integrated cache for a backend process
-    pub fn backend_init(self) -> IntegratedCacheReadAccess<'t> {
+    pub fn backend_init(self) -> IntegratedCacheReadAccess {
         let IntegratedCacheInitStruct {
             relsize_cache_handle,
             block_map_handle,
@@ -253,8 +254,8 @@ pub enum CacheResult<V> {
     NotFound(Lsn),
 }
 
-impl<'t> IntegratedCacheWriteAccess<'t> {
-    pub fn get_rel_size(&'t self, rel: &RelTag) -> CacheResult<u32> {
+impl IntegratedCacheWriteAccess {
+    pub fn get_rel_size(&self, rel: &RelTag) -> CacheResult<u32> {
         if let Some(nblocks) = get_rel_size(&self.relsize_cache, rel) {
             CacheResult::Found(nblocks)
         } else {
@@ -264,7 +265,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     }
 
     pub async fn get_page(
-        &'t self,
+        &self,
         rel: &RelTag,
         block_number: u32,
         dst: impl uring_common::buf::IoBufMut + Send + Sync,
@@ -299,7 +300,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     }
 
     pub async fn page_is_cached(
-        &'t self,
+        &self,
         rel: &RelTag,
         block_number: u32,
     ) -> Result<CacheResult<()>, std::io::Error> {
@@ -321,10 +322,10 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         }
     }
 
-    /// Does the relation exists? CacheResult::NotFound means that the cache doesn't contain that
-    /// information, i.e. we don't know if the relation exists or not.
-    pub fn get_rel_exists(&'t self, rel: &RelTag) -> CacheResult<bool> {
-        // we don't currently cache negative entries, so if the relation is in the cache, it exists
+    /// Does the relation exists? CacheResult::NotFound means that the cache doesn contain that
+    /// information, i.e. we don know if the relation exists or not.
+    pub fn get_rel_exists(& self, rel: &RelTag) -> CacheResult<bool> {
+        // we don currently cache negative entries, so if the relation is in the cache, it exists
         if let Some(_rel_entry) = self.relsize_cache.get(&RelKey::from(rel)) {
             CacheResult::Found(true)
         } else {
@@ -333,7 +334,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         }
     }
 
-    pub fn get_db_size(&'t self, _db_oid: u32) -> CacheResult<u64> {
+    pub fn get_db_size(& self, _db_oid: u32) -> CacheResult<u64> {
         // TODO: it would be nice to cache database sizes too. Getting the database size
         // is not a very common operation, but when you do it, it's often interactive, with
         // e.g. psql \l+ command, so the user will feel the latency.
@@ -343,7 +344,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         CacheResult::NotFound(lsn)
     }
 
-    pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32, lsn: Lsn) {
+    pub fn remember_rel_size(& self, rel: &RelTag, nblocks: u32, lsn: Lsn) {
         match self.relsize_cache.entry(RelKey::from(rel)) {
             Entry::Vacant(e) => {
                 tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
@@ -365,7 +366,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
     /// Remember the given page contents in the cache.
     pub async fn remember_page(
-        &'t self,
+        & self,
         rel: &RelTag,
         block_number: u32,
         src: impl uring_common::buf::IoBuf + Send + Sync,
@@ -387,7 +388,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             let mut found_existing = false;
 
             // NOTE(quantumish): honoring original semantics here (used to be update_with_fn)
-            // but I don't see any reason why this has to take a write lock.
+            // but I don see any reason why this has to take a write lock.
             if let Entry::Occupied(e) = self.block_map.entry(key.clone()) {
                 let block_entry = e.get();
                 found_existing = true;
@@ -468,7 +469,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         } else {
             // !is_write
             //
-            // We can assume that it doesn't already exist, because the
+            // We can assume that it doesn already exist, because the
             // caller is assumed to have already checked it, and holds
             // the io-in-progress lock. (The BlockEntry might exist, but no cache block)
 
@@ -522,7 +523,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     }
 
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
-    pub fn forget_rel(&'t self, rel: &RelTag, _nblocks: Option<u32>, flush_lsn: Lsn) {
+    pub fn forget_rel(& self, rel: &RelTag, _nblocks: Option<u32>, flush_lsn: Lsn) {
         tracing::info!("forgetting rel entry for {rel:?}");
         self.relsize_cache.remove(&RelKey::from(rel));
 
@@ -631,15 +632,16 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 }
             }
         }
-        // Give up if we didn't find anything
+        // Give up if we didn find anything
         None
     }
 
     /// Resize the local file cache.
-    pub fn resize_file_cache(&self, num_blocks: u32) {
+    pub fn resize_file_cache(&'static self, num_blocks: u32) {
         let old_num_blocks = self.block_map.get_num_buckets() as u32;
 
         if old_num_blocks < num_blocks {
+			tracing::error!("growing to {num_blocks}!");
             if let Err(err) = self.block_map.grow(num_blocks) {
                 tracing::warn!(
                     "could not grow file cache to {} blocks (old size {}): {}",
@@ -649,58 +651,62 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                 );
             }
         } else {
-            // Don't hold lock for longer than necessary.
-			{  
-				let mut clock_hand = self.clock_hand.lock().unwrap();
-				
-				// Make sure the clock hand resets properly.
-				// TODO(quantumish): confirm this is expected behavior?
-				if *clock_hand > num_blocks as usize {
-					*clock_hand = num_blocks as usize - 1;
+			let page_evictions = &self.page_evictions_counter;
+			let global_lw_lsn = &self.global_lw_lsn;
+			let block_map = self.block_map.clone();
+			tokio::task::spawn_blocking(move || {
+				block_map.begin_shrink(num_blocks);
+				// Evict everything in to-be-shrinked space
+				// TODO(quantumish): consider moving things ahead of clock hand?
+				for i in num_blocks..old_num_blocks {
+					let Some(entry) = block_map.entry_at_bucket(i as usize) else {
+						continue;
+					};
+					let old = entry.get();
+					if old.pinned.load(Ordering::Relaxed) != 0 {
+						tracing::warn!(
+							"could not shrink file cache to {} blocks (old size {}): entry {} is pinned",
+							num_blocks,
+							old_num_blocks,
+							i
+						);
+						continue;
+					}
+					_ = global_lw_lsn.fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
+					old.cache_block.store(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+					entry.remove();
+					// TODO(quantumish): is this expected behavior?
+					page_evictions.inc();
 				}
-				self.block_map.begin_shrink(num_blocks);
-			}
 
-			// Evict everything in to-be-shrinked space
-			// TODO(quantumish): consider moving ahead of clock hand?
-			for i in num_blocks..old_num_blocks {
-				let Some(entry) = self.block_map.entry_at_bucket(i as usize) else {
-					continue;
-				};
-				let old = entry.get();
-				if old.pinned.load(Ordering::Relaxed) != 0 {
-					tracing::warn!(
-						"could not shrink file cache to {} blocks (old size {}): entry {} is pinned",
-						num_blocks,
-						old_num_blocks,
-						i
-					);
-					return;
-				}
-				_ = self.global_lw_lsn.fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
-				old.cache_block.store(INVALID_CACHE_BLOCK, Ordering::Relaxed);
-				entry.remove();
-				// TODO(quantumish): is this expected behavior?
-				self.page_evictions_counter.inc();
-			}
-
-			if let Err(err) = self.block_map.finish_shrink() {
-				tracing::warn!(
-                    "could not shrink file cache to {} blocks (old size {}): {}",
-                    num_blocks,
-                    old_num_blocks,
-                    err
-                );
-			}
+				// if let Err(err) = block_map.finish_shrink() {
+				// 	tracing::warn!(
+				// 		"could not shrink file cache to {} blocks (old size {}): {}",
+				// 		num_blocks,
+				// 		old_num_blocks,
+				// 		err
+				// 	);
+				// }
+								// Don hold lock for longer than necessary.
+				// {  
+				// 	let mut clock_hand = self.clock_hand.lock().unwrap();
+					
+				// 	// Make sure the clock hand resets properly.
+				// 	// TODO(quantumish): confirm this is expected behavior?
+				// 	if *clock_hand > num_blocks as usize {
+				// 		*clock_hand = num_blocks as usize - 1;
+				// 	}
+				// }
+			});
         }
-    }
+	}
 
     pub fn dump_map(&self, _dst: &mut dyn std::io::Write) {
         //FIXME self.cache_map.start_read().dump(dst);
     }
 }
 
-impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
+impl metrics::core::Collector for IntegratedCacheWriteAccess {
     fn desc(&self) -> Vec<&metrics::core::Desc> {
         let mut descs = Vec::new();
         descs.append(&mut self.page_evictions_counter.desc());
@@ -769,12 +775,12 @@ pub enum GetBucketResult {
 ///
 /// This allows backends to read pages from the cache directly, on their own, without making a
 /// request to the communicator process.
-impl<'t> IntegratedCacheReadAccess<'t> {
-    pub fn get_rel_size(&'t self, rel: &RelTag) -> Option<u32> {
+impl IntegratedCacheReadAccess {
+    pub fn get_rel_size(& self, rel: &RelTag) -> Option<u32> {
         get_rel_size(&self.relsize_cache, rel)
     }
 
-    pub fn start_read_op(&'t self) -> BackendCacheReadOp<'t> {
+    pub fn start_read_op(& self) -> BackendCacheReadOp {
         BackendCacheReadOp {
             read_guards: Vec::new(),
             map_access: self,
@@ -782,7 +788,7 @@ impl<'t> IntegratedCacheReadAccess<'t> {
     }
 
     /// Check if the given page is present in the cache
-    pub fn cache_contains_page(&'t self, rel: &RelTag, block_number: u32) -> bool {
+    pub fn cache_contains_page(& self, rel: &RelTag, block_number: u32) -> bool {
         self.block_map
             .get(&BlockKey::from((rel, block_number)))
             .is_some()
@@ -806,7 +812,7 @@ impl<'t> IntegratedCacheReadAccess<'t> {
 
 pub struct BackendCacheReadOp<'t> {
     read_guards: Vec<DeferredUnpin>,
-    map_access: &'t IntegratedCacheReadAccess<'t>,
+    map_access: &'t IntegratedCacheReadAccess,
 }
 
 impl<'e> BackendCacheReadOp<'e> {
