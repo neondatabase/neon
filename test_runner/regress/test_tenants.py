@@ -363,10 +363,24 @@ def test_pageserver_metrics_removed_after_offload(
         )
         env.pageserver.http_client().timeline_offload(tenant_1, timeline)
         # We need to wait until all background jobs are finished before we can check the metrics.
-        # There're many of them: compaction, GC, etc. It's hard to wait for all of them, so we just
-        # sleep for a while there.
-        time.sleep(5)
-        wait_until(lambda: env.pageserver.http_client().timeline_compact_info())
+        # There're many of them: compaction, GC, etc.
+        wait_until(
+            lambda: all(
+                sample.value == 0
+                for sample in env.pageserver.http_client()
+                .get_metrics()
+                .query_all("pageserver_background_loop_semaphore_waiting_tasks")
+            )
+            and all(
+                sample.value == 0
+                for sample in env.pageserver.http_client()
+                .get_metrics()
+                .query_all("pageserver_background_loop_semaphore_running_tasks")
+            )
+        )
+        # One more second so that everything gets cleaned up
+        time.sleep(1)
+
         post_offload_samples = set(
             [x.name for x in get_ps_metric_samples_for_timeline(tenant_1, timeline)]
         )
