@@ -347,7 +347,7 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         // We use spawn_blocking for database operations, so require approximately
         // as many blocking threads as we will open database connections.
-        .max_blocking_threads(Persistence::MAX_CONNECTIONS as usize)
+        .max_blocking_threads(PersistenceConfig::MAX_CONNECTIONS_DEFAULT as usize)
         .enable_all()
         .build()
         .unwrap()
