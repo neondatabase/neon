@@ -390,6 +390,16 @@ where
         map.get_num_buckets()
     }
 
+	/// Returns the logical number of buckets in the table (aka the amount of allocatable buckets).
+	pub fn get_num_logical_buckets(&self) -> usize {
+        let map = unsafe { self.shared_ptr.as_ref() }.unwrap().read();
+		if map.alloc_limit == INVALID_POS {
+			map.get_num_buckets()
+		} else {
+			map.alloc_limit as usize
+		}
+    }
+
     /// Return the key and value stored in bucket with given index. This can be used to
     /// iterate through the hash map.
     // TODO: An Iterator might be nicer. The communicator's clock algorithm needs to

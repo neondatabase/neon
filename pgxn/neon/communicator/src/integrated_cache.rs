@@ -587,7 +587,7 @@ impl IntegratedCacheWriteAccess {
             (*clock_hand) += 1;
 
             let mut evict_this = false;
-            let num_buckets = self.block_map.get_num_buckets();
+            let num_buckets = self.block_map.get_num_logical_buckets();
             match self
                 .block_map
                 .get_at_bucket((*clock_hand) % num_buckets)
@@ -638,26 +638,43 @@ impl IntegratedCacheWriteAccess {
 
     /// Resize the local file cache.
     pub fn resize_file_cache(&'static self, num_blocks: u32) {
+		// TODO(quantumish): unclear what the semantics of this entire operation is
+		// if there is no file cache. 
+		let file_cache = self.file_cache.as_ref().unwrap();
         let old_num_blocks = self.block_map.get_num_buckets() as u32;
-
+		tracing::error!("trying to resize cache to {num_blocks} blocks");
+		let difference = old_num_blocks.abs_diff(num_blocks);
         if old_num_blocks < num_blocks {
-			tracing::error!("growing to {num_blocks}!");
             if let Err(err) = self.block_map.grow(num_blocks) {
-                tracing::warn!(
+                tracing::error!(
                     "could not grow file cache to {} blocks (old size {}): {}",
                     num_blocks,
                     old_num_blocks,
                     err
                 );
             }
+			let remaining = file_cache.undelete_blocks(difference as u64);
+			file_cache.grow(remaining);
+			debug_assert!(file_cache.free_space() > remaining);
         } else {
 			let page_evictions = &self.page_evictions_counter;
 			let global_lw_lsn = &self.global_lw_lsn;
 			let block_map = self.block_map.clone();
 			tokio::task::spawn_blocking(move || {
-				block_map.begin_shrink(num_blocks);
-				// Evict everything in to-be-shrinked space
+				// Don't hold clock hand lock any longer than necessary, should be ok to evict in parallel
+				// but we don't want to compete with the eviction logic in the to-be-shrunk region.
+				{
+					let mut clock_hand = self.clock_hand.lock().unwrap();
+
+					block_map.begin_shrink(num_blocks);
+					// Avoid skipping over beginning entries due to modulo shift.
+					if *clock_hand > num_blocks as usize {
+						*clock_hand = num_blocks as usize - 1;
+					}
+				}
+				// Try and evict everything in to-be-shrinked space
 				// TODO(quantumish): consider moving things ahead of clock hand?
+				let mut successful_evictions = 0;
 				for i in num_blocks..old_num_blocks {
 					let Some(entry) = block_map.entry_at_bucket(i as usize) else {
 						continue;
@@ -673,30 +690,65 @@ impl IntegratedCacheWriteAccess {
 						continue;
 					}
 					_ = global_lw_lsn.fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
-					old.cache_block.store(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+					let cache_block = old.cache_block.swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
 					entry.remove();
+					
+					file_cache.delete_block(cache_block);
+					
+					successful_evictions += 1;
 					// TODO(quantumish): is this expected behavior?
 					page_evictions.inc();
 				}
 
-				// if let Err(err) = block_map.finish_shrink() {
-				// 	tracing::warn!(
-				// 		"could not shrink file cache to {} blocks (old size {}): {}",
-				// 		num_blocks,
-				// 		old_num_blocks,
-				// 		err
-				// 	);
-				// }
-								// Don hold lock for longer than necessary.
-				// {  
-				// 	let mut clock_hand = self.clock_hand.lock().unwrap();
-					
-				// 	// Make sure the clock hand resets properly.
-				// 	// TODO(quantumish): confirm this is expected behavior?
-				// 	if *clock_hand > num_blocks as usize {
-				// 		*clock_hand = num_blocks as usize - 1;
-				// 	}
-				// }
+				// We want to quickly clear space in the LFC. Regression tests expect to see
+				// an immediate-ish change in the file size, so we evict other entries to reclaim
+				// enough space. Waiting for stragglers at the end of the map could *in theory*
+				// take indefinite amounts of time depending on how long they stay pinned.
+				while successful_evictions < difference {
+					if let Some(i) = self.try_evict_one_cache_block() {
+						file_cache.delete_block(i);
+						successful_evictions += 1;
+					}
+				}
+
+				// Try again at evicting entries in to-be-shrunk region, except don't give up this time.
+				// Not a great solution all around: unnecessary scanning, spinning, and code duplication.
+				// Not sure what a good alternative is though, as there may be enough of these entries that
+				// we can't store a Vec of them and we ultimately can't proceed until they're evicted.
+				// Maybe a notification system for unpinning somehow? This also makes me think that pinning
+				// of entries should be a first class concept within the hashmap implementation...
+				'outer: for i in num_blocks..old_num_blocks {
+					loop { 
+						let Some(entry) = block_map.entry_at_bucket(i as usize) else {
+							continue 'outer;
+						};
+						let old = entry.get();
+						if old.pinned.load(Ordering::Relaxed) != 0 {
+							drop(entry);
+							// Painful...
+							std::thread::sleep(std::time::Duration::from_secs(1));
+							continue;
+						}
+						_ = global_lw_lsn.fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
+						let cache_block = old.cache_block.swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
+						entry.remove();
+						
+						file_cache.delete_block(cache_block);
+						
+						// TODO(quantumish): is this expected behavior?
+						page_evictions.inc();
+						continue 'outer;
+					}
+				}
+
+				if let Err(err) = self.block_map.finish_shrink() { 
+					tracing::warn!(
+						"could not shrink file cache to {} blocks (old size {}): {}",
+						num_blocks,
+						old_num_blocks,
+						err
+					);
+				}
 			});
         }
 	}

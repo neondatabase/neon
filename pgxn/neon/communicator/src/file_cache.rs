@@ -27,7 +27,12 @@ pub struct FileCache {
     file: Arc<File>,
 
     free_list: Mutex<FreeList>,
-
+	// NOTE(quantumish): when we punch holes in the LFC to shrink the file size,
+	// we *shouldn't* add them to the free list (since that's used to write new entries)
+	// but we still should remember them so that we can add them to the free list when
+	// a growth later occurs. this still has the same scalability flaws as the freelist 
+	hole_list: Mutex<Vec<CacheBlock>>,
+	
     // metrics
     max_blocks_gauge: metrics::IntGauge,
     num_free_blocks_gauge: metrics::IntGauge,
@@ -81,6 +86,7 @@ impl FileCache {
                 max_blocks: initial_size,
                 free_blocks: Vec::new(),
             }),
+			hole_list: Mutex::new(Vec::new()),
             max_blocks_gauge,
             num_free_blocks_gauge,
         })
@@ -129,11 +135,60 @@ impl FileCache {
         }
         None
     }
-
+	
     pub fn dealloc_block(&self, cache_block: CacheBlock) {
         let mut free_list = self.free_list.lock().unwrap();
         free_list.free_blocks.push(cache_block);
     }
+
+	/// "Delete" a block via fallocate's hole punching feature.
+	// TODO(quantumish): possibly implement some batching? lots of syscalls...
+	// unfortunately should be at odds with our access pattern as entries in the hashmap
+	// should have no correlation with the location of blocks in the actual LFC file.
+	pub fn delete_block(&self, cache_block: CacheBlock) {
+		use nix::fcntl as nix;
+		if let Err(e) = nix::fallocate(
+			self.file.clone(),
+			nix::FallocateFlags::FALLOC_FL_PUNCH_HOLE
+				.union(nix::FallocateFlags::FALLOC_FL_KEEP_SIZE),
+			(cache_block as usize * BLCKSZ) as libc::off_t,
+			BLCKSZ as libc::off_t
+		) {
+			tracing::error!("failed to punch hole in LFC at block {cache_block}: {e}");
+			return;
+		}
+
+		let mut hole_list = self.hole_list.lock().unwrap();
+        hole_list.push(cache_block);
+	}
+
+	/// Attempt to reclaim `num_blocks` of previously hole-punched blocks.
+	// TODO(quantumish): could probably just be merged w/ grow() - is there ever a reason
+	// to call this separately?
+	pub fn undelete_blocks(&self, num_blocks: u64) -> u64 {
+		// Safety: nothing else should ever need to take both of these locks at once.
+		// TODO(quantumish): may just be worth putting both under the same lock.
+		let mut hole_list = self.hole_list.lock().unwrap();
+		let mut free_list = self.free_list.lock().unwrap();
+		let amt = hole_list.len().min(num_blocks as usize);
+		for _ in 0..amt {
+			free_list.free_blocks.push(hole_list.pop().unwrap());
+		}
+		amt as u64
+	}
+
+	/// Physically grows the file and expands the freelist.
+	pub fn grow(&self, num_blocks: u64) {
+		self.free_list.lock().unwrap().max_blocks += num_blocks;
+	}
+
+	/// Returns number of blocks in the remaining space.
+	pub fn free_space(&self) -> u64 {
+		let free_list = self.free_list.lock().unwrap();
+		let slab = free_list.max_blocks - free_list.next_free_block.min(free_list.max_blocks);
+		let fragments = free_list.free_blocks.len() as u64;
+		slab + fragments
+	}
 }
 
 impl metrics::core::Collector for FileCache {
