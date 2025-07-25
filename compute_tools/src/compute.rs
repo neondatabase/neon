@@ -1458,6 +1458,7 @@ impl ComputeNode {
 
         let tls_config = self.tls_config(&pspec.spec);
         let databricks_settings = spec.databricks_settings.as_ref();
+        let postgres_port = self.params.connstr.port();
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
@@ -1465,9 +1466,11 @@ impl ComputeNode {
             pgdata_path,
             &self.params,
             &pspec.spec,
+            postgres_port,
             self.params.internal_http_port,
             tls_config,
             databricks_settings,
+            self.params.lakebase_mode,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1968,13 +1971,16 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
+        let postgres_port = self.params.connstr.port();
         config::write_postgres_conf(
             pgdata_path,
             &self.params,
             &spec,
+            postgres_port,
             self.params.internal_http_port,
             tls_config,
             spec.databricks_settings.as_ref(),
+            self.params.lakebase_mode,
         )?;
 
         self.pg_reload_conf()?;
