@@ -13,10 +13,10 @@ use fail::fail_point;
 use futures::StreamExt;
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
-use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_ffi::v14::xlog_utils::normalize_lsn;
 use postgres_ffi::waldecoder::WalDecodeError;
+use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
 use tokio::sync::watch;
@@ -26,7 +26,7 @@ use tokio_postgres::replication::ReplicationStream;
 use tokio_postgres::{Client, SimpleQueryMessage, SimpleQueryRow};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, trace, warn};
-use utils::{critical_timeline};
+use utils::critical_timeline;
 use utils::id::NodeId;
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
@@ -464,7 +464,6 @@ pub(super) async fn handle_walreceiver_connection(
                                     timeline.timeline_id,
                                     Some(&timeline.corruption_detected),
                                     "{err:?}"
-                                
                                 );
                             }
                         })?;
