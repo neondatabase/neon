@@ -135,7 +135,10 @@ impl Horizons {
         let res = LeaseInfo {
             valid_until: updated.valid_until,
         };
-        inner.metrics.leases_count_gauge.set(inner.leases_by_id.len().into_u64());
+        inner
+            .metrics
+            .leases_count_gauge
+            .set(inner.leases_by_id.len().into_u64());
         Ok(res)
     }
 

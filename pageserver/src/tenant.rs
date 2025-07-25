@@ -4842,13 +4842,13 @@ impl TenantShard {
 
                 // Cull any expired leases
                 let now = SystemTime::now();
-                target.leases.retain(|_, lease| !lease.is_expired(&now));
+                target.lsn_leases.retain(|_, lease| !lease.is_expired(&now));
                 timeline.standby_horizons.cull_leases(now);
 
                 timeline
                     .metrics
                     .valid_lsn_lease_count_gauge
-                    .set(target.leases.len() as u64);
+                    .set(target.lsn_leases.len() as u64);
 
                 // Look up parent's PITR cutoff to update the child's knowledge of whether it is within parent's PITR
                 if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
@@ -9493,7 +9493,7 @@ mod tests {
         // Keeping everything <= Lsn(0x80) b/c leases:
         // 0/10: initdb layer
         // (0/20..=0/70).step_by(0x10): image layers added when creating the timeline.
-        assert_eq!(res.layers_needed_by_leases, 7);
+        assert_eq!(res.layers_needed_by_lsn_leases, 7);
         // Keeping 0/90 b/c it is the latest layer.
         assert_eq!(res.layers_not_updated, 1);
         // Removed 0/80.
@@ -9778,7 +9778,7 @@ mod tests {
                     time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
-                leases: Default::default(),
+                lsn_leases: Default::default(),
                 within_ancestor_pitr: false,
             };
         }
@@ -10333,7 +10333,7 @@ mod tests {
                     time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
-                leases: Default::default(),
+                lsn_leases: Default::default(),
                 within_ancestor_pitr: false,
             };
         }
@@ -10582,7 +10582,7 @@ mod tests {
                     time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
-                leases: Default::default(),
+                lsn_leases: Default::default(),
                 within_ancestor_pitr: false,
             };
         }
@@ -10831,7 +10831,7 @@ mod tests {
                     time: Some(Lsn(0x10)),
                     space: Lsn(0x10),
                 },
-                leases: Default::default(),
+                lsn_leases: Default::default(),
                 within_ancestor_pitr: false,
             };
         }
@@ -10851,7 +10851,7 @@ mod tests {
                     time: Some(Lsn(0x50)),
                     space: Lsn(0x50),
                 },
-                leases: Default::default(),
+                lsn_leases: Default::default(),
                 within_ancestor_pitr: false,
             };
         }
@@ -11572,7 +11572,7 @@ mod tests {
                     time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
-                leases: Default::default(),
+                lsn_leases: Default::default(),
                 within_ancestor_pitr: false,
             };
         }
@@ -11961,7 +11961,7 @@ mod tests {
                     time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
-                leases: Default::default(),
+                lsn_leases: Default::default(),
                 within_ancestor_pitr: false,
             };
         }
@@ -12213,7 +12213,7 @@ mod tests {
                     time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
-                leases: Default::default(),
+                lsn_leases: Default::default(),
                 within_ancestor_pitr: false,
             };
         }
@@ -12539,7 +12539,7 @@ mod tests {
                     time: Some(Lsn(0x30)),
                     space: Lsn(0x30),
                 },
-                leases: Default::default(),
+                lsn_leases: Default::default(),
                 within_ancestor_pitr: false,
             };
         }

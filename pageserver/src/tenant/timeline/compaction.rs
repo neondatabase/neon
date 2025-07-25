@@ -3270,7 +3270,7 @@ impl Timeline {
                     retain_lsns_below_horizon.push(*lsn);
                 }
             }
-            for lsn in gc_info.leases.keys() {
+            for lsn in gc_info.lsn_leases.keys() {
                 if lsn < &gc_cutoff {
                     retain_lsns_below_horizon.push(*lsn);
                 }

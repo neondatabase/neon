@@ -139,8 +139,9 @@ pub struct TimelineInputs {
     /// Cutoff point calculated from the user-supplied 'max_retention_period'
     retention_param_cutoff: Option<Lsn>,
 
-    /// Lease points on the timeline
-    lease_points: Vec<Lsn>,
+    /// LSN lease points on the timeline
+    #[serde(rename = "lease_points")]
+    lsn_lease_points: Vec<Lsn>,
 }
 
 /// Gathers the inputs for the tenant sizing model.
@@ -250,8 +251,8 @@ pub(super) async fn gather_inputs(
 
         let branch_is_invisible = timeline.is_invisible() == Some(true);
 
-        let lease_points = gc_info
-            .leases
+        let lsn_lease_points = gc_info
+            .lsn_leases
             .keys()
             .filter(|&&lsn| lsn > ancestor_lsn)
             .copied()
@@ -274,8 +275,12 @@ pub(super) async fn gather_inputs(
             .collect::<Vec<_>>();
 
         if !branch_is_invisible {
-            // Do not count lease points for invisible branches.
-            lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));
+            // Do not count lsn lease points for invisible branches.
+            lsns.extend(
+                lsn_lease_points
+                    .iter()
+                    .map(|&lsn| (lsn, LsnKind::LeasePoint)),
+            );
         }
 
         drop(gc_info);
@@ -409,7 +414,7 @@ pub(super) async fn gather_inputs(
             latest_gc_cutoff: *timeline.get_applied_gc_cutoff_lsn(),
             next_pitr_cutoff,
             retention_param_cutoff,
-            lease_points,
+            lsn_lease_points,
         });
     }
 

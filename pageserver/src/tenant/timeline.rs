@@ -485,7 +485,7 @@ pub(crate) struct GcInfo {
     pub(crate) cutoffs: GcCutoffs,
 
     /// Leases granted to particular LSNs.
-    pub(crate) leases: BTreeMap<Lsn, LsnLease>,
+    pub(crate) lsn_leases: BTreeMap<Lsn, LsnLease>,
 
     /// Whether our branch point is within our ancestor's PITR interval (for cost estimation)
     pub(crate) within_ancestor_pitr: bool,
@@ -533,7 +533,7 @@ impl GcInfo {
         self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes)
     }
     pub(crate) fn lsn_covered_by_lease(&self, lsn: Lsn) -> bool {
-        self.leases.contains_key(&lsn)
+        self.lsn_leases.contains_key(&lsn)
     }
 }
 
@@ -1813,7 +1813,7 @@ impl Timeline {
 
             let valid_until = SystemTime::now() + length;
 
-            let entry = gc_info.leases.entry(lsn);
+            let entry = gc_info.lsn_leases.entry(lsn);
 
             match entry {
                 Entry::Occupied(mut occupied) => {
@@ -6536,7 +6536,7 @@ impl Timeline {
             return Err(GcError::TimelineCancelled);
         }
 
-        let (space_cutoff, time_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
+        let (space_cutoff, time_cutoff, retain_lsns, max_lsn_with_valid_lsn_lease) = {
             let gc_info = self.gc_info.read().unwrap();
 
             let space_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
@@ -6551,13 +6551,14 @@ impl Timeline {
             //
             // Caveat: `refresh_gc_info` is in charged of updating the lease map.
             // Here, we do not check for stale leases again.
-            let max_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
+            let max_lsn_with_valid_lsn_lease =
+                gc_info.lsn_leases.last_key_value().map(|(lsn, _)| *lsn);
 
             (
                 space_cutoff,
                 time_cutoff,
                 retain_lsns,
-                max_lsn_with_valid_lease,
+                max_lsn_with_valid_lsn_lease,
             )
         };
 
@@ -6604,7 +6605,7 @@ impl Timeline {
                 space_cutoff,
                 time_cutoff,
                 retain_lsns,
-                max_lsn_with_valid_lease,
+                max_lsn_with_valid_lsn_lease,
                 new_gc_cutoff,
             )
             .instrument(
@@ -6623,7 +6624,7 @@ impl Timeline {
         space_cutoff: Lsn,
         time_cutoff: Option<Lsn>, // None if uninitialized
         retain_lsns: Vec<Lsn>,
-        max_lsn_with_valid_lease: Option<Lsn>,
+        max_lsn_with_valid_lsn_lease: Option<Lsn>,
         new_gc_cutoff: Lsn,
     ) -> Result<GcResult, GcError> {
         // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
@@ -6733,15 +6734,15 @@ impl Timeline {
                 }
 
                 // 4. Is there a valid lease that requires us to keep this layer?
-                if let Some(lsn) = &max_lsn_with_valid_lease {
+                if let Some(lsn) = &max_lsn_with_valid_lsn_lease {
                     // keep if layer start <= any of the lease
                     if &l.get_lsn_range().start <= lsn {
                         debug!(
-                            "keeping {} because there is a valid lease preventing GC at {}",
+                            "keeping {} because there is a valid LSN lease preventing GC at {}",
                             l.layer_name(),
                             lsn,
                         );
-                        result.layers_needed_by_leases += 1;
+                        result.layers_needed_by_lsn_leases += 1;
                         continue 'outer;
                     }
                 }
