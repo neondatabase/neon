@@ -47,14 +47,7 @@ impl Encoder<BytesMut> for PostgresCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: BytesMut, dst: &mut BytesMut) -> io::Result<()> {
-        // When it comes to request/response workflows, we usually flush the entire write
-        // buffer in order to wait for the response before we send a new request.
-        // Therefore we can avoid the copy and just replace the buffer.
-        if dst.is_empty() {
-            *dst = item;
-        } else {
-            dst.extend_from_slice(&item);
-        }
+        dst.unsplit(item);
         Ok(())
     }
 }
