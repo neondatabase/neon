@@ -10,7 +10,7 @@
 //! write it? ), but the backends use direct C library calls for that.
 use std::fs::File;
 use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -25,13 +25,11 @@ pub const INVALID_CACHE_BLOCK: CacheBlock = u64::MAX;
 #[derive(Debug)]
 pub struct FileCache {
     file: Arc<File>,
-
     free_list: Mutex<FreeList>,
-	// NOTE(quantumish): when we punch holes in the LFC to shrink the file size,
-	// we *shouldn't* add them to the free list (since that's used to write new entries)
-	// but we still should remember them so that we can add them to the free list when
-	// a growth later occurs. this still has the same scalability flaws as the freelist 
-	hole_list: Mutex<Vec<CacheBlock>>,
+
+	// The `fiemap-rs` library doesn't expose any way to issue a FIEMAP ioctl
+	// on an existing file descroptor, so we have to save the path.
+	path: PathBuf,
 	
     // metrics
     max_blocks_gauge: metrics::IntGauge,
@@ -86,7 +84,7 @@ impl FileCache {
                 max_blocks: initial_size,
                 free_blocks: Vec::new(),
             }),
-			hole_list: Mutex::new(Vec::new()),
+			path: file_cache_path.to_path_buf(),
             max_blocks_gauge,
             num_free_blocks_gauge,
         })
@@ -157,24 +155,57 @@ impl FileCache {
 			tracing::error!("failed to punch hole in LFC at block {cache_block}: {e}");
 			return;
 		}
-
-		let mut hole_list = self.hole_list.lock().unwrap();
-        hole_list.push(cache_block);
 	}
 
 	/// Attempt to reclaim `num_blocks` of previously hole-punched blocks.
-	// TODO(quantumish): could probably just be merged w/ grow() - is there ever a reason
-	// to call this separately?
+	#[cfg(target_os = "linux")]
 	pub fn undelete_blocks(&self, num_blocks: u64) -> u64 {
-		// Safety: nothing else should ever need to take both of these locks at once.
-		// TODO(quantumish): may just be worth putting both under the same lock.
-		let mut hole_list = self.hole_list.lock().unwrap();
+		use itertools::Itertools;
+		let mut pushed = 0;
 		let mut free_list = self.free_list.lock().unwrap();
-		let amt = hole_list.len().min(num_blocks as usize);
-		for _ in 0..amt {
-			free_list.free_blocks.push(hole_list.pop().unwrap());
+		let res = fiemap::fiemap(self.path.as_path()).unwrap();
+		for (prev, cur) in res.map(|x| x.unwrap()).tuple_windows() {
+			if (prev.fe_logical + prev.fe_length) < cur.fe_logical {
+				let mut end = prev.fe_logical + prev.fe_length;
+				while end < cur.fe_logical {
+					free_list.free_blocks.push(end);
+					pushed += 1;
+					if pushed == num_blocks {
+						return 0;
+					}
+					end += BLCKSZ as u64;
+				}
+			}
 		}
-		amt as u64
+		num_blocks - pushed
+	}
+	
+	/// Attempt to reclaim `num_blocks` of previously hole-punched blocks.
+	// FIXME(quantumish): local tests showed this code has some buggy behavior.
+	#[cfg(target_os = "macos")]
+	pub fn undelete_blocks(&self, num_blocks: u64) -> u64 {
+		use nix::unistd as nix;
+		let mut free_list = self.free_list.lock().unwrap();
+		let num_bytes = (free_list.next_free_block * BLOCKSZ) as i64;
+		let mut cur_pos = 0;
+		let mut pushed = 0;
+		while cur_pos < num_bytes {
+			let res = nix::lseek(
+				file.clone(),
+				cur_pos,
+				nix::Whence::SeekHole
+			).unwrap();
+			if res >= num_bytes {
+				break;
+			}
+			free_list.free_blocks.push(res);
+			pushed += 1;
+			if pushed == num_blocks {
+				return 0;
+			}
+			cur_pos = res + BLOCKSZ as i64;
+		}
+		num_blocks - pushed
 	}
 
 	/// Physically grows the file and expands the freelist.
