@@ -3309,6 +3309,7 @@ def test_ps_unavailable_after_delete(
         ps.allowed_errors.append(".*request was dropped before completing.*")
         env.storage_controller.node_delete(ps.id, force=True)
         wait_until(lambda: assert_nodes_count(2))
+        env.storage_controller.reconcile_until_idle()
     elif deletion_api == DeletionAPIKind.OLD:
         env.storage_controller.node_delete_old(ps.id)
         assert_nodes_count(2)
@@ -3318,7 +3319,7 @@ def test_ps_unavailable_after_delete(
     # Running pageserver CLI init in a separate thread
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         log.info("Restarting tombstoned pageserver...")
-        ps.stop(immediate=True)
+        ps.stop()
         ps_start_fut = executor.submit(lambda: ps.start(await_active=False))
 
         # After deleted pageserver restart, the node count must remain the same
