@@ -12,13 +12,12 @@ from typing import TYPE_CHECKING
 import psycopg2
 import pytest
 import requests
-from kafka import KafkaConsumer
-
 from fixtures.log_helper import log
 from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import RemotePostgres
+    from kafka import KafkaConsumer
 
 
 class DebeziumAPI:
@@ -102,6 +101,7 @@ def debezium(remote_pg: RemotePostgres):
     assert resp.status_code == 201
     assert len(dbz.list_connectors()) == 1
     from kafka import KafkaConsumer
+
     kafka_host = "kafka" if ("CI" in os.environ) else "127.0.0.1"
     kafka_port = 9092 if ("CI" in os.environ) else 29092
     log.info("Connecting to Kafka: %s:%s", kafka_host, kafka_port)
@@ -131,7 +131,6 @@ def get_kafka_msg(consumer: KafkaConsumer, ts_ms, before=None, after=None) -> No
     """
     log.info("Bootstrap servers: %s", consumer.config["bootstrap_servers"])
     msg = consumer.poll()
-    log.info("poll message: %s", msg)
     assert msg, "Empty message"
     for val in msg.values():
         r = json.loads(val[-1].value)
