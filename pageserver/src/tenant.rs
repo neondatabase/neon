@@ -179,6 +179,9 @@ pub(super) struct AttachedTenantConf {
     /// The deadline before which we are blocked from GC so that
     /// leases have a chance to be renewed.
     lsn_lease_deadline: Option<tokio::time::Instant>,
+    /// The deadline before which we are blocked from GC so that
+    /// standby horizon leases have a chance to be renewed.
+    standby_horizon_lease_deadline: Option<tokio::time::Instant>,
 }
 
 impl AttachedTenantConf {
@@ -203,10 +206,27 @@ impl AttachedTenantConf {
             None
         };
 
+        // Sets a deadline before which we cannot proceed to GC due to standby horizon lease.
+        //
+        // Similar to LSN leases, standby horizon leases are not persisted to disk. By delaying GC by lease
+        // length, we guarantee that all the standby horizon leases we granted before will have a chance to renew
+        // when we run GC for the first time after restart / transition from AttachedMulti to AttachedSingle.
+        let standby_horizon_lease_deadline = if location.attach_mode == AttachmentMode::Single {
+            Some(
+                tokio::time::Instant::now()
+                    + TenantShard::get_standby_horizon_lease_length_impl(conf, &tenant_conf),
+            )
+        } else {
+            // We don't use `standby_horizon_lease_deadline` to delay GC in AttachedMulti and AttachedStale
+            // because we don't do GC in these modes.
+            None
+        };
+
         Self {
             tenant_conf,
             location,
             lsn_lease_deadline,
+            standby_horizon_lease_deadline,
         }
     }
 
@@ -228,6 +248,12 @@ impl AttachedTenantConf {
 
     fn is_gc_blocked_by_lsn_lease_deadline(&self) -> bool {
         self.lsn_lease_deadline
+            .map(|d| tokio::time::Instant::now() < d)
+            .unwrap_or(false)
+    }
+
+    fn is_gc_blocked_by_standby_horizon_lease_deadline(&self) -> bool {
+        self.standby_horizon_lease_deadline
             .map(|d| tokio::time::Instant::now() < d)
             .unwrap_or(false)
     }
@@ -3111,7 +3137,7 @@ impl TenantShard {
                 return Ok(GcResult::default());
             }
 
-            if todo!("block for standby horizon lease deadline") {
+            if conf.is_gc_blocked_by_standby_horizon_lease_deadline() {
                 info!("Skipping GC because standby horizon lease deadline is not reached");
                 return Ok(GcResult::default());
             }
@@ -4280,6 +4306,7 @@ impl TenantShard {
                     tenant_conf: update(attached_conf.tenant_conf.clone())?,
                     location: attached_conf.location,
                     lsn_lease_deadline: attached_conf.lsn_lease_deadline,
+                    standby_horizon_lease_deadline: attached_conf.standby_horizon_lease_deadline,
                 }))
             })?;
 

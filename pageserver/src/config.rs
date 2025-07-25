@@ -638,13 +638,15 @@ impl PageServerConf {
             ..Default::default()
         };
 
-        // Test authors tend to forget about the default 10min initial lease deadline
+        // Test authors tend to forget about the default 10min initial lsn lease deadline
         // when writing tests, which turns their immediate gc requests via mgmt API
         // into no-ops. Override the binary default here, such that there is no initial
-        // lease deadline by default in tests. Tests that care can always override it
+        // lsn lease deadline by default in tests. Tests that care can always override it
         // themselves.
         // Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
         config_toml.tenant_config.lsn_lease_length = Duration::from_secs(0);
+        // Same argument applies to the initial standby_horizon lease deadline.
+        config_toml.tenant_config.standby_horizon_lease_length = Duration::from_secs(0);
 
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
     }

@@ -565,6 +565,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'basebackup_cache_enabled' as bool")?,
+            standby_horizon_lease_length: settings
+                .remove("standby_horizon_lease_length")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'standby_horizon_lease_length' as duration")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

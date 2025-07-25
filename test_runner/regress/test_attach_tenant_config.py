@@ -181,6 +181,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "image_layer_creation_check_threshold": 1,
         "lsn_lease_length": "1m",
         "lsn_lease_length_for_ts": "5s",
+        "standby_horizon_lease_length": "5s",
         "timeline_offloading": False,
         "rel_size_v2_enabled": True,
         "relsize_snapshot_cache_capacity": 10000,

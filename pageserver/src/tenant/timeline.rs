@@ -1884,8 +1884,14 @@ impl Timeline {
                 .checked_add(Duration::from_secs(5 * 60))
                 .unwrap());
         }
-        let applied_gc_cutoff_lsn =
-            todo!("think about boundary conditions? we didn't have any before though");
+        let applied_gc_cutoff_lsn_guard = self.get_applied_gc_cutoff_lsn();
+        if lsn < *applied_gc_cutoff_lsn_guard {
+            bail!(
+                "tried to request a standby horizon lease for an lsn below the applied gc cutoff. requested at {} gc cutoff {}",
+                lsn,
+                *applied_gc_cutoff_lsn_guard
+            );
+        }
         let length = self.get_standby_horizon_lease_length();
         self.standby_horizons
             .upsert_lease(lease_id, lsn, length)
