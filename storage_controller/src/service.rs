@@ -85,7 +85,7 @@ use crate::peer_client::GlobalObservedState;
 use crate::persistence::split_state::SplitState;
 use crate::persistence::{
     AbortShardSplitStatus, ControllerPersistence, DatabaseError, DatabaseResult,
-    MetadataHealthPersistence, Persistence, ShardGenerationState, TenantFilter,
+    MetadataHealthPersistence, Persistence, PersistenceConfig, ShardGenerationState, TenantFilter,
     TenantShardPersistence,
 };
 use crate::reconciler::{
@@ -490,6 +490,8 @@ pub struct Config {
 
     // Feature flag: Whether the storage controller should act to rectify pageserver-reported local disk loss.
     pub handle_ps_local_disk_loss: bool,
+
+    pub persistence_config: PersistenceConfig,
 }
 
 impl From<DatabaseError> for ApiError {

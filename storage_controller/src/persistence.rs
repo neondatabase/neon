@@ -87,6 +87,38 @@ pub struct Persistence {
     connection_pool: Pool<AsyncPgConnection>,
 }
 
+#[derive(Copy, Clone)]
+pub struct PersistenceConfig {
+    max_connections: u32,
+    idle_connection_timeout: Duration,
+    max_connection_lifetime: Duration,
+}
+
+impl PersistenceConfig {
+    pub fn new(
+        max_connections: Option<u32>,
+        idle_connection_timeout: Option<Duration>,
+        max_connection_lifetime: Option<Duration>,
+    ) -> Self {
+        // If unspecified, use neon.com defaults
+        //
+        // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
+        // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
+        pub const MAX_CONNECTIONS_DEFAULT: u32 = 99;
+        // We don't want to keep a lot of connections alive: close them down promptly if they aren't being used.
+        pub const IDLE_CONNECTION_TIMEOUT_DEFAULT: Duration = Duration::from_secs(10);
+        pub const MAX_CONNECTION_LIFETIME_DEFAULT: Duration = Duration::from_secs(60);
+
+        PersistenceConfig {
+            max_connections: max_connections.unwrap_or(MAX_CONNECTIONS_DEFAULT),
+            idle_connection_timeout: idle_connection_timeout
+                .unwrap_or(IDLE_CONNECTION_TIMEOUT_DEFAULT),
+            max_connection_lifetime: max_connection_lifetime
+                .unwrap_or(MAX_CONNECTION_LIFETIME_DEFAULT),
+        }
+    }
+}
+
 /// Legacy format, for use in JSON compat objects in test environment
 #[derive(Serialize, Deserialize)]
 struct JsonPersistence {
@@ -207,7 +239,7 @@ impl Persistence {
     const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
     const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 
-    pub async fn new(database_url: String) -> Self {
+    pub async fn new(database_url: String, config: PersistenceConfig) -> Self {
         let mut mgr_config = ManagerConfig::default();
         mgr_config.custom_setup = Box::new(establish_connection_rustls);
 
@@ -219,9 +251,9 @@ impl Persistence {
         // We will use a connection pool: this is primarily to _limit_ our connection count, rather than to optimize time
         // to execute queries (database queries are not generally on latency-sensitive paths).
         let connection_pool = Pool::builder()
-            .max_size(Self::MAX_CONNECTIONS)
-            .max_lifetime(Some(Self::MAX_CONNECTION_LIFETIME))
-            .idle_timeout(Some(Self::IDLE_CONNECTION_TIMEOUT))
+            .max_size(config.max_connections)
+            .max_lifetime(Some(config.max_connection_lifetime))
+            .idle_timeout(Some(config.idle_connection_timeout))
             // Always keep at least one connection ready to go
             .min_idle(Some(1))
             .test_on_check_out(true)
