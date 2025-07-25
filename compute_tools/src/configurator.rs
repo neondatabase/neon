@@ -2,6 +2,7 @@ use std::fs::File;
 use std::thread;
 use std::{path::Path, sync::Arc};
 
+use anyhow::Result;
 use compute_api::responses::{ComputeConfig, ComputeStatus};
 use tracing::{error, info, instrument};
 
@@ -13,6 +14,10 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     info!("waiting for reconfiguration requests");
     loop {
         let mut state = compute.state.lock().unwrap();
+        /* BEGIN_HADRON */
+        // RefreshConfiguration should only be used inside the loop
+        assert_ne!(state.status, ComputeStatus::RefreshConfiguration);
+        /* END_HADRON */
 
         if compute.params.lakebase_mode {
             while state.status != ComputeStatus::ConfigurationPending
@@ -54,53 +59,68 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
             info!(
                 "compute node suspects its configuration is out of date, now refreshing configuration"
             );
-            // Drop the lock guard here to avoid holding the lock while downloading spec from the control plane / HCC.
-            // This is the only thread that can move compute_ctl out of the `RefreshConfigurationPending` state, so it
+            state.set_status(ComputeStatus::RefreshConfiguration, &compute.state_changed);
+            // Drop the lock guard here to avoid holding the lock while downloading config from the control plane / HCC.
+            // This is the only thread that can move compute_ctl out of the `RefreshConfiguration` state, so it
             // is safe to drop the lock like this.
             drop(state);
 
-            let spec = if let Some(config_path) = &compute.params.config_path_test_only {
-                // This path is only to make testing easier. In production we always get the spec from the HCC.
-                info!(
-                    "reloading config.json from path: {}",
-                    config_path.to_string_lossy()
-                );
-                let path = Path::new(config_path);
-                if let Ok(file) = File::open(path) {
-                    match serde_json::from_reader::<File, ComputeConfig>(file) {
-                        Ok(config) => config.spec,
-                        Err(e) => {
-                            error!("could not parse spec file: {}", e);
-                            None
-                        }
-                    }
-                } else {
-                    error!(
-                        "could not open config file at path: {}",
+            let get_config_result: anyhow::Result<ComputeConfig> =
+                if let Some(config_path) = &compute.params.config_path_test_only {
+                    // This path is only to make testing easier. In production we always get the config from the HCC.
+                    info!(
+                        "reloading config.json from path: {}",
                         config_path.to_string_lossy()
                     );
-                    None
-                }
-            } else if let Some(control_plane_uri) = &compute.params.control_plane_uri {
-                match get_config_from_control_plane(control_plane_uri, &compute.params.compute_id) {
-                    Ok(config) => config.spec,
-                    Err(e) => {
-                        error!("could not get config from control plane: {}", e);
-                        None
+                    let path = Path::new(config_path);
+                    if let Ok(file) = File::open(path) {
+                        match serde_json::from_reader::<File, ComputeConfig>(file) {
+                            Ok(config) => Ok(config),
+                            Err(e) => {
+                                error!("could not parse config file: {}", e);
+                                Err(anyhow::anyhow!("could not parse config file: {}", e))
+                            }
+                        }
+                    } else {
+                        error!(
+                            "could not open config file at path: {:?}",
+                            config_path.to_string_lossy()
+                        );
+                        Err(anyhow::anyhow!(
+                            "could not open config file at path: {}",
+                            config_path.to_string_lossy()
+                        ))
                     }
-                }
-            } else {
-                None
-            };
+                } else if let Some(control_plane_uri) = &compute.params.control_plane_uri {
+                    get_config_from_control_plane(control_plane_uri, &compute.params.compute_id)
+                } else {
+                    Err(anyhow::anyhow!("config_path_test_only is not set"))
+                };
 
-            if let Some(spec) = spec {
-                if let Ok(pspec) = ParsedSpec::try_from(spec) {
+            // Parse any received ComputeSpec and transpose the result into a Result<Option<ParsedSpec>>.
+            let parsed_spec_result: Result<Option<ParsedSpec>> =
+                get_config_result.and_then(|config| {
+                    if let Some(spec) = config.spec {
+                        if let Ok(pspec) = ParsedSpec::try_from(spec) {
+                            Ok(Some(pspec))
+                        } else {
+                            Err(anyhow::anyhow!("could not parse spec"))
+                        }
+                    } else {
+                        Ok(None)
+                    }
+                });
+
+            let new_status: ComputeStatus;
+            match parsed_spec_result {
+                // Control plane (HCM) returned a spec and we were able to parse it.
+                Ok(Some(pspec)) => {
                     {
                         let mut state = compute.state.lock().unwrap();
                         // Defensive programming to make sure this thread is indeed the only one that can move the compute
-                        // node out of the `RefreshConfigurationPending` state. Would be nice if we can encode this invariant
+                        // node out of the `RefreshConfiguration` state. Would be nice if we can encode this invariant
                         // into the type system.
-                        assert_eq!(state.status, ComputeStatus::RefreshConfigurationPending);
+                        assert_eq!(state.status, ComputeStatus::RefreshConfiguration);
 
                         if state.pspec.as_ref().map(|ps| ps.pageserver_connstr.clone())
                             == Some(pspec.pageserver_connstr.clone())
@@ -123,20 +143,45 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
                     match compute.reconfigure() {
                         Ok(_) => {
                             info!("Refresh configuration: compute node configured");
-                            compute.set_status(ComputeStatus::Running);
+                            new_status = ComputeStatus::Running;
                         }
                         Err(e) => {
                             error!(
                                 "Refresh configuration: could not configure compute node: {}",
                                 e
                             );
-                            // Leave the compute node in the `RefreshConfigurationPending` state if the configuration
+                            // Set the compute node back to the `RefreshConfigurationPending` state if the configuration
                             // was not successful. It should be okay to treat this situation the same as if the loop
                             // hasn't executed yet as long as the detection side keeps notifying.
+                            new_status = ComputeStatus::RefreshConfigurationPending;
                         }
                     }
                 }
+                // Control plane (HCM)'s response does not contain a spec. This is the "Empty" attachment case.
+                Ok(None) => {
+                    info!(
+                        "Compute Manager signaled that this compute is no longer attached to any storage. Exiting."
+                    );
+                    // We just immediately terminate the whole compute_ctl in this case. It's not necessary to attempt a
+                    // clean shutdown as Postgres is probably not responding anyway (which is why we are in this refresh
+                    // configuration state).
+                    std::process::exit(1);
+                }
+                // Various error cases:
+                // - The request to the control plane (HCM) either failed or returned a malformed spec.
+                // - compute_ctl itself is configured incorrectly (e.g., compute_id is not set).
+                Err(e) => {
+                    error!(
+                        "Refresh configuration: error getting a parsed spec: {:?}",
+                        e
+                    );
+                    new_status = ComputeStatus::RefreshConfigurationPending;
+                    // We may be dealing with an overloaded HCM if we end up in this path. Backoff 5 seconds before
+                    // retrying to avoid hammering the HCM.
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
             }
+            compute.set_status(new_status);
         } else if state.status == ComputeStatus::Failed {
             info!("compute node is now in Failed state, exiting");
             break;

@@ -1994,6 +1994,7 @@ impl ComputeNode {
                             // wait
                             ComputeStatus::Init
                             | ComputeStatus::Configuration
+                            | ComputeStatus::RefreshConfiguration
                             | ComputeStatus::RefreshConfigurationPending
                             | ComputeStatus::Empty => {
                                 state = self.state_changed.wait(state).unwrap();
