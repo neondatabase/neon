@@ -214,7 +214,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
 # Mold: A Modern Linker
 ENV MOLD_VERSION=v2.37.1
 RUN set -e \
-    && git clone -b "${MOLD_VERSION}" --single-branch https://github.com/rui314/mold.git \
+    && git clone -b "${MOLD_VERSION}" --depth 1 https://github.com/rui314/mold.git \
     && mkdir mold/build \
     && cd mold/build \    
     && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ .. \
