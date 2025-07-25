@@ -735,7 +735,8 @@ static STANDBY_HORIZON_LEASES: Lazy<UIntGaugeVec> = Lazy::new(|| {
         "pageserver_standby_horizon_leases",
         "Gauge indicating current number of standby horizon leases, per timeline",
         &["tenant_id", "shard_id", "timeline_id"]
-    ).expect("failed to define a metric")
+    )
+    .expect("failed to define a metric")
 });
 
 static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
@@ -3344,11 +3345,9 @@ impl TimelineMetrics {
             legacy_value: STANDBY_HORIZON
                 .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
                 .unwrap(),
-            leases_count_gauge: STANDBY_HORIZON_LEASES.get_metric_with_label_values(&[
-                &tenant_id,
-                &shard_id,
-                &timeline_id,
-            ]).unwrap(),
+            leases_count_gauge: STANDBY_HORIZON_LEASES
+                .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+                .unwrap(),
         };
         let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])

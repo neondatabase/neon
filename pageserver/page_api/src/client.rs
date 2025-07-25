@@ -144,7 +144,10 @@ impl Client {
         Ok(resp.try_into()?)
     }
 
-    pub async fn lease_standby_horizon(&mut self, req: LeaseStandbyHorizonRequest) -> tonic::Result<LeaseStandbyHorizonResponse> {
+    pub async fn lease_standby_horizon(
+        &mut self,
+        req: LeaseStandbyHorizonRequest,
+    ) -> tonic::Result<LeaseStandbyHorizonResponse> {
         let req = proto::LeaseStandbyHorizonRequest::from(req);
         let resp = self.inner.lease_standby_horizon(req).await?.into_inner();
         Ok(resp.try_into()?)
