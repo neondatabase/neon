@@ -2368,30 +2368,13 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
     })
 }
 
-fn establish_connection_rustls(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
-    let fut = async {
-        // We first set up the way we want rustls to work.
-        let rustls_config = client_config_with_root_certs()
-            .map_err(|err| ConnectionError::BadConnection(format!("{err:?}")))?;
-        let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
-        let (client, conn) = tokio_postgres::connect(config, tls)
-            .await
-            .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
-
-        AsyncPgConnection::try_from_client_and_connection(client, conn).await
-    };
-    fut.boxed()
-}
-
 // Hadron's implementation of establish_connection_rustls which avoids hogging the tokio executor thread during
 // CPU-intensive operations in postgres connection and session establishments.
 // Compared to the original implementation this function performs the following tasks using spawn_blocking to avoid
 // hogging the tokio executor thread:
 // 1. Parsing and decoding root certificates during rustls client config setup.
 // 2. The tokio_postgres::connect() call, which performs the TLS handshake and the postgres password authentication.
-fn establish_connection_rustls_no_hog_thread(
-    config: &str,
-) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
+fn establish_connection_rustls(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
     let fut = async move {
         // We first set up the way we want rustls to work.
         let rustls_config = tokio::task::spawn_blocking(client_config_with_root_certs)
