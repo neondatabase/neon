@@ -141,9 +141,7 @@ pub struct ApiConfig {
 pub(crate) struct DbSchemaCache(pub Cache<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>);
 impl DbSchemaCache {
     pub fn new(config: crate::config::CacheOptions) -> Self {
-        let builder = moka::sync::Cache::builder()
-            .name("db_schema_cache")
-            .expire_after(CplaneExpiry::default());
+        let builder = Cache::builder().name("db_schema_cache");
         let builder = config.moka(builder);
 
         Self(builder.build())
