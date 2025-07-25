@@ -1862,7 +1862,7 @@ impl PageServerHandler {
             }
         };
 
-        let request_span = info_span!("request");
+        let request_span = info_span!("request", ?hold_gc_cutoff_guard);
         let ((pgb_reader, timeline_handles), result) = match self.pipelining_config.clone() {
             PageServicePipeliningConfig::Pipelined(pipelining_config) => {
                 self.handle_pagerequests_pipelined(
