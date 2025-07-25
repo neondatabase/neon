@@ -862,7 +862,7 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
     ) == 0
     assert not env.pageserver.log_contains(".*Circuit breaker failure ended.*")
 
-
+@pytest.mark.skip(reason="Lakebase mode")
 def test_ps_corruption_detection_feedback(neon_env_builder: NeonEnvBuilder):
     """
     Test that when the pageserver detects corruption during image layer creation,
