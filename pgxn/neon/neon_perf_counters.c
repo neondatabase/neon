@@ -13,7 +13,6 @@
 
 #include "funcapi.h"
 #include "miscadmin.h"
-#include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
