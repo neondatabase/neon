@@ -612,6 +612,10 @@ pub struct TenantConfigToml {
     #[serde(with = "humantime_serde")]
     pub lsn_lease_length_for_ts: Duration,
 
+    /// The length for a standby horizon lease.
+    #[serde(with = "humantime_serde")]
+    pub standby_horizon_lease_length: Duration,
+
     /// Enable auto-offloading of timelines.
     /// (either this flag or the pageserver-global one need to be set)
     pub timeline_offloading: bool,
@@ -937,6 +941,7 @@ impl Default for TenantConfigToml {
             image_creation_preempt_threshold: DEFAULT_IMAGE_CREATION_PREEMPT_THRESHOLD,
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
+            standby_horizon_lease_length: LsnLease::DEFAULT_STANDBY_HORIZON_LENGTH,
             timeline_offloading: true,
             rel_size_v2_enabled: false,
             gc_compaction_enabled: DEFAULT_GC_COMPACTION_ENABLED,

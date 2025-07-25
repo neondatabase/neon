@@ -180,6 +180,9 @@ impl LsnLease {
     /// `get_lsn_by_timestamp` request (1 minutes).
     pub const DEFAULT_LENGTH_FOR_TS: Duration = Duration::from_secs(60);
 
+    /// The default length for a standby horizon lease  (10 minutes).
+    pub const DEFAULT_STANDBY_HORIZON_LENGTH: Duration = Duration::from_secs(10 * 60);
+
     /// Checks whether the lease is expired.
     pub fn is_expired(&self, now: &SystemTime) -> bool {
         now > &self.valid_until
@@ -643,6 +646,8 @@ pub struct TenantConfigPatch {
     pub relsize_snapshot_cache_capacity: FieldPatch<usize>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub basebackup_cache_enabled: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub standby_horizon_lease_length: FieldPatch<String>,
 }
 
 /// Like [`crate::config::TenantConfigToml`], but preserves the information
@@ -775,6 +780,10 @@ pub struct TenantConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub basebackup_cache_enabled: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    pub standby_horizon_lease_length: Option<Duration>,
 }
 
 impl TenantConfig {
@@ -821,6 +830,7 @@ impl TenantConfig {
             mut sampling_ratio,
             mut relsize_snapshot_cache_capacity,
             mut basebackup_cache_enabled,
+            mut standby_horizon_lease_length,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -925,6 +935,10 @@ impl TenantConfig {
         patch
             .basebackup_cache_enabled
             .apply(&mut basebackup_cache_enabled);
+        patch
+            .standby_horizon_lease_length
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut standby_horizon_lease_length);
 
         Ok(Self {
             checkpoint_distance,
@@ -965,6 +979,7 @@ impl TenantConfig {
             sampling_ratio,
             relsize_snapshot_cache_capacity,
             basebackup_cache_enabled,
+            standby_horizon_lease_length,
         })
     }
 
@@ -1076,6 +1091,9 @@ impl TenantConfig {
             basebackup_cache_enabled: self
                 .basebackup_cache_enabled
                 .unwrap_or(global_conf.basebackup_cache_enabled),
+            standby_horizon_lease_length: self
+                .standby_horizon_lease_length
+                .unwrap_or(global_conf.standby_horizon_lease_length),
         }
     }
 }

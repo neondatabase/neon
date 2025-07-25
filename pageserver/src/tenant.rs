@@ -4213,6 +4213,19 @@ impl TenantShard {
             .unwrap_or(conf.default_tenant_conf.lsn_lease_length)
     }
 
+    pub fn get_standby_horizon_lease_length(&self) -> Duration {
+        Self::get_standby_horizon_lease_length_impl(self.conf, &self.tenant_conf.load().tenant_conf)
+    }
+
+    pub fn get_standby_horizon_lease_length_impl(
+        conf: &'static PageServerConf,
+        tenant_conf: &pageserver_api::models::TenantConfig,
+    ) -> Duration {
+        tenant_conf
+            .standby_horizon_lease_length
+            .unwrap_or(conf.default_tenant_conf.standby_horizon_lease_length)
+    }
+
     pub fn get_timeline_offloading_enabled(&self) -> bool {
         if self.conf.timeline_offloading {
             return true;
@@ -8876,15 +8889,15 @@ mod tests {
                 ],
                 // image layers
                 vec![
-                    (Lsn(0x10), vec![(key1, test_img("metadata key 1"))]),
-                    (
-                        Lsn(0x30),
-                        vec![
-                            (key0, test_img("metadata key 0")),
-                            (key3, test_img("metadata key 3")),
-                        ],
-                    ),
-                ],
+(Lsn(0x10), vec![(key1, test_img("metadata key 1"))]),
+(
+                    Lsn(0x30),
+                    vec![
+                        (key0, test_img("metadata key 0")),
+                        (key3, test_img("metadata key 3")),
+                    ],
+                ),
+],
                 Lsn(0x30),
             )
             .await?;

@@ -1886,7 +1886,7 @@ impl Timeline {
         }
         let applied_gc_cutoff_lsn =
             todo!("think about boundary conditions? we didn't have any before though");
-        let length = todo!("duplicate init lease deadline logic?");
+        let length = self.get_standby_horizon_lease_length();
         self.standby_horizons
             .upsert_lease(lease_id, lsn, length)
             .map(|lease| lease.valid_until)
@@ -2667,6 +2667,14 @@ impl Timeline {
             .tenant_conf
             .lsn_lease_length_for_ts
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
+    }
+
+    pub(crate) fn get_standby_horizon_lease_length(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .standby_horizon_lease_length
+            .unwrap_or(self.conf.default_tenant_conf.standby_horizon_lease_length)
     }
 
     pub(crate) fn is_gc_blocked_by_lsn_lease_deadline(&self) -> bool {
