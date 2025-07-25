@@ -1922,8 +1922,11 @@ nm_to_string(NeonMessage *msg)
 static void
 reset_min_request_lsn(int code, Datum arg)
 {
-	if (MyProc != NULL)
-		MIN_BACKEND_REQUEST_LSN = InvalidXLogRecPtr;
+#if PG_MAJORVERSION_NUM < 15
+	if (!MyProc)
+		return;
+#endif
+	MIN_BACKEND_REQUEST_LSN = InvalidXLogRecPtr;
 }
 
 /*
