@@ -729,6 +729,7 @@ enum BatchedFeMessage {
     GetPage {
         span: Span,
         shard: WeakHandle<TenantManagerTypes>,
+        applied_gc_cutoff_guard: Option<RcuReadGuard<Lsn>>,
         pages: SmallVec<[BatchedGetPageRequest; 1]>,
         batch_break_reason: GetPageBatchBreakReason,
     },
@@ -1195,18 +1196,31 @@ impl PageServerHandler {
                 })
                 .await?;
 
+                let applied_gc_cutoff_guard = shard.get_applied_gc_cutoff_lsn(); // hold guard
                 // We're holding the Handle
                 let effective_lsn = match Self::effective_request_lsn(
                     &shard,
                     shard.get_last_record_lsn(),
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
-                    &shard.get_applied_gc_cutoff_lsn(),
+                    &applied_gc_cutoff_guard,
                 ) {
                     Ok(lsn) => lsn,
                     Err(e) => {
                         return respond_error!(span, e);
                     }
+                };
+                let applied_gc_cutoff_guard = if cfg!(test)
+                    || cfg!(feature = "testing")
+                    || shard
+                        .timeline
+                        .feature_resolver
+                        .evaluate_boolean("page-service-getpage-hold-applied-gc-cutoff-guard")
+                        .is_ok()
+                {
+                    Some(applied_gc_cutoff_guard)
+                } else {
+                    None
                 };
 
                 let batch_wait_ctx = if ctx.has_perf_span() {
@@ -1228,6 +1242,7 @@ impl PageServerHandler {
                 BatchedFeMessage::GetPage {
                     span,
                     shard: shard.downgrade(),
+                    applied_gc_cutoff_guard,
                     pages: smallvec![BatchedGetPageRequest {
                         req,
                         timer,
@@ -1328,13 +1343,28 @@ impl PageServerHandler {
                 match (eligible_batch, this_msg) {
                     (
                         BatchedFeMessage::GetPage {
-                            pages: accum_pages, ..
+                            pages: accum_pages,
+                            applied_gc_cutoff_guard: accum_applied_gc_cutoff_guard,
+                            ..
                         },
                         BatchedFeMessage::GetPage {
-                            pages: this_pages, ..
+                            pages: this_pages,
+                            applied_gc_cutoff_guard: this_applied_gc_cutoff_guard,
+                            ..
                         },
                     ) => {
                         accum_pages.extend(this_pages);
+                        // the minimum of the two guards will keep data for both alive
+                        match (&accum_applied_gc_cutoff_guard, this_applied_gc_cutoff_guard) {
+                            (None, None) => (),
+                            (None, Some(this)) => *accum_applied_gc_cutoff_guard = Some(this),
+                            (Some(_), None) => (),
+                            (Some(accum), Some(this)) => {
+                                if **accum <= *this {
+                                    *accum_applied_gc_cutoff_guard = Some(this);
+                                }
+                            }
+                        };
                         Ok(())
                     }
                     #[cfg(feature = "testing")]
@@ -1649,6 +1679,7 @@ impl PageServerHandler {
             BatchedFeMessage::GetPage {
                 span,
                 shard,
+                applied_gc_cutoff_guard,
                 pages,
                 batch_break_reason,
             } => {
@@ -1668,6 +1699,7 @@ impl PageServerHandler {
                         .instrument(span.clone())
                         .await;
                         assert_eq!(res.len(), npages);
+                        drop(applied_gc_cutoff_guard);
                         res
                     },
                     span,
@@ -2067,6 +2099,7 @@ impl PageServerHandler {
                         pages,
                         span: _,
                         shard: _,
+                        applied_gc_cutoff_guard: _,
                         batch_break_reason: _,
                     } = &mut batch
                     {

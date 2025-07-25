@@ -448,7 +448,7 @@ pub struct Timeline {
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
     basebackup_cache: Arc<BasebackupCache>,
 
-    feature_resolver: Arc<TenantFeatureResolver>,
+    pub(crate) feature_resolver: Arc<TenantFeatureResolver>,
 }
 
 pub(crate) enum PreviousHeatmap {
