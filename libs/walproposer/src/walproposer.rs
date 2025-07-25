@@ -159,6 +159,21 @@ pub trait ApiImpl {
     fn after_election(&self, _wp: &mut WalProposer) {
         todo!()
     }
+
+    /* BEGIN_HADRON */
+    fn reset_safekeeper_statuses_for_metrics(&self, _wp: &mut WalProposer, _num_safekeepers: u32) {
+        // Do nothing for testing purposes.
+    }
+
+    fn update_safekeeper_status_for_metrics(
+        &self,
+        _wp: &mut WalProposer,
+        _sk_index: u32,
+        _status: u8,
+    ) {
+        // Do nothing for testing purposes.
+    }
+    /* END_HADRON */
 }
 
 #[derive(Debug)]
