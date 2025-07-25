@@ -7,7 +7,6 @@ use bytes::Bytes;
 use http::Method;
 use http::header::{
     ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS, AUTHORIZATION, CONTENT_TYPE, HOST,
-    ORIGIN,
 };
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
@@ -70,6 +69,7 @@ use crate::util::deserialize_json_string;
 
 static EMPTY_JSON_SCHEMA: &str = r#"{"schemas":[]}"#;
 const INTROSPECTION_SQL: &str = POSTGRESQL_INTROSPECTION_SQL;
+const HEADER_VALUE_ALLOW_ALL_ORIGINS: HeaderValue = HeaderValue::from_static("*");
 
 // A wrapper around the DbSchema that allows for self-referencing
 #[self_referencing]
@@ -140,8 +140,6 @@ pub struct ApiConfig {
     pub role_claim_key: String,
     #[serde(default, deserialize_with = "deserialize_comma_separated_option")]
     pub db_extra_search_path: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "deserialize_comma_separated_option")]
-    pub server_cors_allowed_origins: Option<Vec<String>>,
 }
 
 // The DbSchemaCache is a cache of the ApiConfig and DbSchemaOwned for each endpoint
@@ -202,7 +200,6 @@ impl DbSchemaCache {
                             db_allowed_select_functions: vec![],
                             role_claim_key: String::new(),
                             db_extra_search_path: None,
-                            server_cors_allowed_origins: None,
                         };
                         let value = Arc::new((api_config, schema_owned));
                         count_cache_insert(CacheKind::Schema);
@@ -725,52 +722,26 @@ async fn handle_inner(
     }
 }
 
-fn get_allow_origin_header_value<'a>(
-    headers: &'a HeaderMap,
-    allowed_origins: Option<&'a Vec<String>>,
-) -> Option<&'a str> {
-    let origin_header = headers.get(ORIGIN);
-    let origin = match origin_header {
-        Some(origin) => origin.to_str().unwrap_or(""),
-        None => "",
-    };
-    let is_allowed = match (origin_header, allowed_origins) {
-        (Some(_), Some(allowed_origins)) => allowed_origins.iter().any(|o| o == origin),
-        (Some(_), None) => true,
-        (None, Some(_)) => false,
-        (None, None) => false,
-    };
-    if is_allowed { Some(origin) } else { None }
-}
-
 fn cors_response(
-    origin: Option<&str>,
     headers: &HeaderMap,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, http::Error> {
-    match origin {
-        Some(o) => {
-            let allowed_headers = headers
-                .get(ACCESS_CONTROL_REQUEST_HEADERS)
-                .and_then(|a| a.to_str().ok())
-                .filter(|v| !v.is_empty())
-                .map_or_else(
-                    || "Authorization".to_string(),
-                    |v| format!("{v}, Authorization"),
-                );
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(ACCESS_CONTROL_ALLOW_ORIGIN, o)
-                .header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
-                .header("Access-Control-Max-Age", "86400")
-                .header("Access-Control-Expose-Headers", "Content-Encoding, Content-Location, Content-Range, Content-Type, Date, Location, Server, Transfer-Encoding, Range-Unit")
-                .header("Access-Control-Allow-Headers", allowed_headers)
-                .header("Allow", "OPTIONS, GET, POST, PATCH, PUT, DELETE")
-                .body(Empty::new().map_err(|x| match x {}).boxed())
-        }
-        None => Response::builder()
-            .status(StatusCode::OK)
-            .body(Empty::new().map_err(|x| match x {}).boxed()),
-    }
+    let allowed_headers = headers
+        .get(ACCESS_CONTROL_REQUEST_HEADERS)
+        .and_then(|a| a.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map_or_else(
+            || "Authorization".to_string(),
+            |v| format!("{v}, Authorization"),
+        );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, HEADER_VALUE_ALLOW_ALL_ORIGINS)
+        .header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+        .header("Access-Control-Max-Age", "86400")
+        .header("Access-Control-Expose-Headers", "Content-Encoding, Content-Location, Content-Range, Content-Type, Date, Location, Server, Transfer-Encoding, Range-Unit")
+        .header("Access-Control-Allow-Headers", allowed_headers)
+        .header("Allow", "OPTIONS, GET, POST, PATCH, PUT, DELETE")
+        .body(Empty::new().map_err(|x| match x {}).boxed())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -784,6 +755,15 @@ async fn handle_rest_inner(
     jwt: String,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, RestError> {
+    let (parts, originial_body) = request.into_parts();
+
+    if parts.method == Method::OPTIONS {
+        return cors_response(&parts.headers).map_err(|e| {
+            RestError::SubzeroCore(InternalError {
+                message: e.to_string(),
+            })
+        });
+    }
     // validate the jwt token
     let jwt_parsed = backend
         .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
@@ -807,8 +787,6 @@ async fn handle_rest_inner(
 
     let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
 
-    let (parts, originial_body) = request.into_parts();
-
     let auth_header = parts
         .headers
         .get(AUTHORIZATION)
@@ -827,17 +805,7 @@ async fn handle_rest_inner(
         )
         .await?;
     let (api_config, db_schema_owned) = entry.as_ref();
-    let allow_origin = get_allow_origin_header_value(
-        &parts.headers,
-        api_config.server_cors_allowed_origins.as_ref(),
-    );
-    if parts.method == Method::OPTIONS {
-        return cors_response(allow_origin, &parts.headers).map_err(|e| {
-            RestError::SubzeroCore(InternalError {
-                message: e.to_string(),
-            })
-        });
-    }
+
     let db_schema = db_schema_owned.borrow_schema();
 
     let db_schemas = &api_config.db_schemas; // list of schemas available for the api
@@ -1240,7 +1208,7 @@ async fn handle_rest_inner(
     let mut response = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
         .header(CONTENT_TYPE, http_content_type)
-        .header(ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin.unwrap_or(""));
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, HEADER_VALUE_ALLOW_ALL_ORIGINS);
 
     // Add all headers from response_headers vector
     for (header_name, header_value) in response_headers {
