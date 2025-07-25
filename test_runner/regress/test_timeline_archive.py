@@ -491,7 +491,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
 
         return (active_ids, offloaded_ids)
 
-    def timeline_objects(tenant_shard_id, timeline_id):
+    def timeline_objects_exclude_index_part(tenant_shard_id, timeline_id):
         response = list_prefix(
             env.pageserver_remote_storage,  # type: ignore
             prefix="/".join(
@@ -505,7 +505,11 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
             + "/",
         )
 
-        return [k["Key"] for k in response.get("Contents", [])]
+        return [
+            k["Key"]
+            for k in response.get("Contents", [])
+            if not k["Key"].startswith("index_part.json")
+        ]
 
     def worker():
         """
@@ -533,7 +537,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
                     state.created = True
 
                     if (
-                        timeline_objects(
+                        timeline_objects_exclude_index_part(
                             tenant_shard_id=tenant_shard_id, timeline_id=state.timeline_id
                         )
                         == []
@@ -550,7 +554,9 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
                         violations.append(msg)
                         raise RuntimeError(msg)
 
-                    objects = timeline_objects(tenant_shard_id, state.timeline_id)
+                    objects = timeline_objects_exclude_index_part(
+                        tenant_shard_id, state.timeline_id
+                    )
                     if len(objects) == 0:
                         log.info(f"Confirmed deletion of timeline {state.timeline_id}")
                         timelines_deleted.append(state.timeline_id)

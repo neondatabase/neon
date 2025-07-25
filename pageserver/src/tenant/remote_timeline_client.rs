@@ -1992,11 +1992,25 @@ impl RemoteTimelineClient {
             )))?
         });
 
-        debug!("enqueuing index part deletion");
-        self.deletion_queue_client
-            .push_immediate([latest_index].to_vec())
-            .await
-            .map_err(|_| DeleteTimelineError::Cancelled)?;
+        // Skip deleting the index part.json for now. Isolated pageserver will cause attach issues if we
+        // delete index part here.
+        //
+        // - Pageserver 1 attaches the tenant with generation N and creates a timeline A.
+        // - Pageserver 1 gets isolated from the network. Storcon attaches the tenant to pageserver 2 with generation N+1.
+        // - Pageserver 2 delete timeline A, now the timeline directory is empty.
+        // - Pageserver 1 rejoins the network, ingests the new data from safekeeper, and uploads the index_part.json
+        //   with the old generation N.
+        // - Now we are left with a timeline directory with index_part.json with generation N, but no layers
+        //   except the newly-uploaded one from the isolated pageserver 1.
+        //
+        // As a solution, we will keep the tombstone index_part.json (with `deleted_at` set) so that we don't
+        // run into the issue above.
+
+        // debug!("enqueuing index part deletion");
+        // self.deletion_queue_client
+        //     .push_immediate([latest_index].to_vec())
+        //     .await
+        //     .map_err(|_| DeleteTimelineError::Cancelled)?;
 
         // Timeline deletion is rare and we have probably emitted a reasonably number of objects: wait
         // for a flush to a persistent deletion list so that we may be sure deletion will occur.
