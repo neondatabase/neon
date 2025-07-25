@@ -252,7 +252,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
                 assert cur.fetchone() == (ROW_COUNT,)
 
             # Wait for static compute to renew lease at least once.
-            time.sleep(LSN_LEASE_LENGTH / 2)
+            time.sleep(LSN_LEASE_LENGTH)
 
             generate_updates_on_main(env, ep_main, 3, end=100)
 
@@ -264,8 +264,13 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             for ps in env.pageservers:
                 ps.stop()
                 # Static compute should have at least one lease request failure due to connection.
-                time.sleep(LSN_LEASE_LENGTH / 2)
+                # It takes time for the compute to switch and reconnect to the new pageserver.
+                # So even sleeping for `LSN_LEASE_LENGTH` might not be enough. We should find ways
+                # to do this test in a more deterministic way.
+                time.sleep(LSN_LEASE_LENGTH)
                 ps.start()
+                # Make sure the compute can acquire a lease before stopping the next pageserver.
+                time.sleep(LSN_LEASE_LENGTH)
 
             trigger_gc_and_select(
                 env,
