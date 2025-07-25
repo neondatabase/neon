@@ -644,6 +644,7 @@ async fn handle_tenant_timeline_safekeeper_migrate(
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    // TODO(diko): it's not PS operation, there should be a different permission scope.
     check_permissions(&req, Scope::PageServerApi)?;
     maybe_rate_limit(&req, tenant_id).await;
 
@@ -660,6 +661,23 @@ async fn handle_tenant_timeline_safekeeper_migrate(
 
     service
         .tenant_timeline_safekeeper_migrate(tenant_id, timeline_id, migrate_req)
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn handle_tenant_timeline_safekeeper_migrate_abort(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    // TODO(diko): it's not PS operation, there should be a different permission scope.
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    service
+        .tenant_timeline_safekeeper_migrate_abort(tenant_id, timeline_id)
         .await?;
 
     json_response(StatusCode::OK, ())
@@ -2608,6 +2626,16 @@ pub fn make_router(
                     r,
                     handle_tenant_timeline_safekeeper_migrate,
                     RequestName("v1_tenant_timeline_safekeeper_migrate"),
+                )
+            },
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/safekeeper_migrate_abort",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_safekeeper_migrate_abort,
+                    RequestName("v1_tenant_timeline_safekeeper_migrate_abort"),
                 )
             },
         )

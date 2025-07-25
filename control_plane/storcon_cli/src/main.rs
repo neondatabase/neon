@@ -303,6 +303,13 @@ enum Command {
         #[arg(long, required = true, value_delimiter = ',')]
         new_sk_set: Vec<NodeId>,
     },
+    /// Abort ongoing safekeeper migration.
+    TimelineSafekeeperMigrateAbort {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        timeline_id: TimelineId,
+    },
 }
 
 #[derive(Parser)]
@@ -1394,6 +1401,17 @@ async fn main() -> anyhow::Result<()> {
                     path,
                     Some(TimelineSafekeeperMigrateRequest { new_sk_set }),
                 )
+                .await?;
+        }
+        Command::TimelineSafekeeperMigrateAbort {
+            tenant_id,
+            timeline_id,
+        } => {
+            let path =
+                format!("v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate_abort");
+
+            storcon_client
+                .dispatch::<(), ()>(Method::POST, path, None)
                 .await?;
         }
     }
