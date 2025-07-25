@@ -394,8 +394,7 @@ async fn get_pageserver_connection_info(
         None => {
             // This is never supposed to happen because `SELECT min()` should always return one row.
             return Err(DatabaseError::Logical(format!(
-                "Unexpected empty query result for min(shard_count) query. Tenant ID {}",
-                tenant_id
+                "Unexpected empty query result for min(shard_count) query. Tenant ID {tenant_id}"
             )));
         }
     };
@@ -487,9 +486,9 @@ mod test {
     fn get_test_sk_node(id: u64) -> SafeKeeperNode {
         SafeKeeperNode::new(
             NodeId(id),
-            format!("safekeeper-{}", id),
+            format!("safekeeper-{id}"),
             123,
-            format!("safekeeper-{}", id),
+            format!("safekeeper-{id}"),
             456,
         )
     }
@@ -501,13 +500,13 @@ mod test {
         let connection_string = pg.settings().url("test");
         {
             let mut conn = PgConnection::establish(&connection_string)
-                .unwrap_or_else(|_| panic!("Error connecting to {}", connection_string));
+                .unwrap_or_else(|_| panic!("Error connecting to {connection_string}"));
             run_migrations(&mut conn).unwrap();
         }
 
         let mut connection = AsyncPgConnection::establish(&connection_string)
             .await
-            .unwrap_or_else(|_| panic!("Error connecting to {}", connection_string));
+            .unwrap_or_else(|_| panic!("Error connecting to {connection_string}"));
 
         execute_sk_upsert(&mut connection, get_test_sk_node(0).to_database_row())
             .await
@@ -565,13 +564,13 @@ mod test {
         let connection_string = pg.settings().url("test");
         {
             let mut conn = PgConnection::establish(&connection_string)
-                .unwrap_or_else(|_| panic!("Error connecting to {}", connection_string));
+                .unwrap_or_else(|_| panic!("Error connecting to {connection_string}"));
             run_migrations(&mut conn).unwrap();
         }
 
         let mut connection = AsyncPgConnection::establish(&connection_string)
             .await
-            .unwrap_or_else(|_| panic!("Error connecting to {}", connection_string));
+            .unwrap_or_else(|_| panic!("Error connecting to {connection_string}"));
 
         // An initial call should insert the timeline safekeepers and return the inserted values.
         let timeline1_id = TimelineId::generate();
@@ -629,13 +628,13 @@ mod test {
         let connection_string = pg.settings().url("test");
         {
             let mut conn = PgConnection::establish(&connection_string)
-                .unwrap_or_else(|_| panic!("Error connecting to {}", connection_string));
+                .unwrap_or_else(|_| panic!("Error connecting to {connection_string}"));
             run_migrations(&mut conn).unwrap();
         }
 
         let mut connection = AsyncPgConnection::establish(&connection_string)
             .await
-            .unwrap_or_else(|_| panic!("Error connecting to {}", connection_string));
+            .unwrap_or_else(|_| panic!("Error connecting to {connection_string}"));
 
         // Insert some values
         let timeline1_id = TimelineId::generate();
@@ -718,12 +717,12 @@ mod test {
         let connection_string = pg.settings().url("test");
         {
             let mut conn = PgConnection::establish(&connection_string)
-                .unwrap_or_else(|_| panic!("Error connecting to {}", connection_string));
+                .unwrap_or_else(|_| panic!("Error connecting to {connection_string}"));
             run_migrations(&mut conn).unwrap();
         }
         let mut connection = AsyncPgConnection::establish(&connection_string)
             .await
-            .unwrap_or_else(|_| panic!("Error connecting to {}", connection_string));
+            .unwrap_or_else(|_| panic!("Error connecting to {connection_string}"));
 
         // Insert some values
         let safekeeper_ids = vec![
@@ -809,7 +808,7 @@ mod test {
                 .safekeeper_peers
                 .push(TimelineSafekeeperPeer {
                     node_id: NodeId(i),
-                    listen_http_addr: format!("safekeeper-{}", i),
+                    listen_http_addr: format!("safekeeper-{i}"),
                     http_port: 123,
                 });
             if i < 3 {
@@ -817,7 +816,7 @@ mod test {
                     .safekeeper_peers
                     .push(TimelineSafekeeperPeer {
                         node_id: NodeId(i),
-                        listen_http_addr: format!("safekeeper-{}", i),
+                        listen_http_addr: format!("safekeeper-{i}"),
                         http_port: 123,
                     });
                 expected_responses[3]
