@@ -133,7 +133,7 @@ RUN case $DEBIAN_VERSION in \
       # Install newer version (3.25) from backports.
       # libstdc++-10-dev is required for plv8
       bullseye) \
-        echo "deb http://deb.debian.org/debian bullseye-backports main" > /etc/apt/sources.list.d/bullseye-backports.list; \
+        echo "deb http://archive.debian.org/debian bullseye-backports main" > /etc/apt/sources.list.d/bullseye-backports.list; \
         VERSION_INSTALLS="cmake/bullseye-backports cmake-data/bullseye-backports libstdc++-10-dev"; \
       ;; \
       # Version-specific installs for Bookworm (PG17):

@@ -147,7 +147,7 @@ impl RateBucketInfo {
 
 impl<K: Hash + Eq> BucketRateLimiter<K> {
     pub fn new(info: impl Into<Cow<'static, [RateBucketInfo]>>) -> Self {
-        Self::new_with_rand_and_hasher(info, StdRng::from_entropy(), RandomState::new())
+        Self::new_with_rand_and_hasher(info, StdRng::from_os_rng(), RandomState::new())
     }
 }
 
@@ -216,7 +216,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         let n = self.map.shards().len();
         // this lock is ok as the periodic cycle of do_gc makes this very unlikely to collide
         // (impossible, infact, unless we have 2048 threads)
-        let shard = self.rand.lock_propagate_poison().gen_range(0..n);
+        let shard = self.rand.lock_propagate_poison().random_range(0..n);
         self.map.shards()[shard].write().clear();
     }
 }

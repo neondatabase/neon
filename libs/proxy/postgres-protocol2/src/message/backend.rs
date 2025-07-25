@@ -74,7 +74,6 @@ impl Header {
 }
 
 /// An enum representing Postgres backend messages.
-#[non_exhaustive]
 pub enum Message {
     AuthenticationCleartextPassword,
     AuthenticationGss,
@@ -145,16 +144,7 @@ impl Message {
             PARSE_COMPLETE_TAG => Message::ParseComplete,
             BIND_COMPLETE_TAG => Message::BindComplete,
             CLOSE_COMPLETE_TAG => Message::CloseComplete,
-            NOTIFICATION_RESPONSE_TAG => {
-                let process_id = buf.read_i32::<BigEndian>()?;
-                let channel = buf.read_cstr()?;
-                let message = buf.read_cstr()?;
-                Message::NotificationResponse(NotificationResponseBody {
-                    process_id,
-                    channel,
-                    message,
-                })
-            }
+            NOTIFICATION_RESPONSE_TAG => Message::NotificationResponse(NotificationResponseBody {}),
             COPY_DONE_TAG => Message::CopyDone,
             COMMAND_COMPLETE_TAG => {
                 let tag = buf.read_cstr()?;
@@ -543,28 +533,7 @@ impl NoticeResponseBody {
     }
 }
 
-pub struct NotificationResponseBody {
-    process_id: i32,
-    channel: Bytes,
-    message: Bytes,
-}
-
-impl NotificationResponseBody {
-    #[inline]
-    pub fn process_id(&self) -> i32 {
-        self.process_id
-    }
-
-    #[inline]
-    pub fn channel(&self) -> io::Result<&str> {
-        get_str(&self.channel)
-    }
-
-    #[inline]
-    pub fn message(&self) -> io::Result<&str> {
-        get_str(&self.message)
-    }
-}
+pub struct NotificationResponseBody {}
 
 pub struct ParameterDescriptionBody {
     storage: Bytes,

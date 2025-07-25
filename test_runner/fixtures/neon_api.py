@@ -24,6 +24,7 @@ def connection_parameters_to_env(params: dict[str, str]) -> dict[str, str]:
 
 # Some API calls not yet implemented.
 # You may want to copy not-yet-implemented methods from the PR https://github.com/neondatabase/neon/pull/11305
+@final
 class NeonAPI:
     def __init__(self, neon_api_key: str, neon_api_base_url: str):
         self.__neon_api_key = neon_api_key
@@ -170,7 +171,7 @@ class NeonAPI:
         protected: bool | None = None,
         archived: bool | None = None,
         init_source: str | None = None,
-        add_endpoint=True,
+        add_endpoint: bool = True,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {}
         if add_endpoint:
@@ -220,6 +221,16 @@ class NeonAPI:
         resp = self.__request(
             "DELETE",
             f"/projects/{project_id}/branches/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
+    def reset_to_parent(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/reset_to_parent",
             headers={
                 "Accept": "application/json",
             },

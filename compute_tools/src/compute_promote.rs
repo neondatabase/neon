@@ -1,11 +1,12 @@
 use crate::compute::ComputeNode;
 use anyhow::{Context, Result, bail};
-use compute_api::{
-    responses::{LfcPrewarmState, PromoteState, SafekeepersLsn},
-    spec::ComputeMode,
-};
+use compute_api::responses::{LfcPrewarmState, PromoteConfig, PromoteState};
+use compute_api::spec::ComputeMode;
+use itertools::Itertools;
+use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
+use tracing::info;
 use utils::lsn::Lsn;
 
 impl ComputeNode {
@@ -13,21 +14,22 @@ impl ComputeNode {
     /// and http client disconnects, this does not stop promotion, and subsequent
     /// calls block until promote finishes.
     /// Called by control plane on secondary after primary endpoint is terminated
-    pub async fn promote(self: &Arc<Self>, safekeepers_lsn: SafekeepersLsn) -> PromoteState {
+    /// Has a failpoint "compute-promotion"
+    pub async fn promote(self: &Arc<Self>, cfg: PromoteConfig) -> PromoteState {
         let cloned = self.clone();
+        let promote_fn = async move || {
+            let Err(err) = cloned.promote_impl(cfg).await else {
+                return PromoteState::Completed;
+            };
+            tracing::error!(%err, "promoting");
+            PromoteState::Failed {
+                error: format!("{err:#}"),
+            }
+        };
+
         let start_promotion = || {
             let (tx, rx) = tokio::sync::watch::channel(PromoteState::NotPromoted);
-            tokio::spawn(async move {
-                tx.send(match cloned.promote_impl(safekeepers_lsn).await {
-                    Ok(_) => PromoteState::Completed,
-                    Err(err) => {
-                        tracing::error!(%err, "promoting");
-                        PromoteState::Failed {
-                            error: err.to_string(),
-                        }
-                    }
-                })
-            });
+            tokio::spawn(async move { tx.send(promote_fn().await) });
             rx
         };
 
@@ -47,9 +49,7 @@ impl ComputeNode {
         task.borrow().clone()
     }
 
-    // Why do we have to supply safekeepers?
-    // For secondary we use primary_connection_conninfo so safekeepers field is empty
-    async fn promote_impl(&self, safekeepers_lsn: SafekeepersLsn) -> Result<()> {
+    async fn promote_impl(&self, mut cfg: PromoteConfig) -> Result<()> {
         {
             let state = self.state.lock().unwrap();
             let mode = &state.pspec.as_ref().unwrap().spec.mode;
@@ -73,7 +73,7 @@ impl ComputeNode {
             .await
             .context("connecting to postgres")?;
 
-        let primary_lsn = safekeepers_lsn.wal_flush_lsn;
+        let primary_lsn = cfg.wal_flush_lsn;
         let mut last_wal_replay_lsn: Lsn = Lsn::INVALID;
         const RETRIES: i32 = 20;
         for i in 0..=RETRIES {
@@ -86,7 +86,7 @@ impl ComputeNode {
             if last_wal_replay_lsn >= primary_lsn {
                 break;
             }
-            tracing::info!("Try {i}, replica lsn {last_wal_replay_lsn}, primary lsn {primary_lsn}");
+            info!("Try {i}, replica lsn {last_wal_replay_lsn}, primary lsn {primary_lsn}");
             sleep(Duration::from_secs(1)).await;
         }
         if last_wal_replay_lsn < primary_lsn {
@@ -96,7 +96,7 @@ impl ComputeNode {
         // using $1 doesn't work with ALTER SYSTEM SET
         let safekeepers_sql = format!(
             "ALTER SYSTEM SET neon.safekeepers='{}'",
-            safekeepers_lsn.safekeepers
+            cfg.spec.safekeeper_connstrings.join(",")
         );
         client
             .query(&safekeepers_sql, &[])
@@ -106,6 +106,12 @@ impl ComputeNode {
             .query("SELECT pg_reload_conf()", &[])
             .await
             .context("reloading postgres config")?;
+
+        #[cfg(feature = "testing")]
+        fail::fail_point!("compute-promotion", |_| {
+            bail!("promotion configured to fail because of a failpoint")
+        });
+
         let row = client
             .query_one("SELECT * FROM pg_promote()", &[])
             .await
@@ -125,8 +131,36 @@ impl ComputeNode {
             bail!("replica in read only mode after promotion");
         }
 
-        let mut state = self.state.lock().unwrap();
-        state.pspec.as_mut().unwrap().spec.mode = ComputeMode::Primary;
-        Ok(())
+        {
+            let mut state = self.state.lock().unwrap();
+            let spec = &mut state.pspec.as_mut().unwrap().spec;
+            spec.mode = ComputeMode::Primary;
+            let new_conf = cfg.spec.cluster.postgresql_conf.as_mut().unwrap();
+            let existing_conf = spec.cluster.postgresql_conf.as_ref().unwrap();
+            Self::merge_spec(new_conf, existing_conf);
+        }
+        info!("applied new spec, reconfiguring as primary");
+        self.reconfigure()
+    }
+
+    /// Merge old and new Postgres conf specs to apply on secondary.
+    /// Change new spec's port and safekeepers since they are supplied
+    /// differenly
+    fn merge_spec(new_conf: &mut String, existing_conf: &str) {
+        let mut new_conf_set: HashMap<&str, &str> = new_conf
+            .split_terminator('\n')
+            .map(|e| e.split_once("=").expect("invalid item"))
+            .collect();
+        new_conf_set.remove("neon.safekeepers");
+
+        let existing_conf_set: HashMap<&str, &str> = existing_conf
+            .split_terminator('\n')
+            .map(|e| e.split_once("=").expect("invalid item"))
+            .collect();
+        new_conf_set.insert("port", existing_conf_set["port"]);
+        *new_conf = new_conf_set
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .join("\n");
     }
 }

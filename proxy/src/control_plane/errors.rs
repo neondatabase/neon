@@ -52,7 +52,7 @@ impl ReportableError for ControlPlaneError {
                 | Reason::EndpointNotFound
                 | Reason::EndpointDisabled
                 | Reason::BranchNotFound
-                | Reason::InvalidEphemeralEndpointOptions => ErrorKind::User,
+                | Reason::WrongLsnOrTimestamp => ErrorKind::User,
 
                 Reason::RateLimitExceeded => ErrorKind::ServiceRateLimit,
 

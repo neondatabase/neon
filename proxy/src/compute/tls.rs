@@ -7,6 +7,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::pqproto::request_tls;
+use crate::proxy::connect_compute::TlsNegotiation;
 use crate::proxy::retry::CouldRetry;
 
 #[derive(Debug, Error)]
@@ -35,6 +36,7 @@ pub async fn connect_tls<S, T>(
     mode: SslMode,
     tls: &T,
     host: &str,
+    negotiation: TlsNegotiation,
 ) -> Result<MaybeTlsStream<S, T::Stream>, TlsError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -49,12 +51,15 @@ where
         SslMode::Prefer | SslMode::Require => {}
     }
 
-    if !request_tls(&mut stream).await? {
-        if SslMode::Require == mode {
-            return Err(TlsError::Required);
-        }
-
-        return Ok(MaybeTlsStream::Raw(stream));
+    match negotiation {
+        // No TLS request needed
+        TlsNegotiation::Direct => {}
+        // TLS request successful
+        TlsNegotiation::Postgres if request_tls(&mut stream).await? => {}
+        // TLS request failed but is required
+        TlsNegotiation::Postgres if SslMode::Require == mode => return Err(TlsError::Required),
+        // TLS request failed but is not required
+        TlsNegotiation::Postgres => return Ok(MaybeTlsStream::Raw(stream)),
     }
 
     Ok(MaybeTlsStream::Tls(

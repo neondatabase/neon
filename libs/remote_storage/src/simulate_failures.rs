@@ -81,7 +81,7 @@ impl UnreliableWrapper {
     ///
     fn attempt(&self, op: RemoteOp) -> anyhow::Result<u64> {
         let mut attempts = self.attempts.lock().unwrap();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         match attempts.entry(op) {
             Entry::Occupied(mut e) => {
@@ -94,7 +94,7 @@ impl UnreliableWrapper {
                 /* BEGIN_HADRON */
                 // If there are more attempts to fail, fail the request by probability.
                 if (attempts_before_this < self.attempts_to_fail)
-                    && (rng.gen_range(0..=100) < self.attempt_failure_probability)
+                    && (rng.random_range(0..=100) < self.attempt_failure_probability)
                 {
                     let error =
                         anyhow::anyhow!("simulated failure of remote operation {:?}", e.key());

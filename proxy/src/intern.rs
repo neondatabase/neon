@@ -247,7 +247,7 @@ mod tests {
         use rand::{Rng, SeedableRng};
         use rand_distr::Zipf;
 
-        let endpoint_dist = Zipf::new(500000, 0.8).unwrap();
+        let endpoint_dist = Zipf::new(500000.0, 0.8).unwrap();
         let endpoints = StdRng::seed_from_u64(272488357).sample_iter(endpoint_dist);
 
         let interner = MyId::get_interner();

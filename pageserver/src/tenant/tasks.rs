@@ -515,7 +515,7 @@ pub(crate) async fn sleep_random_range(
     interval: RangeInclusive<Duration>,
     cancel: &CancellationToken,
 ) -> Result<Duration, Cancelled> {
-    let delay = rand::thread_rng().gen_range(interval);
+    let delay = rand::rng().random_range(interval);
     if delay == Duration::ZERO {
         return Ok(delay);
     }

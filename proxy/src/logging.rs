@@ -26,7 +26,7 @@ use crate::metrics::Metrics;
 /// configuration from environment variables. For example, to change the
 /// destination, set `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`.
 /// See <https://opentelemetry.io/docs/reference/specification/sdk-environment-variables>
-pub async fn init() -> anyhow::Result<LoggingGuard> {
+pub fn init() -> anyhow::Result<LoggingGuard> {
     let logfmt = LogFormat::from_env()?;
 
     let env_filter = EnvFilter::builder()
@@ -43,8 +43,8 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
                 .expect("this should be a valid filter directive"),
         );
 
-    let otlp_layer =
-        tracing_utils::init_tracing("proxy", tracing_utils::ExportConfig::default()).await;
+    let provider = tracing_utils::init_tracing("proxy", tracing_utils::ExportConfig::default());
+    let otlp_layer = provider.as_ref().map(tracing_utils::layer);
 
     let json_log_layer = if logfmt == LogFormat::Json {
         Some(JsonLoggingLayer::new(
@@ -76,7 +76,7 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
         .with(text_log_layer)
         .try_init()?;
 
-    Ok(LoggingGuard)
+    Ok(LoggingGuard(provider))
 }
 
 /// Initialize logging for local_proxy with log prefix and no opentelemetry.
@@ -97,7 +97,7 @@ pub fn init_local_proxy() -> anyhow::Result<LoggingGuard> {
         .with(fmt_layer)
         .try_init()?;
 
-    Ok(LoggingGuard)
+    Ok(LoggingGuard(None))
 }
 
 pub struct LocalProxyFormatter(Format<Full, SystemTime>);
@@ -118,14 +118,16 @@ where
     }
 }
 
-pub struct LoggingGuard;
+pub struct LoggingGuard(Option<tracing_utils::Provider>);
 
 impl Drop for LoggingGuard {
     fn drop(&mut self) {
-        // Shutdown trace pipeline gracefully, so that it has a chance to send any
-        // pending traces before we exit.
-        tracing::info!("shutting down the tracing machinery");
-        tracing_utils::shutdown_tracing();
+        if let Some(p) = &self.0 {
+            // Shutdown trace pipeline gracefully, so that it has a chance to send any
+            // pending traces before we exit.
+            tracing::info!("shutting down the tracing machinery");
+            drop(p.shutdown());
+        }
     }
 }
 

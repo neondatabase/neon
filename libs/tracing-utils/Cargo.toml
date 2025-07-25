@@ -8,7 +8,7 @@ license.workspace = true
 hyper0.workspace = true
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
-opentelemetry-otlp = { workspace = true, default-features = false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-otlp = { workspace = true, default-features = false, features = ["http-proto", "trace", "http", "reqwest-blocking-client"] }
 opentelemetry-semantic-conventions.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tracing.workspace = true

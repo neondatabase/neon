@@ -7,7 +7,7 @@ use std::io::{self, Cursor};
 
 use bytes::{Buf, BufMut};
 use itertools::Itertools;
-use rand::distributions::{Distribution, Standard};
+use rand::distr::{Distribution, StandardUniform};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zerocopy::{FromBytes, Immutable, IntoBytes, big_endian};
 
@@ -313,6 +313,14 @@ impl WriteBuf {
         self.0.set_position(0);
     }
 
+    /// Shrinks the buffer if efficient to do so, and returns the remaining size.
+    pub fn occupied_len(&mut self) -> usize {
+        if self.should_shrink() {
+            self.shrink();
+        }
+        self.0.get_mut().len()
+    }
+
     /// Write a raw message to the internal buffer.
     ///
     /// The size_hint value is only a hint for reserving space. It's ok if it's incorrect, since
@@ -458,9 +466,9 @@ impl fmt::Display for CancelKeyData {
             .finish()
     }
 }
-impl Distribution<CancelKeyData> for Standard {
+impl Distribution<CancelKeyData> for StandardUniform {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> CancelKeyData {
-        id_to_cancel_key(rng.r#gen())
+        id_to_cancel_key(rng.random())
     }
 }
 

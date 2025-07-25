@@ -180,8 +180,6 @@ async fn authenticate(
         return Err(auth::AuthError::NetworkNotAllowed);
     }
 
-    client.write_message(BeMessage::NoticeResponse("Connecting to database."));
-
     // Backwards compatibility. pg_sni_proxy uses "--" in domain names
     // while direct connections do not. Once we migrate to pg_sni_proxy
     // everywhere, we can remove this.

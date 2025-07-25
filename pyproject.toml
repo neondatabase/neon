@@ -50,6 +50,7 @@ types-pyyaml = "^6.0.12.20240917"
 testcontainers = "^4.9.0"
 # Install a release candidate of `jsonnet`, as it supports Python 3.13
 jsonnet = "^0.21.0-rc2"
+requests-unixsocket = "^0.4.1"
 
 [tool.poetry.group.dev.dependencies]
 mypy = "==1.13.0"

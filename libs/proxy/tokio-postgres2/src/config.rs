@@ -11,9 +11,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
 use crate::connect::connect;
-use crate::connect_raw::{RawConnection, connect_raw};
+use crate::connect_raw::{self, StartupStream};
 use crate::connect_tls::connect_tls;
-use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::{MakeTlsConnect, TlsConnect, TlsStream};
 use crate::{Client, Connection, Error};
 
@@ -244,24 +243,27 @@ impl Config {
         &self,
         stream: S,
         tls: T,
-    ) -> Result<RawConnection<S, T::Stream>, Error>
+    ) -> Result<StartupStream<S, T::Stream>, Error>
     where
         S: AsyncRead + AsyncWrite + Unpin,
         T: TlsConnect<S>,
     {
         let stream = connect_tls(stream, self.ssl_mode, tls).await?;
-        connect_raw(stream, self).await
+        let mut stream = StartupStream::new(stream);
+        connect_raw::authenticate(&mut stream, self).await?;
+
+        Ok(stream)
     }
 
-    pub async fn authenticate<S, T>(
+    pub fn authenticate<S, T>(
         &self,
-        stream: MaybeTlsStream<S, T>,
-    ) -> Result<RawConnection<S, T>, Error>
+        stream: &mut StartupStream<S, T>,
+    ) -> impl Future<Output = Result<(), Error>>
     where
         S: AsyncRead + AsyncWrite + Unpin,
         T: TlsStream + Unpin,
     {
-        connect_raw(stream, self).await
+        connect_raw::authenticate(stream, self)
     }
 }
 

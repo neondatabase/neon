@@ -429,26 +429,13 @@ impl CancellationHandler {
 /// (we'd need something like `#![feature(type_alias_impl_trait)]`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelClosure {
-    socket_addr: SocketAddr,
-    cancel_token: RawCancelToken,
-    hostname: String, // for pg_sni router
-    user_info: ComputeUserInfo,
+    pub socket_addr: SocketAddr,
+    pub cancel_token: RawCancelToken,
+    pub hostname: String, // for pg_sni router
+    pub user_info: ComputeUserInfo,
 }
 
 impl CancelClosure {
-    pub(crate) fn new(
-        socket_addr: SocketAddr,
-        cancel_token: RawCancelToken,
-        hostname: String,
-        user_info: ComputeUserInfo,
-    ) -> Self {
-        Self {
-            socket_addr,
-            cancel_token,
-            hostname,
-            user_info,
-        }
-    }
     /// Cancels the query running on user's compute node.
     pub(crate) async fn try_cancel_query(
         &self,

@@ -1634,7 +1634,8 @@ pub(crate) mod test {
     use bytes::Bytes;
     use itertools::MinMaxResult;
     use postgres_ffi::PgMajorVersion;
-    use rand::prelude::{SeedableRng, SliceRandom, StdRng};
+    use rand::prelude::{SeedableRng, StdRng};
+    use rand::seq::IndexedRandom;
     use rand::{Rng, RngCore};
 
     /// Construct an index for a fictional delta layer and and then
@@ -1788,14 +1789,14 @@ pub(crate) mod test {
 
         let mut entries = Vec::new();
         for _ in 0..constants::KEY_COUNT {
-            let count = rng.gen_range(1..constants::MAX_ENTRIES_PER_KEY);
+            let count = rng.random_range(1..constants::MAX_ENTRIES_PER_KEY);
             let mut lsns_iter =
                 std::iter::successors(Some(Lsn(constants::LSN_OFFSET.0 + 0x08)), |lsn| {
                     Some(Lsn(lsn.0 + 0x08))
                 });
             let mut lsns = Vec::new();
             while lsns.len() < count as usize {
-                let take = rng.gen_bool(0.5);
+                let take = rng.random_bool(0.5);
                 let lsn = lsns_iter.next().unwrap();
                 if take {
                     lsns.push(lsn);
@@ -1869,12 +1870,13 @@ pub(crate) mod test {
         for _ in 0..constants::RANGES_COUNT {
             let mut range: Option<Range<Key>> = Option::default();
             while range.is_none() || keyspace.overlaps(range.as_ref().unwrap()) {
-                let range_start = rng.gen_range(start..end);
+                let range_start = rng.random_range(start..end);
                 let range_end_offset = range_start + constants::MIN_RANGE_SIZE;
                 if range_end_offset >= end {
                     range = Some(Key::from_i128(range_start)..Key::from_i128(end));
                 } else {
-                    let range_end = rng.gen_range((range_start + constants::MIN_RANGE_SIZE)..end);
+                    let range_end =
+                        rng.random_range((range_start + constants::MIN_RANGE_SIZE)..end);
                     range = Some(Key::from_i128(range_start)..Key::from_i128(range_end));
                 }
             }

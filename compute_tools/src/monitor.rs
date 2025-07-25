@@ -11,6 +11,7 @@ use tracing::{Level, error, info, instrument, span};
 use crate::compute::ComputeNode;
 use crate::metrics::{PG_CURR_DOWNTIME_MS, PG_TOTAL_DOWNTIME_MS};
 
+const PG_DEFAULT_INIT_TIMEOUIT: Duration = Duration::from_secs(60);
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Struct to store runtime state of the compute monitor thread.
@@ -352,13 +353,47 @@ impl ComputeMonitor {
 // Hang on condition variable waiting until the compute status is `Running`.
 fn wait_for_postgres_start(compute: &ComputeNode) {
     let mut state = compute.state.lock().unwrap();
+    let pg_init_timeout = compute
+        .params
+        .pg_init_timeout
+        .unwrap_or(PG_DEFAULT_INIT_TIMEOUIT);
+
     while state.status != ComputeStatus::Running {
         info!("compute is not running, waiting before monitoring activity");
-        state = compute.state_changed.wait(state).unwrap();
+        if !compute.params.lakebase_mode {
+            state = compute.state_changed.wait(state).unwrap();
 
-        if state.status == ComputeStatus::Running {
-            break;
+            if state.status == ComputeStatus::Running {
+                break;
+            }
+            continue;
         }
+
+        if state.pg_start_time.is_some()
+            && Utc::now()
+                .signed_duration_since(state.pg_start_time.unwrap())
+                .to_std()
+                .unwrap_or_default()
+                > pg_init_timeout
+        {
+            // If Postgres isn't up and running with working PS/SK connections within POSTGRES_STARTUP_TIMEOUT, it is
+            // possible that we started Postgres with a wrong spec (so it is talking to the wrong PS/SK nodes). To prevent
+            // deadends we simply exit (panic) the compute node so it can restart with the latest spec.
+            //
+            // NB: We skip this check if we have not attempted to start PG yet (indicated by state.pg_start_up == None).
+            // This is to make sure the more appropriate errors are surfaced if we encounter issues before we even attempt
+            // to start PG (e.g., if we can't pull the spec, can't sync safekeepers, or can't get the basebackup).
+            error!(
+                "compute did not enter Running state in {} seconds, exiting",
+                pg_init_timeout.as_secs()
+            );
+            std::process::exit(1);
+        }
+        state = compute
+            .state_changed
+            .wait_timeout(state, Duration::from_secs(5))
+            .unwrap()
+            .0;
     }
 }
 

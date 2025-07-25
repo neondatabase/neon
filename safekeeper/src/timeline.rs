@@ -427,6 +427,9 @@ impl From<TimelineError> for ApiError {
             TimelineError::NotFound(ttid) => {
                 ApiError::NotFound(anyhow!("timeline {} not found", ttid).into())
             }
+            TimelineError::Deleted(ttid) => {
+                ApiError::NotFound(anyhow!("timeline {} deleted", ttid).into())
+            }
             _ => ApiError::InternalServerError(anyhow!("{}", te)),
         }
     }
@@ -591,7 +594,7 @@ impl Timeline {
 
     /// Cancel the timeline, requesting background activity to stop. Closing
     /// the `self.gate` waits for that.
-    pub async fn cancel(&self) {
+    pub fn cancel(&self) {
         info!("timeline {} shutting down", self.ttid);
         self.cancel.cancel();
     }
@@ -911,6 +914,13 @@ impl Timeline {
         to: Configuration,
     ) -> Result<TimelineMembershipSwitchResponse> {
         let mut state = self.write_shared_state().await;
+        // Ensure we don't race with exclude/delete requests by checking the cancellation
+        // token under the write_shared_state lock.
+        // Exclude/delete cancel the timeline under the shared state lock,
+        // so the timeline cannot be deleted in the middle of the membership switch.
+        if self.is_cancelled() {
+            bail!(TimelineError::Cancelled(self.ttid));
+        }
         state.sk.membership_switch(to).await
     }
 

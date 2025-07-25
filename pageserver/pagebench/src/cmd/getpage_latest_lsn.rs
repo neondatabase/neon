@@ -326,8 +326,7 @@ async fn main_impl(
             .cloned()
             .collect();
         let weights =
-            rand::distributions::weighted::WeightedIndex::new(ranges.iter().map(|v| v.len()))
-                .unwrap();
+            rand::distr::weighted::WeightedIndex::new(ranges.iter().map(|v| v.len())).unwrap();
 
         Box::pin(async move {
             let scheme = match Url::parse(&args.page_service_connstring) {
@@ -427,7 +426,7 @@ async fn run_worker(
     cancel: CancellationToken,
     rps_period: Option<Duration>,
     ranges: Vec<KeyRange>,
-    weights: rand::distributions::weighted::WeightedIndex<i128>,
+    weights: rand::distr::weighted::WeightedIndex<i128>,
 ) {
     shared_state.start_work_barrier.wait().await;
     let client_start = Instant::now();
@@ -469,9 +468,9 @@ async fn run_worker(
                 }
 
                 // Pick a random page from a random relation.
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 let r = &ranges[weights.sample(&mut rng)];
-                let key: i128 = rng.gen_range(r.start..r.end);
+                let key: i128 = rng.random_range(r.start..r.end);
                 let (rel_tag, block_no) = key_to_block(key);
 
                 let mut blks = VecDeque::with_capacity(batch_size);
@@ -502,7 +501,7 @@ async fn run_worker(
                 // We assume that the entire batch can fit within the relation.
                 assert_eq!(blks.len(), batch_size, "incomplete batch");
 
-                let req_lsn = if rng.gen_bool(args.req_latest_probability) {
+                let req_lsn = if rng.random_bool(args.req_latest_probability) {
                     Lsn::MAX
                 } else {
                     r.timeline_lsn

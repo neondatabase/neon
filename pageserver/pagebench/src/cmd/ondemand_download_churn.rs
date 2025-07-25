@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use pageserver_api::models::HistoricLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
-use rand::seq::SliceRandom;
+use rand::seq::IndexedMutRandom;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -260,7 +260,7 @@ async fn timeline_actor(
 
             loop {
                 let layer_tx = {
-                    let mut rng = rand::thread_rng();
+                    let mut rng = rand::rng();
                     timeline.layers.choose_mut(&mut rng).expect("no layers")
                 };
                 match layer_tx.try_send(permit.take().unwrap()) {

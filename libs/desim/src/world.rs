@@ -69,7 +69,7 @@ impl World {
     /// Create a new random number generator.
     pub fn new_rng(&self) -> StdRng {
         let mut rng = self.rng.lock();
-        StdRng::from_rng(rng.deref_mut()).unwrap()
+        StdRng::from_rng(rng.deref_mut())
     }
 
     /// Create a new node.

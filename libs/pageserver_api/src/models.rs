@@ -443,9 +443,9 @@ pub struct ImportPgdataIdempotencyKey(pub String);
 impl ImportPgdataIdempotencyKey {
     pub fn random() -> Self {
         use rand::Rng;
-        use rand::distributions::Alphanumeric;
+        use rand::distr::Alphanumeric;
         Self(
-            rand::thread_rng()
+            rand::rng()
                 .sample_iter(&Alphanumeric)
                 .take(20)
                 .map(char::from)
@@ -1500,6 +1500,7 @@ pub struct TimelineArchivalConfigRequest {
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct TimelinePatchIndexPartRequest {
     pub rel_size_migration: Option<RelSizeMigration>,
+    pub rel_size_migrated_at: Option<Lsn>,
     pub gc_compaction_last_completed_lsn: Option<Lsn>,
     pub applied_gc_cutoff_lsn: Option<Lsn>,
     #[serde(default)]
@@ -1533,10 +1534,10 @@ pub enum RelSizeMigration {
     /// `None` is the same as `Some(RelSizeMigration::Legacy)`.
     Legacy,
     /// The tenant is migrating to the new rel_size format. Both old and new rel_size format are
-    /// persisted in the index part. The read path will read both formats and merge them.
+    /// persisted in the storage. The read path will read both formats and validate them.
     Migrating,
     /// The tenant has migrated to the new rel_size format. Only the new rel_size format is persisted
-    /// in the index part, and the read path will not read the old format.
+    /// in the storage, and the read path will not read the old format.
     Migrated,
 }
 
@@ -1619,6 +1620,7 @@ pub struct TimelineInfo {
 
     /// The status of the rel_size migration.
     pub rel_size_migration: Option<RelSizeMigration>,
+    pub rel_size_migrated_at: Option<Lsn>,
 
     /// Whether the timeline is invisible in synthetic size calculations.
     pub is_invisible: Option<bool>,

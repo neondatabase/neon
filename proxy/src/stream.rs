@@ -154,6 +154,15 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         message.write_message(&mut self.write);
     }
 
+    /// Write the buffer to the socket until we have some more space again.
+    pub async fn write_if_full(&mut self) -> io::Result<()> {
+        while self.write.occupied_len() > 2048 {
+            self.stream.write_buf(&mut self.write).await?;
+        }
+
+        Ok(())
+    }
+
     /// Flush the output buffer into the underlying stream.
     ///
     /// This is cancel safe.

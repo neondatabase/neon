@@ -25,7 +25,7 @@ pub(super) fn period_jitter(d: Duration, pct: u32) -> Duration {
     if d == Duration::ZERO {
         d
     } else {
-        rand::thread_rng().gen_range((d * (100 - pct)) / 100..(d * (100 + pct)) / 100)
+        rand::rng().random_range((d * (100 - pct)) / 100..(d * (100 + pct)) / 100)
     }
 }
 
@@ -35,7 +35,7 @@ pub(super) fn period_warmup(period: Duration) -> Duration {
     if period == Duration::ZERO {
         period
     } else {
-        rand::thread_rng().gen_range(Duration::ZERO..period)
+        rand::rng().random_range(Duration::ZERO..period)
     }
 }
 

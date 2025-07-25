@@ -139,50 +139,6 @@ impl From<RelTag> for proto::RelTag {
     }
 }
 
-/// Checks whether a relation exists, at the given LSN. Only valid on shard 0, other shards error.
-#[derive(Clone, Copy, Debug)]
-pub struct CheckRelExistsRequest {
-    pub read_lsn: ReadLsn,
-    pub rel: RelTag,
-}
-
-impl TryFrom<proto::CheckRelExistsRequest> for CheckRelExistsRequest {
-    type Error = ProtocolError;
-
-    fn try_from(pb: proto::CheckRelExistsRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            read_lsn: pb
-                .read_lsn
-                .ok_or(ProtocolError::Missing("read_lsn"))?
-                .try_into()?,
-            rel: pb.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
-        })
-    }
-}
-
-impl From<CheckRelExistsRequest> for proto::CheckRelExistsRequest {
-    fn from(request: CheckRelExistsRequest) -> Self {
-        Self {
-            read_lsn: Some(request.read_lsn.into()),
-            rel: Some(request.rel.into()),
-        }
-    }
-}
-
-pub type CheckRelExistsResponse = bool;
-
-impl From<proto::CheckRelExistsResponse> for CheckRelExistsResponse {
-    fn from(pb: proto::CheckRelExistsResponse) -> Self {
-        pb.exists
-    }
-}
-
-impl From<CheckRelExistsResponse> for proto::CheckRelExistsResponse {
-    fn from(exists: CheckRelExistsResponse) -> Self {
-        Self { exists }
-    }
-}
-
 /// Requests a base backup.
 #[derive(Clone, Copy, Debug)]
 pub struct GetBaseBackupRequest {
@@ -707,6 +663,8 @@ impl From<GetPageStatusCode> for tonic::Code {
 pub struct GetRelSizeRequest {
     pub read_lsn: ReadLsn,
     pub rel: RelTag,
+    /// If true, return missing=true for missing relations instead of a NotFound error.
+    pub allow_missing: bool,
 }
 
 impl TryFrom<proto::GetRelSizeRequest> for GetRelSizeRequest {
@@ -719,6 +677,7 @@ impl TryFrom<proto::GetRelSizeRequest> for GetRelSizeRequest {
                 .ok_or(ProtocolError::Missing("read_lsn"))?
                 .try_into()?,
             rel: proto.rel.ok_or(ProtocolError::Missing("rel"))?.try_into()?,
+            allow_missing: proto.allow_missing,
         })
     }
 }
@@ -728,21 +687,29 @@ impl From<GetRelSizeRequest> for proto::GetRelSizeRequest {
         Self {
             read_lsn: Some(request.read_lsn.into()),
             rel: Some(request.rel.into()),
+            allow_missing: request.allow_missing,
         }
     }
 }
 
-pub type GetRelSizeResponse = u32;
+/// The size of a relation as number of blocks, or None if `allow_missing=true` and the relation
+/// does not exist.
+///
+/// INVARIANT: never None if `allow_missing=false` (returns `NotFound` error instead).
+pub type GetRelSizeResponse = Option<u32>;
 
 impl From<proto::GetRelSizeResponse> for GetRelSizeResponse {
-    fn from(proto: proto::GetRelSizeResponse) -> Self {
-        proto.num_blocks
+    fn from(pb: proto::GetRelSizeResponse) -> Self {
+        (!pb.missing).then_some(pb.num_blocks)
     }
 }
 
 impl From<GetRelSizeResponse> for proto::GetRelSizeResponse {
-    fn from(num_blocks: GetRelSizeResponse) -> Self {
-        Self { num_blocks }
+    fn from(resp: GetRelSizeResponse) -> Self {
+        Self {
+            num_blocks: resp.unwrap_or_default(),
+            missing: resp.is_none(),
+        }
     }
 }
 

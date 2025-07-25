@@ -596,6 +596,7 @@ pub struct TimelineImportRequest {
     pub timeline_id: TimelineId,
     pub start_lsn: Lsn,
     pub sk_set: Vec<NodeId>,
+    pub force_upsert: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]

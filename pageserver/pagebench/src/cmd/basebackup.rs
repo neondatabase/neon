@@ -188,9 +188,9 @@ async fn main_impl(
         start_work_barrier.wait().await;
         loop {
             let (timeline, work) = {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 let target = all_targets.choose(&mut rng).unwrap();
-                let lsn = target.lsn_range.clone().map(|r| rng.gen_range(r));
+                let lsn = target.lsn_range.clone().map(|r| rng.random_range(r));
                 (target.timeline, Work { lsn })
             };
             let sender = work_senders.get(&timeline).unwrap();

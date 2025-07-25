@@ -52,8 +52,14 @@ stateDiagram-v2
   Init --> Running : Started Postgres
   Running --> TerminationPendingFast : Requested termination
   Running --> TerminationPendingImmediate : Requested termination
+  Running --> ConfigurationPending : Received a /configure request with spec
+  Running --> RefreshConfigurationPending : Received a /refresh_configuration request, compute node will pull a new spec and reconfigure
+  RefreshConfigurationPending --> RefreshConfiguration: Received compute spec and started configuration
+  RefreshConfiguration --> Running : Compute has been re-configured
+  RefreshConfiguration --> RefreshConfigurationPending : Configuration failed and to be retried
   TerminationPendingFast --> Terminated compute with 30s delay for cplane to inspect status
   TerminationPendingImmediate --> Terminated : Terminated compute immediately
+  Failed --> RefreshConfigurationPending : Received a /refresh_configuration request
   Failed --> [*] : Compute exited
   Terminated --> [*] : Compute exited
 ```

@@ -11,7 +11,8 @@ use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::{LayerName, PersistentLayerDesc};
 use pageserver_api::key::Key;
 use pageserver_api::shard::TenantShardId;
-use rand::prelude::{SeedableRng, SliceRandom, StdRng};
+use rand::prelude::{SeedableRng, StdRng};
+use rand::seq::IndexedRandom;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 

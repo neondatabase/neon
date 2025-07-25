@@ -1820,12 +1820,12 @@ nm_to_string(NeonMessage *msg)
 			}
 		case T_NeonGetPageResponse:
 			{
-#if 0
 				NeonGetPageResponse *msg_resp = (NeonGetPageResponse *) msg;
-#endif
 
 				appendStringInfoString(&s, "{\"type\": \"NeonGetPageResponse\"");
-				appendStringInfo(&s, ", \"page\": \"XXX\"}");
+				appendStringInfo(&s, ", \"rinfo\": %u/%u/%u", RelFileInfoFmt(msg_resp->req.rinfo));
+				appendStringInfo(&s, ", \"forknum\": %d", msg_resp->req.forknum);
+				appendStringInfo(&s, ", \"blkno\": %u", msg_resp->req.blkno);
 				appendStringInfoChar(&s, '}');
 				break;
 			}

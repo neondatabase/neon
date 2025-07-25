@@ -385,7 +385,7 @@ async fn create_s3_client(
         .as_millis();
 
     // because nanos can be the same for two threads so can millis, add randomness
-    let random = rand::thread_rng().r#gen::<u32>();
+    let random = rand::rng().random::<u32>();
 
     let remote_storage_config = RemoteStorageConfig {
         storage: RemoteStorageKind::AwsS3(S3Config {

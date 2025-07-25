@@ -8,10 +8,10 @@ code changes locally, but not suitable for running production systems.
 
 ## Example: Start with Postgres 16
 
-To create and start a local development environment with Postgres 16, you will need to provide `--pg-version` flag to 3 of the start-up commands.
+To create and start a local development environment with Postgres 16, you will need to provide `--pg-version` flag to 2 of the start-up commands.
 
 ```shell
-cargo neon init --pg-version 16
+cargo neon init
 cargo neon start
 cargo neon tenant create --set-default --pg-version 16
 cargo neon endpoint create main --pg-version 16

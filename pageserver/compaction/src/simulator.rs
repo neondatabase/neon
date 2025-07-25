@@ -300,9 +300,9 @@ impl MockTimeline {
         key_range: &Range<Key>,
     ) -> anyhow::Result<()> {
         crate::helpers::union_to_keyspace(&mut self.keyspace, vec![key_range.clone()]);
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for _ in 0..num_records {
-            self.ingest_record(rng.gen_range(key_range.clone()), len);
+            self.ingest_record(rng.random_range(key_range.clone()), len);
             self.wal_ingested += len;
         }
         Ok(())

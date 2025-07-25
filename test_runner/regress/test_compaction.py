@@ -58,7 +58,7 @@ PREEMPT_GC_COMPACTION_TENANT_CONF = {
     "compaction_upper_limit": 6,
     "lsn_lease_length": "0s",
     # Enable gc-compaction
-    "gc_compaction_enabled": "true",
+    "gc_compaction_enabled": True,
     "gc_compaction_initial_threshold_kb": 1024,  # At a small threshold
     "gc_compaction_ratio_percent": 1,
     # No PiTR interval and small GC horizon
@@ -540,7 +540,7 @@ def test_pageserver_gc_compaction_trigger(neon_env_builder: NeonEnvBuilder):
         "pitr_interval": "0s",
         "gc_horizon": f"{1024 * 16}",
         "lsn_lease_length": "0s",
-        "gc_compaction_enabled": "true",
+        "gc_compaction_enabled": True,
         "gc_compaction_initial_threshold_kb": "16",
         "gc_compaction_ratio_percent": "50",
         # Do not generate image layers with create_image_layers

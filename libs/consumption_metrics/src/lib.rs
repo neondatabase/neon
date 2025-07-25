@@ -90,7 +90,7 @@ impl<'a> IdempotencyKey<'a> {
         IdempotencyKey {
             now: Utc::now(),
             node_id,
-            nonce: rand::thread_rng().gen_range(0..=9999),
+            nonce: rand::rng().random_range(0..=9999),
         }
     }
 

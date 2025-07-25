@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ahash::RandomState;
 use clashmap::ClashMap;
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use tokio::time::Instant;
 use tracing::info;
 use utils::leaky_bucket::LeakyBucketState;
@@ -61,7 +61,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
             self.map.len()
         );
         let n = self.map.shards().len();
-        let shard = thread_rng().gen_range(0..n);
+        let shard = rand::rng().random_range(0..n);
         self.map.shards()[shard]
             .write()
             .retain(|(_, value)| !value.bucket_is_empty(now));

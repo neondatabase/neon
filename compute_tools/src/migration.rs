@@ -9,15 +9,20 @@ use crate::metrics::DB_MIGRATION_FAILED;
 pub(crate) struct MigrationRunner<'m> {
     client: &'m mut Client,
     migrations: &'m [&'m str],
+    lakebase_mode: bool,
 }
 
 impl<'m> MigrationRunner<'m> {
     /// Create a new migration runner
-    pub fn new(client: &'m mut Client, migrations: &'m [&'m str]) -> Self {
+    pub fn new(client: &'m mut Client, migrations: &'m [&'m str], lakebase_mode: bool) -> Self {
         // The neon_migration.migration_id::id column is a bigint, which is equivalent to an i64
         assert!(migrations.len() + 1 < i64::MAX as usize);
 
-        Self { client, migrations }
+        Self {
+            client,
+            migrations,
+            lakebase_mode,
+        }
     }
 
     /// Get the current value neon_migration.migration_id
@@ -130,8 +135,13 @@ impl<'m> MigrationRunner<'m> {
             // ID is also the next index
             let migration_id = (current_migration + 1) as i64;
             let migration = self.migrations[current_migration];
+            let migration = if self.lakebase_mode {
+                migration.replace("neon_superuser", "databricks_superuser")
+            } else {
+                migration.to_string()
+            };
 
-            match Self::run_migration(self.client, migration_id, migration).await {
+            match Self::run_migration(self.client, migration_id, &migration).await {
                 Ok(_) => {
                     info!("Finished migration id={}", migration_id);
                 }

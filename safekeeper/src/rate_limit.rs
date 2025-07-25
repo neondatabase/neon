@@ -44,6 +44,6 @@ impl RateLimiter {
 
 /// Generate a random duration that is a fraction of the given duration.
 pub fn rand_duration(duration: &std::time::Duration) -> std::time::Duration {
-    let randf64 = rand::thread_rng().gen_range(0.0..1.0);
+    let randf64 = rand::rng().random_range(0.0..1.0);
     duration.mul_f64(randf64)
 }

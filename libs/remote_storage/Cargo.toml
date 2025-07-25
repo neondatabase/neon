@@ -43,7 +43,7 @@ itertools.workspace = true
 sync_wrapper = { workspace = true, features = ["futures"] }
 
 byteorder = "1.4"
-rand = "0.8.5"
+rand.workspace = true
 
 [dev-dependencies]
 camino-tempfile.workspace = true
