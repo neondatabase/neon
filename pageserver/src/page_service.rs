@@ -118,6 +118,10 @@ const GRPC_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// like 8 GetPage streams per connections, plus any unary requests.
 const GRPC_MAX_CONCURRENT_STREAMS: u32 = 256;
 
+/// Feature flag name for controlling whether to hold the applied GC cutoff guard
+/// during GetPage requests. This prevents GC from advancing while pages are being read.
+pub(crate) const FEATURE_FLAG_HOLD_APPLIED_GC_CUTOFF_GUARD: &str = "page-service-getpage-hold-applied-gc-cutoff-guard";
+
 ///////////////////////////////////////////////////////////////////////////////
 
 pub struct Listener {
@@ -1852,11 +1856,11 @@ impl PageServerHandler {
             // Use the global feature resolver with the tenant ID directly, avoiding the need
             // to get a timeline/shard which might not be available on this pageserver node.
             let empty_properties = std::collections::HashMap::new();
-            match self.feature_resolver.evaluate_boolean(
-                "page-service-getpage-hold-applied-gc-cutoff-guard",
-                tenant_id,
-                &empty_properties,
-            ) {
+                         match self.feature_resolver.evaluate_boolean(
+                 FEATURE_FLAG_HOLD_APPLIED_GC_CUTOFF_GUARD,
+                 tenant_id,
+                 &empty_properties,
+             ) {
                 Ok(()) => HoldAppliedGcCutoffGuard::Yes,
                 Err(_) => HoldAppliedGcCutoffGuard::No,
             }
