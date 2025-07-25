@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use camino::Utf8Path;
 use jsonwebtoken::EncodingKey;
 use std::fs;
@@ -13,17 +13,18 @@ pub struct HadronTokenGenerator {
 }
 
 impl HadronTokenGenerator {
-    pub fn new(path: &Utf8Path) -> Self {
-        let key_data = fs::read(path).unwrap_or_else(|e| {
-            panic!("Error reading private key file {:?}. Error: {:?}", path, e)
-        });
-        let encoding_key = EncodingKey::from_rsa_pem(&key_data).unwrap_or_else(|e| {
-            panic!(
-                "Error reading private key file {:?} as RSA private key. Error: {:?}",
-                path, e
-            )
-        });
-        Self { encoding_key }
+    pub fn new(path: &Utf8Path) -> anyhow::Result<Self> {
+        let key_data = match fs::read(path) {
+            Ok(ok) => ok,
+            Err(e) => bail!("Error reading private key file {path:?}. Error: {e}"),
+        };
+        let encoding_key = match EncodingKey::from_rsa_pem(&key_data) {
+            Ok(ok) => ok,
+            Err(e) => {
+                bail!("Error reading private key file {path:?} as RSA private key. Error: {e}")
+            }
+        };
+        Ok(Self { encoding_key })
     }
 
     pub fn generate_tenant_scope_token(&self, tenant_id: TenantId) -> Result<String> {

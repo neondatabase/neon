@@ -330,7 +330,8 @@ impl Secrets {
             token_generator: args
                 .private_key_path
                 .as_ref()
-                .map(|path| HadronTokenGenerator::new(path)),
+                .map(|path| HadronTokenGenerator::new(path))
+                .transpose()?,
         };
 
         Ok(this)
