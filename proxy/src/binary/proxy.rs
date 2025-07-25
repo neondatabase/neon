@@ -711,13 +711,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         info!("Using DbSchemaCache with options={db_schema_cache_config:?}");
 
         let db_schema_cache = if args.is_rest_broker {
-            Some(DbSchemaCache(
-                moka::sync::Cache::builder()
-                    .name("db_schema_cache")
-                    .max_capacity(db_schema_cache_config.size)
-                    .time_to_idle(db_schema_cache_config.ttl)
-                    .build(),
-            ))
+            Some(DbSchemaCache::new(db_schema_cache_config))
         } else {
             None
         };

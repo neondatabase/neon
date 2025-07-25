@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::auth::Backend;
 use crate::auth::backend::ComputeUserInfo;
+use crate::cache::common::Cache;
 use crate::compute::{AuthInfo, ComputeConnection, ConnectionError, PostgresError};
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;

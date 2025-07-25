@@ -1,8 +1,5 @@
-use std::{
-    hash::{BuildHasher, Hash},
-    ops::{Deref, DerefMut},
-    time::{Duration, Instant},
-};
+use std::ops::{Deref, DerefMut};
+use std::time::{Duration, Instant};
 
 use moka::Expiry;
 
@@ -21,43 +18,24 @@ pub(crate) trait Cache {
     /// Entry's value.
     type Value;
 
-    /// Used for entry invalidation.
-    type LookupInfo<Key>;
-
     /// Invalidate an entry using a lookup info.
     /// We don't have an empty default impl because it's error-prone.
-    fn invalidate(&self, _: &Self::LookupInfo<Self::Key>);
+    fn invalidate(&self, _: &Self::Key);
 }
 
 impl<C: Cache> Cache for &C {
     type Key = C::Key;
     type Value = C::Value;
-    type LookupInfo<Key> = C::LookupInfo<Key>;
 
-    fn invalidate(&self, info: &Self::LookupInfo<Self::Key>) {
+    fn invalidate(&self, info: &Self::Key) {
         C::invalidate(self, info);
-    }
-}
-
-impl<K, V, S> Cache for moka::sync::Cache<K, V, S>
-where
-    K: Hash + Eq + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
-    S: BuildHasher + Clone + Sync + Send + 'static,
-{
-    type Key = K;
-    type Value = V;
-    type LookupInfo<Key> = Key;
-
-    fn invalidate(&self, info: &Self::LookupInfo<K>) {
-        moka::sync::Cache::invalidate(self, info);
     }
 }
 
 /// Wrapper for convenient entry invalidation.
 pub(crate) struct Cached<C: Cache, V = <C as Cache>::Value> {
     /// Cache + lookup info.
-    pub(crate) token: Option<(C, C::LookupInfo<C::Key>)>,
+    pub(crate) token: Option<(C, C::Key)>,
 
     /// The value itself.
     pub(crate) value: V,

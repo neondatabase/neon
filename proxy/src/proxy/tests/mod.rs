@@ -20,12 +20,12 @@ use tracing_test::traced_test;
 
 use super::retry::CouldRetry;
 use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
-use crate::cache::CplaneExpiry;
-use crate::config::{ComputeConfig, RetryConfig, TlsConfig};
+use crate::cache::node_info::{CachedNodeInfo, NodeInfoCache};
+use crate::config::{CacheOptions, ComputeConfig, RetryConfig, TlsConfig};
 use crate::context::RequestContext;
 use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo, NodeInfoCache};
+use crate::control_plane::{self, NodeInfo};
 use crate::error::ErrorKind;
 use crate::pglb::ERR_INSECURE_CONNECTION;
 use crate::pglb::handshake::{HandshakeData, handshake};
@@ -419,13 +419,11 @@ impl TestConnectMechanism {
         Self {
             counter: Arc::new(std::sync::Mutex::new(0)),
             sequence,
-            cache: Box::leak(Box::new(
-                moka::sync::Cache::builder()
-                    .expire_after(CplaneExpiry::default())
-                    .max_capacity(1)
-                    .time_to_live(Duration::from_secs(100))
-                    .build(),
-            )),
+            cache: Box::leak(Box::new(NodeInfoCache::new(CacheOptions {
+                size: Some(1),
+                absolute_ttl: Some(Duration::from_secs(100)),
+                idle_ttl: None,
+            }))),
         }
     }
 }
@@ -439,7 +437,7 @@ impl ConnectMechanism for TestConnectMechanism {
     async fn connect_once(
         &self,
         _ctx: &RequestContext,
-        _node_info: &control_plane::CachedNodeInfo,
+        _node_info: &CachedNodeInfo,
         _config: &ComputeConfig,
     ) -> Result<Self::Connection, compute::ConnectionError> {
         let mut counter = self.counter.lock().unwrap();

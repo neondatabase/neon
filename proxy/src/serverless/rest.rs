@@ -140,6 +140,15 @@ pub struct ApiConfig {
 // The DbSchemaCache is a cache of the ApiConfig and DbSchemaOwned for each endpoint
 pub(crate) struct DbSchemaCache(pub Cache<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>);
 impl DbSchemaCache {
+    pub fn new(config: crate::config::CacheOptions) -> Self {
+        let builder = moka::sync::Cache::builder()
+            .name("db_schema_cache")
+            .expire_after(CplaneExpiry::default());
+        let builder = config.moka(builder);
+
+        Self(builder.build())
+    }
+
     pub async fn get_cached_or_remote(
         &self,
         endpoint_id: &EndpointCacheKey,

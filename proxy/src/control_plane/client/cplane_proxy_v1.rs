@@ -17,6 +17,7 @@ use super::super::messages::{ControlPlaneErrorMessage, GetEndpointAccessControl,
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
+use crate::cache::node_info::CachedNodeInfo;
 use crate::context::RequestContext;
 use crate::control_plane::caches::ApiCaches;
 use crate::control_plane::errors::{
@@ -25,8 +26,7 @@ use crate::control_plane::errors::{
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse};
 use crate::control_plane::{
-    AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, EndpointAccessControl, NodeInfo,
-    RoleAccessControl,
+    AccessBlockerFlags, AuthInfo, AuthSecret, EndpointAccessControl, NodeInfo, RoleAccessControl,
 };
 use crate::metrics::Metrics;
 use crate::proxy::retry::CouldRetry;
@@ -415,7 +415,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
 
         macro_rules! check_cache {
             () => {
-                if let Some(info) = self.caches.node_info.get(&key) {
+                if let Some(info) = self.caches.node_info.get_entry(&key) {
                     return match info {
                         Err(msg) => {
                             info!(key = &*key, "found cached wake_compute error");
@@ -427,10 +427,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                         Ok(info) => {
                             debug!(key = &*key, "found cached compute node info");
                             ctx.set_project(info.aux.clone());
-                            Ok(Cached {
-                                token: Some((&self.caches.node_info, key)),
-                                value: info,
-                            })
+                            Ok(info)
                         }
                     };
                 }
