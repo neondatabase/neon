@@ -47,6 +47,7 @@ pub fn write_postgres_conf(
     pgdata_path: &Path,
     params: &ComputeNodeParams,
     spec: &ComputeSpec,
+    postgres_port: u16,
     extension_server_port: u16,
     tls_config: &Option<TlsConfig>,
     databricks_settings: Option<&DatabricksSettings>,
@@ -282,6 +283,10 @@ pub fn write_postgres_conf(
         // be explicit about the default value
         writeln!(file, "neon.disable_logical_replication_subscribers=false")?;
     }
+
+    // Explicitly set the port based on the connstr, overriding any previous port setting.
+    // Note: It is important that we don't specify a different port again after this.
+    writeln!(file, "port = {postgres_port}")?;
 
     // We need Postgres to send logs to rsyslog so that we can forward them
     // further to customers' log aggregation systems.

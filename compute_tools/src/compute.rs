@@ -1459,12 +1459,18 @@ impl ComputeNode {
         let tls_config = self.tls_config(&pspec.spec);
         let databricks_settings = spec.databricks_settings.as_ref();
 
+        let postgres_port = self
+            .params
+            .connstr
+            .port()
+            .expect("port must be present in connstr");
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(
             pgdata_path,
             &self.params,
             &pspec.spec,
+            postgres_port,
             self.params.internal_http_port,
             tls_config,
             databricks_settings,
@@ -1960,10 +1966,16 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
+        let postgres_port = self
+            .params
+            .connstr
+            .port()
+            .expect("port must be present in connstr");
         config::write_postgres_conf(
             pgdata_path,
             &self.params,
             &spec,
+            postgres_port,
             self.params.internal_http_port,
             tls_config,
             spec.databricks_settings.as_ref(),
