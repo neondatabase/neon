@@ -1,0 +1,1 @@
+DROP INDEX hadron_idx_tenant_id_metastore_id;

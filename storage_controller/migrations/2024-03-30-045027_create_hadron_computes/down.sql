@@ -1,0 +1,1 @@
+DROP TABLE hadron_computes;
