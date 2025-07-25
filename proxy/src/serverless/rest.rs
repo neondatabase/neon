@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Method;
-use http::header::{AUTHORIZATION, CONTENT_TYPE, HOST};
+use http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Empty, Full};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
-use hyper::http::{HeaderName, HeaderValue};
+use hyper::http::{HeaderMap, HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use indexmap::IndexMap;
 use moka::sync::Cache;
@@ -137,6 +137,8 @@ pub struct ApiConfig {
     pub role_claim_key: String,
     #[serde(default, deserialize_with = "deserialize_comma_separated_option")]
     pub db_extra_search_path: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_comma_separated_option")]
+    pub server_cors_allowed_origins: Option<Vec<String>>,
 }
 
 // The DbSchemaCache is a cache of the ApiConfig and DbSchemaOwned for each endpoint
@@ -197,6 +199,7 @@ impl DbSchemaCache {
                             db_allowed_select_functions: vec![],
                             role_claim_key: String::new(),
                             db_extra_search_path: None,
+                            server_cors_allowed_origins: None,
                         };
                         let value = Arc::new((api_config, schema_owned));
                         count_cache_insert(CacheKind::Schema);
@@ -531,7 +534,7 @@ pub(crate) async fn handle(
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ApiError> {
     let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
-    let mut response = match result {
+    let response = match result {
         Ok(r) => {
             ctx.set_success();
 
@@ -640,9 +643,6 @@ pub(crate) async fn handle(
         }
     };
 
-    response
-        .headers_mut()
-        .insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
     Ok(response)
 }
 
@@ -722,6 +722,58 @@ async fn handle_inner(
     }
 }
 
+fn get_allow_origin_header_value<'a>(
+    headers: &'a HeaderMap,
+    allowed_origins: Option<&'a Vec<String>>,
+) -> Option<&'a str> {
+    let origin_header = headers.get(ORIGIN);
+    let origin = match origin_header {
+        Some(origin) => origin.to_str().unwrap_or("*"),
+        None => "*",
+    };
+    let is_allowed = match (origin_header, allowed_origins) {
+        (Some(_), Some(allowed_origins)) => allowed_origins.iter().any(|o| o == origin),
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => true,
+    };
+    if is_allowed { Some(origin) } else { None }
+}
+
+fn cors_response(
+    origin: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, RestError> {
+    match origin {
+        Some(origin) => {
+            let allowed_headers = match headers.get("access-control-request-headers") {
+                Some(headers) => headers.to_str().unwrap_or("Authorization"),
+                None => "Authorization",
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(ACCESS_CONTROL_ALLOW_ORIGIN, origin)
+                .header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+                .header("Access-Control-Max-Age", "86400")
+                .header("Access-Control-Expose-Headers", "Content-Encoding, Content-Location, Content-Range, Content-Type, Date, Location, Server, Transfer-Encoding, Range-Unit")
+                .header("Access-Control-Allow-Headers", allowed_headers)
+                .header("Allow", "OPTIONS, GET, POST, PATCH, PUT, DELETE")
+                .body(Empty::new().map_err(|x| match x {}).boxed())
+                .map_err(|e| RestError::SubzeroCore(InternalError {
+                    message: e.to_string(),
+                }))
+        }
+        None => Response::builder()
+            .status(StatusCode::OK)
+            .body(Empty::new().map_err(|x| match x {}).boxed())
+            .map_err(|e| {
+                RestError::SubzeroCore(InternalError {
+                    message: e.to_string(),
+                })
+            }),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_rest_inner(
     config: &'static ProxyConfig,
@@ -776,6 +828,13 @@ async fn handle_rest_inner(
         )
         .await?;
     let (api_config, db_schema_owned) = entry.as_ref();
+    let allow_origin = get_allow_origin_header_value(
+        &parts.headers,
+        api_config.server_cors_allowed_origins.as_ref(),
+    );
+    if parts.method == Method::OPTIONS {
+        return cors_response(allow_origin, &parts.headers);
+    }
     let db_schema = db_schema_owned.borrow_schema();
 
     let db_schemas = &api_config.db_schemas; // list of schemas available for the api
@@ -1177,7 +1236,8 @@ async fn handle_rest_inner(
     // build the response
     let mut response = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
-        .header(CONTENT_TYPE, http_content_type);
+        .header(CONTENT_TYPE, http_content_type)
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin.unwrap_or("*"));
 
     // Add all headers from response_headers vector
     for (header_name, header_value) in response_headers {
