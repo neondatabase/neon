@@ -499,9 +499,8 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 			}
 		}
 		/* END_HADRON */
-
+	}
 	pfree(metrics);
 
 	return (Datum) 0;
-	}
 }
