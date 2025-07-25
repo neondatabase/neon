@@ -167,11 +167,7 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
  */
 #define NUM_NEON_PERF_COUNTER_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
 
-#if PG_VERSION_NUM >= 170000
 #define MyNeonCounters (&neon_per_backend_counters_shared[MyProcNumber])
-#else
-#define MyNeonCounters (&neon_per_backend_counters_shared[MyProc->pgprocno])
-#endif
 
 extern void inc_getpage_wait(uint64 latency);
 extern void inc_page_cache_read_wait(uint64 latency);

@@ -79,10 +79,6 @@
 #include "access/xlogrecovery.h"
 #endif
 
-#if PG_VERSION_NUM < 160000
-typedef PGAlignedBlock PGIOAlignedBlock;
-#endif
-
 #define NEON_PANIC_CONNECTION_STATE(shard_no, elvl, message, ...) \
 	neon_shard_log(shard_no, elvl, "Broken connection state: " message, \
 				   ##__VA_ARGS__)
