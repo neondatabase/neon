@@ -1810,6 +1810,8 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
             "config_lines": [
                 # Tip: set to 100MB to make the test fail
                 "max_replication_write_lag=1MB",
+                # Hadron: Need to set max_cluster_size to some value to enable any backpressure at all.
+                "neon.max_cluster_size=1GB",
             ],
             # We need `neon` extension for calling backpressure functions,
             # this flag instructs `compute_ctl` to pre-install it.

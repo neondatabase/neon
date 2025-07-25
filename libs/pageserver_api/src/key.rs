@@ -981,12 +981,12 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         let key = Key {
-            field1: rng.r#gen(),
-            field2: rng.r#gen(),
-            field3: rng.r#gen(),
-            field4: rng.r#gen(),
-            field5: rng.r#gen(),
-            field6: rng.r#gen(),
+            field1: rng.random(),
+            field2: rng.random(),
+            field3: rng.random(),
+            field4: rng.random(),
+            field5: rng.random(),
+            field6: rng.random(),
         };
 
         assert_eq!(key, Key::from_str(&format!("{key}")).unwrap());

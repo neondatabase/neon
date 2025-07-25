@@ -90,6 +90,8 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # During shutdown, DownloadError::Cancelled may be logged as an error.  Cleaning this
     # up is tracked in https://github.com/neondatabase/neon/issues/6096
     ".*Cancelled, shutting down.*",
+    # gRPC request failures during shutdown.
+    ".*grpc:pageservice.*request failed with Unavailable: timeline is shutting down.*",
     # Open layers are only rolled at Lsn boundaries to avoid name clashses.
     # Hence, we can overshoot the soft limit set by checkpoint distance.
     # This is especially pronounced in tests that set small checkpoint
@@ -152,6 +154,8 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     ".*reconciler.*neon_local error.*",
     # Tenant rate limits may fire in tests that submit lots of API requests.
     ".*tenant \\S+ is rate limited.*",
+    # Reconciliations may get stuck/delayed e.g. in chaos tests.
+    ".*background_reconcile: Shard reconciliation is stuck.*",
 ]
 
 

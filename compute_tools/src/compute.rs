@@ -114,6 +114,11 @@ pub struct ComputeNodeParams {
 
     /// Interval for installed extensions collection
     pub installed_extensions_collection_interval: Arc<AtomicU64>,
+
+    /// Timeout of PG compute startup in the Init state.
+    pub pg_init_timeout: Option<Duration>,
+
+    pub lakebase_mode: bool,
 }
 
 type TaskHandle = Mutex<Option<JoinHandle<()>>>;
@@ -155,6 +160,7 @@ pub struct RemoteExtensionMetrics {
 #[derive(Clone, Debug)]
 pub struct ComputeState {
     pub start_time: DateTime<Utc>,
+    pub pg_start_time: Option<DateTime<Utc>>,
     pub status: ComputeStatus,
     /// Timestamp of the last Postgres activity. It could be `None` if
     /// compute wasn't used since start.
@@ -192,6 +198,7 @@ impl ComputeState {
     pub fn new() -> Self {
         Self {
             start_time: Utc::now(),
+            pg_start_time: None,
             status: ComputeStatus::Empty,
             last_active: None,
             error: None,
@@ -736,6 +743,9 @@ impl ComputeNode {
                 }
             };
             _this_entered = start_compute_span.enter();
+
+            // Hadron: Record postgres start time (used to enforce pg_init_timeout).
+            state_guard.pg_start_time.replace(Utc::now());
 
             state_guard.set_status(ComputeStatus::Init, &self.state_changed);
             compute_state = state_guard.clone()
@@ -1544,7 +1554,7 @@ impl ComputeNode {
             .with_context(|| format!("failed to get basebackup@{lsn}"))?;
 
         // Update pg_hba.conf received with basebackup.
-        update_pg_hba(pgdata_path)?;
+        update_pg_hba(pgdata_path, None)?;
 
         // Place pg_dynshmem under /dev/shm. This allows us to use
         // 'dynamic_shared_memory_type = mmap' so that the files are placed in
@@ -1849,6 +1859,7 @@ impl ComputeNode {
         }
 
         // Run migrations separately to not hold up cold starts
+        let lakebase_mode = self.params.lakebase_mode;
         let params = self.params.clone();
         tokio::spawn(async move {
             let mut conf = conf.as_ref().clone();
@@ -1861,7 +1872,7 @@ impl ComputeNode {
                             eprintln!("connection error: {e}");
                         }
                     });
-                    if let Err(e) = handle_migrations(params, &mut client).await {
+                    if let Err(e) = handle_migrations(params, &mut client, lakebase_mode).await {
                         error!("Failed to run migrations: {}", e);
                     }
                 }

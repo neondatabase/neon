@@ -14,12 +14,11 @@ use utils::logging::warn_slow;
 
 use crate::pool::{ChannelPool, ClientGuard, ClientPool, StreamGuard, StreamPool};
 use crate::retry::Retry;
-use crate::split::GetPageSplitter;
 use compute_api::spec::PageserverProtocol;
-use pageserver_api::shard::ShardStripeSize;
 use pageserver_page_api as page_api;
+use pageserver_page_api::GetPageSplitter;
 use utils::id::{TenantId, TimelineId};
-use utils::shard::{ShardCount, ShardIndex, ShardNumber};
+use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
 
 /// Max number of concurrent clients per channel (i.e. TCP connection). New channels will be spun up
 /// when full.
@@ -141,8 +140,8 @@ impl PageserverClient {
         if !old.count.is_unsharded() && shard_spec.stripe_size != old.stripe_size {
             return Err(anyhow!(
                 "can't change stripe size from {} to {}",
-                old.stripe_size,
-                shard_spec.stripe_size
+                old.stripe_size.expect("always Some when sharded"),
+                shard_spec.stripe_size.expect("always Some when sharded")
             ));
         }
 
@@ -155,23 +154,6 @@ impl PageserverClient {
         )?;
         self.shards.store(Arc::new(shards));
         Ok(())
-    }
-
-    /// Returns whether a relation exists.
-    #[instrument(skip_all, fields(rel=%req.rel, lsn=%req.read_lsn))]
-    pub async fn check_rel_exists(
-        &self,
-        req: page_api::CheckRelExistsRequest,
-    ) -> tonic::Result<page_api::CheckRelExistsResponse> {
-        debug!("sending request: {req:?}");
-        let resp = Self::with_retries(CALL_TIMEOUT, async |_| {
-            // Relation metadata is only available on shard 0.
-            let mut client = self.shards.load_full().get_zero().client().await?;
-            Self::with_timeout(REQUEST_TIMEOUT, client.check_rel_exists(req)).await
-        })
-        .await?;
-        debug!("received response: {resp:?}");
-        Ok(resp)
     }
 
     /// Returns the total size of a database, as # of bytes.
@@ -249,13 +231,15 @@ impl PageserverClient {
         // Fast path: request is for a single shard.
         if let Some(shard_id) =
             GetPageSplitter::for_single_shard(&req, shards.count, shards.stripe_size)
+                .map_err(|err| tonic::Status::internal(err.to_string()))?
         {
             return Self::get_page_with_shard(req, shards.get(shard_id)?).await;
         }
 
         // Request spans multiple shards. Split it, dispatch concurrent per-shard requests, and
         // reassemble the responses.
-        let mut splitter = GetPageSplitter::split(req, shards.count, shards.stripe_size);
+        let mut splitter = GetPageSplitter::split(req, shards.count, shards.stripe_size)
+            .map_err(|err| tonic::Status::internal(err.to_string()))?;
 
         let mut shard_requests = FuturesUnordered::new();
         for (shard_id, shard_req) in splitter.drain_requests() {
@@ -265,10 +249,14 @@ impl PageserverClient {
         }
 
         while let Some((shard_id, shard_response)) = shard_requests.next().await.transpose()? {
-            splitter.add_response(shard_id, shard_response)?;
+            splitter
+                .add_response(shard_id, shard_response)
+                .map_err(|err| tonic::Status::internal(err.to_string()))?;
         }
 
-        splitter.get_response()
+        splitter
+            .get_response()
+            .map_err(|err| tonic::Status::internal(err.to_string()))
     }
 
     /// Fetches pages on the given shard. Does not retry internally.
@@ -396,12 +384,14 @@ pub struct ShardSpec {
     /// NB: this is 0 for unsharded tenants, following `ShardIndex::unsharded()` convention.
     count: ShardCount,
     /// The stripe size for these shards.
-    stripe_size: ShardStripeSize,
+    ///
+    /// INVARIANT: None for unsharded tenants, Some for sharded.
+    stripe_size: Option<ShardStripeSize>,
 }
 
 impl ShardSpec {
     /// Creates a new shard spec with the given URLs and stripe size. All shards must be given.
-    /// The stripe size may be omitted for unsharded tenants.
+    /// The stripe size must be Some for sharded tenants, or None for unsharded tenants.
     pub fn new(
         urls: HashMap<ShardIndex, String>,
         stripe_size: Option<ShardStripeSize>,
@@ -414,11 +404,13 @@ impl ShardSpec {
             n => ShardCount::new(n as u8),
         };
 
-        // Determine the stripe size. It doesn't matter for unsharded tenants.
+        // Validate the stripe size.
         if stripe_size.is_none() && !count.is_unsharded() {
             return Err(anyhow!("stripe size must be given for sharded tenants"));
         }
-        let stripe_size = stripe_size.unwrap_or_default();
+        if stripe_size.is_some() && count.is_unsharded() {
+            return Err(anyhow!("stripe size can't be given for unsharded tenants"));
+        }
 
         // Validate the shard spec.
         for (shard_id, url) in &urls {
@@ -458,8 +450,10 @@ struct Shards {
     ///
     /// NB: this is 0 for unsharded tenants, following `ShardIndex::unsharded()` convention.
     count: ShardCount,
-    /// The stripe size. Only used for sharded tenants.
-    stripe_size: ShardStripeSize,
+    /// The stripe size.
+    ///
+    /// INVARIANT: None for unsharded tenants, Some for sharded.
+    stripe_size: Option<ShardStripeSize>,
 }
 
 impl Shards {

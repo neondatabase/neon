@@ -12,6 +12,7 @@
 #define FILE_CACHE_h
 
 #include "lfc_prewarm.h"
+#include "neon.h"
 
 #include "neon_pgversioncompat.h"
 
@@ -41,13 +42,10 @@ extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
 extern void lfc_init(void);
 extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 						 const void* buffer, XLogRecPtr lsn);
+
 extern FileCacheState* lfc_get_state(size_t max_entries);
-
 extern int32 lfc_approximate_working_set_size_seconds(time_t duration, bool reset);
-
-
-extern int32 lfc_approximate_working_set_size_seconds(time_t duration, bool reset);
-
+extern LfcStatsEntry *get_lfc_stats(uint32 *num_entries);
 
 static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,

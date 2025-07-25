@@ -10,16 +10,22 @@ use crate::global_allocator::MyAllocatorCollector;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
 use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
-use crate::neon_request::{NeonIORequest, NeonIOResult};
+use crate::neon_request::{INVALID_BLOCK_NUMBER, NeonIORequest, NeonIOResult};
+use crate::worker_process::control_socket;
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
+use crate::worker_process::lfc_metrics::LfcMetricsCollector;
 use pageserver_client_grpc::{PageserverClient, ShardSpec, ShardStripeSize};
 use pageserver_page_api as page_api;
-
-use metrics::{IntCounter, IntCounterVec};
 
 use tokio::io::AsyncReadExt;
 use tokio_pipe::PipeRead;
 use uring_common::buf::IoBuf;
+
+use measured::MetricGroup;
+use measured::metric::MetricEncoding;
+use measured::metric::gauge::GaugeState;
+use measured::metric::group::Encoding;
+use measured::{Gauge, GaugeVec};
 use utils::id::{TenantId, TimelineId};
 
 use super::callbacks::{get_request_lsn, notify_proc};
@@ -30,7 +36,7 @@ use utils::lsn::Lsn;
 
 pub struct CommunicatorWorkerProcessStruct<'a> {
     /// Tokio runtime that the main loop and any other related tasks runs in.
-    runtime: tokio::runtime::Handle,
+    runtime: tokio::runtime::Runtime,
 
     /// Client to communicate with the pageserver
     client: PageserverClient,
@@ -48,48 +54,80 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     /// Local File Cache, relation size tracking, last-written LSN tracking
     pub(crate) cache: IntegratedCacheWriteAccess,
 
-    /*** Static configuration ***/
-    /// Stripe size doesn't change after startup. (The shard map is not stored here, it's passed
-    /// directly to the client)
-    stripe_size: Option<ShardStripeSize>,
-
     /*** Metrics ***/
-    request_counters: IntCounterVec,
-    request_rel_exists_counter: IntCounter,
-    request_rel_size_counter: IntCounter,
-    request_get_pagev_counter: IntCounter,
-    request_read_slru_segment_counter: IntCounter,
-    request_prefetchv_counter: IntCounter,
-    request_db_size_counter: IntCounter,
-    request_write_page_counter: IntCounter,
-    request_rel_extend_counter: IntCounter,
-    request_rel_zero_extend_counter: IntCounter,
-    request_rel_create_counter: IntCounter,
-    request_rel_truncate_counter: IntCounter,
-    request_rel_unlink_counter: IntCounter,
+    pub(crate) lfc_metrics: LfcMetricsCollector,
 
-    getpage_cache_misses_counter: IntCounter,
-    getpage_cache_hits_counter: IntCounter,
+    request_counters: GaugeVec<RequestTypeLabelGroupSet>,
 
-    request_nblocks_counters: IntCounterVec,
-    request_get_pagev_nblocks_counter: IntCounter,
-    request_prefetchv_nblocks_counter: IntCounter,
-    request_rel_zero_extend_nblocks_counter: IntCounter,
+    getpage_cache_misses_counter: Gauge,
+    getpage_cache_hits_counter: Gauge,
 
+    // For the requests that affect multiple blocks, have separate counters for the # of blocks affected
+    request_nblocks_counters: GaugeVec<RequestTypeLabelGroupSet>,
+
+    #[allow(dead_code)]
     allocator_metrics: MyAllocatorCollector,
 }
 
-pub(super) async fn init(
-    cis: Box<CommunicatorInitStruct>,
-    tenant_id: String,
-    timeline_id: String,
-    auth_token: Option<String>,
+// Define a label group, consisting of 1 or more label values
+#[derive(measured::LabelGroup)]
+#[label(set = RequestTypeLabelGroupSet)]
+struct RequestTypeLabelGroup {
+    request_type: crate::neon_request::NeonIORequestDiscriminants,
+}
+
+impl RequestTypeLabelGroup {
+    fn from_req(req: &NeonIORequest) -> Self {
+        RequestTypeLabelGroup {
+            request_type: req.into(),
+        }
+    }
+}
+
+/// Launch the communicator process's Rust subsystems
+#[allow(clippy::too_many_arguments)]
+pub(super) fn init_legacy() -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("communicator thread")
+        .build()
+        .unwrap();
+
+    // Start the listener on the control socket
+    runtime
+        .block_on(control_socket::launch_listener(None))
+        .map_err(|e| e.to_string())?;
+
+    Box::leak(Box::new(runtime));
+
+    Ok(())
+}
+
+/// Launch the communicator process's Rust subsystems
+#[allow(clippy::too_many_arguments)]
+pub(super) fn init(
+    cis: CommunicatorInitStruct,
+    tenant_id: &str,
+    timeline_id: &str,
+    auth_token: Option<&str>,
     shard_map: HashMap<utils::shard::ShardIndex, String>,
     stripe_size: Option<ShardStripeSize>,
     initial_file_cache_size: u64,
     file_cache_path: Option<PathBuf>,
-) -> CommunicatorWorkerProcessStruct<'static> {
-    info!("Test log message");
+) -> Result<&'static CommunicatorWorkerProcessStruct<'static>, String> {
+    // The caller validated these already
+    let tenant_id = TenantId::from_str(tenant_id).map_err(|e| format!("invalid tenant ID: {e}"))?;
+    let timeline_id =
+        TimelineId::from_str(timeline_id).map_err(|e| format!("invalid timeline ID: {e}"))?;
+    let shard_spec =
+        ShardSpec::new(shard_map, stripe_size).map_err(|e| format!("invalid shard spec: {e}:"))?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("communicator thread")
+        .build()
+        .unwrap();
+
     let last_lsn = get_request_lsn();
 
     let file_cache = if let Some(path) = file_cache_path {
@@ -109,64 +147,22 @@ pub(super) async fn init(
 
     debug!("Initialised integrated cache: {cache:?}");
 
-    let tenant_id = TenantId::from_str(&tenant_id).expect("invalid tenant ID");
-    let timeline_id = TimelineId::from_str(&timeline_id).expect("invalid timeline ID");
-    let shard_spec = ShardSpec::new(shard_map, stripe_size).expect("invalid shard spec");
-    let client = PageserverClient::new(tenant_id, timeline_id, shard_spec, auth_token, None)
-        .expect("could not create client");
+    let client = {
+        let _guard = runtime.enter();
+        PageserverClient::new(
+            tenant_id,
+            timeline_id,
+            shard_spec,
+            auth_token.map(|s| s.to_string()),
+            None,
+        )
+        .expect("could not create client")
+    };
 
-    let request_counters = IntCounterVec::new(
-        metrics::core::Opts::new(
-            "backend_requests_total",
-            "Number of requests from backends.",
-        ),
-        &["request_kind"],
-    )
-    .unwrap();
-    let request_rel_exists_counter = request_counters.with_label_values(&["rel_exists"]);
-    let request_rel_size_counter = request_counters.with_label_values(&["rel_size"]);
-    let request_get_pagev_counter = request_counters.with_label_values(&["get_pagev"]);
-    let request_read_slru_segment_counter =
-        request_counters.with_label_values(&["read_slru_segment"]);
-    let request_prefetchv_counter = request_counters.with_label_values(&["prefetchv"]);
-    let request_db_size_counter = request_counters.with_label_values(&["db_size"]);
-    let request_write_page_counter = request_counters.with_label_values(&["write_page"]);
-    let request_rel_extend_counter = request_counters.with_label_values(&["rel_extend"]);
-    let request_rel_zero_extend_counter = request_counters.with_label_values(&["rel_zero_extend"]);
-    let request_rel_create_counter = request_counters.with_label_values(&["rel_create"]);
-    let request_rel_truncate_counter = request_counters.with_label_values(&["rel_truncate"]);
-    let request_rel_unlink_counter = request_counters.with_label_values(&["rel_unlink"]);
-
-    let getpage_cache_misses_counter = IntCounter::new(
-        "getpage_cache_misses",
-        "Number of file cache misses in get_pagev requests.",
-    )
-    .unwrap();
-    let getpage_cache_hits_counter = IntCounter::new(
-        "getpage_cache_hits",
-        "Number of file cache hits in get_pagev requests.",
-    )
-    .unwrap();
-
-    // For the requests that affect multiple blocks, have separate counters for the # of blocks affected
-    let request_nblocks_counters = IntCounterVec::new(
-        metrics::core::Opts::new(
-            "request_nblocks_total",
-            "Number of blocks in backend requests.",
-        ),
-        &["request_kind"],
-    )
-    .unwrap();
-    let request_get_pagev_nblocks_counter =
-        request_nblocks_counters.with_label_values(&["get_pagev"]);
-    let request_prefetchv_nblocks_counter =
-        request_nblocks_counters.with_label_values(&["prefetchv"]);
-    let request_rel_zero_extend_nblocks_counter =
-        request_nblocks_counters.with_label_values(&["rel_zero_extend"]);
-
-    CommunicatorWorkerProcessStruct {
-        runtime: tokio::runtime::Handle::current(),
-        stripe_size,
+    let worker_struct = CommunicatorWorkerProcessStruct {
+        // Note: it's important to not drop the runtime, or all the tasks are dropped
+        // too. Including it in the returned struct is one way to keep it around.
+        runtime,
         neon_request_slots: cis.neon_request_slots,
         client,
         cache,
@@ -174,30 +170,33 @@ pub(super) async fn init(
         in_progress_table: RequestInProgressTable::new(),
 
         // metrics
-        request_counters,
-        request_rel_exists_counter,
-        request_rel_size_counter,
-        request_get_pagev_counter,
-        request_read_slru_segment_counter,
-        request_prefetchv_counter,
-        request_db_size_counter,
-        request_write_page_counter,
-        request_rel_extend_counter,
-        request_rel_zero_extend_counter,
-        request_rel_create_counter,
-        request_rel_truncate_counter,
-        request_rel_unlink_counter,
+        lfc_metrics: LfcMetricsCollector,
 
-        getpage_cache_misses_counter,
-        getpage_cache_hits_counter,
+        request_counters: GaugeVec::new(),
 
-        request_nblocks_counters,
-        request_get_pagev_nblocks_counter,
-        request_prefetchv_nblocks_counter,
-        request_rel_zero_extend_nblocks_counter,
+        getpage_cache_misses_counter: Gauge::new(),
+        getpage_cache_hits_counter: Gauge::new(),
+
+        request_nblocks_counters: GaugeVec::new(),
 
         allocator_metrics: MyAllocatorCollector::new(),
-    }
+    };
+
+    let worker_struct = Box::leak(Box::new(worker_struct));
+
+    let main_loop_handle = worker_struct.runtime.spawn(worker_struct.run());
+    worker_struct.runtime.spawn(async {
+        let err = main_loop_handle.await.unwrap_err();
+        error!("error: {err:?}");
+    });
+
+    // Start the listener on the control socket
+    worker_struct
+        .runtime
+        .block_on(control_socket::launch_listener(Some(worker_struct)))
+        .map_err(|e| e.to_string())?;
+
+    Ok(worker_struct)
 }
 
 impl<'t> CommunicatorWorkerProcessStruct<'t> {
@@ -205,9 +204,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     pub(super) fn update_shard_map(
         &self,
         new_shard_map: HashMap<utils::shard::ShardIndex, String>,
+        stripe_size: Option<ShardStripeSize>,
     ) {
-        let shard_spec =
-            ShardSpec::new(new_shard_map, self.stripe_size.clone()).expect("invalid shard spec");
+        let shard_spec = ShardSpec::new(new_shard_map, stripe_size).expect("invalid shard spec");
 
         {
             let _in_runtime = self.runtime.enter();
@@ -335,45 +334,15 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     }
 
     /// Handle one IO request
-    async fn handle_request(&'static self, req: &'_ NeonIORequest) -> NeonIOResult {
-        match req {
+    async fn handle_request(&'static self, request: &'_ NeonIORequest) -> NeonIOResult {
+        self.request_counters
+            .inc(RequestTypeLabelGroup::from_req(request));
+        match request {
             NeonIORequest::Empty => {
                 error!("unexpected Empty IO request");
                 NeonIOResult::Error(0)
             }
-            NeonIORequest::RelExists(req) => {
-                self.request_rel_exists_counter.inc();
-                let rel = req.reltag();
-
-                let _in_progress_guard = self
-                    .in_progress_table
-                    .lock(RequestInProgressKey::Rel(rel), req.request_id)
-                    .await;
-
-                // Check the cache first
-                let not_modified_since = match self.cache.get_rel_exists(&rel) {
-                    CacheResult::Found(exists) => return NeonIOResult::RelExists(exists),
-                    CacheResult::NotFound(lsn) => lsn,
-                };
-
-                match self
-                    .client
-                    .check_rel_exists(page_api::CheckRelExistsRequest {
-                        read_lsn: self.request_lsns(not_modified_since),
-                        rel,
-                    })
-                    .await
-                {
-                    Ok(exists) => NeonIOResult::RelExists(exists),
-                    Err(err) => {
-                        info!("tonic error: {err:?}");
-                        NeonIOResult::Error(0)
-                    }
-                }
-            }
-
             NeonIORequest::RelSize(req) => {
-                self.request_rel_size_counter.inc();
                 let rel = req.reltag();
 
                 let _in_progress_guard = self
@@ -387,16 +356,22 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         tracing::trace!("found relsize for {:?} in cache: {}", rel, nblocks);
                         return NeonIOResult::RelSize(nblocks);
                     }
+                    // XXX: we don't cache negative entries, so if there's no entry in the cache, it could mean
+                    // that the relation doesn't exist or that we don't have it cached.
                     CacheResult::NotFound(lsn) => lsn,
                 };
 
                 let read_lsn = self.request_lsns(not_modified_since);
                 match self
                     .client
-                    .get_rel_size(page_api::GetRelSizeRequest { read_lsn, rel })
+                    .get_rel_size(page_api::GetRelSizeRequest {
+                        read_lsn,
+                        rel,
+                        allow_missing: req.allow_missing,
+                    })
                     .await
                 {
-                    Ok(nblocks) => {
+                    Ok(Some(nblocks)) => {
                         // update the cache
                         tracing::info!(
                             "updated relsize for {:?} in cache: {}, lsn {}",
@@ -409,23 +384,21 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
                         NeonIOResult::RelSize(nblocks)
                     }
+                    Ok(None) => {
+                        // TODO: cache negative entry?
+                        NeonIOResult::RelSize(INVALID_BLOCK_NUMBER)
+                    }
                     Err(err) => {
                         info!("tonic error: {err:?}");
                         NeonIOResult::Error(0)
                     }
                 }
             }
-            NeonIORequest::GetPageV(req) => {
-                self.request_get_pagev_counter.inc();
-                self.request_get_pagev_nblocks_counter
-                    .inc_by(req.nblocks as u64);
-                match self.handle_get_pagev_request(req).await {
-                    Ok(()) => NeonIOResult::GetPageV,
-                    Err(errno) => NeonIOResult::Error(errno),
-                }
-            }
+            NeonIORequest::GetPageV(req) => match self.handle_get_pagev_request(req).await {
+                Ok(()) => NeonIOResult::GetPageV,
+                Err(errno) => NeonIOResult::Error(errno),
+            },
             NeonIORequest::ReadSlruSegment(req) => {
-                self.request_read_slru_segment_counter.inc();
                 let lsn = Lsn(req.request_lsn);
                 let file_path = req.destination_file_path();
 
@@ -455,15 +428,13 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 }
             }
             NeonIORequest::PrefetchV(req) => {
-                self.request_prefetchv_counter.inc();
-                self.request_prefetchv_nblocks_counter
-                    .inc_by(req.nblocks as u64);
+                self.request_nblocks_counters
+                    .inc_by(RequestTypeLabelGroup::from_req(request), req.nblocks as i64);
                 let req = *req;
                 tokio::spawn(async move { self.handle_prefetchv_request(&req).await });
                 NeonIOResult::PrefetchVLaunched
             }
             NeonIORequest::DbSize(req) => {
-                self.request_db_size_counter.inc();
                 let _in_progress_guard = self
                     .in_progress_table
                     .lock(RequestInProgressKey::Db(req.db_oid), req.request_id)
@@ -496,8 +467,6 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 
             // Write requests
             NeonIORequest::WritePage(req) => {
-                self.request_write_page_counter.inc();
-
                 let rel = req.reltag();
                 let _in_progress_guard = self
                     .in_progress_table
@@ -515,8 +484,6 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelExtend(req) => {
-                self.request_rel_extend_counter.inc();
-
                 let rel = req.reltag();
                 let _in_progress_guard = self
                     .in_progress_table
@@ -536,9 +503,8 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelZeroExtend(req) => {
-                self.request_rel_zero_extend_counter.inc();
-                self.request_rel_zero_extend_nblocks_counter
-                    .inc_by(req.nblocks as u64);
+                self.request_nblocks_counters
+                    .inc_by(RequestTypeLabelGroup::from_req(request), req.nblocks as i64);
 
                 // TODO: need to grab an io-in-progress lock for this? I guess not
                 // TODO: We could put the empty pages to the cache. Maybe have
@@ -552,23 +518,17 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelCreate(req) => {
-                self.request_rel_create_counter.inc();
-
                 // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache.remember_rel_size(&req.reltag(), 0, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelTruncate(req) => {
-                self.request_rel_truncate_counter.inc();
-
                 // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache
                     .remember_rel_size(&req.reltag(), req.nblocks, Lsn(req.lsn));
                 NeonIOResult::WriteOK
             }
             NeonIORequest::RelUnlink(req) => {
-                self.request_rel_unlink_counter.inc();
-
                 // TODO: need to grab an io-in-progress lock for this? I guess not
                 self.cache.forget_rel(&req.reltag(), None, Lsn(req.lsn));
                 NeonIOResult::WriteOK
@@ -620,9 +580,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             cache_misses.push((blkno, not_modified_since, dest, in_progress_guard));
         }
         self.getpage_cache_misses_counter
-            .inc_by(cache_misses.len() as u64);
+            .inc_by(cache_misses.len() as i64);
         self.getpage_cache_hits_counter
-            .inc_by(req.nblocks as u64 - cache_misses.len() as u64);
+            .inc_by(req.nblocks as i64 - cache_misses.len() as i64);
 
         if cache_misses.is_empty() {
             return Ok(());
@@ -784,37 +744,23 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
     }
 }
 
-impl<'t> metrics::core::Collector for CommunicatorWorkerProcessStruct<'t> {
-    fn desc(&self) -> Vec<&metrics::core::Desc> {
-        let mut descs = Vec::new();
+impl<T> MetricGroup<T> for CommunicatorWorkerProcessStruct<'_>
+where
+    T: Encoding,
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_group_into(&self, enc: &mut T) -> Result<(), T::Err> {
+        use measured::metric::MetricFamilyEncoding;
+        use measured::metric::name::MetricName;
 
-        descs.append(&mut self.request_counters.desc());
-        descs.append(&mut self.getpage_cache_misses_counter.desc());
-        descs.append(&mut self.getpage_cache_hits_counter.desc());
-        descs.append(&mut self.request_nblocks_counters.desc());
+        self.lfc_metrics.collect_group_into(enc)?;
+        self.request_counters
+            .collect_family_into(MetricName::from_str("request_counters"), enc)?;
+        self.request_nblocks_counters
+            .collect_family_into(MetricName::from_str("request_nblocks_counters"), enc)?;
 
-        if let Some(file_cache) = &self.cache.file_cache {
-            descs.append(&mut file_cache.desc());
-        }
-        descs.append(&mut self.cache.desc());
-        descs.append(&mut self.allocator_metrics.desc());
+        // FIXME: allocator metrics
 
-        descs
-    }
-    fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
-        let mut values = Vec::new();
-
-        values.append(&mut self.request_counters.collect());
-        values.append(&mut self.getpage_cache_misses_counter.collect());
-        values.append(&mut self.getpage_cache_hits_counter.collect());
-        values.append(&mut self.request_nblocks_counters.collect());
-
-        if let Some(file_cache) = &self.cache.file_cache {
-            values.append(&mut file_cache.collect());
-        }
-        values.append(&mut self.cache.collect());
-        values.append(&mut self.allocator_metrics.collect());
-
-        values
+        Ok(())
     }
 }

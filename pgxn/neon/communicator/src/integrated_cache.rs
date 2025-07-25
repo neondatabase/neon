@@ -860,6 +860,9 @@ impl IntegratedCacheReadAccess {
         }
     }
 
+    pub fn get_num_buckets_in_use(&self) -> usize {
+        self.block_map.get_num_buckets_in_use()
+    }
 }
 
 pub struct BackendCacheReadOp<'t> {

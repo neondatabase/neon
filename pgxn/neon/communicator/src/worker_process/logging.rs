@@ -48,7 +48,7 @@ pub extern "C" fn communicator_worker_configure_logging() -> Box<LoggingReceiver
     let r = r.with(
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
-            .event_format(SimpleFormatter::new())
+            .event_format(SimpleFormatter)
             .with_writer(sender)
             // TODO: derive this from log_min_messages? Currently the code in
             // communicator_process.c forces log_min_messages='INFO'.
@@ -246,11 +246,5 @@ where
         ctx.field_format().format_fields(writer.by_ref(), event)?;
 
         Ok(())
-    }
-}
-
-impl SimpleFormatter {
-    fn new() -> Self {
-        SimpleFormatter {}
     }
 }
