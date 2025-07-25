@@ -298,7 +298,10 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
         assert post_detach_samples == set()
 
 
-def test_pageserver_metrics_removed_after_offload(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("compaction", ["compaction_enabled", "compaction_disabled"])
+def test_pageserver_metrics_removed_after_offload(
+    neon_env_builder: NeonEnvBuilder, compaction: str
+):
     """Tests that when a timeline is offloaded, the tenant specific metrics are not left behind"""
 
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
@@ -312,6 +315,8 @@ def test_pageserver_metrics_removed_after_offload(neon_env_builder: NeonEnvBuild
             "gc_period": "0s",
             "compaction_period": "0s",
         }
+        if compaction == "compaction_disabled"
+        else None
     )
 
     timeline_1 = env.create_timeline("test_metrics_removed_after_offload_1", tenant_id=tenant_1)
@@ -357,6 +362,11 @@ def test_pageserver_metrics_removed_after_offload(neon_env_builder: NeonEnvBuild
             state=TimelineArchivalState.ARCHIVED,
         )
         env.pageserver.http_client().timeline_offload(tenant_1, timeline)
+        # We need to wait until all background jobs are finished before we can check the metrics.
+        # There're many of them: compaction, GC, etc. It's hard to wait for all of them, so we just
+        # sleep for a while there.
+        time.sleep(5)
+        wait_until(lambda: env.pageserver.http_client().timeline_compact_info())
         post_offload_samples = set(
             [x.name for x in get_ps_metric_samples_for_timeline(tenant_1, timeline)]
         )
