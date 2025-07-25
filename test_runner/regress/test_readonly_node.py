@@ -124,6 +124,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
         )
 
 
+@pytest.mark.repeat(100)
 def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
     """
     Test static endpoint is protected from GC by acquiring and renewing lsn leases.
