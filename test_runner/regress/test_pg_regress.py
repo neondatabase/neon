@@ -123,9 +123,10 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
 def patch_tenant_conf(tenant_conf: dict[str, Any], reldir_type: str) -> dict[str, Any]:
     tenant_conf = tenant_conf.copy()
     if reldir_type == "v2":
-        tenant_conf["rel_size_v2_enabled"] = "true"
+        tenant_conf["rel_size_v2_enabled"] = True
+        tenant_conf["rel_size_v1_access_disabled"] = True
     else:
-        tenant_conf["rel_size_v2_enabled"] = "false"
+        tenant_conf["rel_size_v2_enabled"] = False
     return tenant_conf
 
 

@@ -441,7 +441,7 @@ pub struct Timeline {
     /// heatmap on demand.
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
 
-    pub(crate) rel_size_v2_status: ArcSwap<(Option<RelSizeMigration>, Option<Lsn>)>,
+    pub(crate) rel_size_v2_cached_status: ArcSwap<(Option<RelSizeMigration>, Option<Lsn>)>,
 
     wait_lsn_log_slow: tokio::sync::Semaphore,
 
@@ -2883,19 +2883,33 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
-    /// Returns `true` if the rel_size_v2 config is enabled. NOTE: the write path and read path
-    /// should look at `get_rel_size_v2_status()` to get the actual status of the timeline. It is
-    /// possible that the index part persists the state while the config doesn't get persisted.
-    pub(crate) fn get_rel_size_v2_enabled(&self) -> bool {
+    /// Returns the expected state of the rel size migration. The actual state is persisted in the
+    /// DbDir key.
+    ///
+    /// The expected state is the state that the tenant config expects.
+    pub(crate) fn get_rel_size_v2_expected_state(&self) -> RelSizeMigration {
         let tenant_conf = self.tenant_conf.load();
-        tenant_conf
+        let v2_enabled = tenant_conf
             .tenant_conf
             .rel_size_v2_enabled
-            .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled)
+            .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled);
+        let v1_access_disabled = tenant_conf
+            .tenant_conf
+            .rel_size_v1_access_disabled
+            .unwrap_or(self.conf.default_tenant_conf.rel_size_v1_access_disabled);
+
+        match (v2_enabled, v1_access_disabled) {
+            (true, false) => RelSizeMigration::Migrating,
+            (true, true) => RelSizeMigration::Migrated,
+            (false, true) => RelSizeMigration::Legacy, // This should never happen
+            (false, false) => RelSizeMigration::Legacy,
+        }
     }
 
-    pub(crate) fn get_rel_size_v2_status(&self) -> (RelSizeMigration, Option<Lsn>) {
-        let (status, migrated_at) = self.rel_size_v2_status.load().as_ref().clone();
+    /// DO NOT use this API in the read/write path to determine the rel size migration status. The source of truth is the dbdir key.
+    /// This API is only used for the timeline info struct to get the latest cached status.
+    pub(crate) fn get_rel_size_v2_cached_status(&self) -> (RelSizeMigration, Option<Lsn>) {
+        let (status, migrated_at) = self.rel_size_v2_cached_status.load().as_ref().clone();
         (status.unwrap_or(RelSizeMigration::Legacy), migrated_at)
     }
 
@@ -3336,7 +3350,7 @@ impl Timeline {
 
                 heatmap_layers_downloader: Mutex::new(None),
 
-                rel_size_v2_status: ArcSwap::from_pointee((
+                rel_size_v2_cached_status: ArcSwap::from_pointee((
                     rel_size_v2_status,
                     rel_size_migrated_at,
                 )),
@@ -3429,10 +3443,11 @@ impl Timeline {
         rel_size_v2_status: RelSizeMigration,
         rel_size_migrated_at: Option<Lsn>,
     ) -> anyhow::Result<()> {
-        self.rel_size_v2_status.store(Arc::new((
+        self.rel_size_v2_cached_status.store(Arc::new((
             Some(rel_size_v2_status.clone()),
             rel_size_migrated_at,
         )));
+        // The index_part upload is not used as source of truth anymore, but we still need to upload it to make it work across branches.
         self.remote_client
             .schedule_index_upload_for_rel_size_v2_status_update(
                 rel_size_v2_status,
