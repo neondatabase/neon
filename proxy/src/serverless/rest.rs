@@ -746,7 +746,7 @@ fn get_allow_origin_header_value<'a>(
 fn cors_response(
     origin: Option<&str>,
     headers: &HeaderMap,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, RestError> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, http::Error> {
     match origin {
         Some(o) => {
             let allowed_headers = headers
@@ -766,18 +766,10 @@ fn cors_response(
                 .header("Access-Control-Allow-Headers", allowed_headers)
                 .header("Allow", "OPTIONS, GET, POST, PATCH, PUT, DELETE")
                 .body(Empty::new().map_err(|x| match x {}).boxed())
-                .map_err(|e| RestError::SubzeroCore(InternalError {
-                    message: e.to_string(),
-                }))
         }
         None => Response::builder()
             .status(StatusCode::OK)
-            .body(Empty::new().map_err(|x| match x {}).boxed())
-            .map_err(|e| {
-                RestError::SubzeroCore(InternalError {
-                    message: e.to_string(),
-                })
-            }),
+            .body(Empty::new().map_err(|x| match x {}).boxed()),
     }
 }
 
@@ -840,7 +832,11 @@ async fn handle_rest_inner(
         api_config.server_cors_allowed_origins.as_ref(),
     );
     if parts.method == Method::OPTIONS {
-        return cors_response(allow_origin, &parts.headers);
+        return cors_response(allow_origin, &parts.headers).map_err(|e| {
+            RestError::SubzeroCore(InternalError {
+                message: e.to_string(),
+            })
+        });
     }
     let db_schema = db_schema_owned.borrow_schema();
 
