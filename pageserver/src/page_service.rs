@@ -2144,10 +2144,17 @@ impl PageServerHandler {
             ));
         }
 
-        // Clients should only read from recent LSNs on their timeline, or from locations holding an LSN lease.
+        // Reject LSNs for which we may have garbage collected some of the required reconstruct data,
+        // or may do that garbage collection at any point concurrent to this request's execution.
         //
-        // We may have older data available, but we make a best effort to detect this case and return an error,
-        // to distinguish a misbehaving client (asking for old LSN) from a storage issue (data missing at a legitimate LSN).
+        // The only LSNs that are valid to read are:
+        // - While we hold `latest_gc_cutoff_lsn`, the *range* between its value
+        //   and last_record_lsn. (latest_gc_cutoff_lsn is a guard on Timeline::applied_gc_cutoff_lsn).
+        // - An LSN leased via the lsn lease mechanism. Leased LSNs are respected by
+        //   GC but don't prevent applied_gc_cutoff_lsn from advancing.
+        //
+        // NB: Unlike LSN leases, the standby_horizon leases used by RO replicas _do_ prevent the
+        // applied_gc_cutoff_lsn from advancing, so, there's no special treatment for them here.
         if request_lsn < **latest_gc_cutoff_lsn && !timeline.is_gc_blocked_by_lsn_lease_deadline() {
             let gc_info = &timeline.gc_info.read().unwrap();
             if !gc_info.lsn_covered_by_lease(request_lsn) {
