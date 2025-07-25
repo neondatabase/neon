@@ -778,16 +778,16 @@ impl Timeline {
             .await?;
         let mut rels = HashSet::new();
         for (key, val) in results {
+            if key == REL_DIR_MIGRATION_KEY {
+                // The key that determines the current migration status, skip it.
+                continue;
+            }
             let val = RelDirExists::decode(&val?).map_err(|_| {
                 PageReconstructError::Other(anyhow::anyhow!(
                     "invalid reldir key: decode failed, {}",
                     key
                 ))
             })?;
-            if key.field6 == 0 {
-                // The key that determines the current migration status, skip it.
-                continue;
-            }
             if key.field6 != 1 {
                 return Err(PageReconstructError::Other(anyhow::anyhow!(
                     "invalid reldir key: field6 != 1, {}",
@@ -813,11 +813,11 @@ impl Timeline {
                 forknum: key.field5,
             };
             if val == RelDirExists::Removed {
-                debug_assert!(!rels.contains(&tag), "removed reltag in v2");
+                debug_assert!(!rels.contains(&tag), "removed reltag in v2: {tag}");
                 continue;
             }
             let did_not_contain = rels.insert(tag);
-            debug_assert!(did_not_contain, "duplicate reltag in v2");
+            debug_assert!(did_not_contain, "duplicate reltag in v2: {tag}");
         }
         Ok(rels)
     }
