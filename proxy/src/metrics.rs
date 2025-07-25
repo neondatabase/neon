@@ -2,7 +2,8 @@ use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
 use measured::label::{
-    FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet,
+    FixedCardinalitySet, LabelGroupSet, LabelGroupVisitor, LabelName, LabelSet, LabelValue,
+    StaticLabelSet,
 };
 use measured::metric::histogram::Thresholds;
 use measured::metric::name::MetricName;
@@ -10,7 +11,7 @@ use measured::{
     Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
     MetricGroup,
 };
-use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogVec};
+use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogVec, InfoMetric};
 use tokio::time::{self, Instant};
 
 use crate::control_plane::messages::ColdStartInfo;
@@ -25,6 +26,9 @@ pub struct Metrics {
 
     #[metric(namespace = "wake_compute_lock")]
     pub wake_compute_lock: ApiLockMetrics,
+
+    #[metric(namespace = "service")]
+    pub service: ServiceMetrics,
 }
 
 static SELF: OnceLock<Metrics> = OnceLock::new();
@@ -659,4 +663,44 @@ pub struct ThreadPoolMetrics {
     pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
     pub worker_task_skips_total: CounterVec<ThreadPoolWorkers>,
+}
+
+#[derive(MetricGroup, Default)]
+pub struct ServiceMetrics {
+    pub info: InfoMetric<ServiceInfo>,
+}
+
+#[derive(Default)]
+pub struct ServiceInfo {
+    pub state: ServiceState,
+}
+
+impl ServiceInfo {
+    pub const fn running() -> Self {
+        ServiceInfo {
+            state: ServiceState::Running,
+        }
+    }
+
+    pub const fn terminating() -> Self {
+        ServiceInfo {
+            state: ServiceState::Terminating,
+        }
+    }
+}
+
+impl LabelGroup for ServiceInfo {
+    fn visit_values(&self, v: &mut impl LabelGroupVisitor) {
+        const STATE: &LabelName = LabelName::from_str("state");
+        v.write_value(STATE, &self.state);
+    }
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug, Default)]
+#[label(singleton = "state")]
+pub enum ServiceState {
+    #[default]
+    Init,
+    Running,
+    Terminating,
 }
