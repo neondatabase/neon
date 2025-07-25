@@ -40,7 +40,7 @@ use crate::config::{
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, ServiceInfo};
 use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::redis::kv_ops::RedisKVClient;
@@ -589,6 +589,11 @@ pub async fn run() -> anyhow::Result<()> {
             maintenance_tasks.spawn(async move { cache.gc_worker().await });
         }
     }
+
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
 
     let maintenance = loop {
         // get one complete task

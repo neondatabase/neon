@@ -29,7 +29,7 @@ use crate::config::{
 };
 use crate::control_plane::locks::ApiLocks;
 use crate::http::health_server::AppMetrics;
-use crate::metrics::{Metrics, ThreadPoolMetrics};
+use crate::metrics::{Metrics, ServiceInfo, ThreadPoolMetrics};
 use crate::rate_limiter::{EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo};
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::cancel_set::CancelSet;
@@ -206,6 +206,11 @@ pub async fn run() -> anyhow::Result<()> {
         Arc::new(CancellationHandler::new(&config.connect_to_compute)),
         endpoint_rate_limiter,
     );
+
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
 
     match futures::future::select(pin!(maintenance_tasks.join_next()), pin!(task)).await {
         // exit immediately on maintenance task completion
