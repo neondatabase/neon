@@ -1462,6 +1462,14 @@ impl ComputeNode {
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path, None)?;
 
+        if let Some(databricks_settings) = spec.databricks_settings.as_ref() {
+            copy_tls_certificates(
+                &databricks_settings.pg_compute_tls_settings.key_file,
+                &databricks_settings.pg_compute_tls_settings.cert_file,
+                pgdata_path,
+            )?;
+        }
+
         // Place pg_dynshmem under /dev/shm. This allows us to use
         // 'dynamic_shared_memory_type = mmap' so that the files are placed in
         // /dev/shm, similar to how 'dynamic_shared_memory_type = posix' works.
