@@ -197,7 +197,7 @@ def test_create_snapshot(
     shutil.copytree(
         test_output_dir,
         new_compatibility_snapshot_dir,
-        ignore=shutil.ignore_patterns("pg_dynshmem"),
+        ignore=shutil.ignore_patterns("pg_dynshmem", "neon-communicator.socket"),
     )
 
     log.info(f"Copied new compatibility snapshot dir to: {new_compatibility_snapshot_dir}")
@@ -538,6 +538,7 @@ def test_historic_storage_formats(
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.pg_version = dataset.pg_version
     env = neon_env_builder.init_configs()
+
     env.start()
     assert isinstance(env.pageserver_remote_storage, S3Storage)
 
@@ -575,6 +576,17 @@ def test_historic_storage_formats(
     timelines = env.pageserver.http_client().timeline_list(dataset.tenant_id)
     # All our artifacts should contain at least one timeline
     assert len(timelines) > 0
+
+    if dataset.name == "2025-04-08-tenant-manifest-v1":
+        # This dataset was created at a time where we decided to migrate to v2 reldir by simply disabling writes to v1
+        # and starting writing to v2. This was too risky and we have reworked the migration plan. Therefore, we should
+        # opt in full relv2 mode for this dataset.
+        for timeline in timelines:
+            env.pageserver.http_client().timeline_patch_index_part(
+                dataset.tenant_id,
+                timeline["timeline_id"],
+                {"force_index_update": True, "rel_size_migration": "migrated"},
+            )
 
     # Import tenant does not create the timeline on safekeepers,
     # because it is a debug handler and the timeline may have already been

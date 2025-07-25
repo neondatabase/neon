@@ -152,6 +152,8 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     ".*reconciler.*neon_local error.*",
     # Tenant rate limits may fire in tests that submit lots of API requests.
     ".*tenant \\S+ is rate limited.*",
+    # Reconciliations may get stuck/delayed e.g. in chaos tests.
+    ".*background_reconcile: Shard reconciliation is stuck.*",
 ]
 
 

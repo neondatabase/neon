@@ -1540,6 +1540,17 @@ class NeonEnv:
 
         raise RuntimeError(f"Pageserver with ID {id} not found")
 
+    def get_safekeeper(self, id: int) -> Safekeeper:
+        """
+        Look up a safekeeper by its ID.
+        """
+
+        for sk in self.safekeepers:
+            if sk.id == id:
+                return sk
+
+        raise RuntimeError(f"Safekeeper with ID {id} not found")
+
     def get_tenant_pageserver(self, tenant_id: TenantId | TenantShardId):
         """
         Get the NeonPageserver where this tenant shard is currently attached, according
@@ -1938,9 +1949,12 @@ class NeonStorageController(MetricsGetter, LogUtils):
         timeout_in_seconds: int | None = None,
         instance_id: int | None = None,
         base_port: int | None = None,
+        handle_ps_local_disk_loss: bool | None = None,
     ) -> Self:
         assert not self.running
-        self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
+        self.env.neon_cli.storage_controller_start(
+            timeout_in_seconds, instance_id, base_port, handle_ps_local_disk_loss
+        )
         self.running = True
         return self
 
@@ -2838,10 +2852,13 @@ class NeonProxiedStorageController(NeonStorageController):
         timeout_in_seconds: int | None = None,
         instance_id: int | None = None,
         base_port: int | None = None,
+        handle_ps_local_disk_loss: bool | None = None,
     ) -> Self:
         assert instance_id is not None and base_port is not None
 
-        self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
+        self.env.neon_cli.storage_controller_start(
+            timeout_in_seconds, instance_id, base_port, handle_ps_local_disk_loss
+        )
         self.instances[instance_id] = {"running": True}
 
         self.running = True
@@ -3893,6 +3910,41 @@ class NeonProxy(PgProtocol):
             assert response.status_code == expected_code, f"response: {response.json()}"
         return response.json()
 
+    def http_multiquery(self, *queries, **kwargs):
+        # TODO maybe use default values if not provided
+        user = quote(kwargs["user"])
+        password = quote(kwargs["password"])
+        expected_code = kwargs.get("expected_code")
+        timeout = kwargs.get("timeout")
+
+        json_queries = []
+        for query in queries:
+            if type(query) is str:
+                json_queries.append({"query": query})
+            else:
+                [query, params] = query
+                json_queries.append({"query": query, "params": params})
+
+        queries_str = [j["query"] for j in json_queries]
+        log.info(f"Executing http queries: {queries_str}")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        response = requests.post(
+            f"https://{self.domain}:{self.external_http_port}/sql",
+            data=json.dumps({"queries": json_queries}),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Pool-Opt-In": "true",
+            },
+            verify=str(self.test_output_dir / "proxy.crt"),
+            timeout=timeout,
+        )
+
+        if expected_code is not None:
+            assert response.status_code == expected_code, f"response: {response.json()}"
+        return response.json()
+
     async def http2_query(self, query, args, **kwargs):
         # TODO maybe use default values if not provided
         user = kwargs["user"]
@@ -4742,9 +4794,10 @@ class Endpoint(PgProtocol, LogUtils):
                     m = re.search(r"=\s*(\S+)", line)
                     assert m is not None, f"malformed config line {line}"
                     size = m.group(1)
-                    assert size_to_bytes(size) >= size_to_bytes("1MB"), (
-                        "LFC size cannot be set less than 1MB"
-                    )
+                    if size_to_bytes(size) > 0:
+                        assert size_to_bytes(size) >= size_to_bytes("1MB"), (
+                            "LFC size cannot be set less than 1MB"
+                        )
             lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
                 f"neon.file_cache_path = '{lfc_path_escaped}'",
@@ -4877,15 +4930,38 @@ class Endpoint(PgProtocol, LogUtils):
     def is_running(self):
         return self._running._value > 0
 
-    def reconfigure(self, pageserver_id: int | None = None, safekeepers: list[int] | None = None):
+    def reconfigure(
+        self,
+        pageserver_id: int | None = None,
+        safekeepers: list[int] | None = None,
+        timeout_sec: float = 120,
+    ):
         assert self.endpoint_id is not None
         # If `safekeepers` is not None, they are remember them as active and use
         # in the following commands.
         if safekeepers is not None:
             self.active_safekeepers = safekeepers
-        self.env.neon_cli.endpoint_reconfigure(
-            self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
-        )
+
+        start_time = time.time()
+        while True:
+            try:
+                self.env.neon_cli.endpoint_reconfigure(
+                    self.endpoint_id,
+                    self.tenant_id,
+                    pageserver_id,
+                    self.active_safekeepers,
+                    timeout_sec=timeout_sec,
+                )
+                return
+            except RuntimeError as e:
+                if time.time() - start_time > timeout_sec:
+                    raise e
+                log.warning(f"Reconfigure failed with error: {e}. Retrying...")
+                time.sleep(5)
+
+    def refresh_configuration(self):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_refresh_configuration(self.endpoint_id)
 
     def respec(self, **kwargs: Any) -> None:
         """Update the endpoint.json file used by control_plane."""
@@ -4898,6 +4974,10 @@ class Endpoint(PgProtocol, LogUtils):
         with open(config_path, "w") as file:
             log.debug(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
+
+    def get_compute_spec(self) -> dict[str, Any]:
+        out = json.loads((Path(self.endpoint_path()) / "config.json").read_text())["spec"]
+        return cast("dict[str, Any]", out)
 
     def respec_deep(self, **kwargs: Any) -> None:
         """
@@ -4928,6 +5008,10 @@ class Endpoint(PgProtocol, LogUtils):
         with open(config_path, "w") as file:
             log.debug("Updating compute config to: %s", json.dumps(config, indent=4))
             json.dump(config, file, indent=4)
+
+    def update_pageservers_in_config(self, pageserver_id: int | None = None):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_update_pageservers(self.endpoint_id, pageserver_id)
 
     def wait_for_migrations(self, wait_for: int = NUM_COMPUTE_MIGRATIONS) -> None:
         """
@@ -5385,15 +5469,24 @@ class Safekeeper(LogUtils):
         return timeline_status.commit_lsn
 
     def pull_timeline(
-        self, srcs: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId
+        self,
+        srcs: list[Safekeeper],
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        mconf: MembershipConfiguration | None = None,
     ) -> dict[str, Any]:
         """
         pull_timeline from srcs to self.
         """
         src_https = [f"http://localhost:{sk.port.http}" for sk in srcs]
-        res = self.http_client().pull_timeline(
-            {"tenant_id": str(tenant_id), "timeline_id": str(timeline_id), "http_hosts": src_https}
-        )
+        body: dict[str, Any] = {
+            "tenant_id": str(tenant_id),
+            "timeline_id": str(timeline_id),
+            "http_hosts": src_https,
+        }
+        if mconf is not None:
+            body["mconf"] = mconf.__dict__
+        res = self.http_client().pull_timeline(body)
         src_ids = [sk.id for sk in srcs]
         log.info(f"finished pulling timeline from {src_ids} to {self.id}")
         return res
@@ -5787,6 +5880,7 @@ SKIP_FILES = frozenset(
         "postmaster.pid",
         "pg_control",
         "pg_dynshmem",
+        "neon-communicator.socket",
     )
 )
 

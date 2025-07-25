@@ -42,6 +42,7 @@ pub trait StorageControllerUpcallApi {
     fn re_attach(
         &self,
         conf: &PageServerConf,
+        empty_local_disk: bool,
     ) -> impl Future<
         Output = Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError>,
     > + Send;
@@ -155,6 +156,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
     async fn re_attach(
         &self,
         conf: &PageServerConf,
+        empty_local_disk: bool,
     ) -> Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError> {
         let url = self
             .base_url
@@ -226,6 +228,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         let request = ReAttachRequest {
             node_id: self.node_id,
             register: register.clone(),
+            empty_local_disk: Some(empty_local_disk),
         };
 
         let response: ReAttachResponse = self
