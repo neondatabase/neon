@@ -222,6 +222,14 @@ pub enum Bool {
     False,
 }
 
+#[allow(dead_code)]
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+#[label(singleton = "outcome")]
+pub enum CacheOutcome {
+    Hit,
+    Miss,
+}
+
 #[derive(LabelGroup)]
 #[label(set = ConsoleRequestSet)]
 pub struct ConsoleRequest<'a> {
