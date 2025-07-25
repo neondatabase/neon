@@ -320,19 +320,19 @@ where
     /// Map a range which does not intersect any persistent layers to
     /// the in-memory layer candidate.
     fn pad_range(&mut self, key_range: Range<Key>) {
-        if !key_range.is_empty() {
-            if let Some(ref inmem) = self.in_memory_layer {
-                let search_result = SearchResult {
-                    layer: ReadableLayerWeak::InMemoryLayer(inmem.clone()),
-                    lsn_floor: inmem.get_lsn_range().start,
-                };
+        if !key_range.is_empty()
+            && let Some(ref inmem) = self.in_memory_layer
+        {
+            let search_result = SearchResult {
+                layer: ReadableLayerWeak::InMemoryLayer(inmem.clone()),
+                lsn_floor: inmem.get_lsn_range().start,
+            };
 
-                self.result
-                    .found
-                    .entry(search_result)
-                    .or_default()
-                    .add_range(key_range);
-            }
+            self.result
+                .found
+                .entry(search_result)
+                .or_default()
+                .add_range(key_range);
         }
     }
 
@@ -726,13 +726,13 @@ impl LayerMap {
             below > start_lsn
         };
 
-        if let Some(open) = &self.open_layer {
-            if is_below(open) {
-                return Some(InMemoryLayerDesc {
-                    handle: InMemoryLayerHandle::Open,
-                    lsn_range: open.get_lsn_range(),
-                });
-            }
+        if let Some(open) = &self.open_layer
+            && is_below(open)
+        {
+            return Some(InMemoryLayerDesc {
+                handle: InMemoryLayerHandle::Open,
+                lsn_range: open.get_lsn_range(),
+            });
         }
 
         self.frozen_layers
@@ -864,32 +864,11 @@ impl LayerMap {
         // Loop through the delta coverage and recurse on each part
         for (change_key, change_val) in version.delta_coverage.range(start..end) {
             // If there's a relevant delta in this part, add 1 and recurse down
-            if let Some(val) = &current_val {
-                if val.get_lsn_range().end > lsn.start {
-                    let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
-                    let lr = lsn.start..val.get_lsn_range().start;
-                    if !kr.is_empty() {
-                        let base_count = Self::is_reimage_worthy(val, key) as usize;
-                        let new_limit = limit.map(|l| l - base_count);
-                        let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
-                        max_stacked_deltas = std::cmp::max(
-                            max_stacked_deltas,
-                            base_count + max_stacked_deltas_underneath,
-                        );
-                    }
-                }
-            }
-
-            current_key = change_key;
-            current_val.clone_from(&change_val);
-        }
-
-        // Consider the last part
-        if let Some(val) = &current_val {
-            if val.get_lsn_range().end > lsn.start {
-                let kr = Key::from_i128(current_key)..Key::from_i128(end);
+            if let Some(val) = &current_val
+                && val.get_lsn_range().end > lsn.start
+            {
+                let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                 let lr = lsn.start..val.get_lsn_range().start;
-
                 if !kr.is_empty() {
                     let base_count = Self::is_reimage_worthy(val, key) as usize;
                     let new_limit = limit.map(|l| l - base_count);
@@ -899,6 +878,27 @@ impl LayerMap {
                         base_count + max_stacked_deltas_underneath,
                     );
                 }
+            }
+
+            current_key = change_key;
+            current_val.clone_from(&change_val);
+        }
+
+        // Consider the last part
+        if let Some(val) = &current_val
+            && val.get_lsn_range().end > lsn.start
+        {
+            let kr = Key::from_i128(current_key)..Key::from_i128(end);
+            let lr = lsn.start..val.get_lsn_range().start;
+
+            if !kr.is_empty() {
+                let base_count = Self::is_reimage_worthy(val, key) as usize;
+                let new_limit = limit.map(|l| l - base_count);
+                let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
+                max_stacked_deltas = std::cmp::max(
+                    max_stacked_deltas,
+                    base_count + max_stacked_deltas_underneath,
+                );
             }
         }
 

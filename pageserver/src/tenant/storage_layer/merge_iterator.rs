@@ -102,10 +102,10 @@ impl<'a> PeekableLayerIterRef<'a> {
     async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
         let result = self.peeked.take();
         self.peeked = self.iter.next().await?;
-        if let (Some((k1, l1, _)), Some((k2, l2, _))) = (&self.peeked, &result) {
-            if (k1, l1) < (k2, l2) {
-                bail!("iterator is not ordered: {}", self.iter.layer_dbg_info());
-            }
+        if let (Some((k1, l1, _)), Some((k2, l2, _))) = (&self.peeked, &result)
+            && (k1, l1) < (k2, l2)
+        {
+            bail!("iterator is not ordered: {}", self.iter.layer_dbg_info());
         }
         Ok(result)
     }

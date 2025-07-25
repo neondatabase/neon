@@ -76,10 +76,10 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
 
     // Create streams.
     for i in 0..args.count {
-        if i % 100 == 0 {
+        if i.is_multiple_of(100) {
             info!("opened {}/{} streams", i, args.count);
         }
-        if i % args.per_connection == 0 && i > 0 {
+        if i.is_multiple_of(args.per_connection) && i > 0 {
             client = connect().await?;
         }
 

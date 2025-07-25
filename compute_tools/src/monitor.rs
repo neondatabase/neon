@@ -214,17 +214,17 @@ impl ComputeMonitor {
                 Ok((active_time, sessions)) => {
                     let mut detected_activity = false;
 
-                    if let Some(prev_active_time) = self.active_time {
-                        if active_time != prev_active_time {
-                            detected_activity = true;
-                        }
+                    if let Some(prev_active_time) = self.active_time
+                        && active_time != prev_active_time
+                    {
+                        detected_activity = true;
                     }
                     self.active_time = Some(active_time);
 
-                    if let Some(prev_sessions) = self.sessions {
-                        if sessions != prev_sessions {
-                            detected_activity = true;
-                        }
+                    if let Some(prev_sessions) = self.sessions
+                        && sessions != prev_sessions
+                    {
+                        detected_activity = true;
                     }
                     self.sessions = Some(sessions);
 

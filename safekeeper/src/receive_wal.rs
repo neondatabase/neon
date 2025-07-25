@@ -174,7 +174,7 @@ pub struct WalReceiverGuard {
 
 impl WalReceiverGuard {
     /// Get reference to locked shared state contents.
-    fn get(&self) -> MappedMutexGuard<WalReceiverState> {
+    fn get(&self) -> MappedMutexGuard<'_, WalReceiverState> {
         self.walreceivers.get_slot(self.id)
     }
 }
@@ -638,10 +638,10 @@ impl WalAcceptor {
             };
 
             // Send reply, if any.
-            if let Some(reply) = reply {
-                if self.reply_tx.send(reply).await.is_err() {
-                    break; // disconnected, break to flush WAL and return
-                }
+            if let Some(reply) = reply
+                && self.reply_tx.send(reply).await.is_err()
+            {
+                break; // disconnected, break to flush WAL and return
             }
         }
 

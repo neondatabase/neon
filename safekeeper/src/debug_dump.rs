@@ -222,15 +222,15 @@ pub async fn build(args: Args, global_timelines: Arc<GlobalTimelines>) -> Result
     );
     for tli in ptrs_snapshot {
         let ttid = tli.ttid;
-        if let Some(tenant_id) = args.tenant_id {
-            if tenant_id != ttid.tenant_id {
-                continue;
-            }
+        if let Some(tenant_id) = args.tenant_id
+            && tenant_id != ttid.tenant_id
+        {
+            continue;
         }
-        if let Some(timeline_id) = args.timeline_id {
-            if timeline_id != ttid.timeline_id {
-                continue;
-            }
+        if let Some(timeline_id) = args.timeline_id
+            && timeline_id != ttid.timeline_id
+        {
+            continue;
         }
 
         timelines.push(TimelineDumpSer {

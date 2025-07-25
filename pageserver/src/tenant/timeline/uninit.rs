@@ -291,13 +291,11 @@ impl TimelineCreateGuard {
                 arg: idempotency,
             });
         }
-        if !allow_offloaded {
-            if let Some(existing) = timelines_offloaded.get(&timeline_id) {
-                return Err(TimelineExclusionError::AlreadyExists {
-                    existing: TimelineOrOffloaded::Offloaded(existing.clone()),
-                    arg: idempotency,
-                });
-            }
+        if !allow_offloaded && let Some(existing) = timelines_offloaded.get(&timeline_id) {
+            return Err(TimelineExclusionError::AlreadyExists {
+                existing: TimelineOrOffloaded::Offloaded(existing.clone()),
+                arg: idempotency,
+            });
         }
         if creating_timelines.contains(&timeline_id) {
             return Err(TimelineExclusionError::AlreadyCreating);

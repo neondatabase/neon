@@ -121,16 +121,16 @@ impl FeatureResolver {
                                 "hostname".to_string(),
                                 PostHogFlagFilterPropertyValue::String(metadata.http_host),
                             );
-                            if let Some(cplane_region) = metadata.other.get("region_id") {
-                                if let Some(cplane_region) = cplane_region.as_str() {
-                                    // This region contains the cell number
-                                    properties.insert(
-                                        "neon_region".to_string(),
-                                        PostHogFlagFilterPropertyValue::String(
-                                            cplane_region.to_string(),
-                                        ),
-                                    );
-                                }
+                            if let Some(cplane_region) = metadata.other.get("region_id")
+                                && let Some(cplane_region) = cplane_region.as_str()
+                            {
+                                // This region contains the cell number
+                                properties.insert(
+                                    "neon_region".to_string(),
+                                    PostHogFlagFilterPropertyValue::String(
+                                        cplane_region.to_string(),
+                                    ),
+                                );
                             }
                         }
                         Err(e) => {

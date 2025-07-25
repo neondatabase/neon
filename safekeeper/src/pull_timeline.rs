@@ -523,18 +523,18 @@ pub async fn handle_request(
         for (i, response) in responses.into_iter().enumerate() {
             match response {
                 Ok(status) => {
-                    if let Some(mconf) = &request.mconf {
-                        if status.mconf.generation > mconf.generation {
-                            // We probably raced with another timeline membership change with higher generation.
-                            // Ignore this request.
-                            return Err(ApiError::Conflict(format!(
-                                "cannot pull timeline with generation {}: timeline {} already exists with generation {} on {}",
-                                mconf.generation,
-                                request.timeline_id,
-                                status.mconf.generation,
-                                http_hosts[i],
-                            )));
-                        }
+                    if let Some(mconf) = &request.mconf
+                        && status.mconf.generation > mconf.generation
+                    {
+                        // We probably raced with another timeline membership change with higher generation.
+                        // Ignore this request.
+                        return Err(ApiError::Conflict(format!(
+                            "cannot pull timeline with generation {}: timeline {} already exists with generation {} on {}",
+                            mconf.generation,
+                            request.timeline_id,
+                            status.mconf.generation,
+                            http_hosts[i],
+                        )));
                     }
                     statuses.push((status, i));
                 }

@@ -473,7 +473,7 @@ impl Plan {
                             res?;
                             last_completed_job_idx = job_idx;
 
-                            if last_completed_job_idx % checkpoint_every == 0 {
+                            if last_completed_job_idx.is_multiple_of(checkpoint_every) {
                                 tracing::info!(last_completed_job_idx, jobs=%jobs_in_plan, "Checkpointing import status");
 
                                 let progress = ShardImportProgressV1 {
@@ -990,13 +990,13 @@ impl ChunkProcessingJob {
                     .read(LayerManagerLockHolder::ImportPgData)
                     .await;
                 let existing_layer = guard.try_get_from_key(&desc.key());
-                if let Some(layer) = existing_layer {
-                    if layer.metadata().generation == timeline.generation {
-                        return Err(anyhow::anyhow!(
-                            "Import attempted to rewrite layer file in the same generation: {}",
-                            layer.local_path()
-                        ));
-                    }
+                if let Some(layer) = existing_layer
+                    && layer.metadata().generation == timeline.generation
+                {
+                    return Err(anyhow::anyhow!(
+                        "Import attempted to rewrite layer file in the same generation: {}",
+                        layer.local_path()
+                    ));
                 }
             }
 
@@ -1037,9 +1037,10 @@ impl ChunkProcessingJob {
                 );
             }
             None => {
-                guard
-                    .open_mut()?
-                    .track_new_image_layers(&[resident_layer.clone()], &timeline.metrics);
+                guard.open_mut()?.track_new_image_layers(
+                    std::slice::from_ref(&resident_layer),
+                    &timeline.metrics,
+                );
             }
         }
 

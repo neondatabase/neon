@@ -322,10 +322,10 @@ impl BackgroundTask {
 
             for timeline in tenant.list_timelines() {
                 let tti = TenantTimelineId::new(tenant_id, timeline.timeline_id);
-                if let Some(entry) = entries_old.get(&tti) {
-                    if timeline.get_last_record_lsn() <= entry.lsn {
-                        entries_new.insert(tti, entry.clone());
-                    }
+                if let Some(entry) = entries_old.get(&tti)
+                    && timeline.get_last_record_lsn() <= entry.lsn
+                {
+                    entries_new.insert(tti, entry.clone());
                 }
             }
         }
@@ -569,17 +569,17 @@ impl BackgroundTask {
 
         {
             let entries = self.c.entries.lock().unwrap();
-            if let Some(entry) = entries.get(&tti) {
-                if entry.lsn >= req_lsn {
-                    tracing::info!(
-                        %timeline_id,
-                        %req_lsn,
-                        %entry.lsn,
-                        "Basebackup entry already exists for timeline with higher LSN, skipping basebackup",
-                    );
-                    self.prepare_skip_count.inc();
-                    return Ok(());
-                }
+            if let Some(entry) = entries.get(&tti)
+                && entry.lsn >= req_lsn
+            {
+                tracing::info!(
+                    %timeline_id,
+                    %req_lsn,
+                    %entry.lsn,
+                    "Basebackup entry already exists for timeline with higher LSN, skipping basebackup",
+                );
+                self.prepare_skip_count.inc();
+                return Ok(());
             }
         }
 

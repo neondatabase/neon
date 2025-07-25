@@ -709,15 +709,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> InterpretedWalSender<'_, IO> {
                     if let Some(remote_consistent_lsn) = self.wal_sender_guard
                         .walsenders()
                         .get_ws_remote_consistent_lsn(self.wal_sender_guard.id())
-                    {
-                        if self.tli.should_walsender_stop(remote_consistent_lsn).await {
+                        && self.tli.should_walsender_stop(remote_consistent_lsn).await {
                             // Stop streaming if the receivers are caught up and
                             // there's no active compute. This causes the loop in
                             // [`crate::send_interpreted_wal::InterpretedWalSender::run`]
                             // to exit and terminate the WAL stream.
                             break;
                         }
-                    }
 
                     self.pgb
                         .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
