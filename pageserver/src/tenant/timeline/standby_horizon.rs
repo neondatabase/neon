@@ -144,7 +144,7 @@ impl Horizons {
 
     pub fn cull_leases(&self, now: SystemTime) {
         let mut inner = self.inner.lock().unwrap();
-        inner.leases_by_id.retain(|_, l| l.valid_until <= now);
+        inner.leases_by_id.retain(|_, l| l.valid_until > now);
     }
 
     pub fn dump(&self) -> serde_json::Value {
@@ -158,5 +158,21 @@ impl Horizons {
             "legacy": format!("{legacy:?}"),
             "leases_by_id": format!("{leases_by_id:?}"),
         })
+    }
+
+    #[cfg(test  )]
+    pub fn legacy(&self) -> Option<Lsn> {
+        let inner = self.inner.lock().unwrap();
+        inner.legacy
+    }
+
+    #[cfg(test)]
+    pub fn get_leases(&self) -> Vec<(Lsn, SystemTime)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .leases_by_id
+            .iter()
+            .map(|(_, lease)| (lease.lsn, lease.valid_until))
+            .collect()
     }
 }
