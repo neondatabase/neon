@@ -129,7 +129,10 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
     Test static endpoint is protected from GC by acquiring and renewing lsn leases.
     """
 
-    LSN_LEASE_LENGTH = 8
+    LSN_LEASE_LENGTH = (
+        20  # This value needs to be large enough for compute_ctl to send two lease requests.
+    )
+
     neon_env_builder.num_pageservers = 2
     # GC is manual triggered.
     env = neon_env_builder.init_start(
@@ -242,6 +245,11 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         XLOG_BLCKSZ = 8192
         lsn = Lsn((int(lsn) // XLOG_BLCKSZ) * XLOG_BLCKSZ)
 
+        # We need to mock the way cplane works: it gets a lease for a branch before starting the compute.
+        env.storage_controller.pageserver_api().timeline_lsn_lease(
+            env.initial_tenant, env.initial_timeline, lsn
+        )
+
         with env.endpoints.create_start(
             branch_name="main",
             endpoint_id="static",
@@ -250,9 +258,6 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             with ep_static.cursor() as cur:
                 cur.execute("SELECT count(*) FROM t0")
                 assert cur.fetchone() == (ROW_COUNT,)
-
-            # Wait for static compute to renew lease at least once.
-            time.sleep(LSN_LEASE_LENGTH)
 
             generate_updates_on_main(env, ep_main, 3, end=100)
 
@@ -263,14 +268,12 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             # Trigger Pageserver restarts
             for ps in env.pageservers:
                 ps.stop()
-                # Static compute should have at least one lease request failure due to connection.
-                # It takes time for the compute to switch and reconnect to the new pageserver.
-                # So even sleeping for `LSN_LEASE_LENGTH` might not be enough. We should find ways
-                # to do this test in a more deterministic way.
-                time.sleep(LSN_LEASE_LENGTH)
+
+            # Static compute should have at least one lease request failure due to connection.
+            time.sleep(LSN_LEASE_LENGTH / 2)
+
+            for ps in env.pageservers:
                 ps.start()
-                # Make sure the compute can acquire a lease before stopping the next pageserver.
-                time.sleep(LSN_LEASE_LENGTH)
 
             trigger_gc_and_select(
                 env,
