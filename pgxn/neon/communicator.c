@@ -547,7 +547,7 @@ communicator_prefetch_pump_state(void)
 			PrefetchRequest* slot = GetPrfSlot(ring_index);
 			min_backend_prefetch_lsn = Min(slot->request_lsns.request_lsn, min_backend_prefetch_lsn);
 		}
-		MIN_BACKEND_PREFETCH_LSN = min_backend_prefetch_lsn;
+		MIN_BACKEND_REQUEST_LSN = min_backend_prefetch_lsn;
 	}
 	communicator_reconfigure_timeout_if_needed();
 }
@@ -1919,6 +1919,13 @@ nm_to_string(NeonMessage *msg)
 	return s.data;
 }
 
+static void
+reset_min_request_lsn(int code, Datum arg)
+{
+	if (MyProc != NULL)
+		MIN_BACKEND_REQUEST_LSN = InvalidXLogRecPtr;
+}
+
 /*
  *	communicator_init() -- Initialize per-backend private state
  */
@@ -1929,6 +1936,8 @@ communicator_init(void)
 
 	if (MyPState != NULL)
 		return;
+
+	on_shmem_exit(reset_min_request_lsn, 0);
 
 	/*
 	 * Sanity check that theperf counters array is sized correctly. We got
@@ -2555,12 +2564,12 @@ communicator_reconfigure_timeout_if_needed(void)
 						!AmPrewarmWorker && /* do not pump prefetch state in prewarm worker */
 						readahead_getpage_pull_timeout_ms > 0;
 
-	if (!needs_set && MIN_BACKEND_PREFETCH_LSN != InvalidXLogRecPtr)
+	if (!needs_set && MIN_BACKEND_REQUEST_LSN != InvalidXLogRecPtr)
 	{
 		if (last_replay_lsn == InvalidXLogRecPtr)
-			MIN_BACKEND_PREFETCH_LSN = InvalidXLogRecPtr;
+			MIN_BACKEND_REQUEST_LSN = InvalidXLogRecPtr;
 		else
-			needs_set = true; /* Can not reset MIN_BACKEND_PREFETCH_LSN now, have to do it later */
+			needs_set = true; /* Can not reset MIN_BACKEND_REQUEST_LSN now, have to do it later */
 	}
 	if (needs_set != timeout_set)
 	{
@@ -2571,7 +2580,7 @@ communicator_reconfigure_timeout_if_needed(void)
 		 */
 		if (AmBackgroundWriterProcess() || AmCheckpointerProcess())
 		{
-			MIN_BACKEND_PREFETCH_LSN = InvalidXLogRecPtr;
+			MIN_BACKEND_REQUEST_LSN = InvalidXLogRecPtr;
 			if (timeout_set)
 			{
 				disable_timeout(PS_TIMEOUT_ID, false);
@@ -2664,9 +2673,9 @@ neon_communicator_min_inflight_request_lsn(PG_FUNCTION_ARGS)
 		size_t n_procs = ProcGlobal->allProcCount;
 		for (size_t i = 0; i < n_procs; i++)
 		{
-			if (neon_per_backend_counters_shared[i].min_prefetch_lsn != InvalidXLogRecPtr)
+			if (neon_per_backend_counters_shared[i].min_request_lsn != InvalidXLogRecPtr)
 			{
-				min_lsn = Min(min_lsn, neon_per_backend_counters_shared[i].min_prefetch_lsn);
+				min_lsn = Min(min_lsn, neon_per_backend_counters_shared[i].min_request_lsn);
 			}
 		}
 		PG_RETURN_INT64(min_lsn);
