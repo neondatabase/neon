@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Method;
-use http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
+use http::header::{
+    ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS, AUTHORIZATION, CONTENT_TYPE, HOST,
+    ORIGIN,
+};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use http_utils::error::ApiError;
@@ -728,14 +731,14 @@ fn get_allow_origin_header_value<'a>(
 ) -> Option<&'a str> {
     let origin_header = headers.get(ORIGIN);
     let origin = match origin_header {
-        Some(origin) => origin.to_str().unwrap_or("*"),
-        None => "*",
+        Some(origin) => origin.to_str().unwrap_or(""),
+        None => "",
     };
     let is_allowed = match (origin_header, allowed_origins) {
         (Some(_), Some(allowed_origins)) => allowed_origins.iter().any(|o| o == origin),
         (Some(_), None) => true,
         (None, Some(_)) => false,
-        (None, None) => true,
+        (None, None) => false,
     };
     if is_allowed { Some(origin) } else { None }
 }
@@ -745,14 +748,18 @@ fn cors_response(
     headers: &HeaderMap,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, RestError> {
     match origin {
-        Some(origin) => {
-            let allowed_headers = match headers.get("access-control-request-headers") {
-                Some(headers) => headers.to_str().unwrap_or("Authorization"),
-                None => "Authorization",
-            };
+        Some(o) => {
+            let allowed_headers = headers
+                .get(ACCESS_CONTROL_REQUEST_HEADERS)
+                .and_then(|a| a.to_str().ok())
+                .filter(|v| !v.is_empty())
+                .map_or_else(
+                    || "Authorization".to_string(),
+                    |v| format!("{v}, Authorization"),
+                );
             Response::builder()
                 .status(StatusCode::OK)
-                .header(ACCESS_CONTROL_ALLOW_ORIGIN, origin)
+                .header(ACCESS_CONTROL_ALLOW_ORIGIN, o)
                 .header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
                 .header("Access-Control-Max-Age", "86400")
                 .header("Access-Control-Expose-Headers", "Content-Encoding, Content-Location, Content-Range, Content-Type, Date, Location, Server, Transfer-Encoding, Range-Unit")
@@ -1237,7 +1244,7 @@ async fn handle_rest_inner(
     let mut response = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
         .header(CONTENT_TYPE, http_content_type)
-        .header(ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin.unwrap_or("*"));
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin.unwrap_or(""));
 
     // Add all headers from response_headers vector
     for (header_name, header_value) in response_headers {
