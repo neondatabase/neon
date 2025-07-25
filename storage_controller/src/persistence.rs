@@ -95,26 +95,26 @@ pub struct PersistenceConfig {
 }
 
 impl PersistenceConfig {
+    // If unspecified, use neon.com defaults
+    //
+    // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
+    // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
+    pub const MAX_CONNECTIONS_DEFAULT: u32 = 99;
+    // We don't want to keep a lot of connections alive: close them down promptly if they aren't being used.
+    pub const IDLE_CONNECTION_TIMEOUT_DEFAULT: Duration = Duration::from_secs(10);
+    pub const MAX_CONNECTION_LIFETIME_DEFAULT: Duration = Duration::from_secs(60);
+
     pub fn new(
         max_connections: Option<u32>,
         idle_connection_timeout: Option<Duration>,
         max_connection_lifetime: Option<Duration>,
     ) -> Self {
-        // If unspecified, use neon.com defaults
-        //
-        // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
-        // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
-        pub const MAX_CONNECTIONS_DEFAULT: u32 = 99;
-        // We don't want to keep a lot of connections alive: close them down promptly if they aren't being used.
-        pub const IDLE_CONNECTION_TIMEOUT_DEFAULT: Duration = Duration::from_secs(10);
-        pub const MAX_CONNECTION_LIFETIME_DEFAULT: Duration = Duration::from_secs(60);
-
         PersistenceConfig {
-            max_connections: max_connections.unwrap_or(MAX_CONNECTIONS_DEFAULT),
+            max_connections: max_connections.unwrap_or(Self::MAX_CONNECTIONS_DEFAULT),
             idle_connection_timeout: idle_connection_timeout
-                .unwrap_or(IDLE_CONNECTION_TIMEOUT_DEFAULT),
+                .unwrap_or(Self::IDLE_CONNECTION_TIMEOUT_DEFAULT),
             max_connection_lifetime: max_connection_lifetime
-                .unwrap_or(MAX_CONNECTION_LIFETIME_DEFAULT),
+                .unwrap_or(Self::MAX_CONNECTION_LIFETIME_DEFAULT),
         }
     }
 }
@@ -234,10 +234,6 @@ impl Persistence {
     // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
     // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
     pub const MAX_CONNECTIONS: u32 = 99;
-
-    // We don't want to keep a lot of connections alive: close them down promptly if they aren't being used.
-    const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
-    const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 
     pub async fn new(database_url: String, config: PersistenceConfig) -> Self {
         let mut mgr_config = ManagerConfig::default();
@@ -2198,6 +2194,7 @@ impl Persistence {
     ////////////////////////////////////////////////////////////////
 
     /// Upsert a SafeKeeper node.
+    #[allow(unused)]
     pub(crate) async fn upsert_sk_node(&self, sk_node: &SafeKeeperNode) -> DatabaseResult<()> {
         let sk_row = sk_node.to_database_row();
         self.with_measured_conn(DatabaseOperation::UpsertSafeKeeperNode, move |conn| {
@@ -2210,6 +2207,7 @@ impl Persistence {
 
     /// Load all Safe Keeper nodes and their scheduled endpoints from the database. This method is called at startup to
     /// populate the SafeKeeperScheduler.
+    #[allow(unused)]
     pub(crate) async fn load_safekeeper_scheduling_data(
         &self,
     ) -> DatabaseResult<HashMap<NodeId, SafeKeeperNode>> {
@@ -2232,6 +2230,7 @@ impl Persistence {
         Ok(sk_nodes)
     }
 
+    #[allow(unused)]
     pub(crate) async fn get_or_assign_safekeepers_to_timeline(
         &self,
         timeline_id: TimelineId,
@@ -2254,6 +2253,7 @@ impl Persistence {
         .await
     }
 
+    #[allow(unused)]
     pub(crate) async fn delete_hadron_timeline_safekeepers(
         &self,
         timeline_id: TimelineId,
@@ -2267,6 +2267,7 @@ impl Persistence {
         .await
     }
 
+    #[allow(unused)]
     pub(crate) async fn get_pageserver_and_safekeepers(
         &self,
         tenant_id: TenantId,
@@ -2284,6 +2285,7 @@ impl Persistence {
         .await
     }
 
+    #[allow(unused)]
     pub(crate) async fn list_hadron_safekeepers(&self) -> DatabaseResult<Vec<HadronSafekeeperRow>> {
         let safekeepers: Vec<HadronSafekeeperRow> = self
             .with_measured_conn(DatabaseOperation::ListNodes, move |conn| {
@@ -2303,6 +2305,7 @@ impl Persistence {
         Ok(safekeepers)
     }
 
+    #[allow(unused)]
     pub(crate) async fn safekeeper_list_timelines(
         &self,
         id: i64,

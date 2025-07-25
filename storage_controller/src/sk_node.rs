@@ -24,6 +24,7 @@ pub(crate) struct SafeKeeperNode {
 }
 
 impl SafeKeeperNode {
+    #[allow(unused)]
     pub(crate) fn new(
         id: NodeId,
         listen_http_addr: String,
@@ -42,6 +43,7 @@ impl SafeKeeperNode {
         }
     }
 
+    #[allow(unused)]
     pub(crate) fn to_database_row(&self) -> HadronSafekeeperRow {
         HadronSafekeeperRow {
             sk_node_id: self.id.0 as i64,

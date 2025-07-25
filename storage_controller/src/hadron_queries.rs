@@ -1,3 +1,5 @@
+#![allow(dead_code, unused)]
+
 use std::collections::{HashMap, HashSet};
 
 use diesel::Queryable;
