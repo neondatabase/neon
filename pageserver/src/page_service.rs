@@ -1377,7 +1377,7 @@ impl PageServerHandler {
                             (None, Some(this)) => *accum_applied_gc_cutoff_guard = Some(this),
                             (Some(_), None) => (),
                             (Some(accum), Some(this)) => {
-                                if **accum <= *this {
+                                if **accum > *this {
                                     *accum_applied_gc_cutoff_guard = Some(this);
                                 }
                             }
