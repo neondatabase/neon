@@ -2742,6 +2742,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
     wait_until(unevicted)
 
 
+@pytest.mark.skip(reason="Lakebase mode")
 def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
     """
     Test that the timeline disk usage circuit breaker works as expected. We test that:
