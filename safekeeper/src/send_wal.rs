@@ -55,6 +55,7 @@ pub struct WalSenders {
 
 pub struct WalSendersTimelineMetricValues {
     pub ps_feedback_counter: u64,
+    pub ps_corruption_detected: bool,
     pub last_ps_feedback: PageserverFeedback,
     pub interpreted_wal_reader_tasks: usize,
 }
@@ -193,6 +194,7 @@ impl WalSenders {
 
         WalSendersTimelineMetricValues {
             ps_feedback_counter: shared.ps_feedback_counter,
+            ps_corruption_detected: shared.ps_corruption_detected,
             last_ps_feedback: shared.last_ps_feedback,
             interpreted_wal_reader_tasks,
         }
@@ -209,6 +211,9 @@ impl WalSenders {
         *shared.get_slot_mut(id).get_mut_feedback() = ReplicationFeedback::Pageserver(*feedback);
         shared.last_ps_feedback = *feedback;
         shared.ps_feedback_counter += 1;
+        if feedback.corruption_detected {
+            shared.ps_corruption_detected = true;
+        }
         drop(shared);
 
         RECEIVED_PS_FEEDBACKS.inc();
@@ -278,6 +283,9 @@ struct WalSendersShared {
     last_ps_feedback: PageserverFeedback,
     // total counter of pageserver feedbacks received
     ps_feedback_counter: u64,
+    // Hadron: true iff we received a pageserver feedback that incidated
+    // data corruption in the timeline
+    ps_corruption_detected: bool,
     slots: Vec<Option<WalSenderState>>,
 }
 
@@ -328,6 +336,7 @@ impl WalSendersShared {
             agg_standby_feedback: StandbyFeedback::empty(),
             last_ps_feedback: PageserverFeedback::empty(),
             ps_feedback_counter: 0,
+            ps_corruption_detected: false,
             slots: Vec::new(),
         }
     }

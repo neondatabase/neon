@@ -839,6 +839,7 @@ impl Timeline {
 
         let WalSendersTimelineMetricValues {
             ps_feedback_counter,
+            ps_corruption_detected,
             last_ps_feedback,
             interpreted_wal_reader_tasks,
         } = self.walsenders.info_for_metrics();
@@ -847,6 +848,7 @@ impl Timeline {
         Some(FullTimelineInfo {
             ttid: self.ttid,
             ps_feedback_count: ps_feedback_counter,
+            ps_corruption_detected,
             last_ps_feedback,
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),

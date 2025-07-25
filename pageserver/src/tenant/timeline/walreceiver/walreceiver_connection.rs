@@ -365,6 +365,7 @@ pub(super) async fn handle_walreceiver_connection(
                                 critical_timeline!(
                                     timeline.tenant_shard_id,
                                     timeline.timeline_id,
+                                    Some(&timeline.corruption_detected),
                                     "{msg}"
                                 );
                                 return Err(WalReceiverError::Other(anyhow!(msg)));
@@ -382,6 +383,7 @@ pub(super) async fn handle_walreceiver_connection(
                                         critical_timeline!(
                                             timeline.tenant_shard_id,
                                             timeline.timeline_id,
+                                            Some(&timeline.corruption_detected),
                                             "{msg}"
                                         );
                                         return Err(WalReceiverError::Other(anyhow!(msg)));
@@ -455,6 +457,7 @@ pub(super) async fn handle_walreceiver_connection(
                                 critical_timeline!(
                                     timeline.tenant_shard_id,
                                     timeline.timeline_id,
+                                    Some(&timeline.corruption_detected),
                                     "{err:?}"
                                 );
                             }
@@ -586,6 +589,9 @@ pub(super) async fn handle_walreceiver_connection(
                 remote_consistent_lsn,
                 replytime: ts,
                 shard_number: timeline.tenant_shard_id.shard_number.0 as u32,
+                corruption_detected: timeline
+                    .corruption_detected
+                    .load(std::sync::atomic::Ordering::Relaxed),
             };
 
             debug!("neon_status_update {status_update:?}");
