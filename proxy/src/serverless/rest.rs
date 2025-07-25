@@ -4,12 +4,14 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Method;
-use http::header::{AUTHORIZATION, CONTENT_TYPE, HOST};
+use http::header::{
+    ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS, AUTHORIZATION, CONTENT_TYPE, HOST,
+};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Empty, Full};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
-use hyper::http::{HeaderName, HeaderValue};
+use hyper::http::{HeaderMap, HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use indexmap::IndexMap;
 use ouroboros::self_referencing;
@@ -65,6 +67,7 @@ use crate::util::deserialize_json_string;
 
 static EMPTY_JSON_SCHEMA: &str = r#"{"schemas":[]}"#;
 const INTROSPECTION_SQL: &str = POSTGRESQL_INTROSPECTION_SQL;
+const HEADER_VALUE_ALLOW_ALL_ORIGINS: HeaderValue = HeaderValue::from_static("*");
 
 // A wrapper around the DbSchema that allows for self-referencing
 #[self_referencing]
@@ -503,7 +506,7 @@ pub(crate) async fn handle(
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ApiError> {
     let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
-    let mut response = match result {
+    let response = match result {
         Ok(r) => {
             ctx.set_success();
 
@@ -612,9 +615,6 @@ pub(crate) async fn handle(
         }
     };
 
-    response
-        .headers_mut()
-        .insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
     Ok(response)
 }
 
@@ -694,6 +694,28 @@ async fn handle_inner(
     }
 }
 
+fn cors_response(
+    headers: &HeaderMap,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, http::Error> {
+    let allowed_headers = headers
+        .get(ACCESS_CONTROL_REQUEST_HEADERS)
+        .and_then(|a| a.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map_or_else(
+            || "Authorization".to_string(),
+            |v| format!("{v}, Authorization"),
+        );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, HEADER_VALUE_ALLOW_ALL_ORIGINS)
+        .header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+        .header("Access-Control-Max-Age", "86400")
+        .header("Access-Control-Expose-Headers", "Content-Encoding, Content-Location, Content-Range, Content-Type, Date, Location, Server, Transfer-Encoding, Range-Unit")
+        .header("Access-Control-Allow-Headers", allowed_headers)
+        .header("Allow", "OPTIONS, GET, POST, PATCH, PUT, DELETE")
+        .body(Empty::new().map_err(|x| match x {}).boxed())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_rest_inner(
     config: &'static ProxyConfig,
@@ -705,6 +727,15 @@ async fn handle_rest_inner(
     jwt: String,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, RestError> {
+    let (parts, originial_body) = request.into_parts();
+
+    if parts.method == Method::OPTIONS {
+        return cors_response(&parts.headers).map_err(|e| {
+            RestError::SubzeroCore(InternalError {
+                message: e.to_string(),
+            })
+        });
+    }
     // validate the jwt token
     let jwt_parsed = backend
         .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
@@ -728,8 +759,6 @@ async fn handle_rest_inner(
 
     let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
 
-    let (parts, originial_body) = request.into_parts();
-
     let auth_header = parts
         .headers
         .get(AUTHORIZATION)
@@ -748,6 +777,7 @@ async fn handle_rest_inner(
         )
         .await?;
     let (api_config, db_schema_owned) = entry.as_ref();
+
     let db_schema = db_schema_owned.borrow_schema();
 
     let db_schemas = &api_config.db_schemas; // list of schemas available for the api
@@ -1149,7 +1179,8 @@ async fn handle_rest_inner(
     // build the response
     let mut response = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
-        .header(CONTENT_TYPE, http_content_type);
+        .header(CONTENT_TYPE, http_content_type)
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, HEADER_VALUE_ALLOW_ALL_ORIGINS);
 
     // Add all headers from response_headers vector
     for (header_name, header_value) in response_headers {
