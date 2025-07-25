@@ -46,10 +46,10 @@ members = [
     "libs/proxy/json",
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
+    "libs/proxy/subzero_core",
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
     "pgxn/neon/communicator",
-    "proxy/subzero_core",
 ]
 
 [workspace.package]
