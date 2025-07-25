@@ -1,7 +1,5 @@
-use std::{
-    ops::{Deref, DerefMut},
-    time::{Duration, Instant},
-};
+use std::ops::{Deref, DerefMut};
+use std::time::{Duration, Instant};
 
 use moka::Expiry;
 
@@ -20,20 +18,16 @@ pub(crate) trait Cache {
     /// Entry's value.
     type Value;
 
-    /// Used for entry invalidation.
-    type LookupInfo<Key>;
-
     /// Invalidate an entry using a lookup info.
     /// We don't have an empty default impl because it's error-prone.
-    fn invalidate(&self, _: &Self::LookupInfo<Self::Key>);
+    fn invalidate(&self, _: &Self::Key);
 }
 
 impl<C: Cache> Cache for &C {
     type Key = C::Key;
     type Value = C::Value;
-    type LookupInfo<Key> = C::LookupInfo<Key>;
 
-    fn invalidate(&self, info: &Self::LookupInfo<Self::Key>) {
+    fn invalidate(&self, info: &Self::Key) {
         C::invalidate(self, info);
     }
 }
@@ -41,7 +35,7 @@ impl<C: Cache> Cache for &C {
 /// Wrapper for convenient entry invalidation.
 pub(crate) struct Cached<C: Cache, V = <C as Cache>::Value> {
     /// Cache + lookup info.
-    pub(crate) token: Option<(C, C::LookupInfo<C::Key>)>,
+    pub(crate) token: Option<(C, C::Key)>,
 
     /// The value itself.
     pub(crate) value: V,
@@ -51,23 +45,6 @@ impl<C: Cache, V> Cached<C, V> {
     /// Place any entry into this wrapper; invalidation will be a no-op.
     pub(crate) fn new_uncached(value: V) -> Self {
         Self { token: None, value }
-    }
-
-    pub(crate) fn take_value(self) -> (Cached<C, ()>, V) {
-        (
-            Cached {
-                token: self.token,
-                value: (),
-            },
-            self.value,
-        )
-    }
-
-    pub(crate) fn map<U>(self, f: impl FnOnce(V) -> U) -> Cached<C, U> {
-        Cached {
-            token: self.token,
-            value: f(self.value),
-        }
     }
 
     /// Drop this entry from a cache if it's still there.

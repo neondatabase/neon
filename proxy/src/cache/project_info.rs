@@ -215,12 +215,13 @@ impl ProjectInfoCache {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use super::*;
     use crate::control_plane::messages::{Details, EndpointRateLimitConfig, ErrorInfo, Status};
     use crate::control_plane::{AccessBlockerFlags, AuthSecret};
     use crate::scram::ServerSecret;
-    use std::sync::Arc;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {

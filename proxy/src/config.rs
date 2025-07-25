@@ -107,20 +107,23 @@ pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<RemoteStorageConfig> 
 #[derive(Debug)]
 pub struct CacheOptions {
     /// Max number of entries.
-    pub size: usize,
+    pub size: Option<u64>,
     /// Entry's time-to-live.
-    pub ttl: Duration,
+    pub absolute_ttl: Option<Duration>,
+    /// Entry's time-to-idle.
+    pub idle_ttl: Option<Duration>,
 }
 
 impl CacheOptions {
-    /// Default options for [`crate::control_plane::NodeInfoCache`].
-    pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,ttl=4m";
+    /// Default options for [`crate::cache::node_info::NodeInfoCache`].
+    pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,idle_ttl=4m";
 
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
     fn parse(options: &str) -> anyhow::Result<Self> {
         let mut size = None;
-        let mut ttl = None;
+        let mut absolute_ttl = None;
+        let mut idle_ttl = None;
 
         for option in options.split(',') {
             let (key, value) = option
@@ -129,20 +132,33 @@ impl CacheOptions {
 
             match key {
                 "size" => size = Some(value.parse()?),
-                "ttl" => ttl = Some(humantime::parse_duration(value)?),
+                "absolute_ttl" | "ttl" => absolute_ttl = Some(humantime::parse_duration(value)?),
+                "idle_ttl" | "tti" => idle_ttl = Some(humantime::parse_duration(value)?),
                 unknown => bail!("unknown key: {unknown}"),
             }
         }
 
-        // TTL doesn't matter if cache is always empty.
-        if let Some(0) = size {
-            ttl.get_or_insert(Duration::default());
-        }
-
         Ok(Self {
-            size: size.context("missing `size`")?,
-            ttl: ttl.context("missing `ttl`")?,
+            size,
+            absolute_ttl,
+            idle_ttl,
         })
+    }
+
+    pub fn moka<K, V, C>(
+        &self,
+        mut builder: moka::sync::CacheBuilder<K, V, C>,
+    ) -> moka::sync::CacheBuilder<K, V, C> {
+        if let Some(size) = self.size {
+            builder = builder.max_capacity(size);
+        }
+        if let Some(ttl) = self.absolute_ttl {
+            builder = builder.time_to_live(ttl);
+        }
+        if let Some(tti) = self.idle_ttl {
+            builder = builder.time_to_idle(tti);
+        }
+        builder
     }
 }
 
@@ -169,7 +185,7 @@ pub struct ProjectInfoCacheOptions {
 }
 
 impl ProjectInfoCacheOptions {
-    /// Default options for [`crate::control_plane::NodeInfoCache`].
+    /// Default options for [`crate::cache::project_info::ProjectInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
 
@@ -496,21 +512,37 @@ mod tests {
 
     #[test]
     fn test_parse_cache_options() -> anyhow::Result<()> {
-        let CacheOptions { size, ttl } = "size=4096,ttl=5min".parse()?;
-        assert_eq!(size, 4096);
-        assert_eq!(ttl, Duration::from_secs(5 * 60));
+        let CacheOptions {
+            size,
+            absolute_ttl,
+            idle_ttl: _,
+        } = "size=4096,ttl=5min".parse()?;
+        assert_eq!(size, Some(4096));
+        assert_eq!(absolute_ttl, Some(Duration::from_secs(5 * 60)));
 
-        let CacheOptions { size, ttl } = "ttl=4m,size=2".parse()?;
-        assert_eq!(size, 2);
-        assert_eq!(ttl, Duration::from_secs(4 * 60));
+        let CacheOptions {
+            size,
+            absolute_ttl,
+            idle_ttl: _,
+        } = "ttl=4m,size=2".parse()?;
+        assert_eq!(size, Some(2));
+        assert_eq!(absolute_ttl, Some(Duration::from_secs(4 * 60)));
 
-        let CacheOptions { size, ttl } = "size=0,ttl=1s".parse()?;
-        assert_eq!(size, 0);
-        assert_eq!(ttl, Duration::from_secs(1));
+        let CacheOptions {
+            size,
+            absolute_ttl,
+            idle_ttl: _,
+        } = "size=0,ttl=1s".parse()?;
+        assert_eq!(size, Some(0));
+        assert_eq!(absolute_ttl, Some(Duration::from_secs(1)));
 
-        let CacheOptions { size, ttl } = "size=0".parse()?;
-        assert_eq!(size, 0);
-        assert_eq!(ttl, Duration::default());
+        let CacheOptions {
+            size,
+            absolute_ttl,
+            idle_ttl: _,
+        } = "size=0".parse()?;
+        assert_eq!(size, Some(0));
+        assert_eq!(absolute_ttl, None);
 
         Ok(())
     }

@@ -12,6 +12,7 @@ use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use indexmap::IndexMap;
+use moka::sync::Cache;
 use ouroboros::self_referencing;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
@@ -53,7 +54,6 @@ use super::http_util::{
 };
 use super::json::JsonConversionError;
 use crate::auth::backend::ComputeCredentialKeys;
-use crate::cache::{Cached, TimedLru};
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
@@ -138,8 +138,15 @@ pub struct ApiConfig {
 }
 
 // The DbSchemaCache is a cache of the ApiConfig and DbSchemaOwned for each endpoint
-pub(crate) type DbSchemaCache = TimedLru<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>;
+pub(crate) struct DbSchemaCache(pub Cache<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>);
 impl DbSchemaCache {
+    pub fn new(config: crate::config::CacheOptions) -> Self {
+        let builder = Cache::builder().name("db_schema_cache");
+        let builder = config.moka(builder);
+
+        Self(builder.build())
+    }
+
     pub async fn get_cached_or_remote(
         &self,
         endpoint_id: &EndpointCacheKey,
@@ -149,8 +156,8 @@ impl DbSchemaCache {
         ctx: &RequestContext,
         config: &'static ProxyConfig,
     ) -> Result<Arc<(ApiConfig, DbSchemaOwned)>, RestError> {
-        match self.get(endpoint_id) {
-            Some(Cached { value: v, .. }) => Ok(v),
+        match self.0.get(endpoint_id) {
+            Some(v) => Ok(v),
             None => {
                 info!("db_schema cache miss for endpoint: {:?}", endpoint_id);
                 let remote_value = self
@@ -173,7 +180,7 @@ impl DbSchemaCache {
                             db_extra_search_path: None,
                         };
                         let value = Arc::new((api_config, schema_owned));
-                        self.insert(endpoint_id.clone(), value);
+                        self.0.insert(endpoint_id.clone(), value);
                         return Err(e);
                     }
                     Err(e) => {
@@ -181,7 +188,7 @@ impl DbSchemaCache {
                     }
                 };
                 let value = Arc::new((api_config, schema_owned));
-                self.insert(endpoint_id.clone(), value.clone());
+                self.0.insert(endpoint_id.clone(), value.clone());
                 Ok(value)
             }
         }

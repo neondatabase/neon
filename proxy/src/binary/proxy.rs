@@ -538,7 +538,7 @@ pub async fn run() -> anyhow::Result<()> {
         maintenance_tasks.spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(600)).await;
-                db_schema_cache.flush();
+                db_schema_cache.0.run_pending_tasks();
             }
         });
     }
@@ -711,12 +711,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         info!("Using DbSchemaCache with options={db_schema_cache_config:?}");
 
         let db_schema_cache = if args.is_rest_broker {
-            Some(DbSchemaCache::new(
-                "db_schema_cache",
-                db_schema_cache_config.size,
-                db_schema_cache_config.ttl,
-                true,
-            ))
+            Some(DbSchemaCache::new(db_schema_cache_config))
         } else {
             None
         };

@@ -13,10 +13,11 @@ use tracing::{debug, info};
 use super::{EndpointAccessControl, RoleAccessControl};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
+use crate::cache::node_info::{CachedNodeInfo, NodeInfoCache};
 use crate::cache::project_info::ProjectInfoCache;
 use crate::config::{CacheOptions, ProjectInfoCacheOptions};
 use crate::context::RequestContext;
-use crate::control_plane::{CachedNodeInfo, ControlPlaneApi, NodeInfoCache, errors};
+use crate::control_plane::{ControlPlaneApi, errors};
 use crate::error::ReportableError;
 use crate::metrics::ApiLockMetrics;
 use crate::rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token};
@@ -128,12 +129,7 @@ impl ApiCaches {
         project_info_cache_config: ProjectInfoCacheOptions,
     ) -> Self {
         Self {
-            node_info: NodeInfoCache::new(
-                "node_info_cache",
-                wake_compute_cache_config.size,
-                wake_compute_cache_config.ttl,
-                true,
-            ),
+            node_info: NodeInfoCache::new(wake_compute_cache_config),
             project_info: Arc::new(ProjectInfoCache::new(project_info_cache_config)),
         }
     }
