@@ -674,7 +674,7 @@ impl IntegratedCacheWriteAccess {
 				}
 				// Try and evict everything in to-be-shrinked space
 				// TODO(quantumish): consider moving things ahead of clock hand?
-				let mut successful_evictions = 0;
+				let mut file_evictions = 0;
 				for i in num_blocks..old_num_blocks {
 					let Some(entry) = block_map.entry_at_bucket(i as usize) else {
 						continue;
@@ -693,9 +693,11 @@ impl IntegratedCacheWriteAccess {
 					let cache_block = old.cache_block.swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
 					entry.remove();
 					
-					file_cache.delete_block(cache_block);
+					if cache_block != INVALID_CACHE_BLOCK {
+						file_cache.delete_block(cache_block);
+						file_evictions += 1;
+					}
 					
-					successful_evictions += 1;
 					// TODO(quantumish): is this expected behavior?
 					page_evictions.inc();
 				}
@@ -704,10 +706,12 @@ impl IntegratedCacheWriteAccess {
 				// an immediate-ish change in the file size, so we evict other entries to reclaim
 				// enough space. Waiting for stragglers at the end of the map could *in theory*
 				// take indefinite amounts of time depending on how long they stay pinned.
-				while successful_evictions < difference {
+				while file_evictions < difference {
 					if let Some(i) = self.try_evict_one_cache_block() {
-						file_cache.delete_block(i);
-						successful_evictions += 1;
+						if i != INVALID_CACHE_BLOCK {
+							file_cache.delete_block(i);
+							file_evictions += 1;
+						}
 					}
 				}
 
@@ -732,8 +736,10 @@ impl IntegratedCacheWriteAccess {
 						_ = global_lw_lsn.fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
 						let cache_block = old.cache_block.swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
 						entry.remove();
-						
-						file_cache.delete_block(cache_block);
+
+						if cache_block != INVALID_CACHE_BLOCK {
+							file_cache.delete_block(cache_block);
+						}
 						
 						// TODO(quantumish): is this expected behavior?
 						page_evictions.inc();
