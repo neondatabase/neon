@@ -137,12 +137,13 @@ pub fn get_config_from_control_plane(base_uri: &str, compute_id: &str) -> Result
 /// Check `pg_hba.conf` and update if needed to allow external connections.
 pub fn update_pg_hba(pgdata_path: &Path, databricks_pg_hba: Option<&String>) -> Result<()> {
     // XXX: consider making it a part of config.json
+    info!("checking pg_hba.conf");
     let pghba_path = pgdata_path.join("pg_hba.conf");
 
     // Update pg_hba to contains databricks specfic settings before adding neon settings
     // PG uses the first record that matches to perform authentication, so we need to have
     // our rules before the default ones from neon.
-    // See https://www.postgresql.org/docs/16/auth-pg-hba-conf.html
+    // See https://www.postgresql.org/docs/current/auth-pg-hba-conf.html
     if let Some(databricks_pg_hba) = databricks_pg_hba {
         if config::line_in_file(
             &pghba_path,
