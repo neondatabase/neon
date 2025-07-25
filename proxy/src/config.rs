@@ -115,7 +115,7 @@ pub struct CacheOptions {
 }
 
 impl CacheOptions {
-    /// Default options for [`crate::control_plane::NodeInfoCache`].
+    /// Default options for [`crate::cache::node_info::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,idle_ttl=4m";
 
     /// Parse cache options passed via cmdline.
@@ -185,7 +185,7 @@ pub struct ProjectInfoCacheOptions {
 }
 
 impl ProjectInfoCacheOptions {
-    /// Default options for [`crate::control_plane::NodeInfoCache`].
+    /// Default options for [`crate::cache::project_info::ProjectInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
 
