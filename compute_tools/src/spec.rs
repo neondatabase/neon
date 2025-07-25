@@ -137,7 +137,6 @@ pub fn get_config_from_control_plane(base_uri: &str, compute_id: &str) -> Result
 /// Check `pg_hba.conf` and update if needed to allow external connections.
 pub fn update_pg_hba(pgdata_path: &Path, databricks_pg_hba: Option<&String>) -> Result<()> {
     // XXX: consider making it a part of config.json
-    info!("checking pg_hba.conf");
     let pghba_path = pgdata_path.join("pg_hba.conf");
 
     // Update pg_hba to contains databricks specfic settings before adding neon settings
