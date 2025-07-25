@@ -843,12 +843,11 @@ fn start_pageserver(
         },
     );
 
-    // Spawn a Pageserver gRPC server task. It will spawn separate tasks for
-    // each stream/request.
+    // Spawn a Pageserver gRPC server task. It will spawn separate tasks for each request/stream.
+    // It uses a separate compute request Tokio runtime (COMPUTE_REQUEST_RUNTIME).
     //
-    // TODO: this uses a separate Tokio runtime for the page service. If we want
-    // other gRPC services, they will need their own port and runtime. Is this
-    // necessary?
+    // NB: this port is exposed to computes. It should only provide services that we're okay with
+    // computes accessing. Internal services should use a separate port.
     let mut page_service_grpc = None;
     if let Some(grpc_listener) = grpc_listener {
         page_service_grpc = Some(GrpcPageServiceHandler::spawn(
