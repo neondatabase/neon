@@ -716,7 +716,7 @@ fn start_pageserver(
                 disk_usage_eviction_state,
                 deletion_queue.new_client(),
                 secondary_controller,
-                feature_resolver,
+                feature_resolver.clone(),
             )
             .context("Failed to initialize router state")?,
         );
@@ -842,6 +842,7 @@ fn start_pageserver(
         } else {
             None
         },
+        feature_resolver.clone(),
     );
 
     // Spawn a Pageserver gRPC server task. It will spawn separate tasks for
