@@ -52,7 +52,7 @@ pub(crate) fn regenerate(
     };
 
     // Express a static value for how many shards we may schedule on one node
-    const MAX_SHARDS: u32 = 5000;
+    const MAX_SHARDS: u32 = 2500;
 
     let mut doc = PageserverUtilization {
         disk_usage_bytes: used,
