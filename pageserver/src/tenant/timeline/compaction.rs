@@ -141,12 +141,12 @@ pub struct GcCompactionMetaStatistics {
 impl GcCompactionMetaStatistics {
     fn finalize(&mut self) {
         let end_time = chrono::Utc::now();
-        if let Some(start_time) = self.start_time {
-            if end_time > start_time {
-                let delta = end_time - start_time;
-                if let Ok(std_dur) = delta.to_std() {
-                    self.duration_secs = std_dur.as_secs_f64();
-                }
+        if let Some(start_time) = self.start_time
+            && end_time > start_time
+        {
+            let delta = end_time - start_time;
+            if let Ok(std_dur) = delta.to_std() {
+                self.duration_secs = std_dur.as_secs_f64();
             }
         }
         self.retention_ratio = self.after_compaction_layer_size as f64
@@ -437,20 +437,19 @@ impl GcCompactionQueue {
     fn notify_and_unblock(&self, id: GcCompactionJobId) {
         info!("compaction job id={} finished", id);
         let mut guard = self.inner.lock().unwrap();
-        if let Some(items) = guard.guards.remove(&id) {
-            if let Some(tx) = items.notify {
-                let _ = tx.send(());
-            }
+        if let Some(items) = guard.guards.remove(&id)
+            && let Some(tx) = items.notify
+        {
+            let _ = tx.send(());
         }
-        if let Some(ref meta_statistics) = guard.meta_statistics {
-            if meta_statistics.meta_job_id == id {
-                if let Ok(stats) = serde_json::to_string(&meta_statistics) {
-                    info!(
-                        "gc-compaction meta statistics for job id = {}: {}",
-                        id, stats
-                    );
-                }
-            }
+        if let Some(ref meta_statistics) = guard.meta_statistics
+            && meta_statistics.meta_job_id == id
+            && let Ok(stats) = serde_json::to_string(&meta_statistics)
+        {
+            info!(
+                "gc-compaction meta statistics for job id = {}: {}",
+                id, stats
+            );
         }
     }
 
@@ -2698,20 +2697,20 @@ impl Timeline {
             let mut prev_lsn = None;
             let mut new_split_for_lsn = Vec::with_capacity(split_for_lsn.len());
             for record @ (_, lsn, _) in std::mem::take(split_for_lsn) {
-                if let Some(prev_lsn) = &prev_lsn {
-                    if *prev_lsn == lsn {
-                        // The case that we have an LSN with both data from the delta layer and the image layer. As
-                        // `ValueWrapper` ensures that an image is ordered before a delta at the same LSN, we simply
-                        // drop this delta and keep the image.
-                        //
-                        // For example, we have delta layer key1@0x10, key1@0x20, and image layer key1@0x10, we will
-                        // keep the image for key1@0x10 and the delta for key1@0x20. key1@0x10 delta will be simply
-                        // dropped.
-                        //
-                        // TODO: in case we have both delta + images for a given LSN and it does not exceed the delta
-                        // threshold, we could have kept delta instead to save space. This is an optimization for the future.
-                        continue;
-                    }
+                if let Some(prev_lsn) = &prev_lsn
+                    && *prev_lsn == lsn
+                {
+                    // The case that we have an LSN with both data from the delta layer and the image layer. As
+                    // `ValueWrapper` ensures that an image is ordered before a delta at the same LSN, we simply
+                    // drop this delta and keep the image.
+                    //
+                    // For example, we have delta layer key1@0x10, key1@0x20, and image layer key1@0x10, we will
+                    // keep the image for key1@0x10 and the delta for key1@0x20. key1@0x10 delta will be simply
+                    // dropped.
+                    //
+                    // TODO: in case we have both delta + images for a given LSN and it does not exceed the delta
+                    // threshold, we could have kept delta instead to save space. This is an optimization for the future.
+                    continue;
                 }
                 prev_lsn = Some(lsn);
                 new_split_for_lsn.push(record);
@@ -3789,8 +3788,7 @@ impl Timeline {
                         accumulated_values.len()
                     )));
                 }
-            } else {
-                let last_key: &mut Key = last_key.as_mut().unwrap();
+            } else if let Some(last_key) = last_key.as_mut() {
                 stat.on_unique_key_visited(); // TODO: adjust statistics for partial compaction
                 let retention = self
                     .generate_key_retention(

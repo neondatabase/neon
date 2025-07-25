@@ -347,10 +347,10 @@ impl StorageController {
 
     pub async fn start(&self, start_args: NeonStorageControllerStartArgs) -> anyhow::Result<()> {
         let instance_dir = self.storage_controller_instance_dir(start_args.instance_id);
-        if let Err(err) = tokio::fs::create_dir(&instance_dir).await {
-            if err.kind() != std::io::ErrorKind::AlreadyExists {
-                panic!("Failed to create instance dir {instance_dir:?}");
-            }
+        if let Err(err) = tokio::fs::create_dir(&instance_dir).await
+            && err.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            panic!("Failed to create instance dir {instance_dir:?}");
         }
 
         if self.env.generate_local_ssl_certs {

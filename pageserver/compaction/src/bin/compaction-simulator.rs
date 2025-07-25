@@ -60,8 +60,8 @@ async fn simulate(cmd: &SimulateCmd, results_path: &Path) -> anyhow::Result<()> 
     );
 
     // helper function to print progress indicator
-    let print_progress = |i| -> anyhow::Result<()> {
-        if i == 0 || (i + 1) % 10000 == 0 || i == cmd.num_records - 1 {
+    let print_progress = |i: u64| -> anyhow::Result<()> {
+        if i == 0 || (i + 1).is_multiple_of(10000) || i == cmd.num_records - 1 {
             print!(
                 "\ringested {} / {} records, {} MiB / {} MiB...",
                 i + 1,

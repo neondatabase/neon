@@ -410,17 +410,15 @@ pub async fn scan_pageserver_metadata_cmd(
                 println!("{}", summary.summary_string());
             }
 
-            if post_to_storcon {
-                if let Some(client) = controller_client {
-                    let body = summary.build_health_update_request();
-                    client
-                        .dispatch::<MetadataHealthUpdateRequest, MetadataHealthUpdateResponse>(
-                            Method::POST,
-                            "control/v1/metadata_health/update".to_string(),
-                            Some(body),
-                        )
-                        .await?;
-                }
+            if post_to_storcon && let Some(client) = controller_client {
+                let body = summary.build_health_update_request();
+                client
+                    .dispatch::<MetadataHealthUpdateRequest, MetadataHealthUpdateResponse>(
+                        Method::POST,
+                        "control/v1/metadata_health/update".to_string(),
+                        Some(body),
+                    )
+                    .await?;
             }
 
             if summary.is_fatal() {

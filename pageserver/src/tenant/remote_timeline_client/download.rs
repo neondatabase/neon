@@ -652,10 +652,10 @@ pub(crate) async fn download_initdb_tar_zst(
     .inspect_err(|_e| {
         // Do a best-effort attempt at deleting the temporary file upon encountering an error.
         // We don't have async here nor do we want to pile on any extra errors.
-        if let Err(e) = std::fs::remove_file(&temp_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                warn!("error deleting temporary file {temp_path}: {e}");
-            }
+        if let Err(e) = std::fs::remove_file(&temp_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("error deleting temporary file {temp_path}: {e}");
         }
     })?;
 

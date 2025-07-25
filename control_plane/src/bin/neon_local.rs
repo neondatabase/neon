@@ -979,10 +979,10 @@ fn print_timeline(
         i += 1;
 
         // Mark that the last padding is the end of the timeline
-        if i == len {
-            if let Some(last) = is_last_new.last_mut() {
-                *last = true;
-            }
+        if i == len
+            && let Some(last) = is_last_new.last_mut()
+        {
+            *last = true;
         }
 
         print_timeline(

@@ -295,20 +295,20 @@ async fn main() -> anyhow::Result<()> {
 
     // I failed to modify opt_pathbuf_parser to return Option<PathBuf> in
     // reasonable time, so turn empty string into option post factum.
-    if let Some(pb) = &args.pg_auth_public_key_path {
-        if pb.as_os_str().is_empty() {
-            args.pg_auth_public_key_path = None;
-        }
+    if let Some(pb) = &args.pg_auth_public_key_path
+        && pb.as_os_str().is_empty()
+    {
+        args.pg_auth_public_key_path = None;
     }
-    if let Some(pb) = &args.pg_tenant_only_auth_public_key_path {
-        if pb.as_os_str().is_empty() {
-            args.pg_tenant_only_auth_public_key_path = None;
-        }
+    if let Some(pb) = &args.pg_tenant_only_auth_public_key_path
+        && pb.as_os_str().is_empty()
+    {
+        args.pg_tenant_only_auth_public_key_path = None;
     }
-    if let Some(pb) = &args.http_auth_public_key_path {
-        if pb.as_os_str().is_empty() {
-            args.http_auth_public_key_path = None;
-        }
+    if let Some(pb) = &args.http_auth_public_key_path
+        && pb.as_os_str().is_empty()
+    {
+        args.http_auth_public_key_path = None;
     }
 
     if let Some(addr) = args.dump_control_file {
@@ -796,14 +796,14 @@ fn set_id(workdir: &Utf8Path, given_id: Option<NodeId>) -> Result<NodeId> {
                     .parse()
                     .context("failed to parse safekeeper id")?,
             );
-            if let Some(given_id) = given_id {
-                if given_id != my_id {
-                    bail!(
-                        "safekeeper already initialized with id {}, can't set {}",
-                        my_id,
-                        given_id
-                    );
-                }
+            if let Some(given_id) = given_id
+                && given_id != my_id
+            {
+                bail!(
+                    "safekeeper already initialized with id {}, can't set {}",
+                    my_id,
+                    given_id
+                );
             }
             info!("safekeeper ID {}", my_id);
         }

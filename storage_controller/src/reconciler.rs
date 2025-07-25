@@ -331,10 +331,10 @@ impl Reconciler {
     }
 
     fn get_node(&self, node_id: &NodeId) -> Option<&Node> {
-        if let Some(node) = self.intent.attached.as_ref() {
-            if node.get_id() == *node_id {
-                return Some(node);
-            }
+        if let Some(node) = self.intent.attached.as_ref()
+            && node.get_id() == *node_id
+        {
+            return Some(node);
         }
 
         if let Some(node) = self
@@ -386,16 +386,16 @@ impl Reconciler {
 
         let mut origin = None;
         for (node_id, state) in &self.observed.locations {
-            if let Some(observed_conf) = &state.conf {
-                if observed_conf.mode == LocationConfigMode::AttachedSingle {
-                    // We will only attempt live migration if the origin is not offline: this
-                    // avoids trying to do it while reconciling after responding to an HA failover.
-                    if let Some(node) = self.get_node(node_id) {
-                        if node.is_available() {
-                            origin = Some(node.clone());
-                            break;
-                        }
-                    }
+            if let Some(observed_conf) = &state.conf
+                && observed_conf.mode == LocationConfigMode::AttachedSingle
+            {
+                // We will only attempt live migration if the origin is not offline: this
+                // avoids trying to do it while reconciling after responding to an HA failover.
+                if let Some(node) = self.get_node(node_id)
+                    && node.is_available()
+                {
+                    origin = Some(node.clone());
+                    break;
                 }
             }
         }
@@ -667,14 +667,13 @@ impl Reconciler {
         let baseline_lsns = Some(self.get_lsns(self.tenant_shard_id, &origin_ps).await?);
 
         // If we are migrating to a destination that has a secondary location, warm it up first
-        if let Some(destination_conf) = self.observed.locations.get(&dest_ps.get_id()) {
-            if let Some(destination_conf) = &destination_conf.conf {
-                if destination_conf.mode == LocationConfigMode::Secondary {
-                    tracing::info!("🔁 Downloading latest layers to destination node {dest_ps}",);
-                    self.secondary_download(self.tenant_shard_id, &dest_ps)
-                        .await?;
-                }
-            }
+        if let Some(destination_conf) = self.observed.locations.get(&dest_ps.get_id())
+            && let Some(destination_conf) = &destination_conf.conf
+            && destination_conf.mode == LocationConfigMode::Secondary
+        {
+            tracing::info!("🔁 Downloading latest layers to destination node {dest_ps}",);
+            self.secondary_download(self.tenant_shard_id, &dest_ps)
+                .await?;
         }
 
         pausable_failpoint!("reconciler-live-migrate-pre-generation-inc");

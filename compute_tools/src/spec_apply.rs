@@ -1030,13 +1030,13 @@ async fn get_operations<'a>(
         // Interestingly, we only install p_s_s in the main database, even when
         // it's preloaded.
         ApplySpecPhase::HandleOtherExtensions => {
-            if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
-                if libs.contains("pg_stat_statements") {
-                    return Ok(Box::new(once(Operation {
-                        query: String::from("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"),
-                        comment: Some(String::from("create system extensions")),
-                    })));
-                }
+            if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries")
+                && libs.contains("pg_stat_statements")
+            {
+                return Ok(Box::new(once(Operation {
+                    query: String::from("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"),
+                    comment: Some(String::from("create system extensions")),
+                })));
             }
             Ok(Box::new(empty()))
         }

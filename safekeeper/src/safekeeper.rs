@@ -1206,16 +1206,16 @@ where
             // Here we learn initial LSN for the first time, set fields
             // interested in that.
 
-            if let Some(start_lsn) = msg.term_history.0.first() {
-                if state.timeline_start_lsn == Lsn(0) {
-                    // Remember point where WAL begins globally. In the future it
-                    // will be intialized immediately on timeline creation.
-                    state.timeline_start_lsn = start_lsn.lsn;
-                    info!(
-                        "setting timeline_start_lsn to {:?}",
-                        state.timeline_start_lsn
-                    );
-                }
+            if let Some(start_lsn) = msg.term_history.0.first()
+                && state.timeline_start_lsn == Lsn(0)
+            {
+                // Remember point where WAL begins globally. In the future it
+                // will be intialized immediately on timeline creation.
+                state.timeline_start_lsn = start_lsn.lsn;
+                info!(
+                    "setting timeline_start_lsn to {:?}",
+                    state.timeline_start_lsn
+                );
             }
 
             if state.peer_horizon_lsn == Lsn(0) {

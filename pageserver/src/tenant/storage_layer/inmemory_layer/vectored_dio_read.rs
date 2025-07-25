@@ -78,8 +78,8 @@ const DIO_CHUNK_SIZE: usize = 512;
 /// If multiple chunks need to be read, merge adjacent chunk reads into batches of max size `MAX_CHUNK_BATCH_SIZE`.
 /// (The unit is the number of chunks.)
 const MAX_CHUNK_BATCH_SIZE: usize = {
-    let desired = 128 * 1024; // 128k
-    if desired % DIO_CHUNK_SIZE != 0 {
+    let desired: usize = 128 * 1024; // 128k
+    if !desired.is_multiple_of(DIO_CHUNK_SIZE) {
         panic!("MAX_CHUNK_BATCH_SIZE must be a multiple of DIO_CHUNK_SIZE")
         // compile-time error
     }
@@ -182,10 +182,10 @@ where
         let mut last_chunk_no = None;
         let to_merge: Vec<(u64, Vec<Interest<B>>)> = by_chunk
             .peeking_take_while(|(chunk_no, _)| {
-                if let Some(last_chunk_no) = last_chunk_no {
-                    if *chunk_no != last_chunk_no + 1 {
-                        return false;
-                    }
+                if let Some(last_chunk_no) = last_chunk_no
+                    && *chunk_no != last_chunk_no + 1
+                {
+                    return false;
                 }
                 last_chunk_no = Some(*chunk_no);
                 true

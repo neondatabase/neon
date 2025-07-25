@@ -72,10 +72,10 @@ impl Server {
             if err.is_incomplete_message() || err.is_closed() || err.is_timeout() {
                 return true;
             }
-            if let Some(inner) = err.source() {
-                if let Some(io) = inner.downcast_ref::<std::io::Error>() {
-                    return suppress_io_error(io);
-                }
+            if let Some(inner) = err.source()
+                && let Some(io) = inner.downcast_ref::<std::io::Error>()
+            {
+                return suppress_io_error(io);
             }
             false
         }

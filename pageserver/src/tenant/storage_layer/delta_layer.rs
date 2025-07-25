@@ -1520,7 +1520,7 @@ impl<T: AsRef<DeltaLayerInner>> Adapter<T> {
         &self,
         blknum: u32,
         ctx: &RequestContext,
-    ) -> Result<BlockLease, std::io::Error> {
+    ) -> Result<BlockLease<'_>, std::io::Error> {
         let block_reader = FileBlockReader::new(&self.0.as_ref().file, self.0.as_ref().file_id);
         block_reader.read_blk(blknum, ctx).await
     }

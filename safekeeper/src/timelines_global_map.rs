@@ -450,10 +450,10 @@ impl GlobalTimelines {
         // Now it is safe to move the timeline directory to the correct
         // location. First, create tenant directory. Ignore error if it already
         // exists.
-        if let Err(e) = tokio::fs::create_dir(&tenant_path).await {
-            if e.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(e.into());
-            }
+        if let Err(e) = tokio::fs::create_dir(&tenant_path).await
+            && e.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(e.into());
         }
         // fsync it
         fsync_async_opt(&tenant_path, !conf.no_sync).await?;
@@ -733,13 +733,13 @@ pub async fn validate_temp_timeline(
         bail!("wal_seg_size is not set");
     }
 
-    if let Some(generation) = generation {
-        if control_store.mconf.generation > generation {
-            bail!(
-                "tmp timeline generation {} is higher than expected {generation}",
-                control_store.mconf.generation
-            );
-        }
+    if let Some(generation) = generation
+        && control_store.mconf.generation > generation
+    {
+        bail!(
+            "tmp timeline generation {} is higher than expected {generation}",
+            control_store.mconf.generation
+        );
     }
 
     let wal_store = wal_storage::PhysicalStorage::new(&ttid, path, &control_store, conf.no_sync)?;

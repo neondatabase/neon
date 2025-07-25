@@ -60,9 +60,6 @@ pub(crate) async fn wake_compute<B: WakeComputeBackend>(
                     },
                     (*num_retries).into(),
                 );
-                // TODO: is this necessary? We have a metric.
-                // TODO: this log line is misleading as "wake_compute" might return cached (and stale) info.
-                info!(?num_retries, "compute node woken up after");
                 return Ok(n);
             }
         }

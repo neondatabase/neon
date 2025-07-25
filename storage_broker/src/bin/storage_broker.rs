@@ -426,14 +426,14 @@ impl Registry {
 
         // send message to per timeline subscribers, if there is ttid
         let ttid = msg.tenant_timeline_id()?;
-        if let Some(ttid) = ttid {
-            if let Some(subs) = shared_state.chans_to_timeline_subs.get(&ttid) {
-                // Err can't happen here, as tx is destroyed only after removing
-                // from the map the last subscriber along with tx.
-                subs.chan
-                    .send(msg.clone())
-                    .expect("rx is still in the map with zero subscribers");
-            }
+        if let Some(ttid) = ttid
+            && let Some(subs) = shared_state.chans_to_timeline_subs.get(&ttid)
+        {
+            // Err can't happen here, as tx is destroyed only after removing
+            // from the map the last subscriber along with tx.
+            subs.chan
+                .send(msg.clone())
+                .expect("rx is still in the map with zero subscribers");
         }
         Ok(())
     }

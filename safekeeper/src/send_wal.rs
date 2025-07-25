@@ -101,25 +101,24 @@ impl WalSenders {
 
         let mut selected_interpreted_reader = None;
         for slot in state.slots.iter().flatten() {
-            if let WalSenderState::Interpreted(slot_state) = slot {
-                if let Some(ref interpreted_reader) = slot_state.interpreted_wal_reader {
-                    let select = match (interpreted_reader.current_position(), max_delta_for_fanout)
-                    {
-                        (Some(pos), Some(max_delta)) => {
-                            let delta = pos.0.abs_diff(start_pos.0);
-                            delta <= max_delta
-                        }
-                        // Reader is not active
-                        (None, _) => false,
-                        // Gating fanout by max delta is disabled.
-                        // Attach to any active reader.
-                        (_, None) => true,
-                    };
-
-                    if select {
-                        selected_interpreted_reader = Some(interpreted_reader.clone());
-                        break;
+            if let WalSenderState::Interpreted(slot_state) = slot
+                && let Some(ref interpreted_reader) = slot_state.interpreted_wal_reader
+            {
+                let select = match (interpreted_reader.current_position(), max_delta_for_fanout) {
+                    (Some(pos), Some(max_delta)) => {
+                        let delta = pos.0.abs_diff(start_pos.0);
+                        delta <= max_delta
                     }
+                    // Reader is not active
+                    (None, _) => false,
+                    // Gating fanout by max delta is disabled.
+                    // Attach to any active reader.
+                    (_, None) => true,
+                };
+
+                if select {
+                    selected_interpreted_reader = Some(interpreted_reader.clone());
+                    break;
                 }
             }
         }
@@ -737,10 +736,10 @@ impl EndWatch {
             }
             if let EndWatch::Flush(rx) = &self {
                 let curr_term = rx.borrow().term;
-                if let Some(client_term) = client_term {
-                    if curr_term != client_term {
-                        bail!("term changed: requested {}, now {}", client_term, curr_term);
-                    }
+                if let Some(client_term) = client_term
+                    && curr_term != client_term
+                {
+                    bail!("term changed: requested {}, now {}", client_term, curr_term);
                 }
             }
             self.changed().await?;
@@ -853,10 +852,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             });
             self.pgb.write_message(&msg).await?;
 
-            if let Some(appname) = &self.appname {
-                if appname == "replica" {
-                    failpoint_support::sleep_millis_async!("sk-send-wal-replica-sleep");
-                }
+            if let Some(appname) = &self.appname
+                && appname == "replica"
+            {
+                failpoint_support::sleep_millis_async!("sk-send-wal-replica-sleep");
             }
             trace!(
                 "sent {} bytes of WAL {}-{}",
@@ -897,23 +896,21 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             // Timed out waiting for WAL, check for termination and send KA.
             // Check for termination only if we are streaming up to commit_lsn
             // (to pageserver).
-            if let EndWatch::Commit(_) = self.end_watch {
-                if let Some(remote_consistent_lsn) = self
+            if let EndWatch::Commit(_) = self.end_watch
+                && let Some(remote_consistent_lsn) = self
                     .ws_guard
                     .walsenders
                     .get_ws_remote_consistent_lsn(self.ws_guard.id)
-                {
-                    if self.tli.should_walsender_stop(remote_consistent_lsn).await {
-                        // Terminate if there is nothing more to send.
-                        // Note that "ending streaming" part of the string is used by
-                        // pageserver to identify WalReceiverError::SuccessfulCompletion,
-                        // do not change this string without updating pageserver.
-                        return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
-                            "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
-                            self.appname, self.start_pos,
-                        )));
-                    }
-                }
+                && self.tli.should_walsender_stop(remote_consistent_lsn).await
+            {
+                // Terminate if there is nothing more to send.
+                // Note that "ending streaming" part of the string is used by
+                // pageserver to identify WalReceiverError::SuccessfulCompletion,
+                // do not change this string without updating pageserver.
+                return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
+                    "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
+                    self.appname, self.start_pos,
+                )));
             }
 
             let msg = BeMessage::KeepAlive(WalSndKeepAlive {
@@ -953,10 +950,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 }
                 if let EndWatch::Flush(rx) = &self.end_watch {
                     let curr_term = rx.borrow().term;
-                    if let Some(client_term) = self.term {
-                        if curr_term != client_term {
-                            bail!("term changed: requested {}, now {}", client_term, curr_term);
-                        }
+                    if let Some(client_term) = self.term
+                        && curr_term != client_term
+                    {
+                        bail!("term changed: requested {}, now {}", client_term, curr_term);
                     }
                 }
                 self.end_watch.changed().await?;

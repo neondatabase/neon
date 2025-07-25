@@ -643,7 +643,7 @@ impl Default for RowDescriptor<'_> {
 
 impl RowDescriptor<'_> {
     /// Convenience function to create a RowDescriptor message for an int8 column
-    pub const fn int8_col(name: &[u8]) -> RowDescriptor {
+    pub const fn int8_col(name: &[u8]) -> RowDescriptor<'_> {
         RowDescriptor {
             name,
             tableoid: 0,
@@ -655,7 +655,7 @@ impl RowDescriptor<'_> {
         }
     }
 
-    pub const fn text_col(name: &[u8]) -> RowDescriptor {
+    pub const fn text_col(name: &[u8]) -> RowDescriptor<'_> {
         RowDescriptor {
             name,
             tableoid: 0,

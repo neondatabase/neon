@@ -399,7 +399,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
     /// to it in CopyData messages, and writes them to the connection
     ///
     /// The caller is responsible for sending CopyOutResponse and CopyDone messages.
-    pub fn copyout_writer(&mut self) -> CopyDataWriter<IO> {
+    pub fn copyout_writer(&mut self) -> CopyDataWriter<'_, IO> {
         CopyDataWriter { pgb: self }
     }
 
@@ -876,10 +876,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         }
 
         // Note: no current usages ever send this
-        if let CopyDone = &end {
-            if let Err(e) = self.write_message(&BeMessage::CopyDone).await {
-                error!("failed to send CopyDone: {}", e);
-            }
+        if let CopyDone = &end
+            && let Err(e) = self.write_message(&BeMessage::CopyDone).await
+        {
+            error!("failed to send CopyDone: {}", e);
         }
 
         let err_to_send_and_errcode = match &end {
@@ -906,13 +906,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             Cancelled => None,
             _ => None,
         };
-        if let Some((err, errcode)) = err_to_send_and_errcode {
-            if let Err(ee) = self
+        if let Some((err, errcode)) = err_to_send_and_errcode
+            && let Err(ee) = self
                 .write_message(&BeMessage::ErrorResponse(&err, Some(errcode)))
                 .await
-            {
-                error!("failed to send ErrorResponse: {}", ee);
-            }
+        {
+            error!("failed to send ErrorResponse: {}", ee);
         }
 
         // Proper COPY stream finishing to continue using the connection is not

@@ -49,7 +49,7 @@ impl PerfSpan {
         }
     }
 
-    pub fn enter(&self) -> PerfSpanEntered {
+    pub fn enter(&self) -> PerfSpanEntered<'_> {
         if let Some(ref id) = self.inner.id() {
             self.dispatch.enter(id);
         }
