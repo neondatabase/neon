@@ -275,6 +275,9 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             for ps in env.pageservers:
                 ps.start()
 
+            # Wait for static compute to renew lease at least once.
+            time.sleep(LSN_LEASE_LENGTH)
+
             trigger_gc_and_select(
                 env,
                 ep_static,
