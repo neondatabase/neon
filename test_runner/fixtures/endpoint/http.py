@@ -78,19 +78,23 @@ class EndpointHttpClient(requests.Session):
         json: dict[str, str] = res.json()
         return json
 
-    def prewarm_lfc(self, from_endpoint_id: str | None = None):
+    def prewarm_lfc(self, from_endpoint_id: str | None = None) -> dict[str, str]:
         params = {"from_endpoint": from_endpoint_id} if from_endpoint_id else dict()
         self.post(self.prewarm_url, params=params).raise_for_status()
-        self.prewarm_lfc_wait()
+        return self.prewarm_lfc_wait()
 
-    def prewarm_lfc_wait(self):
+    def prewarm_lfc_wait(self) -> dict[str, str]:
+        statuses = "failed", "completed", "skipped"
+
         def prewarmed():
             json = self.prewarm_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status in ["failed", "completed", "skipped"], f"{status}, {err=}"
+            assert status in statuses, f"{status}, {err=}"
 
         wait_until(prewarmed, timeout=60)
-        assert self.prewarm_lfc_status()["status"] != "failed"
+        res = self.prewarm_lfc_status()
+        assert res["status"] != "failed"
+        return res
 
     def offload_lfc_status(self) -> dict[str, str]:
         res = self.get(self.offload_url)
@@ -98,20 +102,24 @@ class EndpointHttpClient(requests.Session):
         json: dict[str, str] = res.json()
         return json
 
-    def offload_lfc(self):
+    def offload_lfc(self) -> dict[str, str]:
         self.post(self.offload_url).raise_for_status()
-        self.offload_lfc_wait()
+        return self.offload_lfc_wait()
 
-    def offload_lfc_wait(self):
+    def offload_lfc_wait(self) -> dict[str, str]:
+        statuses = "failed", "completed", "skipped"
+
         def offloaded():
             json = self.offload_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status in ["failed", "completed"], f"{status}, {err=}"
+            assert status in statuses, f"{status}, {err=}"
 
         wait_until(offloaded)
-        assert self.offload_lfc_status()["status"] != "failed"
+        res = self.offload_lfc_status()
+        assert res["status"] != "failed"
+        return res
 
-    def promote(self, promote_spec: dict[str, Any], disconnect: bool = False):
+    def promote(self, promote_spec: dict[str, Any], disconnect: bool = False) -> dict[str, str]:
         url = f"http://localhost:{self.external_port}/promote"
         if disconnect:
             try:  # send first request to start promote and disconnect

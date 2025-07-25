@@ -4,9 +4,10 @@ use compute_api::responses::{LfcPrewarmState, PromoteConfig, PromoteState};
 use compute_api::spec::ComputeMode;
 use itertools::Itertools;
 use std::collections::HashMap;
+use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{debug, info};
 use utils::lsn::Lsn;
 
 impl ComputeNode {
@@ -17,13 +18,13 @@ impl ComputeNode {
     /// Has a failpoint "compute-promotion"
     pub async fn promote(self: &Arc<Self>, cfg: PromoteConfig) -> PromoteState {
         let cloned = self.clone();
-        let promote_fn = async move || {
-            let Err(err) = cloned.promote_impl(cfg).await else {
-                return PromoteState::Completed;
-            };
-            tracing::error!(%err, "promoting");
-            PromoteState::Failed {
-                error: format!("{err:#}"),
+        let promote_fn = async move || match cloned.promote_impl(cfg).await {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::error!(%err, "promoting replica");
+                PromoteState::Failed {
+                    error: format!("{err:#}"),
+                }
             }
         };
 
@@ -49,7 +50,7 @@ impl ComputeNode {
         task.borrow().clone()
     }
 
-    async fn promote_impl(&self, mut cfg: PromoteConfig) -> Result<()> {
+    async fn promote_impl(&self, cfg: PromoteConfig) -> Result<PromoteState> {
         {
             let state = self.state.lock().unwrap();
             let mode = &state.pspec.as_ref().unwrap().spec.mode;
@@ -72,6 +73,7 @@ impl ComputeNode {
         let client = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
             .context("connecting to postgres")?;
+        let mut now = Instant::now();
 
         let primary_lsn = cfg.wal_flush_lsn;
         let mut last_wal_replay_lsn: Lsn = Lsn::INVALID;
@@ -92,6 +94,8 @@ impl ComputeNode {
         if last_wal_replay_lsn < primary_lsn {
             bail!("didn't catch up with primary in {RETRIES} retries");
         }
+        let lsn_wait_time_ms = now.elapsed().as_millis() as u32;
+        now = Instant::now();
 
         // using $1 doesn't work with ALTER SYSTEM SET
         let safekeepers_sql = format!(
@@ -108,9 +112,9 @@ impl ComputeNode {
             .context("reloading postgres config")?;
 
         #[cfg(feature = "testing")]
-        fail::fail_point!("compute-promotion", |_| {
-            bail!("promotion configured to fail because of a failpoint")
-        });
+        fail::fail_point!("compute-promotion", |_| bail!(
+            "compute-promotion failpoint"
+        ));
 
         let row = client
             .query_one("SELECT * FROM pg_promote()", &[])
@@ -119,6 +123,8 @@ impl ComputeNode {
         if !row.get::<usize, bool>(0) {
             bail!("pg_promote() returned false");
         }
+        let pg_promote_time_ms = now.elapsed().as_millis() as u32;
+        let now = Instant::now();
 
         let client = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
@@ -134,25 +140,49 @@ impl ComputeNode {
         {
             let mut state = self.state.lock().unwrap();
             let spec = &mut state.pspec.as_mut().unwrap().spec;
-            spec.mode = ComputeMode::Primary;
-            let new_conf = cfg.spec.cluster.postgresql_conf.as_mut().unwrap();
-            let existing_conf = spec.cluster.postgresql_conf.as_ref().unwrap();
-            Self::merge_spec(new_conf, existing_conf);
+            debug!("old spec: {:#?}, new spec: {:#?}", spec, cfg.spec);
+
+            // Local setup has different ports for pg process (port=) for primary and secondary.
+            // In order for promotion to work, new spec needs to have port= with value for secondary
+            if cfg!(feature = "testing") {
+                let Some(existing_conf) = spec.cluster.postgresql_conf.as_ref() else {
+                    bail!("spec.cluster.postgresql_conf missing for endpoint");
+                };
+                let existing_conf = existing_conf.clone();
+
+                *spec = cfg.spec;
+
+                let Some(new_conf) = spec.cluster.postgresql_conf.as_mut() else {
+                    bail!(
+                        "local setup was requested, but spec.cluster.postgresql_conf was not passed"
+                    );
+                };
+                Self::update_conf_from_existing(new_conf, existing_conf);
+            } else {
+                *spec = cfg.spec;
+            }
+            debug!("applied spec: {:#?}", spec);
         }
+
         info!("applied new spec, reconfiguring as primary");
-        self.reconfigure()
+        self.reconfigure()?;
+        let reconfigure_time_ms = now.elapsed().as_millis() as u32;
+
+        Ok(PromoteState::Completed {
+            lsn_wait_time_ms,
+            pg_promote_time_ms,
+            reconfigure_time_ms,
+        })
     }
 
     /// Merge old and new Postgres conf specs to apply on secondary.
-    /// Change new spec's port and safekeepers since they are supplied
-    /// differenly
-    fn merge_spec(new_conf: &mut String, existing_conf: &str) {
+    /// Change new spec's port to old spec's ports, as they're different in local setup and
+    /// if we don't change it, promoted primary connection won't be established
+    fn update_conf_from_existing(new_conf: &mut String, existing_conf: String) {
         let mut new_conf_set: HashMap<&str, &str> = new_conf
             .split_terminator('\n')
             .map(|e| e.split_once("=").expect("invalid item"))
             .collect();
-        new_conf_set.remove("neon.safekeepers");
-
         let existing_conf_set: HashMap<&str, &str> = existing_conf
             .split_terminator('\n')
             .map(|e| e.split_once("=").expect("invalid item"))

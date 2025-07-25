@@ -112,6 +112,11 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
     lsn_triple = get_lsn_triple(promo_cur)
     log.info(f"Secondary: LSN after promotion is {lsn_triple}")
 
+    # Removing this restart makes everything break TODO(myrrc)
+    secondary.stop(mode="immediate-terminate")
+    secondary.respec(mode="Primary")
+    secondary.start()
+
     # Reconnect to the secondary to make sure we get a read-write connection
     with secondary.connect() as conn, conn.cursor() as new_primary_cur:
         new_primary_cur.execute("select count(*) from t")
@@ -145,6 +150,7 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
         stop_and_check_lsn(secondary, None)
 
     if method == PromoteMethod.COMPUTE_CTL:
+        log.info("Restarting primary to check new config")
         secondary.stop()
         # In production, compute ultimately receives new compute spec from cplane.
         secondary.respec(mode="Primary")

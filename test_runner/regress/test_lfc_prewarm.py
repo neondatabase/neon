@@ -47,19 +47,23 @@ def offload_lfc(method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor) 
         # With autoprewarm, we need to be sure LFC was offloaded after all writes
         # finish, so we sleep. Otherwise we'll have less prewarmed pages than we want
         sleep(AUTOOFFLOAD_INTERVAL_SECS)
-        client.offload_lfc_wait()
-        return
+        offload_res = client.offload_lfc_wait()
+        log.info(offload_res)
+        return offload_res
 
     if method == PrewarmMethod.COMPUTE_CTL:
         status = client.prewarm_lfc_status()
         assert status["status"] == "not_prewarmed"
         assert "error" not in status
-        client.offload_lfc()
+        offload_res = client.offload_lfc()
+        log.info(offload_res)
         assert client.prewarm_lfc_status()["status"] == "not_prewarmed"
+
         parsed = prom_parse(client)
         desired = {OFFLOAD_LABEL: 1, PREWARM_LABEL: 0, OFFLOAD_ERR_LABEL: 0, PREWARM_ERR_LABEL: 0}
         assert parsed == desired, f"{parsed=} != {desired=}"
-        return
+
+        return offload_res
 
     raise AssertionError(f"{method} not in PrewarmMethod")
 
@@ -68,21 +72,30 @@ def prewarm_endpoint(
     method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor, lfc_state: str | None
 ):
     if method == PrewarmMethod.AUTOPREWARM:
-        client.prewarm_lfc_wait()
+        prewarm_res = client.prewarm_lfc_wait()
+        log.info(prewarm_res)
     elif method == PrewarmMethod.COMPUTE_CTL:
-        client.prewarm_lfc()
+        prewarm_res = client.prewarm_lfc()
+        log.info(prewarm_res)
+        return prewarm_res
     elif method == PrewarmMethod.POSTGRES:
         cur.execute("select neon.prewarm_local_cache(%s)", (lfc_state,))
 
 
-def check_prewarmed(
+def check_prewarmed_contains(
     method: PrewarmMethod, client: EndpointHttpClient, desired_status: dict[str, str | int]
 ):
     if method == PrewarmMethod.AUTOPREWARM:
-        assert client.prewarm_lfc_status() == desired_status
+        prewarm_status = client.prewarm_lfc_status()
+        for k in desired_status:
+            assert desired_status[k] == prewarm_status[k]
+
         assert prom_parse(client)[PREWARM_LABEL] == 1
     elif method == PrewarmMethod.COMPUTE_CTL:
-        assert client.prewarm_lfc_status() == desired_status
+        prewarm_status = client.prewarm_lfc_status()
+        for k in desired_status:
+            assert desired_status[k] == prewarm_status[k]
+
         desired = {OFFLOAD_LABEL: 0, PREWARM_LABEL: 1, PREWARM_ERR_LABEL: 0, OFFLOAD_ERR_LABEL: 0}
         assert prom_parse(client) == desired
 
@@ -149,9 +162,6 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
     log.info(f"Used LFC size: {lfc_used_pages}")
     pg_cur.execute("select * from neon.get_prewarm_info()")
     total, prewarmed, skipped, _ = pg_cur.fetchall()[0]
-    log.info(f"Prewarm info: {total=} {prewarmed=} {skipped=}")
-    progress = (prewarmed + skipped) * 100 // total
-    log.info(f"Prewarm progress: {progress}%")
     assert lfc_used_pages > 10000
     assert total > 0
     assert prewarmed > 0
@@ -161,7 +171,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
     assert lfc_cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
 
     desired = {"status": "completed", "total": total, "prewarmed": prewarmed, "skipped": skipped}
-    check_prewarmed(method, client, desired)
+    check_prewarmed_contains(method, client, desired)
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
@@ -178,9 +188,8 @@ def test_lfc_prewarm_empty(neon_simple_env: NeonEnv):
     cur = conn.cursor()
     cur.execute("create schema neon; create extension neon with schema neon")
     method = PrewarmMethod.COMPUTE_CTL
-    offload_lfc(method, client, cur)
-    prewarm_endpoint(method, client, cur, None)
-    assert client.prewarm_lfc_status()["status"] == "skipped"
+    assert offload_lfc(method, client, cur)["status"] == "skipped"
+    assert prewarm_endpoint(method, client, cur, None)["status"] == "skipped"
 
 
 # autoprewarm isn't needed as we prewarm manually
