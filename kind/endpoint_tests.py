@@ -185,27 +185,27 @@ def test_create_endpoint_and_connect() -> None:
                 cur.execute("SHOW databricks.workspace_url;")
                 res = cur.fetchone()[0]
                 print(f"atabricks.workspace_url: {res}")
-                assert (
-                    res == urlparse(test_workspace_url).hostname
-                ), "Failed to get the correct databricks.workspace_url GUC value"
+                assert res == urlparse(test_workspace_url).hostname, (
+                    "Failed to get the correct databricks.workspace_url GUC value"
+                )
                 cur.execute("SHOW databricks.enable_databricks_identity_login;")
                 res = cur.fetchone()[0]
                 print(f"databricks.enable_databricks_identity_login: {res}")
-                assert (
-                    res == "on"
-                ), "Failed to get the correct databricks.enable_databricks_identity_login GUC value"
+                assert res == "on", (
+                    "Failed to get the correct databricks.enable_databricks_identity_login GUC value"
+                )
                 cur.execute("SHOW databricks.enable_sql_restrictions;")
                 res = cur.fetchone()[0]
                 print(f"databricks.enable_sql_restrictions: {res}")
-                assert (
-                    res == "on"
-                ), "Failed to get the correct databricks.enable_sql_restrictions GUC value"
+                assert res == "on", (
+                    "Failed to get the correct databricks.enable_sql_restrictions GUC value"
+                )
                 cur.execute("SHOW databricks.disable_PAT_login;")
                 res = cur.fetchone()[0]
                 print(f"databricks.disable_PAT_login: {res}")
-                assert (
-                    res == "on"
-                ), "Failed to get the correct databricks.disable_PAT_login GUC value"
+                assert res == "on", (
+                    "Failed to get the correct databricks.disable_PAT_login GUC value"
+                )
 
         def check_cert_auth_user(endpoint):
             expected_user = "databricks_control_plane"
@@ -291,13 +291,13 @@ def test_create_endpoint_and_connect() -> None:
                 print("Compute log files:", pg_log_files, redacted_log_files)
                 assert len(pg_log_files) > 0, "PG didn't produce any JSON log files"
                 assert len(redacted_log_files) > 0, "Redactor didn't produce any log files"
-                assert len(pg_log_files) == len(
-                    redacted_log_files
-                ), "Redactor didn't process each log file exactly once"
+                assert len(pg_log_files) == len(redacted_log_files), (
+                    "Redactor didn't process each log file exactly once"
+                )
                 for file in redacted_log_files:
-                    assert re.match(
-                        LOG_DAEMON_EXPECTED_REGEX, file
-                    ), f"Unexpected redacted log file name: {file}"
+                    assert re.match(LOG_DAEMON_EXPECTED_REGEX, file), (
+                        f"Unexpected redacted log file name: {file}"
+                    )
                 return pg_log_files, redacted_log_files
 
             # wait for pg_log_redactor to catch up, by file count
@@ -315,12 +315,12 @@ def test_create_endpoint_and_connect() -> None:
                     ["wc", "-l", f"/databricks/logs/brickstore-redacted/{last_redacted_log_file}"]
                 ).split()[0]
             )
-            assert (
-                redacted_log_entries_num <= pg_log_entries_num
-            ), "Redactor emitted non-PG log messages, either through bug or own error msg."
-            assert (
-                redacted_log_entries_num - pg_log_entries_num < lag_tolerance_items
-            ), "Redactor lagged behind, more than OS buffering should allow for."
+            assert redacted_log_entries_num <= pg_log_entries_num, (
+                "Redactor emitted non-PG log messages, either through bug or own error msg."
+            )
+            assert redacted_log_entries_num - pg_log_entries_num < lag_tolerance_items, (
+                "Redactor lagged behind, more than OS buffering should allow for."
+            )
 
             # Order to decrease chance of lag flakiness
             pg_log_tail = kex(
@@ -352,7 +352,9 @@ def test_create_endpoint_and_connect() -> None:
                     found_in_pg_log = True
                     break
             # Note: lag is possible because tail call is not synced w/ lag check and there's no simple way to
-            assert found_in_pg_log, "Last log seen in redactor is not a recent log from PG, through lag bug or own error msg"
+            assert found_in_pg_log, (
+                "Last log seen in redactor is not a recent log from PG, through lag bug or own error msg"
+            )
 
         # Create an endpoint with random IDs.
         test_metastore_id = uuid.uuid4()

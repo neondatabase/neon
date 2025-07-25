@@ -2944,6 +2944,7 @@ def test_global_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
             cur.execute("select count(*) from t2")
             assert cur.fetchone() == (3000,)
 
+
 @pytest.mark.skip(reason="Lakebase Mode")
 def test_max_active_safekeeper_commit_lag(neon_env_builder: NeonEnvBuilder):
     """
@@ -3008,9 +3009,9 @@ def test_max_active_safekeeper_commit_lag(neon_env_builder: NeonEnvBuilder):
                     "SELECT value FROM neon_perf_counters WHERE metric = 'max_active_safekeeper_commit_lag'"
                 )
                 row = cur.fetchone()
-                assert (
-                    row is not None
-                ), "max_active_safekeeper_commit_lag metric not found in lag_is_zero"
+                assert row is not None, (
+                    "max_active_safekeeper_commit_lag metric not found in lag_is_zero"
+                )
                 lag = row[0]
                 log.info(f"Current commit lag: {lag}")
                 return lag == 0.0
