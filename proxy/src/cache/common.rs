@@ -1,4 +1,14 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    ops::{Deref, DerefMut},
+    time::{Duration, Instant},
+};
+
+use moka::Expiry;
+
+use crate::control_plane::messages::ControlPlaneErrorMessage;
+
+/// Default TTL used when caching errors from control plane.
+pub const DEFAULT_ERROR_TTL: Duration = Duration::from_secs(30);
 
 /// A generic trait which exposes types of cache's key and value,
 /// as well as the notion of cache entry invalidation.
@@ -85,5 +95,61 @@ impl<C: Cache, V> Deref for Cached<C, V> {
 impl<C: Cache, V> DerefMut for Cached<C, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.value
+    }
+}
+
+pub type ControlPlaneResult<T> = Result<T, Box<ControlPlaneErrorMessage>>;
+
+#[derive(Clone, Copy)]
+pub struct CplaneExpiry {
+    pub error: Duration,
+}
+
+impl Default for CplaneExpiry {
+    fn default() -> Self {
+        Self {
+            error: DEFAULT_ERROR_TTL,
+        }
+    }
+}
+
+impl CplaneExpiry {
+    pub fn expire_early<V>(
+        &self,
+        value: &ControlPlaneResult<V>,
+        updated: Instant,
+    ) -> Option<Duration> {
+        match value {
+            Ok(_) => None,
+            Err(err) => Some(self.expire_err_early(err, updated)),
+        }
+    }
+
+    pub fn expire_err_early(&self, err: &ControlPlaneErrorMessage, updated: Instant) -> Duration {
+        err.status
+            .as_ref()
+            .and_then(|s| s.details.retry_info.as_ref())
+            .map_or(self.error, |r| r.retry_at.into_std() - updated)
+    }
+}
+
+impl<K, V> Expiry<K, ControlPlaneResult<V>> for CplaneExpiry {
+    fn expire_after_create(
+        &self,
+        _key: &K,
+        value: &ControlPlaneResult<V>,
+        created_at: Instant,
+    ) -> Option<Duration> {
+        self.expire_early(value, created_at)
+    }
+
+    fn expire_after_update(
+        &self,
+        _key: &K,
+        value: &ControlPlaneResult<V>,
+        updated_at: Instant,
+        _duration_until_expiry: Option<Duration>,
+    ) -> Option<Duration> {
+        self.expire_early(value, updated_at)
     }
 }

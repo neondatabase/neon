@@ -149,8 +149,8 @@ impl DbSchemaCache {
         ctx: &RequestContext,
         config: &'static ProxyConfig,
     ) -> Result<Arc<(ApiConfig, DbSchemaOwned)>, RestError> {
-        match self.get_with_created_at(endpoint_id) {
-            Some(Cached { value: (v, _), .. }) => Ok(v),
+        match self.get(endpoint_id) {
+            Some(Cached { value: v, .. }) => Ok(v),
             None => {
                 info!("db_schema cache miss for endpoint: {:?}", endpoint_id);
                 let remote_value = self

@@ -246,17 +246,14 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
 
 impl<K: Hash + Eq, V: Clone> TimedLru<K, V> {
     /// Retrieve a cached entry in convenient wrapper, alongside timing information.
-    pub(crate) fn get_with_created_at<Q>(
-        &self,
-        key: &Q,
-    ) -> Option<Cached<&Self, (<Self as Cache>::Value, Instant)>>
+    pub(crate) fn get<Q>(&self, key: &Q) -> Option<Cached<&Self, <Self as Cache>::Value>>
     where
         K: Borrow<Q> + Clone,
         Q: Hash + Eq + ?Sized,
     {
         self.get_raw(key, |key, entry| Cached {
             token: Some((self, key.clone())),
-            value: (entry.value.clone(), entry.created_at),
+            value: entry.value.clone(),
         })
     }
 }

@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use super::{EndpointAccessControl, RoleAccessControl};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
-use crate::cache::project_info::ProjectInfoCacheImpl;
+use crate::cache::project_info::ProjectInfoCache;
 use crate::config::{CacheOptions, ProjectInfoCacheOptions};
 use crate::context::RequestContext;
 use crate::control_plane::{CachedNodeInfo, ControlPlaneApi, NodeInfoCache, errors};
@@ -119,7 +119,7 @@ pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub(crate) node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
-    pub project_info: Arc<ProjectInfoCacheImpl>,
+    pub project_info: Arc<ProjectInfoCache>,
 }
 
 impl ApiCaches {
@@ -134,7 +134,7 @@ impl ApiCaches {
                 wake_compute_cache_config.ttl,
                 true,
             ),
-            project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
+            project_info: Arc::new(ProjectInfoCache::new(project_info_cache_config)),
         }
     }
 }

@@ -3,7 +3,6 @@
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ::http::HeaderName;
 use ::http::header::AUTHORIZATION;
@@ -17,6 +16,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use super::super::messages::{ControlPlaneErrorMessage, GetEndpointAccessControl, WakeCompute};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
+use crate::cache::common::DEFAULT_ERROR_TTL;
 use crate::context::RequestContext;
 use crate::control_plane::caches::ApiCaches;
 use crate::control_plane::errors::{
@@ -118,7 +118,6 @@ impl NeonControlPlaneClient {
                         cache_key.into(),
                         role.into(),
                         msg.clone(),
-                        retry_info.map(|r| Duration::from_millis(r.retry_delay_ms)),
                     );
 
                     Err(err)
@@ -347,17 +346,10 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
     ) -> Result<RoleAccessControl, GetAuthInfoError> {
         let key = endpoint.normalize();
 
-        if let Some((role_control, ttl)) = self
-            .caches
-            .project_info
-            .get_role_secret_with_ttl(&key, role)
-        {
+        if let Some(role_control) = self.caches.project_info.get_role_secret(&key, role) {
             return match role_control {
-                Err(mut msg) => {
+                Err(msg) => {
                     info!(key = &*key, "found cached get_role_access_control error");
-
-                    // if retry_delay_ms is set change it to the remaining TTL
-                    replace_retry_delay_ms(&mut msg, |_| ttl.as_millis() as u64);
 
                     Err(GetAuthInfoError::ApiError(ControlPlaneError::Message(msg)))
                 }
@@ -383,16 +375,13 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
     ) -> Result<EndpointAccessControl, GetAuthInfoError> {
         let key = endpoint.normalize();
 
-        if let Some((control, ttl)) = self.caches.project_info.get_endpoint_access_with_ttl(&key) {
+        if let Some(control) = self.caches.project_info.get_endpoint_access(&key) {
             return match control {
-                Err(mut msg) => {
+                Err(msg) => {
                     info!(
                         key = &*key,
                         "found cached get_endpoint_access_control error"
                     );
-
-                    // if retry_delay_ms is set change it to the remaining TTL
-                    replace_retry_delay_ms(&mut msg, |_| ttl.as_millis() as u64);
 
                     Err(GetAuthInfoError::ApiError(ControlPlaneError::Message(msg)))
                 }
@@ -426,16 +415,11 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
 
         macro_rules! check_cache {
             () => {
-                if let Some(cached) = self.caches.node_info.get_with_created_at(&key) {
-                    let (cached, (info, created_at)) = cached.take_value();
+                if let Some(cached) = self.caches.node_info.get(&key) {
+                    let (cached, info) = cached.take_value();
                     return match info {
-                        Err(mut msg) => {
+                        Err(msg) => {
                             info!(key = &*key, "found cached wake_compute error");
-
-                            // if retry_delay_ms is set, reduce it by the amount of time it spent in cache
-                            replace_retry_delay_ms(&mut msg, |delay| {
-                                delay.saturating_sub(created_at.elapsed().as_millis() as u64)
-                            });
 
                             Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
                                 msg,
@@ -503,9 +487,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                         "created a cache entry for the wake compute error"
                     );
 
-                    let ttl = retry_info.map_or(Duration::from_secs(30), |r| {
-                        Duration::from_millis(r.retry_delay_ms)
-                    });
+                    let ttl = retry_info.map_or(DEFAULT_ERROR_TTL, |r| r.retry_at - Instant::now());
 
                     self.caches.node_info.insert_ttl(key, Err(msg.clone()), ttl);
 
@@ -514,14 +496,6 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                 err => Err(err),
             },
         }
-    }
-}
-
-fn replace_retry_delay_ms(msg: &mut ControlPlaneErrorMessage, f: impl FnOnce(u64) -> u64) {
-    if let Some(status) = &mut msg.status
-        && let Some(retry_info) = &mut status.details.retry_info
-    {
-        retry_info.retry_delay_ms = f(retry_info.retry_delay_ms);
     }
 }
 
