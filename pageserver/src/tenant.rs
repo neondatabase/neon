@@ -3110,6 +3110,11 @@ impl TenantShard {
                 info!("Skipping GC because lsn lease deadline is not reached");
                 return Ok(GcResult::default());
             }
+
+            if todo!("block for standby horizon lease deadline") {
+                info!("Skipping GC because standby horizon lease deadline is not reached");
+                return Ok(GcResult::default());
+            }
         }
 
         let _guard = match self.gc_block.start().await {
