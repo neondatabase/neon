@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::time::Duration;
 
 use clashmap::ClashMap;
 use moka::sync::Cache;
@@ -84,9 +83,7 @@ impl ProjectInfoCache {
 impl ProjectInfoCache {
     pub(crate) fn new(config: ProjectInfoCacheOptions) -> Self {
         // we cache errors for 30 seconds, unless retry_at is set.
-        let expiry = CplaneExpiry {
-            error: Duration::from_secs(30),
-        };
+        let expiry = CplaneExpiry::default();
         Self {
             role_controls: Cache::builder()
                 .name("role_access_controls")
@@ -223,6 +220,7 @@ mod tests {
     use crate::control_plane::{AccessBlockerFlags, AuthSecret};
     use crate::scram::ServerSecret;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {

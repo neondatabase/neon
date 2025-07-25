@@ -7,6 +7,9 @@ use moka::Expiry;
 
 use crate::control_plane::messages::ControlPlaneErrorMessage;
 
+/// Default TTL used when caching errors from control plane.
+pub const DEFAULT_ERROR_TTL: Duration = Duration::from_secs(30);
+
 /// A generic trait which exposes types of cache's key and value,
 /// as well as the notion of cache entry invalidation.
 /// This is useful for [`Cached`].
@@ -100,6 +103,14 @@ pub type ControlPlaneResult<T> = Result<T, Box<ControlPlaneErrorMessage>>;
 #[derive(Clone, Copy)]
 pub struct CplaneExpiry {
     pub error: Duration,
+}
+
+impl Default for CplaneExpiry {
+    fn default() -> Self {
+        Self {
+            error: DEFAULT_ERROR_TTL,
+        }
+    }
 }
 
 impl CplaneExpiry {

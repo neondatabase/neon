@@ -3,7 +3,6 @@
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ::http::HeaderName;
 use ::http::header::AUTHORIZATION;
@@ -17,6 +16,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use super::super::messages::{ControlPlaneErrorMessage, GetEndpointAccessControl, WakeCompute};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
+use crate::cache::common::DEFAULT_ERROR_TTL;
 use crate::context::RequestContext;
 use crate::control_plane::caches::ApiCaches;
 use crate::control_plane::errors::{
@@ -487,8 +487,7 @@ impl super::ControlPlaneApi for NeonControlPlaneClient {
                         "created a cache entry for the wake compute error"
                     );
 
-                    let ttl =
-                        retry_info.map_or(Duration::from_secs(30), |r| r.retry_at - Instant::now());
+                    let ttl = retry_info.map_or(DEFAULT_ERROR_TTL, |r| r.retry_at - Instant::now());
 
                     self.caches.node_info.insert_ttl(key, Err(msg.clone()), ttl);
 
