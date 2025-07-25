@@ -1,9 +1,11 @@
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server
+    image: clickhouse/clickhouse-server:25.6
     user: "101:101"
     container_name: clickhouse
     hostname: clickhouse
+    environment:
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-ch_password123}
     ports:
       - 127.0.0.1:8123:8123
       - 127.0.0.1:9000:9000
