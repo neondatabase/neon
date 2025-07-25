@@ -54,7 +54,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
     cur.execute("INSERT INTO table1 (id, column1) VALUES (1, 'abc'), (2, 'def');")
     conn.commit()
     if "CLICKHOUSE_PASSWORD" not in os.environ:
-        raise RuntimeError("CLICKHOUSE_PASSWORD not set")
+        raise RuntimeError("CLICKHOUSE_PASSWORD is not set")
     client = clickhouse_connect.get_client(
         host=clickhouse_host, password=os.environ["CLICKHOUSE_PASSWORD"]
     )
