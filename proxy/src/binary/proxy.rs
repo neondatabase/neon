@@ -535,12 +535,7 @@ pub async fn run() -> anyhow::Result<()> {
     // add a task to flush the db_schema cache every 10 minutes
     #[cfg(feature = "rest_broker")]
     if let Some(db_schema_cache) = &config.rest_config.db_schema_cache {
-        maintenance_tasks.spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(600)).await;
-                db_schema_cache.0.run_pending_tasks();
-            }
-        });
+        maintenance_tasks.spawn(db_schema_cache.maintain());
     }
 
     if let Some(metrics_config) = &config.metric_collection {
