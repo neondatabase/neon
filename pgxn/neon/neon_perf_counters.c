@@ -22,6 +22,9 @@
 #include "neon_pgversioncompat.h"
 
 neon_per_backend_counters *neon_per_backend_counters_shared;
+#if PG_MAJORVERSION_NUM < 17
+int MyProcNumber = -1;
+#endif
 
 void
 NeonPerfCountersShmemRequest(void)

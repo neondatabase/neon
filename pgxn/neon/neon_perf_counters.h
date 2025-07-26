@@ -172,10 +172,11 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
  */
 #define NUM_NEON_PERF_COUNTER_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
 
-#if PG_VERSION_NUM >= 170000
+#if PG_MAJORVERSION_NUM >= 17
 #define MyNeonCounters (&neon_per_backend_counters_shared[MyProcNumber])
 #else
-#define MyNeonCounters (&neon_per_backend_counters_shared[MyProc->pgprocno])
+extern int MyProcNumber;
+#define MyNeonCounters (&neon_per_backend_counters_shared[MyProcNumber = MyProc->pgprocno])
 #endif
 
 /*
