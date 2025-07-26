@@ -2236,7 +2236,7 @@ impl PageServerHandler {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(shard_id, %lsn))]
+    #[instrument(skip_all, fields(shard_id, %lsn), ret)]
     async fn handle_lease_standby_horizon<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,

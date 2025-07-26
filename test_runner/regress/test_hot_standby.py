@@ -133,14 +133,20 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
     tenant_conf = {
         # set PITR interval to be small, so we can do GC
         "pitr_interval": "0 s",
+        # this test tests standby_horizon leases feature
+        "standby_horizon_lease_length": "10s",
     }
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
     timeline_id = env.initial_timeline
     tenant_id = env.initial_tenant
 
+    # enable the compute feature t
+    compute_features = ['standby_horizon_leases_experimental']
+
     with env.endpoints.create_start(
         branch_name="main",
         endpoint_id="primary",
+        features=compute_features,
     ) as primary:
         with env.endpoints.new_replica_start(
             origin=primary,
@@ -149,6 +155,7 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
             # that this test exercises. With protocol version 1 it
             # fails.
             config_lines=["neon.protocol_version=2"],
+            features=compute_features,
         ) as secondary:
             p_cur = primary.connect().cursor()
             p_cur.execute("CREATE EXTENSION neon_test_utils")
