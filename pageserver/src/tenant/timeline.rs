@@ -6526,6 +6526,7 @@ impl Timeline {
     /// Currently, we don't make any attempt at removing unneeded page versions
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
+    #[instrument(skip_all, fields(standby_horizon_which_min))]
     pub(super) async fn gc(&self) -> Result<GcResult, GcError> {
         // this is most likely the background tasks, but it might be the spawned task from
         // immediate_gc
@@ -6582,14 +6583,24 @@ impl Timeline {
         // with that controller.
         // When solving this, solve it generically for lsn leases as well.
         let min_standby_horizon = self.standby_horizons.min_and_clear_legacy();
-        let min_standby_horizon = if self
+        let flag_evaluation_result = self
             .feature_resolver
-            .evaluate_boolean("standby-horizon-leases-in-gc")
-            .is_ok()
-        {
-            min_standby_horizon.all
+            .evaluate_multivariate("standby-horizon-which-min")
+            .ok();
+        Span::current().record(
+            "standby_horizon_which_min",
+            tracing::field::debug(&flag_evaluation_result),
+        );
+        let min_standby_horizon = if cfg!(test) || cfg!(feature = "testing") {
+            // TODO: parametrize rust test / test suite over the feature flag?
+            // For now, test the new feature.
+            min_standby_horizon.leases
         } else {
-            min_standby_horizon.legacy
+            match flag_evaluation_result.as_deref() {
+                Some("all") => min_standby_horizon.all,
+                Some("leases") => min_standby_horizon.leases,
+                None | Some("legacy") | Some(_) => min_standby_horizon.legacy,
+            }
         };
         if let Some(standby_horizon) = min_standby_horizon {
             if let Some(standby_lag) = new_gc_cutoff.checked_sub(standby_horizon) {

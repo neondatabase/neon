@@ -3120,6 +3120,11 @@ impl TenantShard {
             return Err(GcError::NotActive);
         }
 
+        // Horizon invariants hold at all times, including during startup & initial lease deadline.
+        for tl in self.timelines.lock().unwrap().values().collect_vec() {
+            tl.standby_horizons.validate_invariants(tl);
+        }
+
         {
             let conf = self.tenant_conf.load();
 
@@ -9549,7 +9554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_standby_horizons() -> anyhow::Result<()> {
+    async fn test_standby_horizons_basics() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_standby_horizons")
             .await
             .unwrap()
@@ -9706,6 +9711,131 @@ mod tests {
 
         // This time, gc should not have been held up.
         assert_eq!(*timeline.get_applied_gc_cutoff_lsn(), end_lsn);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_standby_horizon_leases_gc_cutoff_interaction() -> anyhow::Result<()> {
+        let (tenant, ctx) = TenantHarness::create("test_standby_horizons_renewal_below_cutoff")
+            .await
+            .unwrap()
+            .load()
+            .await;
+
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        timeline
+            .applied_gc_cutoff_lsn
+            .lock_for_write()
+            .store_and_unlock(Lsn(0x20))
+            .wait()
+            .await;
+
+        // below horizon
+        timeline
+            .lease_standby_horizon("mylease1".to_string(), Lsn(0x10), &ctx)
+            .expect_err("this is below cutoff");
+        timeline.standby_horizons.validate_invariants(&timeline);
+        // at horizon
+        timeline.lease_standby_horizon("mylease2".to_string(), Lsn(0x20), &ctx)?;
+        timeline.standby_horizons.validate_invariants(&timeline);
+        // above horizon
+        timeline.lease_standby_horizon("mylease3".to_string(), Lsn(0x30), &ctx)?;
+
+        timeline.standby_horizons.validate_invariants(&timeline);
+
+        // legacy mechanism had no enforcement to be above gc cutoff in the past
+        timeline.standby_horizons.register_legacy_update(Lsn(0x10));
+        timeline.standby_horizons.validate_invariants(&timeline);
+        timeline.standby_horizons.register_legacy_update(Lsn(0x20));
+        timeline.standby_horizons.validate_invariants(&timeline);
+        timeline.standby_horizons.register_legacy_update(Lsn(0x30));
+        timeline.standby_horizons.validate_invariants(&timeline);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_standby_horizon_monotonicity() -> anyhow::Result<()> {
+        let (tenant, ctx) = TenantHarness::create("test_standby_horizon_monotonicity")
+            .await
+            .unwrap()
+            .load()
+            .await;
+
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        timeline
+            .applied_gc_cutoff_lsn
+            .lock_for_write()
+            .store_and_unlock(Lsn(0x20))
+            .wait()
+            .await;
+
+        // initial
+        timeline.lease_standby_horizon("mylease".to_string(), Lsn(0x20), &ctx)?;
+        timeline.standby_horizons.validate_invariants(&timeline);
+
+        // stay in place
+        timeline.lease_standby_horizon("mylease".to_string(), Lsn(0x20), &ctx)?;
+        timeline.standby_horizons.validate_invariants(&timeline);
+
+        // advance
+        timeline.lease_standby_horizon("mylease".to_string(), Lsn(0x30), &ctx)?;
+        timeline.standby_horizons.validate_invariants(&timeline);
+
+        // move back within gc horizon
+        timeline
+            .lease_standby_horizon("mylease".to_string(), Lsn(0x20), &ctx)
+            .expect_err("should fail");
+        timeline.standby_horizons.validate_invariants(&timeline);
+        let leases = timeline
+            .standby_horizons
+            .get_leases()
+            .into_iter()
+            .map(|(lsn, _)| lsn)
+            .collect_vec();
+        assert_eq!(
+            leases,
+            vec![Lsn(0x30)],
+            "failure should not have changed the lease"
+        );
+
+        // move back below gc horizon also forbidden
+        timeline
+            .lease_standby_horizon("mylease".to_string(), Lsn(0x10), &ctx)
+            .expect_err("should fail");
+        timeline.standby_horizons.validate_invariants(&timeline);
+        let leases = timeline
+            .standby_horizons
+            .get_leases()
+            .into_iter()
+            .map(|(lsn, _)| lsn)
+            .collect_vec();
+        assert_eq!(
+            leases,
+            vec![Lsn(0x30)],
+            "failure should not have changed the lease"
+        );
+
+        // another allowed move forward to ensure no poisoning happened
+        timeline.lease_standby_horizon("mylease".to_string(), Lsn(0x40), &ctx)?;
+        timeline.standby_horizons.validate_invariants(&timeline);
+
+        // legacy can move freely, not subject to monotonicity
+        timeline.standby_horizons.register_legacy_update(Lsn(0x40));
+        timeline.standby_horizons.validate_invariants(&timeline);
+        timeline.standby_horizons.register_legacy_update(Lsn(0x10));
+        timeline.standby_horizons.validate_invariants(&timeline);
+        timeline.standby_horizons.register_legacy_update(Lsn(0x20));
+        timeline.standby_horizons.validate_invariants(&timeline);
+        timeline.standby_horizons.register_legacy_update(Lsn(0x30));
+        timeline.standby_horizons.validate_invariants(&timeline);
 
         Ok(())
     }

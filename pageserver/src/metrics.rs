@@ -724,16 +724,25 @@ static TIMELINE_ARCHIVE_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
 static STANDBY_HORIZON: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_standby_horizon",
-        "Standby apply LSN for which GC is hold off, by timeline.",
+        "Gauge mirroring the legacy standby_horizon propagation mechanism's in-memory value.",
         &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
 
-static STANDBY_HORIZON_LEASES: Lazy<UIntGaugeVec> = Lazy::new(|| {
+static STANDBY_HORIZON_LEASES_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
-        "pageserver_standby_horizon_leases",
+        "pageserver_standby_horizon_leases_count",
         "Gauge indicating current number of standby horizon leases, per timeline",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static STANDBY_HORIZON_LEASES_MIN: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_standby_horizon_leases_min",
+        "Gauge indicating the minimum of all known standby_horizon lease.",
         &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
@@ -3345,7 +3354,10 @@ impl TimelineMetrics {
             legacy_value: STANDBY_HORIZON
                 .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
                 .unwrap(),
-            leases_count_gauge: STANDBY_HORIZON_LEASES
+            leases_min: STANDBY_HORIZON_LEASES_MIN
+                .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+                .unwrap(),
+            leases_count: STANDBY_HORIZON_LEASES_COUNT
                 .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
                 .unwrap(),
         };
@@ -3576,7 +3588,8 @@ impl TimelineMetrics {
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = DISK_CONSISTENT_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
-        let _ = STANDBY_HORIZON_LEASES.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ =
+            STANDBY_HORIZON_LEASES_COUNT.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
             let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);

@@ -16,9 +16,10 @@ use std::{
 };
 
 use metrics::{IntGauge, UIntGauge};
+use tracing::{instrument, warn};
 use utils::lsn::Lsn;
 
-use crate::assert_u64_eq_usize::UsizeIsU64;
+use crate::{assert_u64_eq_usize::UsizeIsU64, tenant::Timeline};
 
 pub struct Horizons {
     inner: std::sync::Mutex<Inner>,
@@ -26,6 +27,7 @@ pub struct Horizons {
 struct Inner {
     legacy: Option<Lsn>,
     leases_by_id: HashMap<String, Lease>,
+    leases_min: Option<Lsn>,
     metrics: Metrics,
 }
 
@@ -33,8 +35,10 @@ struct Inner {
 pub struct Metrics {
     /// `pageserver_standby_horizon`
     pub legacy_value: IntGauge,
-    /// `pageserver_standby_horizon_leases`
-    pub leases_count_gauge: UIntGauge,
+    /// `pageserver_standby_horizon_leases_min`
+    pub leases_min: UIntGauge,
+    /// `pageserver_standby_horizon_leases_count`
+    pub leases_count: UIntGauge,
 }
 
 #[derive(Debug)]
@@ -65,6 +69,8 @@ pub struct LeaseInfo {
 pub struct Mins {
     /// Just the legacy mechanism's value.
     pub legacy: Option<Lsn>,
+    /// Just the leases mechanism's value.
+    pub leases: Option<Lsn>,
     /// The minimum across legacy and all leases mechanism values.
     pub all: Option<Lsn>,
 }
@@ -75,12 +81,16 @@ impl Horizons {
         metrics.legacy_value.set(Lsn::INVALID.0 as i64);
 
         let leases_by_id = HashMap::default();
-        metrics.leases_count_gauge.set(0);
+        metrics.leases_count.set(0);
+
+        let leases_min = None;
+        metrics.leases_min.set(0);
 
         Self {
             inner: std::sync::Mutex::new(Inner {
                 legacy,
                 leases_by_id,
+                leases_min,
                 metrics,
             }),
         }
@@ -108,12 +118,15 @@ impl Horizons {
             inner.legacy.take()
         };
 
-        let all = legacy
-            .into_iter()
-            .chain(inner.leases_by_id.values().map(|lease| lease.lsn))
-            .min();
+        let leases = inner.leases_min;
 
-        Mins { legacy, all }
+        let all = std::cmp::min(legacy, inner.leases_min);
+
+        Mins {
+            legacy,
+            leases,
+            all,
+        }
     }
 
     pub fn upsert_lease(
@@ -135,16 +148,32 @@ impl Horizons {
         let res = LeaseInfo {
             valid_until: updated.valid_until,
         };
-        inner
-            .metrics
-            .leases_count_gauge
-            .set(inner.leases_by_id.len().into_u64());
+        let new_count = inner.leases_by_id.len().into_u64();
+        inner.metrics.leases_count.set(new_count);
+        let leases_min = inner.leases_by_id.values().map(|v| v.lsn).min();
+        inner.leases_min = leases_min;
+        inner.metrics.leases_min.set(leases_min.unwrap_or(Lsn(0)).0);
         Ok(res)
     }
 
     pub fn cull_leases(&self, now: SystemTime) {
         let mut inner = self.inner.lock().unwrap();
-        inner.leases_by_id.retain(|_, l| l.valid_until > now);
+        let mut min = None;
+        inner.leases_by_id.retain(|_, l| {
+            if l.valid_until > now {
+                let min = min.get_or_insert(l.lsn);
+                *min = std::cmp::min(*min, l.lsn);
+                true
+            } else {
+                false
+            }
+        });
+        inner
+            .metrics
+            .leases_count
+            .set(inner.leases_by_id.len().into_u64());
+        inner.leases_min = min;
+        inner.metrics.leases_min.set(min.unwrap_or(Lsn(0)).0);
     }
 
     pub fn dump(&self) -> serde_json::Value {
@@ -152,15 +181,71 @@ impl Horizons {
         let Inner {
             legacy,
             leases_by_id,
+            leases_min,
             metrics: _,
         } = &*inner;
         serde_json::json!({
             "legacy": format!("{legacy:?}"),
             "leases_by_id": format!("{leases_by_id:?}"),
+            "leases_min": format!("{leases_min:?}"),
         })
     }
 
-    #[cfg(test  )]
+    #[instrument(skip_all)]
+    pub fn validate_invariants(&self, timeline: &Timeline) {
+        let mut bug = false;
+        let inner = self.inner.lock().unwrap();
+        let applied_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+
+        // INVARIANT: All leases must be at or above applied gc cutoff.
+        // Violation of this invariant would constitute a bug in gc:
+        // it should
+        for (lease_id, lease) in inner.leases_by_id.iter() {
+            if !(lease.lsn >= *applied_gc_cutoff_lsn) {
+                warn!(?lease_id, applied_gc_cutoff_lsn=%*applied_gc_cutoff_lsn, "lease is below the applied gc cutoff");
+                bug = true;
+            }
+        }
+        // The legacy mechanism never had this invariant, so we don't enforce it here.
+        macro_rules! bug_on_neq {
+            ($what:literal, $a:expr, $b:expr,) => {
+                let a = $a;
+                let b = $b;
+                if a != b {
+                    warn!(lhs=?a, rhs=?b, $what);
+                    bug = true;
+                }
+            };
+        }
+
+        // INVARIANT: The lease count metrics is kept in sync
+        bug_on_neq!(
+            "lease count metric",
+            inner.metrics.leases_count.get(),
+            inner.leases_by_id.len().into_u64(),
+        );
+
+        // INVARIANT: The minimum value is the min of all leases
+        bug_on_neq!(
+            "leases_min",
+            inner.leases_min,
+            inner.leases_by_id.values().map(|l| l.lsn).min(),
+        );
+
+        // INVARIANT: The minimum value and the metric is kept in sync
+        bug_on_neq!(
+            "leases_min metric",
+            inner.metrics.leases_min.get(),
+            inner.leases_min.unwrap_or(Lsn(0)).0,
+        );
+
+        // Make tests fail if invariant is violated.
+        if cfg!(test) || cfg!(feature = "testing") {
+            assert!(!bug, "check logs");
+        }
+    }
+
+    #[cfg(test)]
     pub fn legacy(&self) -> Option<Lsn> {
         let inner = self.inner.lock().unwrap();
         inner.legacy
