@@ -2264,9 +2264,12 @@ impl PageServerHandler {
         set_tracing_field_shard_id(&timeline);
 
         let result: Option<SystemTime> = timeline
-            .lease_standby_horizon(lease_id, lsn, ctx)
-            // logging happens inside
+            .lease_standby_horizon(lease_id, lsn, ctx) // logs errors internally
             .ok();
+        debug!(
+            result = result.map(|x| chrono::DateTime::<Utc>::from(x).to_rfc3339()),
+            "result"
+        ); // XXX better observability isn't great
 
         // Encode result as Option<millis since epoch>
         let bytes = result.map(|t| {

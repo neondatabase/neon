@@ -1867,7 +1867,8 @@ impl Timeline {
         Ok(lease)
     }
 
-    #[instrument(skip(_ctx), ret(Debug), err(Debug))]
+    /// Logs return value at info level and errors at warn level in Debug::fmt.
+    #[instrument(skip(_ctx), ret(level = tracing::Level::INFO, Debug), err(level = tracing::Level::WARN, Debug))]
     pub(crate) fn lease_standby_horizon(
         &self,
         lease_id: String,
