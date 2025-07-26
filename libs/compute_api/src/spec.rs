@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
 
 use crate::responses::TlsConfig;
 
@@ -105,7 +106,26 @@ pub struct ComputeSpec {
     // updated to fill these fields, we can make these non optional.
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
+
+    /// Pageserver information can be passed in three different ways:
+    /// 1. Here in `pageserver_connection_info`
+    /// 2. In the `pageserver_connstring` field.
+    /// 3. in `cluster.settings`.
+    ///
+    /// The goal is to use method 1. everywhere. But for backwards-compatibility with old
+    /// versions of the control plane, `compute_ctl` will check 2. and 3. if the
+    /// `pageserver_connection_info` field is missing.
+    ///
+    /// If both `pageserver_connection_info` and `pageserver_connstring`+`shard_stripe_size` are
+    /// given, they must contain the same information.
+    pub pageserver_connection_info: Option<PageserverConnectionInfo>,
+
     pub pageserver_connstring: Option<String>,
+
+    /// Stripe size for pageserver sharding, in pages. This is set together with the legacy
+    /// `pageserver_connstring` field. When the modern `pageserver_connection_info` field is used,
+    /// the stripe size is stored in `pageserver_connection_info.stripe_size` instead.
+    pub shard_stripe_size: Option<ShardStripeSize>,
 
     // More neon ids that we expose to the compute_ctl
     // and to postgres as neon extension GUCs.
@@ -138,10 +158,6 @@ pub struct ComputeSpec {
     pub remote_extensions: Option<RemoteExtSpec>,
 
     pub pgbouncer_settings: Option<IndexMap<String, String>>,
-
-    // Stripe size for pageserver sharding, in pages
-    #[serde(default)]
-    pub shard_stripe_size: Option<usize>,
 
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
@@ -215,6 +231,104 @@ pub enum ComputeFeature {
     /// `parse_unknown_features()` for more details.
     #[serde(other)]
     UnknownFeature,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverConnectionInfo {
+    /// NB: 0 for unsharded tenants, 1 for sharded tenants with 1 shard, following storage
+    pub shard_count: ShardCount,
+
+    /// INVARIANT: null if shard_count is 0, otherwise non-null and immutable
+    pub stripe_size: Option<ShardStripeSize>,
+
+    pub shards: HashMap<ShardIndex, PageserverShardInfo>,
+
+    /// If the compute supports both protocols, this indicates which one it should use.  The compute
+    /// may use other available protocols too, if it doesn't support the preferred one. The URL's
+    /// for the protocol specified here must be present for all shards, i.e. do not mark a protocol
+    /// as preferred if it cannot actually be used with all the pageservers.
+    #[serde(default)]
+    pub prefer_protocol: PageserverProtocol,
+}
+
+/// Extract PageserverConnectionInfo from a comma-separated list of libpq connection strings.
+///
+/// This is used for backwards-compatibility, to parse the legacy
+/// [ComputeSpec::pageserver_connstring] field, or the 'neon.pageserver_connstring' GUC. Nowadays,
+/// the 'pageserver_connection_info' field should be used instead.
+impl PageserverConnectionInfo {
+    pub fn from_connstr(
+        connstr: &str,
+        stripe_size: Option<ShardStripeSize>,
+    ) -> Result<PageserverConnectionInfo, anyhow::Error> {
+        let shard_infos: Vec<_> = connstr
+            .split(',')
+            .map(|connstr| PageserverShardInfo {
+                pageservers: vec![PageserverShardConnectionInfo {
+                    id: None,
+                    libpq_url: Some(connstr.to_string()),
+                    grpc_url: None,
+                }],
+            })
+            .collect();
+
+        match shard_infos.len() {
+            0 => anyhow::bail!("empty connection string"),
+            1 => {
+                // We assume that if there's only connection string, it means "unsharded",
+                // rather than a sharded system with just a single shard. The latter is
+                // possible in principle, but we never do it.
+                let shard_count = ShardCount::unsharded();
+                let only_shard = shard_infos.first().unwrap().clone();
+                let shards = vec![(ShardIndex::unsharded(), only_shard)];
+                Ok(PageserverConnectionInfo {
+                    shard_count,
+                    stripe_size: None,
+                    shards: shards.into_iter().collect(),
+                    prefer_protocol: PageserverProtocol::Libpq,
+                })
+            }
+            n => {
+                if stripe_size.is_none() {
+                    anyhow::bail!("{n} shards but no stripe_size");
+                }
+                let shard_count = ShardCount(n.try_into()?);
+                let shards = shard_infos
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, shard_info)| {
+                        (
+                            ShardIndex {
+                                shard_count,
+                                shard_number: ShardNumber(
+                                    idx.try_into().expect("shard number fits in u8"),
+                                ),
+                            },
+                            shard_info,
+                        )
+                    })
+                    .collect();
+                Ok(PageserverConnectionInfo {
+                    shard_count,
+                    stripe_size,
+                    shards,
+                    prefer_protocol: PageserverProtocol::Libpq,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverShardInfo {
+    pub pageservers: Vec<PageserverShardConnectionInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverShardConnectionInfo {
+    pub id: Option<String>,
+    pub libpq_url: Option<String>,
+    pub grpc_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -331,6 +445,12 @@ impl ComputeMode {
             ComputeMode::Static(_) => "static",
             ComputeMode::Replica => "replica",
         }
+    }
+}
+
+impl Display for ComputeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_type_str())
     }
 }
 
@@ -470,13 +590,15 @@ pub struct JwksSettings {
     pub jwt_audience: Option<String>,
 }
 
-/// Protocol used to connect to a Pageserver. Parsed from the connstring scheme.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Protocol used to connect to a Pageserver.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum PageserverProtocol {
     /// The original protocol based on libpq and COPY. Uses postgresql:// or postgres:// scheme.
     #[default]
+    #[serde(rename = "libpq")]
     Libpq,
     /// A newer, gRPC-based protocol. Uses grpc:// scheme.
+    #[serde(rename = "grpc")]
     Grpc,
 }
 

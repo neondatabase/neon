@@ -18,6 +18,8 @@ use crate::pg_helpers::{
 };
 use crate::tls::{self, SERVER_CRT, SERVER_KEY};
 
+use utils::shard::{ShardIndex, ShardNumber};
+
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
 pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
@@ -69,9 +71,75 @@ pub fn write_postgres_conf(
     }
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
-    if let Some(s) = &spec.pageserver_connstring {
-        writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
+    writeln!(file)?;
+    if let Some(conninfo) = &spec.pageserver_connection_info {
+        let mut libpq_urls: Option<Vec<String>> = Some(Vec::new());
+        let num_shards = if conninfo.shard_count.0 == 0 {
+            1 // unsharded, treat it as a single shard
+        } else {
+            conninfo.shard_count.0
+        };
+
+        for shard_number in 0..num_shards {
+            let shard_index = ShardIndex {
+                shard_number: ShardNumber(shard_number),
+                shard_count: conninfo.shard_count,
+            };
+            let info = conninfo.shards.get(&shard_index).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "shard {shard_index} missing from pageserver_connection_info shard map"
+                )
+            })?;
+
+            let first_pageserver = info
+                .pageservers
+                .first()
+                .expect("must have at least one pageserver");
+
+            // Add the libpq URL to the array, or if the URL is missing, reset the array
+            // forgetting any previous entries. All servers must have a libpq URL, or none
+            // at all.
+            if let Some(url) = &first_pageserver.libpq_url {
+                if let Some(ref mut urls) = libpq_urls {
+                    urls.push(url.clone());
+                }
+            } else {
+                libpq_urls = None
+            }
+        }
+        if let Some(libpq_urls) = libpq_urls {
+            writeln!(
+                file,
+                "# derived from compute spec's pageserver_conninfo field"
+            )?;
+            writeln!(
+                file,
+                "neon.pageserver_connstring={}",
+                escape_conf_value(&libpq_urls.join(","))
+            )?;
+        } else {
+            writeln!(file, "# no neon.pageserver_connstring")?;
+        }
+
+        if let Some(stripe_size) = conninfo.stripe_size {
+            writeln!(
+                file,
+                "# from compute spec's pageserver_conninfo.stripe_size field"
+            )?;
+            writeln!(file, "neon.stripe_size={stripe_size}")?;
+        }
+    } else {
+        if let Some(s) = &spec.pageserver_connstring {
+            writeln!(file, "# from compute spec's pageserver_connstring field")?;
+            writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
+        }
+
+        if let Some(stripe_size) = spec.shard_stripe_size {
+            writeln!(file, "# from compute spec's shard_stripe_size field")?;
+            writeln!(file, "neon.stripe_size={stripe_size}")?;
+        }
     }
+
     if !spec.safekeeper_connstrings.is_empty() {
         let mut neon_safekeepers_value = String::new();
         tracing::info!(
