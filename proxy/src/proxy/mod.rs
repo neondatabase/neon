@@ -8,6 +8,7 @@ pub(crate) mod wake_compute;
 
 use std::collections::HashSet;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use futures::TryStreamExt;
@@ -24,6 +25,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 
+use crate::auth::backend::ComputeCredentialKeys;
 use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
 use crate::config::ProxyConfig;
@@ -41,7 +43,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &'static ProxyConfig,
     auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestContext,
-    cancellation_handler: Arc<CancellationHandler>,
+    _cancellation_handler: Arc<CancellationHandler>,
     client: &mut PqStream<Stream<S>>,
     mode: &ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -88,6 +90,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         auth::Backend::ControlPlane(cplane, creds) => (cplane, creds),
         auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
     };
+    let unauthenticated = matches!(creds.keys, ComputeCredentialKeys::Password(_));
+
     let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
     let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
     auth_info.set_startup_params(params, params_compat);
@@ -109,39 +113,45 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
 
-    send_client_greeting(ctx, &config.greetings, client);
+    send_client_greeting(ctx, &config.greetings, client, node.socket_addr);
 
-    let auth::Backend::ControlPlane(_, user_info) = backend else {
+    let auth::Backend::ControlPlane(_, _user_info) = backend else {
         unreachable!("ensured above");
     };
 
-    let session = cancellation_handler.get_key();
+    // If we have a password, that means we didn't validate the password and convert
+    // them into scram keys. Therefore we can only announce authentication ok now.
+    if unauthenticated {
+        client.write_message(BeMessage::AuthenticationOk);
+    }
 
-    let (process_id, secret_key) =
-        forward_compute_params_to_client(ctx, *session.key(), client, &mut node.stream).await?;
-    let hostname = node.hostname.to_string();
+    // let session = cancellation_handler.get_key();
 
-    let session_id = ctx.session_id();
-    let (cancel_on_shutdown, cancel) = oneshot::channel();
-    tokio::spawn(async move {
-        session
-            .maintain_cancel_key(
-                session_id,
-                cancel,
-                &CancelClosure {
-                    socket_addr: node.socket_addr,
-                    cancel_token: RawCancelToken {
-                        ssl_mode: node.ssl_mode,
-                        process_id,
-                        secret_key,
-                    },
-                    hostname,
-                    user_info,
-                },
-                &config.connect_to_compute,
-            )
-            .await;
-    });
+    let (_process_id, _secret_key) =
+        forward_compute_params_to_client(ctx, None, client, &mut node.stream).await?;
+    // let hostname = node.hostname.to_string();
+
+    // let session_id = ctx.session_id();
+    let (cancel_on_shutdown, _cancel) = oneshot::channel();
+    // tokio::spawn(async move {
+    //     session
+    //         .maintain_cancel_key(
+    //             session_id,
+    //             cancel,
+    //             &CancelClosure {
+    //                 socket_addr: node.socket_addr,
+    //                 cancel_token: RawCancelToken {
+    //                     ssl_mode: node.ssl_mode,
+    //                     process_id,
+    //                     secret_key,
+    //                 },
+    //                 hostname,
+    //                 user_info,
+    //             },
+    //             &config.connect_to_compute,
+    //         )
+    //         .await;
+    // });
 
     Ok((node, cancel_on_shutdown))
 }
@@ -151,12 +161,19 @@ pub(crate) fn send_client_greeting(
     ctx: &RequestContext,
     greetings: &String,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    socket_addr: SocketAddr,
 ) {
     // Expose session_id to clients if we have a greeting message.
     if !greetings.is_empty() {
         let session_msg = format!("{}, session_id: {}", greetings, ctx.session_id());
         client.write_message(BeMessage::NoticeResponse(session_msg.as_str()));
     }
+
+    // needed for RI to know what IP to send cancellation to.
+    client.write_message(BeMessage::ParameterStatus {
+        name: "upstream_ip".as_bytes(),
+        value: socket_addr.ip().to_string().as_bytes(),
+    });
 
     // Forward recorded latencies for probing requests
     if let Some(testodrome_id) = ctx.get_testodrome_id() {
@@ -191,7 +208,7 @@ pub(crate) fn send_client_greeting(
 
 pub(crate) async fn forward_compute_params_to_client(
     ctx: &RequestContext,
-    cancel_key_data: CancelKeyData,
+    cancel_key_data: Option<CancelKeyData>,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     compute: &mut StartupStream<TcpStream, RustlsStream>,
 ) -> Result<(i32, i32), ClientRequestError> {
@@ -210,9 +227,16 @@ pub(crate) async fn forward_compute_params_to_client(
         match msg {
             // Send our cancellation key data instead.
             Some(Message::BackendKeyData(body)) => {
-                client.write_message(BeMessage::BackendKeyData(cancel_key_data));
                 process_id = body.process_id();
                 secret_key = body.secret_key();
+
+                let cancel_key_data = cancel_key_data.unwrap_or_else(|| {
+                    let pid = process_id as u32;
+                    let key = secret_key as u32;
+                    CancelKeyData(((pid as u64) << 32 | (key as u64)).into())
+                });
+
+                client.write_message(BeMessage::BackendKeyData(cancel_key_data));
             }
             // Forward all postgres connection params to the client.
             Some(Message::ParameterStatus(body)) => {

@@ -5,9 +5,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(any(test, feature = "testing"))]
-use anyhow::Context;
-use anyhow::{bail, ensure};
+use anyhow::{Context, bail, ensure};
 use arc_swap::ArcSwapOption;
 #[cfg(any(test, feature = "testing"))]
 use camino::Utf8PathBuf;
@@ -39,6 +37,7 @@ use crate::config::{
     ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
 };
 use crate::context::parquet::ParquetUploadArgs;
+use crate::control_plane::client::lakebase_v1::LakebaseClient;
 use crate::http::health_server::AppMetrics;
 use crate::metrics::{Metrics, ServiceInfo};
 use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
@@ -65,6 +64,9 @@ use clap::{Parser, ValueEnum};
 enum AuthBackendType {
     #[clap(alias("cplane-v1"))]
     ControlPlane,
+
+    #[clap(alias("lakebase-v1"))]
+    Lakebase,
 
     #[clap(alias("link"))]
     ConsoleRedirect,
@@ -132,6 +134,9 @@ struct ProxyCliArgs {
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
     #[clap(short = 'c', long, alias = "ssl-cert")]
     tls_cert: Option<PathBuf>,
+    /// path to mTLS certs for client postgres connections
+    #[clap(long)]
+    mtls_certs: Option<PathBuf>,
     /// Allow writing TLS session keys to the given file pointed to by the environment variable `SSLKEYLOGFILE`.
     #[clap(long, alias = "allow-ssl-keylogfile")]
     allow_tls_keylogfile: bool,
@@ -628,6 +633,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
             key_path,
             cert_path,
+            args.mtls_certs.as_deref(),
             args.certs_dir.as_deref(),
             args.allow_tls_keylogfile,
         )?),
@@ -739,6 +745,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
     match &args.auth_backend {
         AuthBackendType::ControlPlane => {}
+        AuthBackendType::Lakebase => {}
         #[cfg(any(test, feature = "testing"))]
         AuthBackendType::Postgres => {}
         #[cfg(any(test, feature = "testing"))]
@@ -827,6 +834,19 @@ fn build_auth_backend(
             );
 
             let api = control_plane::client::ControlPlaneClient::ProxyV1(api);
+            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
+            let config = Box::leak(Box::new(auth_backend));
+
+            Ok(Either::Left(config))
+        }
+
+        AuthBackendType::Lakebase => {
+            let url: url::Url = args.auth_endpoint.parse()?;
+            let namespace = url.host_str().context("missing hostname as namespace")?;
+            let port = url.port().unwrap_or(5432);
+
+            let api = LakebaseClient::new(namespace.to_owned(), port);
+            let api = control_plane::client::ControlPlaneClient::LakebaseV1(api);
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
             let config = Box::leak(Box::new(auth_backend));
 

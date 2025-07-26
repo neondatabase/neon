@@ -9,6 +9,7 @@ use bytes::{Buf, BufMut};
 use itertools::Itertools;
 use rand::distr::{Distribution, StandardUniform};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use zerocopy::{FromBytes, Immutable, IntoBytes, big_endian};
 
 pub type ErrorCode = [u8; 5];
@@ -51,6 +52,18 @@ impl fmt::Debug for ProtocolVersion {
             .entry(&self.minor())
             .finish()
     }
+}
+
+pub async fn cancel(mut s: TcpStream, key: CancelKeyData) -> io::Result<()> {
+    s.write_all(
+        StartupHeader {
+            len: 16_u32.into(),
+            version: CANCEL_REQUEST_CODE,
+        }
+        .as_bytes(),
+    )
+    .await?;
+    s.write_all(key.as_bytes()).await
 }
 
 /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L118>

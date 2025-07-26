@@ -64,7 +64,7 @@ pub(crate) async fn connect_to_compute_and_auth(
         match res {
             Ok(()) => return Ok(node),
             Err(e) => {
-                if attempt < 2
+                if attempt < 1
                     && let Backend::ControlPlane(cplane, user_info) = user_info
                     && let ControlPlaneClient::ProxyV1(cplane_proxy_v1) = &**cplane
                     && e.should_retry_wake_compute()

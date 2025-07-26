@@ -86,10 +86,10 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     /// Read a postgres password message, which will respect the max length requested.
     /// This is not cancel safe.
     pub async fn read_password_message(&mut self) -> io::Result<&mut [u8]> {
-        // passwords are usually pretty short
+        // passwords are usually pretty short, but JWTs are quite long.
         // and SASL SCRAM messages are no longer than 256 bytes in my testing
         // (a few hashes and random bytes, encoded into base64).
-        const MAX_PASSWORD_LENGTH: u32 = 512;
+        const MAX_PASSWORD_LENGTH: u32 = 2048;
         self.read_raw_expect(FE_PASSWORD_MESSAGE, MAX_PASSWORD_LENGTH)
             .await
     }

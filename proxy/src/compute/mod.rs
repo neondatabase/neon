@@ -137,7 +137,7 @@ pub(crate) struct AuthInfo {
     /// None for local-proxy, as we use trust-based localhost auth.
     /// Some for sql-over-http, ws, tcp, and in most cases for console-redirect.
     /// Might be None for console-redirect, but that's only a consequence of testing environments ATM.
-    auth: Option<Auth>,
+    pub(crate) auth: Option<Auth>,
     server_params: StartupMessageParams,
 
     channel_binding: ChannelBinding,
@@ -151,6 +151,7 @@ pub(crate) struct AuthInfo {
 pub struct ConnectInfo {
     pub host_addr: Option<IpAddr>,
     pub host: Host,
+    pub server_name: String,
     pub port: u16,
     pub ssl_mode: SslMode,
 }
@@ -176,6 +177,7 @@ impl AuthInfo {
                 ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(auth_keys)) => {
                     Some(Auth::Scram(Box::new(auth_keys)))
                 }
+                ComputeCredentialKeys::Password(pw) => Some(Auth::Password(pw)),
                 ComputeCredentialKeys::JwtPayload(_) => None,
             },
             server_params: StartupMessageParams::default(),
@@ -303,6 +305,7 @@ impl ConnectInfo {
         // require for our business.
         let port = self.port;
         let host = &*self.host;
+        let server_name = &*self.server_name;
 
         let addrs = match self.host_addr {
             Some(addr) => vec![SocketAddr::new(addr, port)],
@@ -312,7 +315,7 @@ impl ConnectInfo {
         match connect_once(&*addrs).await {
             Ok((sockaddr, stream)) => Ok((
                 sockaddr,
-                tls::connect_tls(stream, self.ssl_mode, config, host, tls).await?,
+                tls::connect_tls(stream, self.ssl_mode, config, server_name, tls).await?,
             )),
             Err(err) => {
                 warn!("couldn't connect to compute node at {host}:{port}: {err}");

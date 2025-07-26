@@ -192,7 +192,8 @@ async fn authenticate(
     };
 
     let conn_info = compute::ConnectInfo {
-        host: db_info.host.into(),
+        host: db_info.host.as_ref().into(),
+        server_name: db_info.host.into_string(),
         port: db_info.port,
         ssl_mode,
         host_addr: None,

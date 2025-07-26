@@ -1,7 +1,8 @@
 //! A group of high-level tests for connection establishing logic and auth.
 #![allow(clippy::unimplemented)]
 
-mod mitm;
+// disabled as we removed support for channel binding.
+// mod mitm;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -181,7 +182,7 @@ async fn dummy_proxy(
 ) -> anyhow::Result<()> {
     let mut stream = match handshake(&RequestContext::test(), client, tls.as_ref(), false).await? {
         HandshakeData::Startup(stream, _) => stream,
-        HandshakeData::Cancel(_) => bail!("cancellation not supported"),
+        HandshakeData::Cancel(_, _) => bail!("cancellation not supported"),
     };
 
     auth.authenticate(&mut stream).await?;
@@ -296,7 +297,7 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
     ));
 
     let _conn = postgres_client::Config::new("test".to_owned(), 5432)
-        .channel_binding(postgres_client::config::ChannelBinding::Require)
+        .channel_binding(postgres_client::config::ChannelBinding::Disable)
         .user("user")
         .dbname("db")
         .password(password)
@@ -531,6 +532,7 @@ fn helper_create_uncached_node_info() -> NodeInfo {
     NodeInfo {
         conn_info: compute::ConnectInfo {
             host: "test".into(),
+            server_name: "test".into(),
             port: 5432,
             ssl_mode: SslMode::Disable,
             host_addr: None,

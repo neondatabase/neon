@@ -15,6 +15,7 @@ use crate::metrics::{Metrics, NumClientConnectionsGuard};
 use crate::pglb::ClientRequestError;
 use crate::pglb::handshake::{HandshakeData, handshake};
 use crate::pglb::passthrough::ProxyPassthrough;
+use crate::pqproto::CancelKeyData;
 use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::proxy::{
     ErrorSource, connect_compute, forward_compute_params_to_client, send_client_greeting,
@@ -179,7 +180,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         .await??
     {
         HandshakeData::Startup(stream, params) => (stream, params),
-        HandshakeData::Cancel(cancel_key_data) => {
+        HandshakeData::Cancel(_, cancel_key_data) => {
             // spawn a task to cancel the session, but don't wait for it
             cancellations.spawn({
                 let cancellation_handler_clone  = Arc::clone(&cancellation_handler);
@@ -207,7 +208,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     ctx.set_db_options(params.clone());
 
-    let (node_info, mut auth_info, user_info) = match backend
+    let (node_info, mut auth_info, _user_info) = match backend
         .authenticate(ctx, &config.authentication_config, &mut stream)
         .await
     {
@@ -229,37 +230,36 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         .authenticate(ctx, &mut node)
         .or_else(|e| async { Err(stream.throw_error(e, Some(ctx)).await) })
         .await?;
-    send_client_greeting(ctx, &config.greetings, &mut stream);
+    send_client_greeting(ctx, &config.greetings, &mut stream, node.socket_addr);
 
-    let session = cancellation_handler.get_key();
+    // let session = cancellation_handler.get_key();
 
-    let (process_id, secret_key) =
-        forward_compute_params_to_client(ctx, *session.key(), &mut stream, &mut node.stream)
-            .await?;
+    let (_process_id, _secret_key) =
+        forward_compute_params_to_client(ctx, None, &mut stream, &mut node.stream).await?;
     let stream = stream.flush_and_into_inner().await?;
-    let hostname = node.hostname.to_string();
+    // let hostname = node.hostname.to_string();
 
-    let session_id = ctx.session_id();
-    let (cancel_on_shutdown, cancel) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        session
-            .maintain_cancel_key(
-                session_id,
-                cancel,
-                &CancelClosure {
-                    socket_addr: node.socket_addr,
-                    cancel_token: RawCancelToken {
-                        ssl_mode: node.ssl_mode,
-                        process_id,
-                        secret_key,
-                    },
-                    hostname,
-                    user_info,
-                },
-                &config.connect_to_compute,
-            )
-            .await;
-    });
+    // let session_id = ctx.session_id();
+    let (cancel_on_shutdown, _cancel) = tokio::sync::oneshot::channel();
+    // tokio::spawn(async move {
+    //     session
+    //         .maintain_cancel_key(
+    //             session_id,
+    //             cancel,
+    //             &CancelClosure {
+    //                 socket_addr: node.socket_addr,
+    //                 cancel_token: RawCancelToken {
+    //                     ssl_mode: node.ssl_mode,
+    //                     process_id,
+    //                     secret_key,
+    //                 },
+    //                 hostname,
+    //                 user_info,
+    //             },
+    //             &config.connect_to_compute,
+    //         )
+    //         .await;
+    // });
 
     Ok(Some(ProxyPassthrough {
         client: stream,
