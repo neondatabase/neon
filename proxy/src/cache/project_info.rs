@@ -23,8 +23,9 @@ use crate::types::{EndpointId, RoleName};
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
 pub struct ProjectInfoCache {
-    role_controls: Cache<(EndpointIdInt, RoleNameInt), ControlPlaneResult<RoleAccessControl>>,
-    ep_controls: Cache<EndpointIdInt, ControlPlaneResult<EndpointAccessControl>>,
+    role_controls:
+        Cache<(EndpointIdInt, RoleNameInt), ControlPlaneResult<Entry<RoleAccessControl>>>,
+    ep_controls: Cache<EndpointIdInt, ControlPlaneResult<Entry<EndpointAccessControl>>>,
 
     project2ep: MultiSet<ProjectIdInt, EndpointIdInt>,
     account2ep: MultiSet<AccountIdInt, EndpointIdInt>,
@@ -56,6 +57,13 @@ impl<'a, K: Ord, V> Comparable<Key<'a, K>> for KeyValue<K, V> {
     fn compare(&self, key: &Key<'a, K>) -> std::cmp::Ordering {
         self.0.cmp(key.0).then(false.cmp(&key.1))
     }
+}
+
+#[derive(Clone)]
+struct Entry<T> {
+    project_id: Option<ProjectIdInt>,
+    account_id: Option<AccountIdInt>,
+    value: T,
 }
 
 impl ProjectInfoCache {
@@ -144,7 +152,9 @@ impl ProjectInfoCache {
 
         count_cache_outcome(
             CacheKind::ProjectInfoRoles,
-            self.role_controls.get(&(endpoint_id, role_name)),
+            self.role_controls
+                .get(&(endpoint_id, role_name))
+                .map(|e| e.map(|e| e.value)),
         )
     }
 
@@ -156,7 +166,9 @@ impl ProjectInfoCache {
 
         count_cache_outcome(
             CacheKind::ProjectInfoEndpoints,
-            self.ep_controls.get(&endpoint_id),
+            self.ep_controls
+                .get(&endpoint_id)
+                .map(|e| e.map(|e| e.value)),
         )
     }
 
@@ -184,9 +196,22 @@ impl ProjectInfoCache {
         count_cache_insert(CacheKind::ProjectInfoEndpoints);
         count_cache_insert(CacheKind::ProjectInfoRoles);
 
-        self.ep_controls.insert(endpoint_id, Ok(controls));
-        self.role_controls
-            .insert((endpoint_id, role_name), Ok(role_controls));
+        self.ep_controls.insert(
+            endpoint_id,
+            Ok(Entry {
+                account_id,
+                project_id,
+                value: controls,
+            }),
+        );
+        self.role_controls.insert(
+            (endpoint_id, role_name),
+            Ok(Entry {
+                account_id,
+                project_id,
+                value: role_controls,
+            }),
+        );
     }
 
     pub(crate) fn insert_endpoint_access_err(
