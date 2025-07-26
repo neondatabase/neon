@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -54,11 +55,12 @@ use super::http_util::{
 };
 use super::json::JsonConversionError;
 use crate::auth::backend::ComputeCredentialKeys;
+use crate::cache::common::{count_cache_insert, count_cache_outcome, eviction_listener};
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::read_body_with_limit;
-use crate::metrics::Metrics;
+use crate::metrics::{CacheKind, Metrics};
 use crate::serverless::sql_over_http::HEADER_VALUE_TRUE;
 use crate::types::EndpointCacheKey;
 use crate::util::deserialize_json_string;
@@ -138,13 +140,29 @@ pub struct ApiConfig {
 }
 
 // The DbSchemaCache is a cache of the ApiConfig and DbSchemaOwned for each endpoint
-pub(crate) struct DbSchemaCache(pub Cache<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>);
+pub(crate) struct DbSchemaCache(Cache<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>);
 impl DbSchemaCache {
     pub fn new(config: crate::config::CacheOptions) -> Self {
         let builder = Cache::builder().name("db_schema_cache");
         let builder = config.moka(builder);
 
+        let metrics = &Metrics::get().cache;
+        if let Some(size) = config.size {
+            metrics.capacity.set(CacheKind::Schema, size as i64);
+        }
+
+        let builder =
+            builder.eviction_listener(|_k, _v, cause| eviction_listener(CacheKind::Schema, cause));
+
         Self(builder.build())
+    }
+
+    pub async fn maintain(&self) -> Result<Infallible, anyhow::Error> {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            self.0.run_pending_tasks();
+        }
     }
 
     pub async fn get_cached_or_remote(
@@ -156,7 +174,8 @@ impl DbSchemaCache {
         ctx: &RequestContext,
         config: &'static ProxyConfig,
     ) -> Result<Arc<(ApiConfig, DbSchemaOwned)>, RestError> {
-        match self.0.get(endpoint_id) {
+        let cache_result = count_cache_outcome(CacheKind::Schema, self.0.get(endpoint_id));
+        match cache_result {
             Some(v) => Ok(v),
             None => {
                 info!("db_schema cache miss for endpoint: {:?}", endpoint_id);
@@ -180,6 +199,7 @@ impl DbSchemaCache {
                             db_extra_search_path: None,
                         };
                         let value = Arc::new((api_config, schema_owned));
+                        count_cache_insert(CacheKind::Schema);
                         self.0.insert(endpoint_id.clone(), value);
                         return Err(e);
                     }
@@ -188,6 +208,7 @@ impl DbSchemaCache {
                     }
                 };
                 let value = Arc::new((api_config, schema_owned));
+                count_cache_insert(CacheKind::Schema);
                 self.0.insert(endpoint_id.clone(), value.clone());
                 Ok(value)
             }

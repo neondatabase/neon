@@ -2,8 +2,12 @@ use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
 use moka::Expiry;
+use moka::notification::RemovalCause;
 
 use crate::control_plane::messages::ControlPlaneErrorMessage;
+use crate::metrics::{
+    CacheEviction, CacheKind, CacheOutcome, CacheOutcomeGroup, CacheRemovalCause, Metrics,
+};
 
 /// Default TTL used when caching errors from control plane.
 pub const DEFAULT_ERROR_TTL: Duration = Duration::from_secs(30);
@@ -129,4 +133,36 @@ impl<K, V> Expiry<K, ControlPlaneResult<V>> for CplaneExpiry {
     ) -> Option<Duration> {
         self.expire_early(value, updated_at)
     }
+}
+
+pub fn eviction_listener(kind: CacheKind, cause: RemovalCause) {
+    let cause = match cause {
+        RemovalCause::Expired => CacheRemovalCause::Expired,
+        RemovalCause::Explicit => CacheRemovalCause::Explicit,
+        RemovalCause::Replaced => CacheRemovalCause::Replaced,
+        RemovalCause::Size => CacheRemovalCause::Size,
+    };
+    Metrics::get()
+        .cache
+        .evicted_total
+        .inc(CacheEviction { cache: kind, cause });
+}
+
+#[inline]
+pub fn count_cache_outcome<T>(kind: CacheKind, cache_result: Option<T>) -> Option<T> {
+    let outcome = if cache_result.is_some() {
+        CacheOutcome::Hit
+    } else {
+        CacheOutcome::Miss
+    };
+    Metrics::get().cache.request_total.inc(CacheOutcomeGroup {
+        cache: kind,
+        outcome,
+    });
+    cache_result
+}
+
+#[inline]
+pub fn count_cache_insert(kind: CacheKind) {
+    Metrics::get().cache.inserted_total.inc(kind);
 }
