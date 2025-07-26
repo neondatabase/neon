@@ -78,6 +78,7 @@ parquet = { version = "53", default-features = false, features = ["zstd"] }
 portable-atomic = { version = "1", features = ["require-cas"] }
 prost = { version = "0.13", features = ["no-recursion-limit", "prost-derive"] }
 rand = { version = "0.9" }
+rcgen = { version = "0.13", features = ["aws_lc_rs"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
 regex-syntax = { version = "0.8" }
@@ -126,6 +127,7 @@ cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", features = ["derive", "env", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "help", "std", "string", "suggestions", "usage"] }
+displaydoc = { version = "0.2" }
 either = { version = "1" }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }

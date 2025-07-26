@@ -1,6 +1,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 extern crate hyper0 as hyper;
+use postgres_backend::AuthType;
 
 use std::time::Duration;
 
@@ -128,6 +129,7 @@ pub struct SafeKeeperConf {
     /* END_HADRON */
     pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
+    pub auth_type: AuthType,
     pub pg_auth: Option<Arc<JwtAuth>>,
     pub pg_tenant_only_auth: Option<Arc<JwtAuth>>,
     pub http_auth: Option<Arc<SwappableJwtAuth>>,
@@ -173,6 +175,7 @@ impl SafeKeeperConf {
             peer_recovery_enabled: true,
             wal_backup_enabled: true,
             backup_parallel_jobs: 1,
+            auth_type: AuthType::HadronJWT,
             pg_auth: None,
             pg_tenant_only_auth: None,
             http_auth: None,

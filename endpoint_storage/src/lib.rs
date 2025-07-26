@@ -7,7 +7,6 @@ use axum::{RequestPartsExt, http::StatusCode, http::request::Parts};
 use axum_extra::TypedHeader;
 use axum_extra::headers::{Authorization, authorization::Bearer};
 use camino::Utf8PathBuf;
-use jsonwebtoken::{DecodingKey, Validation};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -15,27 +14,8 @@ use std::result::Result as StdResult;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
+use utils::auth::JwtAuth;
 use utils::id::{EndpointId, TenantId, TimelineId};
-
-// simplified version of utils::auth::JwtAuth
-pub struct JwtAuth {
-    decoding_key: DecodingKey,
-    validation: Validation,
-}
-
-pub const VALIDATION_ALGO: jsonwebtoken::Algorithm = jsonwebtoken::Algorithm::EdDSA;
-impl JwtAuth {
-    pub fn new(key: &[u8]) -> Result<Self> {
-        Ok(Self {
-            decoding_key: DecodingKey::from_ed_pem(key)?,
-            validation: Validation::new(VALIDATION_ALGO),
-        })
-    }
-
-    pub fn decode<T: serde::de::DeserializeOwned>(&self, token: &str) -> Result<T> {
-        Ok(jsonwebtoken::decode(token, &self.decoding_key, &self.validation).map(|t| t.claims)?)
-    }
-}
 
 fn normalize_key(key: &str) -> StdResult<Utf8PathBuf, String> {
     let key = clean_utf8(&Utf8PathBuf::from(key));
@@ -157,7 +137,8 @@ impl FromRequestParts<Arc<Storage>> for S3Path {
         let claims: EndpointStorageClaims = state
             .auth
             .decode(bearer.token())
-            .map_err(|e| bad_request(e, "decoding token"))?;
+            .map_err(|e| bad_request(e, "decoding token"))?
+            .claims;
 
         // Read paths may have different endpoint ids. For readonly -> readwrite replica
         // prewarming, endpoint must read other endpoint's data.
@@ -224,7 +205,8 @@ impl FromRequestParts<Arc<Storage>> for PrefixS3Path {
         let claims: DeletePrefixClaims = state
             .auth
             .decode(bearer.token())
-            .map_err(|e| bad_request(e, "invalid token"))?;
+            .map_err(|e| bad_request(e, "invalid token"))?
+            .claims;
         let route = DeletePrefixClaims {
             tenant_id: path.tenant_id,
             timeline_id: path.timeline_id,

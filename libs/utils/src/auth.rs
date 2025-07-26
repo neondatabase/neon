@@ -1,9 +1,9 @@
 // For details about authentication see docs/authentication.md
 
-use std::borrow::Cow;
 use std::fmt::Display;
 use std::fs;
 use std::sync::Arc;
+use std::{borrow::Cow, io, path::Path};
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
@@ -11,14 +11,17 @@ use camino::Utf8Path;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode,
 };
+use oid_registry::OID_PKCS1_RSAENCRYPTION;
 use pem::Pem;
+use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::id::TenantId;
 
-/// Algorithm to use. We require EdDSA.
+/// Signature algorithms to use. We allow EdDSA and RSA/SHA-256.
 const STORAGE_TOKEN_ALGORITHM: Algorithm = Algorithm::EdDSA;
+const HADRON_STORAGE_TOKEN_ALGORITHM: Algorithm = Algorithm::RS256;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -93,6 +96,14 @@ impl Claims {
             tenant_id,
             scope,
             endpoint_id: None,
+        }
+    }
+
+    pub fn new_for_endpoint(endpoint_id: Uuid) -> Self {
+        Self {
+            tenant_id: None,
+            endpoint_id: Some(endpoint_id),
+            scope: Scope::TenantEndpoint,
         }
     }
 }
@@ -175,6 +186,96 @@ impl JwtAuth {
         Ok(Self::new(decoding_keys))
     }
 
+    // Helper function to parse a X509 certificate file and extract the RSA public keys from it as `DecodingKey`s.
+    // - `ceritificate_file_path`: the path to the certificate file. It must be a file, not a directory or anything else.
+    // Returns the successfully extracted decoding keys. Non-RSA keys and non-X509-parsable certificates are skipped.
+    // Multuple keys may be returned because a single file can contain multiple certificates.
+    fn extract_rsa_decoding_keys_from_certificate<P: AsRef<Path>>(
+        certificate_file_path: P,
+    ) -> Result<Vec<DecodingKey>> {
+        let certs: io::Result<Vec<CertificateDer<'static>>> = rustls_pemfile::certs(
+            &mut io::BufReader::new(fs::File::open(certificate_file_path)?),
+        )
+        .collect();
+
+        Ok(certs?
+            .iter()
+            .filter_map(
+                |cert| match x509_parser::parse_x509_certificate(cert) {
+                    Ok((_, cert)) => {
+                        let public_key = cert.public_key();
+                        // Note that we are just extracting the public key from the certificate, not the signature.
+                        // So the algorithm is just the asymmetric crypto such as RSA, no hashes of or anything like
+                        // that.
+                        if *public_key.algorithm.oid() == OID_PKCS1_RSAENCRYPTION {
+                            Some(DecodingKey::from_rsa_der(&public_key.subject_public_key.data))
+                        } else {
+                            tracing::warn!(
+                                "Unsupported public key algorithm: {:?} found in certificate. Skipping.",
+                                public_key.algorithm
+                            );
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Error parsing certificate: {}. Skipping.", e);
+                        None
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// Create a `JwtAuth` that can decode tokens using RSA public keys in X509 certificates from the given path.
+    /// - `cert_path`: the path to a directory or a file containing X509 certificates. If it is a directory, all files
+    ///   under the first level of the directory will be inspected for certificates.
+    ///   Returns the `JwtAuth` with the decoding keys extracted from the certificates, or error.
+    ///   Used by Hadron.
+    pub fn from_cert_path(cert_path: &Utf8Path) -> Result<Self> {
+        tracing::info!(
+            "Loading public keys in certificates from path: {}",
+            cert_path
+        );
+
+        let mut decoding_keys = Vec::new();
+
+        let metadata = cert_path.metadata()?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(cert_path)? {
+                let path = entry?.path();
+                if !path.is_file() {
+                    // Ignore directories (don't recurse)
+                    continue;
+                }
+                decoding_keys.extend(
+                    Self::extract_rsa_decoding_keys_from_certificate(path).unwrap_or_default(),
+                );
+            }
+        } else if metadata.is_file() {
+            decoding_keys.extend(
+                Self::extract_rsa_decoding_keys_from_certificate(cert_path).unwrap_or_default(),
+            );
+        } else {
+            anyhow::bail!("{cert_path} is neither a directory or a file")
+        }
+        if decoding_keys.is_empty() {
+            anyhow::bail!(
+                "Configured for JWT auth with zero decoding keys. All JWT gated requests would be rejected."
+            );
+        }
+
+        // Note that we need to create a `JwtAuth` with a different `validation` from the default one created by `new()` in this case
+        // because the `jsonwebtoken` crate requires that all algorithms in `validation.algorithms` belong to the same algorithm family
+        // (all RSA or all EdDSA).
+        let mut validation = Validation::default();
+        validation.algorithms = vec![HADRON_STORAGE_TOKEN_ALGORITHM];
+        validation.required_spec_claims = [].into();
+        Ok(Self {
+            validation,
+            decoding_keys,
+        })
+    }
+
     pub fn from_key(key: String) -> Result<Self> {
         Ok(Self::new(vec![DecodingKey::from_ed_pem(key.as_bytes())?]))
     }
@@ -217,8 +318,28 @@ pub fn encode_from_key_file<S: Serialize>(claims: &S, pem: &Pem) -> Result<Strin
     Ok(encode(&Header::new(STORAGE_TOKEN_ALGORITHM), claims, &key)?)
 }
 
+/// Encode (i.e., sign) a Hadron auth token with the given claims and RSA private key. This is used
+/// by HCC to sign tokens when deploying compute or returning the compute spec. The resulting token
+/// is used by the compute node to authenticate with HCC and PS/SK.
+pub fn encode_hadron_token<S: Serialize>(claims: &S, key_data: &[u8]) -> Result<String> {
+    let key = EncodingKey::from_rsa_pem(key_data)?;
+    encode_hadron_token_with_encoding_key(claims, &key)
+}
+
+pub fn encode_hadron_token_with_encoding_key<S: Serialize>(
+    claims: &S,
+    encoding_key: &EncodingKey,
+) -> Result<String> {
+    Ok(encode(
+        &Header::new(HADRON_STORAGE_TOKEN_ALGORITHM),
+        claims,
+        encoding_key,
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
+    use io::Write;
     use std::str::FromStr;
 
     use super::*;
@@ -243,8 +364,8 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
     fn test_decode() {
         let expected_claims = Claims {
             tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
-            scope: Scope::Tenant,
             endpoint_id: None,
+            scope: Scope::Tenant,
         };
 
         // A test token containing the following payload, signed using TEST_PRIV_KEY_ED25519:
@@ -272,8 +393,8 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
     fn test_encode() {
         let claims = Claims {
             tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
-            scope: Scope::Tenant,
             endpoint_id: None,
+            scope: Scope::Tenant,
         };
 
         let pem = pem::parse(TEST_PRIV_KEY_ED25519).unwrap();
@@ -286,5 +407,73 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let decoded: TokenData<Claims> = auth.decode(&encoded).unwrap();
 
         assert_eq!(decoded.claims, claims);
+    }
+
+    #[test]
+    fn test_decode_with_key_from_certificate() {
+        // Tests that we can sign (encode) a token with a RSA private key and verify (decode) it with the
+        // corresponding public key extracted from a certificate.
+
+        // Generate two RSA key pairs and create self-signed certificates with it.
+        let key_pair_1 = rcgen::KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256).unwrap();
+        let key_pair_2 = rcgen::KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256).unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "eng-brickstore@databricks.com");
+        let cert_1 = params.clone().self_signed(&key_pair_1).unwrap();
+        let cert_2 = params.self_signed(&key_pair_2).unwrap();
+
+        // Write the certificates and keys to a temporary dir.
+        let dir = camino_tempfile::tempdir().unwrap();
+        {
+            fs::File::create(dir.path().join("cert_1.pem"))
+                .unwrap()
+                .write_all(cert_1.pem().as_bytes())
+                .unwrap();
+            fs::File::create(dir.path().join("key_1.pem"))
+                .unwrap()
+                .write_all(key_pair_1.serialize_pem().as_bytes())
+                .unwrap();
+            fs::File::create(dir.path().join("cert_2.pem"))
+                .unwrap()
+                .write_all(cert_2.pem().as_bytes())
+                .unwrap();
+            fs::File::create(dir.path().join("key_2.pem"))
+                .unwrap()
+                .write_all(key_pair_2.serialize_pem().as_bytes())
+                .unwrap();
+        }
+        // Instantiate a `JwtAuth` with the certificate path. The resulting `JwtAuth` should extract the RSA public
+        // keys out of the X509 certificates and use them as the decoding keys. Since we specified a directory, both
+        // X509 certificates will be loaded, but the private key files are skipped.
+        let auth = JwtAuth::from_cert_path(dir.path()).unwrap();
+        assert_eq!(auth.decoding_keys.len(), 2);
+
+        // Also create a `JwtAuth`, specifying a single certificate file for it to get the decoding key from.
+        let auth_cert_1 = JwtAuth::from_cert_path(&dir.path().join("cert_1.pem")).unwrap();
+        assert_eq!(auth_cert_1.decoding_keys.len(), 1);
+
+        // Encode tokens with some claims.
+        let claims = Claims {
+            tenant_id: Some(TenantId::generate()),
+            endpoint_id: None,
+            scope: Scope::Tenant,
+        };
+        let encoded_1 =
+            encode_hadron_token(&claims, key_pair_1.serialize_pem().as_bytes()).unwrap();
+        let encoded_2 =
+            encode_hadron_token(&claims, key_pair_2.serialize_pem().as_bytes()).unwrap();
+
+        // Verify that we can decode the token with matching decoding keys (decoding also verifies the signature).
+        assert_eq!(auth.decode::<Claims>(&encoded_1).unwrap().claims, claims);
+        assert_eq!(auth.decode::<Claims>(&encoded_2).unwrap().claims, claims);
+        assert_eq!(
+            auth_cert_1.decode::<Claims>(&encoded_1).unwrap().claims,
+            claims
+        );
+
+        // Verify that the token cannot be decoded with a mismatched decode key.
+        assert!(auth_cert_1.decode::<Claims>(&encoded_2).is_err());
     }
 }
