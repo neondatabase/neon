@@ -688,14 +688,16 @@ impl Endpoint {
     }
 
     /// Generate a JWT with the correct claims.
-    pub fn generate_jwt(&self, scope: Option<ComputeClaimsScope>) -> Result<String> {
+    pub fn generate_jwt(&self, scope: Option<Vec<ComputeClaimsScope>>) -> Result<String> {
         self.env.generate_auth_token(&ComputeClaims {
             audience: match scope {
-                Some(ComputeClaimsScope::Admin) => Some(vec![COMPUTE_AUDIENCE.to_owned()]),
+                Some(ref scope) if scope.contains(&ComputeClaimsScope::Admin) => {
+                    Some(vec![COMPUTE_AUDIENCE.to_owned()])
+                }
                 _ => None,
             },
             compute_id: match scope {
-                Some(ComputeClaimsScope::Admin) => None,
+                Some(ref scope) if scope.contains(&ComputeClaimsScope::Admin) => None,
                 _ => Some(self.endpoint_id.clone()),
             },
             scope,
@@ -999,7 +1001,7 @@ impl Endpoint {
                     self.external_http_address.port()
                 ),
             )
-            .bearer_auth(self.generate_jwt(None::<ComputeClaimsScope>)?)
+            .bearer_auth(self.generate_jwt(None::<Vec<ComputeClaimsScope>>)?)
             .send()
             .await?;
 
@@ -1067,7 +1069,7 @@ impl Endpoint {
                 self.external_http_address.port()
             ))
             .header(CONTENT_TYPE.as_str(), "application/json")
-            .bearer_auth(self.generate_jwt(None::<ComputeClaimsScope>)?)
+            .bearer_auth(self.generate_jwt(None::<Vec<ComputeClaimsScope>>)?)
             .body(
                 serde_json::to_string(&ConfigurationRequest {
                     spec,

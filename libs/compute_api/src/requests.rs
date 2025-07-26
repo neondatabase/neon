@@ -42,8 +42,8 @@ pub struct ComputeClaims {
     /// [`ComputeClaimsScope::Admin`].
     pub compute_id: Option<String>,
 
-    /// The scope of what the token authorizes.
-    pub scope: Option<ComputeClaimsScope>,
+    /// The scopes of what the token is authorized for.
+    pub scope: Option<Vec<ComputeClaimsScope>>,
 
     /// The recipient the token is intended for.
     ///

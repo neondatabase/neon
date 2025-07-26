@@ -4817,7 +4817,7 @@ class Endpoint(PgProtocol, LogUtils):
 
         self.config(config_lines)
 
-        self.__jwt = self.generate_jwt()
+        self.__jwt = self.generate_jwt([])
 
         return self
 
@@ -4868,7 +4868,7 @@ class Endpoint(PgProtocol, LogUtils):
 
         return self
 
-    def generate_jwt(self, scope: ComputeClaimsScope | None = None) -> str:
+    def generate_jwt(self, scope: list[ComputeClaimsScope]) -> str:
         """
         Generate a JWT for making requests to the endpoint's external HTTP
         server.

@@ -98,7 +98,7 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
                 // Unauthorized because when we eventually do use
                 // [`Validation`], we will hit the above `Err` match arm which
                 // returns 401 Unauthorized.
-                Some(ComputeClaimsScope::Admin) => {
+                Some(ref scope) if scope.contains(&ComputeClaimsScope::Admin) => {
                     let Some(ref audience) = data.claims.audience else {
                         return Err(JsonResponse::error(
                             StatusCode::UNAUTHORIZED,
