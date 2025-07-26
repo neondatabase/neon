@@ -345,37 +345,42 @@ impl ComputeMonitor {
             }
         }
 
-        let mode: ComputeMode = self
+        if self
             .compute
-            .state
-            .lock()
-            .unwrap()
-            .pspec
-            .as_ref()
-            .expect("we launch ComputeMonitor only after we received a spec")
-            .spec
-            .mode;
-        match mode {
-            // TODO: can the .spec.mode ever change? if it can (e.g. secondary promote to primary)
-            // then we should make sure that lsn_lease_state transitions back to None so we stop renewing it.
-            ComputeMode::Primary => (),
-            ComputeMode::Static(_) => (),
-            ComputeMode::Replica => {
-                // TODO: instead of apply_lsn, use min inflight request LSN
-                match cli.query_one("SELECT pg_last_wal_replay_lsn() as apply_lsn", &[]) {
-                    Ok(r) => match r.try_get::<&str, postgres_types::PgLsn>("apply_lsn") {
-                        Ok(apply_lsn) => {
-                            let apply_lsn = Lsn(apply_lsn.into());
-                            self.compute
-                                .ro_replica
-                                .update_min_inflight_request_lsn(apply_lsn);
-                        }
+            .has_feature(ComputeFeature::StandbyHorizonLeasesExperimental)
+        {
+            let mode: ComputeMode = self
+                .compute
+                .state
+                .lock()
+                .unwrap()
+                .pspec
+                .as_ref()
+                .expect("we launch ComputeMonitor only after we received a spec")
+                .spec
+                .mode;
+            match mode {
+                // TODO: can the .spec.mode ever change? if it can (e.g. secondary promote to primary)
+                // then we should make sure that lsn_lease_state transitions back to None so we stop renewing it.
+                ComputeMode::Primary => (),
+                ComputeMode::Static(_) => (),
+                ComputeMode::Replica => {
+                    // TODO: instead of apply_lsn, use min inflight request LSN
+                    match cli.query_one("SELECT pg_last_wal_replay_lsn() as apply_lsn", &[]) {
+                        Ok(r) => match r.try_get::<&str, postgres_types::PgLsn>("apply_lsn") {
+                            Ok(apply_lsn) => {
+                                let apply_lsn = Lsn(apply_lsn.into());
+                                self.compute
+                                    .ro_replica
+                                    .update_min_inflight_request_lsn(apply_lsn);
+                            }
+                            Err(e) => {
+                                anyhow::bail!("parse apply_lsn: {e}");
+                            }
+                        },
                         Err(e) => {
-                            anyhow::bail!("parse apply_lsn: {e}");
+                            anyhow::bail!("query apply_lsn: {e}");
                         }
-                    },
-                    Err(e) => {
-                        anyhow::bail!("query apply_lsn: {e}");
                     }
                 }
             }

@@ -4285,6 +4285,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         update_catalog: bool = False,
+        features: list[str] | None = None,
     ) -> Self:
         """
         Create a new Postgres endpoint.
@@ -4312,6 +4313,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             update_catalog=update_catalog,
+            features=features,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = self.env.repo_dir / path
@@ -4617,6 +4619,7 @@ class Endpoint(PgProtocol, LogUtils):
         basebackup_request_tries: int | None = None,
         autoprewarm: bool = False,
         offload_lfc_interval_seconds: int | None = None,
+        features: list[str] | None = None,
     ) -> Self:
         """
         Create an endpoint, apply config, and start Postgres.
@@ -4632,6 +4635,7 @@ class Endpoint(PgProtocol, LogUtils):
             lsn=lsn,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            features=features,
         ).start(
             remote_ext_base_url=remote_ext_base_url,
             pageserver_id=pageserver_id,
@@ -4725,6 +4729,7 @@ class EndpointFactory:
         basebackup_request_tries: int | None = None,
         autoprewarm: bool = False,
         offload_lfc_interval_seconds: int | None = None,
+        features: list[str] | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4748,6 +4753,7 @@ class EndpointFactory:
             basebackup_request_tries=basebackup_request_tries,
             autoprewarm=autoprewarm,
             offload_lfc_interval_seconds=offload_lfc_interval_seconds,
+            features=features,
         )
 
     def create(
@@ -4761,6 +4767,7 @@ class EndpointFactory:
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
         update_catalog: bool = False,
+        features: list[str] | None = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4784,6 +4791,7 @@ class EndpointFactory:
             config_lines=config_lines,
             pageserver_id=pageserver_id,
             update_catalog=update_catalog,
+            features=features,
         )
 
     def stop_all(self, fail_on_error=True) -> Self:
@@ -4827,6 +4835,7 @@ class EndpointFactory:
         endpoint_id: str | None = None,
         grpc: bool | None = None,
         config_lines: list[str] | None = None,
+        features: list[str] | None = None,
     ) -> Endpoint:
         branch_name = origin.branch_name
         assert origin in self.endpoints
@@ -4840,6 +4849,7 @@ class EndpointFactory:
             grpc=grpc,
             hot_standby=True,
             config_lines=config_lines,
+            features=features,
         )
 
 

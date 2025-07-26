@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::requests::ComputeClaimsScope;
-use compute_api::spec::{ComputeMode, PageserverProtocol};
+use compute_api::spec::{ComputeFeature, ComputeMode, PageserverProtocol};
 use control_plane::broker::StorageBroker;
 use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode};
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
@@ -595,6 +595,9 @@ struct EndpointCreateCmdArgs {
     #[clap(long = "pageserver-id")]
     endpoint_pageserver_id: Option<NodeId>,
 
+    #[clap(long, value_parser = parse_compute_features)]
+    features: Option<ComputeFeatures>,
+
     #[clap(
         long,
         help = "Don't do basebackup, create endpoint directory with only config files",
@@ -631,6 +634,13 @@ struct EndpointCreateCmdArgs {
         help = "Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but useful for tests."
     )]
     allow_multiple: bool,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(transparent)]
+struct ComputeFeatures(Vec<ComputeFeature>);
+fn parse_compute_features(s: &str) -> anyhow::Result<ComputeFeatures> {
+    serde_json::from_str(s).context("parse compute features arg as JSON array")
 }
 
 #[derive(clap::Args)]
@@ -1480,6 +1490,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 args.grpc,
                 !args.update_catalog,
                 false,
+                args.features
+                    .as_ref()
+                    .map(|x| x.0.clone())
+                    .unwrap_or(vec![]),
             )?;
         }
         EndpointCmd::Start(args) => {

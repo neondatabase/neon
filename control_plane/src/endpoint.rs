@@ -198,6 +198,7 @@ impl ComputeControlPlane {
         grpc: bool,
         skip_pg_catalog_updates: bool,
         drop_subscriptions_before_start: bool,
+        features: Vec<ComputeFeature>,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
@@ -232,7 +233,7 @@ impl ComputeControlPlane {
             drop_subscriptions_before_start,
             grpc,
             reconfigure_concurrency: 1,
-            features: vec![],
+            features: features.clone(),
             cluster: None,
             compute_ctl_config: compute_ctl_config.clone(),
         });
@@ -253,7 +254,7 @@ impl ComputeControlPlane {
                 skip_pg_catalog_updates,
                 drop_subscriptions_before_start,
                 reconfigure_concurrency: 1,
-                features: vec![],
+                features,
                 cluster: None,
                 compute_ctl_config,
             })?,

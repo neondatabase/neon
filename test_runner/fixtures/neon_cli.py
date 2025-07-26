@@ -503,6 +503,7 @@ class NeonLocalCli(AbstractNeonCli):
         pageserver_id: int | None = None,
         allow_multiple=False,
         update_catalog: bool = False,
+        features: list[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
@@ -534,6 +535,8 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--allow-multiple"])
         if update_catalog:
             args.extend(["--update-catalog"])
+        if features is not None:
+            args.extend(["--features", json.dumps(features)])
 
         res = self.raw_cli(args)
         res.check_returncode()

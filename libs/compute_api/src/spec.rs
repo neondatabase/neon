@@ -207,6 +207,8 @@ pub enum ComputeFeature {
     /// Enable TLS functionality.
     TlsExperimental,
 
+    StandbyHorizonLeasesExperimental,
+
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test
     /// `parse_unknown_features()` for more details.
