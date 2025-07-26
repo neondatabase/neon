@@ -29,6 +29,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 clashmap.workspace = true
 compute_api.workspace = true
 consumption_metrics.workspace = true
+crossbeam-skiplist = { git = "https://github.com/crossbeam-rs/crossbeam", rev = "8d24b3460bb7a9968e2ee21eeb42c16b0b5d02e9" }
 env_logger.workspace = true
 framed-websockets.workspace = true
 futures.workspace = true
