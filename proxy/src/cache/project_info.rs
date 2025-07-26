@@ -1,7 +1,8 @@
-use std::collections::HashSet;
 use std::convert::Infallible;
+use std::sync::{Arc, Mutex};
 
-use clashmap::ClashMap;
+use crossbeam_skiplist::SkipMap;
+use crossbeam_skiplist::equivalent::{Comparable, Equivalent};
 use moka::sync::Cache;
 use tracing::{debug, info};
 
@@ -11,6 +12,7 @@ use crate::cache::common::{
 use crate::config::ProjectInfoCacheOptions;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Reason};
 use crate::control_plane::{EndpointAccessControl, RoleAccessControl};
+use crate::ext::LockExt;
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::metrics::{CacheKind, Metrics};
 use crate::types::{EndpointId, RoleName};
@@ -23,14 +25,81 @@ use crate::types::{EndpointId, RoleName};
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
 pub struct ProjectInfoCache {
-    role_controls: Cache<(EndpointIdInt, RoleNameInt), ControlPlaneResult<RoleAccessControl>>,
-    ep_controls: Cache<EndpointIdInt, ControlPlaneResult<EndpointAccessControl>>,
+    role_controls:
+        Cache<(EndpointIdInt, RoleNameInt), ControlPlaneResult<Entry<RoleAccessControl>>>,
+    ep_controls: Cache<EndpointIdInt, ControlPlaneResult<Entry<EndpointAccessControl>>>,
 
-    project2ep: ClashMap<ProjectIdInt, HashSet<EndpointIdInt>>,
-    // FIXME(stefan): we need a way to GC the account2ep map.
-    account2ep: ClashMap<AccountIdInt, HashSet<EndpointIdInt>>,
+    project2ep: Arc<RefCountMultiSet<ProjectIdInt, EndpointIdInt>>,
+    account2ep: Arc<RefCountMultiSet<AccountIdInt, EndpointIdInt>>,
 
     config: ProjectInfoCacheOptions,
+}
+
+type RefCount = Mutex<usize>;
+
+// This is rather hacky.
+// We use an ordered map of (K, V) -> RefCount.
+// We use range queries over `(K, _)..(K+1, _)` to do the invalidation.
+// We use the RefCount to know when to remove entries.
+type RefCountMultiSet<K, V> = SkipMap<KeyValue<K, V>, RefCount>;
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
+struct KeyValue<K, V>(K, V);
+struct Key<'a, K>(&'a K, bool);
+
+impl<'a, K> Key<'a, K> {
+    fn prefix(key: &'a K) -> std::ops::Range<Self> {
+        Self(key, false)..Self(key, true)
+    }
+}
+
+impl<'a, K: Ord, V> Equivalent<Key<'a, K>> for KeyValue<K, V> {
+    fn equivalent(&self, key: &Key<'a, K>) -> bool {
+        self.0 == *key.0 && !key.1
+    }
+}
+impl<'a, K: Ord, V> Comparable<Key<'a, K>> for KeyValue<K, V> {
+    fn compare(&self, key: &Key<'a, K>) -> std::cmp::Ordering {
+        self.0.cmp(key.0).then(false.cmp(&key.1))
+    }
+}
+
+#[derive(Clone)]
+struct Entry<T> {
+    project_id: Option<ProjectIdInt>,
+    account_id: Option<AccountIdInt>,
+    value: T,
+}
+
+impl<T> Entry<T> {
+    fn dec_ref_counts(
+        self,
+        project2ep: &RefCountMultiSet<ProjectIdInt, EndpointIdInt>,
+        account2ep: &RefCountMultiSet<AccountIdInt, EndpointIdInt>,
+        endpoint_id: EndpointIdInt,
+    ) {
+        if let Some(project_id) = self.project_id {
+            dec_ref_count(project2ep, project_id, endpoint_id);
+        }
+        if let Some(account_id) = self.account_id {
+            dec_ref_count(account2ep, account_id, endpoint_id);
+        }
+    }
+}
+
+fn dec_ref_count<Id: Ord + Send + 'static>(
+    id2ep: &RefCountMultiSet<Id, EndpointIdInt>,
+    id: Id,
+    endpoint_id: EndpointIdInt,
+) {
+    if let Some(entry) = id2ep.get(&KeyValue(id, endpoint_id)) {
+        let mut count = entry.value().lock_propagate_poison();
+        *count -= 1;
+        if *count == 0 {
+            // remove the entry while holding the lock
+            entry.remove();
+        }
+    }
 }
 
 impl ProjectInfoCache {
@@ -41,25 +110,17 @@ impl ProjectInfoCache {
 
     pub fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt) {
         info!("invalidating endpoint access for project `{project_id}`");
-        let endpoints = self
-            .project2ep
-            .get(&project_id)
-            .map(|kv| kv.value().clone())
-            .unwrap_or_default();
-        for endpoint_id in endpoints {
-            self.ep_controls.invalidate(&endpoint_id);
+
+        for entry in self.project2ep.range(Key::prefix(&project_id)) {
+            self.ep_controls.invalidate(&entry.key().1);
         }
     }
 
     pub fn invalidate_endpoint_access_for_org(&self, account_id: AccountIdInt) {
         info!("invalidating endpoint access for org `{account_id}`");
-        let endpoints = self
-            .account2ep
-            .get(&account_id)
-            .map(|kv| kv.value().clone())
-            .unwrap_or_default();
-        for endpoint_id in endpoints {
-            self.ep_controls.invalidate(&endpoint_id);
+
+        for entry in self.account2ep.range(Key::prefix(&account_id)) {
+            self.ep_controls.invalidate(&entry.key().1);
         }
     }
 
@@ -72,13 +133,9 @@ impl ProjectInfoCache {
             "invalidating role secret for project_id `{}` and role_name `{}`",
             project_id, role_name,
         );
-        let endpoints = self
-            .project2ep
-            .get(&project_id)
-            .map(|kv| kv.value().clone())
-            .unwrap_or_default();
-        for endpoint_id in endpoints {
-            self.role_controls.invalidate(&(endpoint_id, role_name));
+
+        for entry in self.project2ep.range(Key::prefix(&project_id)) {
+            self.role_controls.invalidate(&(entry.key().1, role_name));
         }
     }
 }
@@ -94,29 +151,50 @@ impl ProjectInfoCache {
             .capacity
             .set(CacheKind::ProjectInfoEndpoints, config.size as i64);
 
+        let project2ep = Arc::new(RefCountMultiSet::<ProjectIdInt, EndpointIdInt>::new());
+        let account2ep = Arc::new(RefCountMultiSet::<AccountIdInt, EndpointIdInt>::new());
+        let project2ep1 = Arc::clone(&project2ep);
+        let project2ep2 = Arc::clone(&project2ep);
+        let account2ep1 = Arc::clone(&account2ep);
+        let account2ep2 = Arc::clone(&account2ep);
+
         // we cache errors for 30 seconds, unless retry_at is set.
         let expiry = CplaneExpiry::default();
         Self {
             role_controls: Cache::builder()
                 .name("role_access_controls")
-                .eviction_listener(|_k, _v, cause| {
-                    eviction_listener(CacheKind::ProjectInfoRoles, cause);
-                })
+                .eviction_listener(
+                    move |k, v: ControlPlaneResult<Entry<RoleAccessControl>>, cause| {
+                        eviction_listener(CacheKind::ProjectInfoRoles, cause);
+
+                        let (endpoint_id, _): (EndpointIdInt, RoleNameInt) = *k;
+                        if let Ok(v) = v {
+                            v.dec_ref_counts(&project2ep1, &account2ep1, endpoint_id);
+                        }
+                    },
+                )
                 .max_capacity(config.size * config.max_roles)
                 .time_to_live(config.ttl)
                 .expire_after(expiry)
                 .build(),
             ep_controls: Cache::builder()
                 .name("endpoint_access_controls")
-                .eviction_listener(|_k, _v, cause| {
-                    eviction_listener(CacheKind::ProjectInfoEndpoints, cause);
-                })
+                .eviction_listener(
+                    move |k, v: ControlPlaneResult<Entry<EndpointAccessControl>>, cause| {
+                        eviction_listener(CacheKind::ProjectInfoEndpoints, cause);
+
+                        let endpoint_id: EndpointIdInt = *k;
+                        if let Ok(v) = v {
+                            v.dec_ref_counts(&project2ep2, &account2ep2, endpoint_id);
+                        }
+                    },
+                )
                 .max_capacity(config.size)
                 .time_to_live(config.ttl)
                 .expire_after(expiry)
                 .build(),
-            project2ep: ClashMap::new(),
-            account2ep: ClashMap::new(),
+            project2ep,
+            account2ep,
             config,
         }
     }
@@ -131,7 +209,9 @@ impl ProjectInfoCache {
 
         count_cache_outcome(
             CacheKind::ProjectInfoRoles,
-            self.role_controls.get(&(endpoint_id, role_name)),
+            self.role_controls
+                .get(&(endpoint_id, role_name))
+                .map(|e| e.map(|e| e.value)),
         )
     }
 
@@ -143,7 +223,9 @@ impl ProjectInfoCache {
 
         count_cache_outcome(
             CacheKind::ProjectInfoEndpoints,
-            self.ep_controls.get(&endpoint_id),
+            self.ep_controls
+                .get(&endpoint_id)
+                .map(|e| e.map(|e| e.value)),
         )
     }
 
@@ -156,11 +238,12 @@ impl ProjectInfoCache {
         controls: EndpointAccessControl,
         role_controls: RoleAccessControl,
     ) {
+        // 2 corresponds to how many cache inserts we do.
         if let Some(account_id) = account_id {
-            self.insert_account2endpoint(account_id, endpoint_id);
+            self.inc_account2ep_ref(account_id, endpoint_id, 2);
         }
         if let Some(project_id) = project_id {
-            self.insert_project2endpoint(project_id, endpoint_id);
+            self.inc_project2ep_ref(project_id, endpoint_id, 2);
         }
 
         debug!(
@@ -171,9 +254,22 @@ impl ProjectInfoCache {
         count_cache_insert(CacheKind::ProjectInfoEndpoints);
         count_cache_insert(CacheKind::ProjectInfoRoles);
 
-        self.ep_controls.insert(endpoint_id, Ok(controls));
-        self.role_controls
-            .insert((endpoint_id, role_name), Ok(role_controls));
+        self.ep_controls.insert(
+            endpoint_id,
+            Ok(Entry {
+                account_id,
+                project_id,
+                value: controls,
+            }),
+        );
+        self.role_controls.insert(
+            (endpoint_id, role_name),
+            Ok(Entry {
+                account_id,
+                project_id,
+                value: role_controls,
+            }),
+        );
     }
 
     pub(crate) fn insert_endpoint_access_err(
@@ -211,22 +307,18 @@ impl ProjectInfoCache {
             .insert((endpoint_id, role_name), Err(msg));
     }
 
-    fn insert_project2endpoint(&self, project_id: ProjectIdInt, endpoint_id: EndpointIdInt) {
-        if let Some(mut endpoints) = self.project2ep.get_mut(&project_id) {
-            endpoints.insert(endpoint_id);
-        } else {
-            self.project2ep
-                .insert(project_id, HashSet::from([endpoint_id]));
-        }
+    fn inc_project2ep_ref(&self, project_id: ProjectIdInt, endpoint_id: EndpointIdInt, x: usize) {
+        let entry = self
+            .project2ep
+            .get_or_insert(KeyValue(project_id, endpoint_id), Mutex::new(0));
+        *entry.value().lock_propagate_poison() += x;
     }
 
-    fn insert_account2endpoint(&self, account_id: AccountIdInt, endpoint_id: EndpointIdInt) {
-        if let Some(mut endpoints) = self.account2ep.get_mut(&account_id) {
-            endpoints.insert(endpoint_id);
-        } else {
-            self.account2ep
-                .insert(account_id, HashSet::from([endpoint_id]));
-        }
+    fn inc_account2ep_ref(&self, account_id: AccountIdInt, endpoint_id: EndpointIdInt, x: usize) {
+        let entry = self
+            .account2ep
+            .get_or_insert(KeyValue(account_id, endpoint_id), Mutex::new(0));
+        *entry.value().lock_propagate_poison() += x;
     }
 
     pub fn maybe_invalidate_role_secret(&self, _endpoint_id: &EndpointId, _role_name: &RoleName) {
@@ -291,6 +383,16 @@ mod tests {
             },
         );
 
+        cache.ep_controls.run_pending_tasks();
+        cache.role_controls.run_pending_tasks();
+
+        // check the project mappings are there
+        assert_eq!(cache.project2ep.len(), 1);
+
+        // check the ref counts
+        let entry = cache.project2ep.front().unwrap();
+        assert_eq!(*entry.value().lock_propagate_poison(), 2);
+
         cache.insert_endpoint_access(
             account_id,
             project_id,
@@ -307,6 +409,17 @@ mod tests {
             },
         );
 
+        cache.ep_controls.run_pending_tasks();
+        cache.role_controls.run_pending_tasks();
+
+        // check the project mappings are still there
+        assert_eq!(cache.project2ep.len(), 1);
+
+        // check the ref counts
+        let entry = cache.project2ep.front().unwrap();
+        assert_eq!(*entry.value().lock_propagate_poison(), 3);
+
+        // check both entries exist
         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
         assert_eq!(cached.unwrap().secret, secret1);
 
@@ -334,13 +447,26 @@ mod tests {
             },
         );
 
+        cache.ep_controls.run_pending_tasks();
         cache.role_controls.run_pending_tasks();
+
         assert_eq!(cache.role_controls.entry_count(), 2);
+
+        // check the project mappings are still there
+        assert_eq!(cache.project2ep.len(), 1);
+
+        // check the ref counts are unchanged.
+        let entry = cache.project2ep.front().unwrap();
+        assert_eq!(*entry.value().lock_propagate_poison(), 3);
 
         tokio::time::sleep(Duration::from_secs(2)).await;
 
+        cache.ep_controls.run_pending_tasks();
         cache.role_controls.run_pending_tasks();
         assert_eq!(cache.role_controls.entry_count(), 0);
+
+        // check the project/account mappings are no longer there
+        assert!(cache.project2ep.is_empty());
     }
 
     #[tokio::test]

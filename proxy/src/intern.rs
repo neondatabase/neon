@@ -18,7 +18,7 @@ pub struct StringInterner<Id> {
     _id: PhantomData<Id>,
 }
 
-#[derive(PartialEq, Debug, Clone, Copy, Eq, Hash)]
+#[derive(PartialEq, Debug, Clone, Copy, Eq, Hash, PartialOrd, Ord)]
 pub struct InternedString<Id> {
     inner: Spur,
     _id: PhantomData<Id>,
@@ -146,7 +146,7 @@ impl From<&RoleName> for RoleNameInt {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EndpointIdTag;
 impl InternId for EndpointIdTag {
     fn get_interner() -> &'static StringInterner<Self> {
@@ -186,7 +186,7 @@ impl From<BranchId> for BranchIdInt {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectIdTag;
 impl InternId for ProjectIdTag {
     fn get_interner() -> &'static StringInterner<Self> {
@@ -206,7 +206,7 @@ impl From<ProjectId> for ProjectIdInt {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AccountIdTag;
 impl InternId for AccountIdTag {
     fn get_interner() -> &'static StringInterner<Self> {
