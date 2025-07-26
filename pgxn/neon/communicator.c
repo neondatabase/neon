@@ -1923,7 +1923,7 @@ static void
 reset_min_request_lsn(int code, Datum arg)
 {
 	if (MyProcNumber != -1)
-		neon_per_backend_counters_shared[MyProcNumber[MyProcNumber] = InvalidXLogRecPtr;
+		neon_per_backend_counters_shared[MyProcNumber].min_request_lsn = InvalidXLogRecPtr;
 }
 
 /*
