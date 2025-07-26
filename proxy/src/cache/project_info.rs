@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use crossbeam_skiplist::SkipSet;
 use crossbeam_skiplist::equivalent::{Comparable, Equivalent};
@@ -27,8 +28,8 @@ pub struct ProjectInfoCache {
         Cache<(EndpointIdInt, RoleNameInt), ControlPlaneResult<Entry<RoleAccessControl>>>,
     ep_controls: Cache<EndpointIdInt, ControlPlaneResult<Entry<EndpointAccessControl>>>,
 
-    project2ep: MultiSet<ProjectIdInt, EndpointIdInt>,
-    account2ep: MultiSet<AccountIdInt, EndpointIdInt>,
+    project2ep: Arc<MultiSet<ProjectIdInt, EndpointIdInt>>,
+    account2ep: Arc<MultiSet<AccountIdInt, EndpointIdInt>>,
 
     config: ProjectInfoCacheOptions,
 }
@@ -115,6 +116,9 @@ impl ProjectInfoCache {
             .capacity
             .set(CacheKind::ProjectInfoEndpoints, config.size as i64);
 
+        let project2ep = Arc::new(MultiSet::new());
+        let account2ep = Arc::new(MultiSet::new());
+
         // we cache errors for 30 seconds, unless retry_at is set.
         let expiry = CplaneExpiry::default();
         Self {
@@ -136,8 +140,8 @@ impl ProjectInfoCache {
                 .time_to_live(config.ttl)
                 .expire_after(expiry)
                 .build(),
-            project2ep: MultiSet::new(),
-            account2ep: MultiSet::new(),
+            project2ep,
+            account2ep,
             config,
         }
     }
