@@ -541,10 +541,10 @@ async fn read_replies(
     loop {
         match reply_rx.recv().await {
             Some(msg) => {
-                if let AcceptorProposerMessage::AppendResponse(ar) = msg {
-                    if ar.term != donor_term {
-                        bail!("donor term changed from {} to {}", donor_term, ar.term);
-                    }
+                if let AcceptorProposerMessage::AppendResponse(ar) = msg
+                    && ar.term != donor_term
+                {
+                    bail!("donor term changed from {} to {}", donor_term, ar.term);
                 }
             }
             None => return Ok(()), // chan closed, WalAcceptor terminated

@@ -48,10 +48,10 @@ struct NewMetricsRoot {
 
 impl NewMetricsRoot {
     pub fn is_v2_metrics(json_value: &serde_json::Value) -> bool {
-        if let Some(ver) = json_value.get("version") {
-            if let Some(2) = ver.as_u64() {
-                return true;
-            }
+        if let Some(ver) = json_value.get("version")
+            && let Some(2) = ver.as_u64()
+        {
+            return true;
         }
         false
     }
@@ -316,13 +316,14 @@ async fn restore_and_reschedule(
 
         let error = reschedule(earlier_metric_at, metric_collection_interval).await;
 
-        if let Some(error) = error {
-            if error.as_secs() >= 60 {
-                tracing::info!(
-                    error_ms = error.as_millis(),
-                    "startup scheduling error due to restart"
-                )
-            }
+        if let Some(error) = error
+            && error.as_secs() >= 60
+        {
+            // change 60 seconds to metrics collection interval?
+            tracing::info!(
+                error_ms = error.as_millis(),
+                "startup scheduling error due to restart"
+            )
         }
     }
 

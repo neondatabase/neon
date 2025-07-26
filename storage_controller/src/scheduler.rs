@@ -386,10 +386,10 @@ impl ScheduleContext {
     pub(crate) fn project_detach(&self, shard: &TenantShard) -> Self {
         let mut new_context = self.clone();
 
-        if let Some(attached) = shard.intent.get_attached() {
-            if let Some(score) = new_context.nodes.get_mut(attached) {
-                score.dec();
-            }
+        if let Some(attached) = shard.intent.get_attached()
+            && let Some(score) = new_context.nodes.get_mut(attached)
+        {
+            score.dec();
         }
 
         for secondary in shard.intent.get_secondary() {

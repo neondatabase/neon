@@ -1541,7 +1541,7 @@ async fn timeline_layer_scan_disposable_keys(
             not_disposable_count += 1;
         }
         #[allow(clippy::collapsible_if)]
-        if i % 10000 == 0 {
+        if i.is_multiple_of(10000) {
             if cancel.is_cancelled() || timeline.cancel.is_cancelled() || timeline.is_stopping() {
                 return Err(ApiError::ShuttingDown);
             }
@@ -3719,17 +3719,17 @@ async fn hadron_reset_alert_gauges(
 
 /// Read the end of a tar archive.
 ///
-/// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
-/// `tokio_tar` already read the first such block. Read the second all-zeros block,
+/// A tar archive normally ends with two consecutive blocks of zeroes, 512 bytes each.
+/// `tokio_tar` already read the first such block. Read the second all-zeroes block,
 /// and check that there is no more data after the EOF marker.
 ///
-/// 'tar' command can also write extra blocks of zeros, up to a record
+/// 'tar' command can also write extra blocks of zeroes, up to a record
 /// size, controlled by the --record-size argument. Ignore them too.
-async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow::Result<()> {
+async fn read_tar_eof(mut reader: impl tokio::io::AsyncRead + Unpin) -> anyhow::Result<()> {
     use tokio::io::AsyncReadExt;
     let mut buf = [0u8; 512];
 
-    // Read the all-zeros block, and verify it
+    // Read the all-zeroes block, and verify it
     let mut total_bytes = 0;
     while total_bytes < 512 {
         let nbytes = reader.read(&mut buf[total_bytes..]).await?;
@@ -3761,7 +3761,7 @@ async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow
     if seen_nonzero_bytes {
         anyhow::bail!("unexpected non-zero bytes after the tar archive");
     }
-    if trailing_bytes % 512 != 0 {
+    if !trailing_bytes.is_multiple_of(512) {
         anyhow::bail!(
             "unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive"
         );

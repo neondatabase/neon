@@ -50,7 +50,7 @@ impl<T> Poison<T> {
     }
 
     /// Check for poisoning and return a [`Guard`] that provides access to the wrapped state.
-    pub fn check_and_arm(&mut self) -> Result<Guard<T>, Error> {
+    pub fn check_and_arm(&mut self) -> Result<Guard<'_, T>, Error> {
         match self.state {
             State::Clean => {
                 self.state = State::Armed;

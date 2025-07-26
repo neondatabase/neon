@@ -558,11 +558,11 @@ async fn add_request_id_header_to_response(
     mut res: Response<Body>,
     req_info: RequestInfo,
 ) -> Result<Response<Body>, ApiError> {
-    if let Some(request_id) = req_info.context::<RequestId>() {
-        if let Ok(request_header_value) = HeaderValue::from_str(&request_id.0) {
-            res.headers_mut()
-                .insert(&X_REQUEST_ID_HEADER, request_header_value);
-        };
+    if let Some(request_id) = req_info.context::<RequestId>()
+        && let Ok(request_header_value) = HeaderValue::from_str(&request_id.0)
+    {
+        res.headers_mut()
+            .insert(&X_REQUEST_ID_HEADER, request_header_value);
     };
 
     Ok(res)

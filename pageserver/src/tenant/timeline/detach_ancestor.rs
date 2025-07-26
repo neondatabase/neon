@@ -651,12 +651,12 @@ fn obtain_exclusive_attempt(
     let (guard, barrier) = completion::channel();
     {
         let mut guard = tenant.ongoing_timeline_detach.lock().unwrap();
-        if let Some((tl, other)) = guard.as_ref() {
-            if !other.is_ready() {
-                return Err(OtherTimelineDetachOngoing(*tl));
-            }
-            // FIXME: no test enters here
+        if let Some((tl, other)) = guard.as_ref()
+            && !other.is_ready()
+        {
+            return Err(OtherTimelineDetachOngoing(*tl));
         }
+        // FIXME: no test enters here
         *guard = Some((detached.timeline_id, barrier));
     }
 

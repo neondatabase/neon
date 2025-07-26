@@ -554,11 +554,11 @@ pub async fn main_task(
         };
 
         let prepared = backup.prepare_upload().await;
-        if let Some(seg) = &uploaded_segment {
-            if seg.eq_without_status(&prepared) {
-                // we already uploaded this segment, nothing to do
-                continue 'outer;
-            }
+        if let Some(seg) = &uploaded_segment
+            && seg.eq_without_status(&prepared)
+        {
+            // we already uploaded this segment, nothing to do
+            continue 'outer;
         }
 
         match backup.do_upload(&prepared).await {

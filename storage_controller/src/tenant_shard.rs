@@ -870,10 +870,10 @@ impl TenantShard {
         // If the candidate is our preferred node, then it is better than the current location, as long
         // as it is online -- the online check is part of the score calculation we did above, so it's
         // important that this check comes after that one.
-        if let Some(preferred) = self.preferred_node.as_ref() {
-            if preferred == &candidate {
-                return Some(true);
-            }
+        if let Some(preferred) = self.preferred_node.as_ref()
+            && preferred == &candidate
+        {
+            return Some(true);
         }
 
         match scheduler.compute_node_score::<T::Score>(
@@ -964,31 +964,30 @@ impl TenantShard {
         schedule_context: &ScheduleContext,
     ) -> bool {
         // Tenant with preferred node: check if it is not already at the preferred node
-        if let Some(preferred) = self.preferred_node.as_ref() {
-            if Some(preferred) != self.intent.get_attached().as_ref() {
-                return true;
-            }
+        if let Some(preferred) = self.preferred_node.as_ref()
+            && Some(preferred) != self.intent.get_attached().as_ref()
+        {
+            return true;
         }
 
         // Sharded tenant: check if any locations have a nonzero affinity score
         if self.shard.count >= ShardCount(1) {
             let schedule_context = schedule_context.project_detach(self);
             for node in self.intent.all_pageservers() {
-                if let Some(af) = schedule_context.nodes.get(&node) {
-                    if *af > AffinityScore(0) {
-                        return true;
-                    }
+                if let Some(af) = schedule_context.nodes.get(&node)
+                    && *af > AffinityScore(0)
+                {
+                    return true;
                 }
             }
         }
 
         // Attached tenant: check if the attachment is outside the preferred AZ
-        if let PlacementPolicy::Attached(_) = self.policy {
-            if let Some(attached) = self.intent.get_attached() {
-                if scheduler.get_node_az(attached) != self.intent.preferred_az_id {
-                    return true;
-                }
-            }
+        if let PlacementPolicy::Attached(_) = self.policy
+            && let Some(attached) = self.intent.get_attached()
+            && scheduler.get_node_az(attached) != self.intent.preferred_az_id
+        {
+            return true;
         }
 
         // Tenant with secondary locations: check if any are within the preferred AZ
@@ -1259,15 +1258,15 @@ impl TenantShard {
     /// Start or abort a graceful migration of this shard to another pageserver. This works on top of the
     /// other optimisation functions, to bias them to move to the destination node.
     pub(crate) fn set_preferred_node(&mut self, node: Option<NodeId>) {
-        if let Some(hint) = self.preferred_node.as_ref() {
-            if Some(hint) != node.as_ref() {
-                // This is legal but a bit surprising: we expect that administrators wouldn't usually
-                // change their mind about where to migrate something.
-                tracing::warn!(
-                    "Changing migration destination from {hint} to {node:?} (current intent {:?})",
-                    self.intent
-                );
-            }
+        if let Some(hint) = self.preferred_node.as_ref()
+            && Some(hint) != node.as_ref()
+        {
+            // This is legal but a bit surprising: we expect that administrators wouldn't usually
+            // change their mind about where to migrate something.
+            tracing::warn!(
+                "Changing migration destination from {hint} to {node:?} (current intent {:?})",
+                self.intent
+            );
         }
 
         self.preferred_node = node;
@@ -1313,12 +1312,12 @@ impl TenantShard {
                 self.intent
                     .promote_attached(scheduler, new_attached_node_id);
 
-                if let Some(hint) = self.preferred_node.as_ref() {
-                    if hint == &new_attached_node_id {
-                        // The migration target is not a long term pin: once we are done with the migration, clear it.
-                        tracing::info!("Graceful migration to {hint} complete");
-                        self.preferred_node = None;
-                    }
+                if let Some(hint) = self.preferred_node.as_ref()
+                    && hint == &new_attached_node_id
+                {
+                    // The migration target is not a long term pin: once we are done with the migration, clear it.
+                    tracing::info!("Graceful migration to {hint} complete");
+                    self.preferred_node = None;
                 }
             }
             ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
@@ -1528,20 +1527,20 @@ impl TenantShard {
         }
 
         // Reconcile already in flight for the current sequence?
-        if let Some(handle) = &self.reconciler {
-            if handle.sequence == self.sequence {
-                tracing::info!(
-                    "Reconciliation already in progress for sequence {:?}",
-                    self.sequence,
-                );
-                return ReconcileNeeded::WaitExisting(ReconcilerWaiter {
-                    tenant_shard_id: self.tenant_shard_id,
-                    seq_wait: self.waiter.clone(),
-                    error_seq_wait: self.error_waiter.clone(),
-                    error: self.last_error.clone(),
-                    seq: self.sequence,
-                });
-            }
+        if let Some(handle) = &self.reconciler
+            && handle.sequence == self.sequence
+        {
+            tracing::info!(
+                "Reconciliation already in progress for sequence {:?}",
+                self.sequence,
+            );
+            return ReconcileNeeded::WaitExisting(ReconcilerWaiter {
+                tenant_shard_id: self.tenant_shard_id,
+                seq_wait: self.waiter.clone(),
+                error_seq_wait: self.error_waiter.clone(),
+                error: self.last_error.clone(),
+                seq: self.sequence,
+            });
         }
 
         // Pre-checks done: finally check whether we may actually do the work
@@ -1847,10 +1846,10 @@ impl TenantShard {
     /// our state: if the result is from a sequence >= my ReconcileHandle, then drop
     /// the handle to indicate there is no longer a reconciliation in progress.
     pub(crate) fn reconcile_complete(&mut self, sequence: Sequence) {
-        if let Some(reconcile_handle) = &self.reconciler {
-            if reconcile_handle.sequence <= sequence {
-                self.reconciler = None;
-            }
+        if let Some(reconcile_handle) = &self.reconciler
+            && reconcile_handle.sequence <= sequence
+        {
+            self.reconciler = None;
         }
     }
 

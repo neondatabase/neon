@@ -219,6 +219,7 @@ pub enum Bool {
     False,
 }
 
+#[allow(dead_code)]
 #[derive(FixedCardinalityLabel, Copy, Clone)]
 #[label(singleton = "outcome")]
 pub enum CacheOutcome {
@@ -555,14 +556,6 @@ impl From<bool> for Bool {
     fn from(value: bool) -> Self {
         if value { Bool::True } else { Bool::False }
     }
-}
-
-#[derive(LabelGroup)]
-#[label(set = InvalidEndpointsSet)]
-pub struct InvalidEndpointsGroup {
-    pub protocol: Protocol,
-    pub rejected: Bool,
-    pub outcome: ConnectOutcome,
 }
 
 #[derive(LabelGroup)]

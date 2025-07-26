@@ -34,10 +34,10 @@ pub(super) async fn read_metrics_from_disk(
     tokio::task::spawn_blocking(move || {
         let _e = span.entered();
 
-        if let Some(parent) = path.parent() {
-            if let Err(e) = scan_and_delete_with_same_prefix(&path) {
-                tracing::info!("failed to cleanup temporary files in {parent:?}: {e:#}");
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = scan_and_delete_with_same_prefix(&path)
+        {
+            tracing::info!("failed to cleanup temporary files in {parent:?}: {e:#}");
         }
 
         let mut file = std::fs::File::open(&*path)?;

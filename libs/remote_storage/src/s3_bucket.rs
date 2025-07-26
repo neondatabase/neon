@@ -513,10 +513,10 @@ impl S3Bucket {
                 }
                 break;
             }
-            if let Some(max_keys) = max_keys {
-                if versions_and_deletes.len() >= max_keys.get().try_into().unwrap() {
-                    return Err(DownloadError::Other(anyhow::anyhow!("too many versions")));
-                }
+            if let Some(max_keys) = max_keys
+                && versions_and_deletes.len() >= max_keys.get().try_into().unwrap()
+            {
+                return Err(DownloadError::Other(anyhow::anyhow!("too many versions")));
             }
         }
         Ok(VersionListing {
