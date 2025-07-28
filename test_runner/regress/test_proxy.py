@@ -156,7 +156,7 @@ def test_auth_errors(static_proxy: NeonProxy):
     with pytest.raises(psycopg2.Error) as exprinfo:
         static_proxy.connect(user="pinocchio")
     text = str(exprinfo.value).strip()
-    assert text.find("password authentication failed for user 'pinocchio'") != -1
+    assert text.find("password authentication failed for user \"pinocchio\"") != -1
 
     static_proxy.safe_psql(
         "create role pinocchio with login password 'magic'",
