@@ -1,5 +1,5 @@
 use tokio::time::Instant;
-use x509_cert::der::zeroize::Zeroize as _;
+use zeroize::Zeroize as _;
 
 use super::pbkdf2;
 use crate::cache::Cached;

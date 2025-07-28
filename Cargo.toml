@@ -234,9 +234,10 @@ uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 rustls-native-certs = "0.8"
 whoami = "1.5.1"
-zerocopy = { version = "0.8", features = ["derive", "simd"] }
 json-structural-diff = { version = "0.2.0" }
 x509-cert = { version = "0.2.5" }
+zerocopy = { version = "0.8", features = ["derive", "simd"] }
+zeroize = "1.8"
 
 ## TODO replace this with tracing
 env_logger = "0.11"

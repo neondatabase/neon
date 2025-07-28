@@ -3,7 +3,7 @@
 use hmac::Mac as _;
 use sha2::Digest as _;
 use subtle::ConstantTimeEq;
-use x509_cert::der::zeroize::Zeroize;
+use zeroize::Zeroize as _;
 
 use crate::metrics::Metrics;
 use crate::scram::pbkdf2::Prf;

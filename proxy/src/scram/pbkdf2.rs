@@ -4,7 +4,7 @@
 use hmac::Mac as _;
 use hmac::digest::consts::U32;
 use hmac::digest::generic_array::GenericArray;
-use x509_cert::der::zeroize::Zeroize as _;
+use zeroize::Zeroize as _;
 
 use crate::metrics::Metrics;
 

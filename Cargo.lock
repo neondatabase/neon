@@ -5519,6 +5519,7 @@ dependencies = [
  "workspace_hack",
  "x509-cert",
  "zerocopy 0.8.24",
+ "zeroize",
 ]
 
 [[package]]
