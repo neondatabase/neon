@@ -617,7 +617,12 @@ pub async fn run() -> anyhow::Result<()> {
 /// ProxyConfig is created at proxy startup, and lives forever.
 fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let thread_pool = ThreadPool::new(args.scram_thread_pool_size);
-    Metrics::install(thread_pool.metrics.clone());
+    Metrics::get()
+        .proxy
+        .scram_pool
+        .0
+        .set(thread_pool.metrics.clone())
+        .ok();
 
     let tls_config = match (&args.tls_key, &args.tls_cert) {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(

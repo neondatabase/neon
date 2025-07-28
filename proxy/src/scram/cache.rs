@@ -29,7 +29,7 @@ impl Cache for Pbkdf2Cache {
 /// harder to exploit, even if any such memory exploit exists in proxy.
 #[derive(Clone)]
 pub struct Pbkdf2CacheEntry {
-    /// corresponds to [`ServerSecret::cached_at`]
+    /// corresponds to [`super::ServerSecret::cached_at`]
     pub(super) cached_from: Instant,
     pub(super) suffix: pbkdf2::Block,
 }
