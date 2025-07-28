@@ -78,7 +78,7 @@ impl PoolingBackend {
         let ep = EndpointIdInt::from(&user_info.endpoint);
         let role = RoleNameInt::from(&user_info.user);
         let auth_outcome = crate::auth::validate_password_and_exchange(
-            &self.config.authentication_config.thread_pool,
+            &self.config.authentication_config.scram_thread_pool,
             ep,
             role,
             password,

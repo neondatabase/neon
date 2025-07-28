@@ -1,11 +1,12 @@
 //! Tools for client/server/stored key management.
 
-use hmac::Mac;
-use sha2::Digest;
+use hmac::Mac as _;
+use sha2::Digest as _;
 use subtle::ConstantTimeEq;
 use x509_cert::der::zeroize::Zeroize;
 
 use crate::metrics::Metrics;
+use crate::scram::pbkdf2::Prf;
 
 /// Faithfully taken from PostgreSQL.
 pub(crate) const SCRAM_KEY_LEN: usize = 32;
@@ -50,14 +51,13 @@ impl ScramKey {
     }
 
     pub(crate) fn client_key(b: &[u8; 32]) -> Self {
-        // Hmac::new_from_slice will run 2 sha256 rounds.
+        // Prf::new_from_slice will run 2 sha256 rounds.
         // Update + Finalize run 2 sha256 rounds.
         Metrics::get().proxy.sha_rounds.inc_by(4);
 
-        let mut hmac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b)
-            .expect("HMAC is able to accept all key sizes");
-        hmac.update(b"Client Key");
-        let client_key: [u8; 32] = hmac.finalize().into_bytes().into();
+        let mut prf = Prf::new_from_slice(b).expect("HMAC is able to accept all key sizes");
+        prf.update(b"Client Key");
+        let client_key: [u8; 32] = prf.finalize().into_bytes().into();
         client_key.into()
     }
 }

@@ -690,7 +690,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
     let authentication_config = AuthenticationConfig {
         jwks_cache: JwkCache::default(),
-        thread_pool,
+        scram_thread_pool: thread_pool,
         scram_protocol_timeout: args.scram_protocol_timeout,
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
         is_vpc_acccess_proxy: args.is_private_access_proxy,

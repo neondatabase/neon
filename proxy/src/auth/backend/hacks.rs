@@ -33,7 +33,7 @@ pub(crate) async fn authenticate_cleartext(
             secret,
             endpoint: ep,
             role,
-            pool: config.thread_pool.clone(),
+            pool: config.scram_thread_pool.clone(),
         },
     );
     let auth_outcome = {

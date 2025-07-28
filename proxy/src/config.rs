@@ -19,7 +19,7 @@ use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};
 use crate::ext::TaskExt;
 use crate::intern::RoleNameInt;
 use crate::rate_limiter::{RateLimitAlgorithm, RateLimiterConfig};
-use crate::scram::threadpool::ThreadPool;
+use crate::scram;
 use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
 #[cfg(feature = "rest_broker")]
@@ -75,7 +75,7 @@ pub struct HttpConfig {
 }
 
 pub struct AuthenticationConfig {
-    pub thread_pool: Arc<ThreadPool>,
+    pub scram_thread_pool: Arc<scram::threadpool::ThreadPool>,
     pub scram_protocol_timeout: tokio::time::Duration,
     pub ip_allowlist_check_enabled: bool,
     pub is_vpc_acccess_proxy: bool,

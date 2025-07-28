@@ -1,19 +1,19 @@
 //! For postgres password authentication, we need to perform a PBKDF2 using
 //! PRF=HMAC-SHA2-256, producing only 1 block (32 bytes) of output key.
 
+use hmac::Mac as _;
 use hmac::digest::consts::U32;
 use hmac::digest::generic_array::GenericArray;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use x509_cert::der::zeroize::Zeroize;
+use x509_cert::der::zeroize::Zeroize as _;
 
 use crate::metrics::Metrics;
 
-type Prf = Hmac<Sha256>;
+/// The Psuedo-random function used during PBKDF2 and the SCRAM-SHA-256 handshake.
+pub type Prf = hmac::Hmac<sha2::Sha256>;
 pub(crate) type Block = GenericArray<u8, U32>;
 
 pub(crate) struct Pbkdf2 {
-    hmac: Hmac<Sha256>,
+    hmac: Prf,
     /// U{r-1} for whatever iteration r we are currently on.
     prev: Block,
     /// the output of `fold(xor, U{1}..U{r})` for whatever iteration r we are currently on.
@@ -41,7 +41,7 @@ impl Pbkdf2 {
         hmac.update(&1u32.to_be_bytes());
         let init_block = hmac.finalize_reset().into_bytes();
 
-        // Hmac::new_from_slice will run 2 sha256 rounds.
+        // Prf::new_from_slice will run 2 sha256 rounds.
         // Our update + finalize run 2 sha256 rounds for each pbkdf2 round.
         Metrics::get().proxy.sha_rounds.inc_by(4);
 
@@ -60,6 +60,8 @@ impl Pbkdf2 {
 
     /// For "fairness", we implement PBKDF2 with cooperative yielding, which is why we use this `turn`
     /// function that only executes a fixed number of iterations before continuing.
+    ///
+    /// Task must be rescheuled if this returns [`std::task::Poll::Pending`].
     pub(crate) fn turn(&mut self) -> std::task::Poll<Block> {
         let Self {
             hmac,

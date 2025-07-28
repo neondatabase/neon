@@ -1,10 +1,10 @@
 //! Tools for client/server signature management.
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use hmac::Mac as _;
 
 use super::key::{SCRAM_KEY_LEN, ScramKey};
 use crate::metrics::Metrics;
+use crate::scram::pbkdf2::Prf;
 
 /// A collection of message parts needed to derive the client's signature.
 #[derive(Debug)]
@@ -19,8 +19,7 @@ impl SignatureBuilder<'_> {
         // don't know exactly. this is a rough approx
         Metrics::get().proxy.sha_rounds.inc_by(8);
 
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(key.as_ref()).expect("HMAC accepts all key sizes");
+        let mut mac = Prf::new_from_slice(key.as_ref()).expect("HMAC accepts all key sizes");
         mac.update(self.client_first_message_bare.as_bytes());
         mac.update(b",");
         mac.update(self.server_first_message.as_bytes());

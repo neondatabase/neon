@@ -276,7 +276,7 @@ async fn authenticate_with_secret(
         let role = RoleNameInt::from(&info.user);
 
         let auth_outcome =
-            validate_password_and_exchange(&config.thread_pool, ep, role, &password, secret)
+            validate_password_and_exchange(&config.scram_thread_pool, ep, role, &password, secret)
                 .await?;
         let keys = match auth_outcome {
             crate::sasl::Outcome::Success(key) => key,
@@ -501,7 +501,7 @@ mod tests {
 
     static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
         jwks_cache: JwkCache::default(),
-        thread_pool: ThreadPool::new(1),
+        scram_thread_pool: ThreadPool::new(1),
         scram_protocol_timeout: std::time::Duration::from_secs(5),
         ip_allowlist_check_enabled: true,
         is_vpc_acccess_proxy: false,
