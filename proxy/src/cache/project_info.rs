@@ -98,7 +98,7 @@ impl ProjectInfoCache {
         let expiry = CplaneExpiry::default();
         Self {
             role_controls: Cache::builder()
-                .name("role_access_controls")
+                .name("project_info_roles")
                 .eviction_listener(|_k, _v, cause| {
                     eviction_listener(CacheKind::ProjectInfoRoles, cause);
                 })
@@ -107,7 +107,7 @@ impl ProjectInfoCache {
                 .expire_after(expiry)
                 .build(),
             ep_controls: Cache::builder()
-                .name("endpoint_access_controls")
+                .name("project_info_endpoints")
                 .eviction_listener(|_k, _v, cause| {
                     eviction_listener(CacheKind::ProjectInfoEndpoints, cause);
                 })

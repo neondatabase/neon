@@ -143,7 +143,7 @@ pub struct ApiConfig {
 pub(crate) struct DbSchemaCache(Cache<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>);
 impl DbSchemaCache {
     pub fn new(config: crate::config::CacheOptions) -> Self {
-        let builder = Cache::builder().name("db_schema_cache");
+        let builder = Cache::builder().name("schema");
         let builder = config.moka(builder);
 
         let metrics = &Metrics::get().cache;

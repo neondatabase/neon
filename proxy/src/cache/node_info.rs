@@ -20,7 +20,7 @@ impl Cache for NodeInfoCache {
 impl NodeInfoCache {
     pub fn new(config: CacheOptions) -> Self {
         let builder = moka::sync::Cache::builder()
-            .name("node_info_cache")
+            .name("node_info")
             .expire_after(CplaneExpiry::default());
         let builder = config.moka(builder);
 
