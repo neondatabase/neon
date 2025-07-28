@@ -378,8 +378,6 @@ def test_pageserver_metrics_removed_after_offload(
                 .query_all("pageserver_background_loop_semaphore_running_tasks")
             )
         )
-        # One more second so that everything gets cleaned up
-        time.sleep(1)
 
         post_offload_samples = set(
             [x.name for x in get_ps_metric_samples_for_timeline(tenant_1, timeline)]
