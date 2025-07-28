@@ -185,8 +185,7 @@ impl DbSchemaCache {
         &self,
         endpoint_id: &EndpointCacheKey,
     ) -> Option<Arc<(ApiConfig, DbSchemaOwned)>> {
-        self.get_with_created_at(endpoint_id)
-            .map(|Cached { value: (v, _), .. }| v)
+        count_cache_outcome(CacheKind::Schema, self.0.get(endpoint_id))
     }
     pub async fn get_remote(
         &self,
@@ -219,7 +218,8 @@ impl DbSchemaCache {
                     server_cors_allowed_origins: None,
                 };
                 let value = Arc::new((api_config, schema_owned));
-                self.insert(endpoint_id.clone(), value);
+                count_cache_insert(CacheKind::Schema);
+                self.0.insert(endpoint_id.clone(), value);
                 return Err(e);
             }
             Err(e) => {
@@ -227,7 +227,8 @@ impl DbSchemaCache {
             }
         };
         let value = Arc::new((api_config, schema_owned));
-        self.insert(endpoint_id.clone(), value.clone());
+        count_cache_insert(CacheKind::Schema);
+        self.0.insert(endpoint_id.clone(), value.clone());
         Ok(value)
     }
     async fn internal_get_remote(
