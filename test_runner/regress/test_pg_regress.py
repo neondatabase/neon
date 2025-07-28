@@ -395,23 +395,6 @@ def test_max_wal_rate(neon_simple_env: NeonEnv):
     tuples = endpoint.safe_psql("SELECT backpressure_throttling_time();")
     assert tuples[0][0] == 0, "Backpressure throttling detected"
 
-    # 0 MB/s max_wal_rate. WAL proposer can still push some WALs but will be super slow.
-    endpoint.safe_psql_many(
-        [
-            "ALTER SYSTEM SET databricks.max_wal_mb_per_second = 0;",
-            "SELECT pg_reload_conf();",
-        ]
-    )
-
-    # Write ~10 KB data should hit backpressure.
-    with endpoint.cursor(dbname=DBNAME) as cur:
-        cur.execute("SET databricks.max_wal_mb_per_second = 0;")
-        for _ in range(0, 10):
-            cur.execute("INSERT INTO usertable SELECT random(), repeat('a', 1000);")
-
-    tuples = endpoint.safe_psql("SELECT backpressure_throttling_time();")
-    assert tuples[0][0] > 0, "No backpressure throttling detected"
-
     # 1 MB/s max_wal_rate.
     endpoint.safe_psql_many(
         [
@@ -456,21 +439,6 @@ def test_tx_abort_with_many_relations(
             "max_locks_per_transaction=16384",
         ],
     )
-
-    if reldir_type == "v1":
-        assert (
-            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
-                "rel_size_migration"
-            ]
-            == "legacy"
-        )
-    else:
-        assert (
-            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
-                "rel_size_migration"
-            ]
-            != "legacy"
-        )
 
     # How many relations: this number is tuned to be long enough to take tens of seconds
     # if the rollback code path is buggy, tripping the test's timeout.
@@ -556,3 +524,19 @@ def test_tx_abort_with_many_relations(
         except:
             exec.shutdown(wait=False, cancel_futures=True)
             raise
+
+    # Do the check after everything is done, because the reldirv2 transition won't happen until create table.
+    if reldir_type == "v1":
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            == "legacy"
+        )
+    else:
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            != "legacy"
+        )

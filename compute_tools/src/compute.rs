@@ -21,6 +21,7 @@ use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -40,8 +41,9 @@ use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
+use crate::hadron_metrics::COMPUTE_ATTACHED;
 use crate::installed_extensions::get_installed_extensions;
-use crate::logger::startup_context_from_env;
+use crate::logger::{self, startup_context_from_env};
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
@@ -113,11 +115,17 @@ pub struct ComputeNodeParams {
 
     /// Interval for installed extensions collection
     pub installed_extensions_collection_interval: Arc<AtomicU64>,
-
+    /// Hadron instance ID of the compute node.
+    pub instance_id: Option<String>,
     /// Timeout of PG compute startup in the Init state.
     pub pg_init_timeout: Option<Duration>,
-
+    // Path to the `pg_isready` binary.
+    pub pg_isready_bin: String,
     pub lakebase_mode: bool,
+
+    pub build_tag: String,
+    pub control_plane_uri: Option<String>,
+    pub config_path_test_only: Option<OsString>,
 }
 
 type TaskHandle = Mutex<Option<JoinHandle<()>>>;
@@ -405,6 +413,52 @@ struct StartVmMonitorResult {
     vm_monitor: Option<JoinHandle<Result<()>>>,
 }
 
+/// Databricks-specific environment variables to be passed to the `postgres` sub-process.
+pub struct DatabricksEnvVars {
+    /// The Databricks "endpoint ID" of the compute instance. Used by `postgres` to check
+    /// the token scopes of internal auth tokens.
+    pub endpoint_id: String,
+    /// Hostname of the Databricks workspace URL this compute instance belongs to.
+    /// Used by postgres to verify Databricks PAT tokens.
+    pub workspace_host: String,
+}
+
+impl DatabricksEnvVars {
+    pub fn new(compute_spec: &ComputeSpec, compute_id: Option<&String>) -> Self {
+        // compute_id is a string format of "{endpoint_id}/{compute_idx}"
+        // endpoint_id is a uuid. We only need to pass down endpoint_id to postgres.
+        // Panics if compute_id is not set or not in the expected format.
+        let endpoint_id = compute_id.unwrap().split('/').next().unwrap().to_string();
+        let workspace_host = compute_spec
+            .databricks_settings
+            .as_ref()
+            .map(|s| s.databricks_workspace_host.clone())
+            .unwrap_or("".to_string());
+        Self {
+            endpoint_id,
+            workspace_host,
+        }
+    }
+
+    /// Constants for the names of Databricks-specific postgres environment variables.
+    const DATABRICKS_ENDPOINT_ID_ENVVAR: &'static str = "DATABRICKS_ENDPOINT_ID";
+    const DATABRICKS_WORKSPACE_HOST_ENVVAR: &'static str = "DATABRICKS_WORKSPACE_HOST";
+
+    /// Convert DatabricksEnvVars to a list of string pairs that can be passed as env vars. Consumes `self`.
+    pub fn to_env_var_list(self) -> Vec<(String, String)> {
+        vec![
+            (
+                Self::DATABRICKS_ENDPOINT_ID_ENVVAR.to_string(),
+                self.endpoint_id.clone(),
+            ),
+            (
+                Self::DATABRICKS_WORKSPACE_HOST_ENVVAR.to_string(),
+                self.workspace_host.clone(),
+            ),
+        ]
+    }
+}
+
 impl ComputeNode {
     pub fn new(params: ComputeNodeParams, config: ComputeConfig) -> Result<Self> {
         let connstr = params.connstr.as_str();
@@ -486,6 +540,7 @@ impl ComputeNode {
             port: this.params.external_http_port,
             config: this.compute_ctl_config.clone(),
             compute_id: this.params.compute_id.clone(),
+            instance_id: this.params.instance_id.clone(),
         }
         .launch(&this);
 
@@ -1402,6 +1457,8 @@ impl ComputeNode {
         let pgdata_path = Path::new(&self.params.pgdata);
 
         let tls_config = self.tls_config(&pspec.spec);
+        let databricks_settings = spec.databricks_settings.as_ref();
+        let postgres_port = self.params.connstr.port();
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
@@ -1409,8 +1466,11 @@ impl ComputeNode {
             pgdata_path,
             &self.params,
             &pspec.spec,
+            postgres_port,
             self.params.internal_http_port,
             tls_config,
+            databricks_settings,
+            self.params.lakebase_mode,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1450,8 +1510,28 @@ impl ComputeNode {
             )
         })?;
 
-        // Update pg_hba.conf received with basebackup.
-        update_pg_hba(pgdata_path, None)?;
+        if let Some(settings) = databricks_settings {
+            copy_tls_certificates(
+                &settings.pg_compute_tls_settings.key_file,
+                &settings.pg_compute_tls_settings.cert_file,
+                pgdata_path,
+            )?;
+
+            // Update pg_hba.conf received with basebackup including additional databricks settings.
+            update_pg_hba(pgdata_path, Some(&settings.databricks_pg_hba))?;
+            update_pg_ident(pgdata_path, Some(&settings.databricks_pg_ident))?;
+        } else {
+            // Update pg_hba.conf received with basebackup.
+            update_pg_hba(pgdata_path, None)?;
+        }
+
+        if let Some(databricks_settings) = spec.databricks_settings.as_ref() {
+            copy_tls_certificates(
+                &databricks_settings.pg_compute_tls_settings.key_file,
+                &databricks_settings.pg_compute_tls_settings.cert_file,
+                pgdata_path,
+            )?;
+        }
 
         // Place pg_dynshmem under /dev/shm. This allows us to use
         // 'dynamic_shared_memory_type = mmap' so that the files are placed in
@@ -1564,14 +1644,31 @@ impl ComputeNode {
     pub fn start_postgres(&self, storage_auth_token: Option<String>) -> Result<PostgresHandle> {
         let pgdata_path = Path::new(&self.params.pgdata);
 
+        let env_vars: Vec<(String, String)> = if self.params.lakebase_mode {
+            let databricks_env_vars = {
+                let state = self.state.lock().unwrap();
+                let spec = &state.pspec.as_ref().unwrap().spec;
+                DatabricksEnvVars::new(spec, Some(&self.params.compute_id))
+            };
+
+            info!(
+                "Starting Postgres for databricks endpoint id: {}",
+                &databricks_env_vars.endpoint_id
+            );
+
+            let mut env_vars = databricks_env_vars.to_env_var_list();
+            env_vars.extend(storage_auth_token.map(|t| ("NEON_AUTH_TOKEN".to_string(), t)));
+            env_vars
+        } else if let Some(storage_auth_token) = &storage_auth_token {
+            vec![("NEON_AUTH_TOKEN".to_owned(), storage_auth_token.to_owned())]
+        } else {
+            vec![]
+        };
+
         // Run postgres as a child process.
         let mut pg = maybe_cgexec(&self.params.pgbin)
             .args(["-D", &self.params.pgdata])
-            .envs(if let Some(storage_auth_token) = &storage_auth_token {
-                vec![("NEON_AUTH_TOKEN", storage_auth_token)]
-            } else {
-                vec![]
-            })
+            .envs(env_vars)
             .stderr(Stdio::piped())
             .spawn()
             .expect("cannot start postgres process");
@@ -1785,6 +1882,34 @@ impl ComputeNode {
         Ok::<(), anyhow::Error>(())
     }
 
+    // Signal to the configurator to refresh the configuration by pulling a new spec from the HCC.
+    // Note that this merely triggers a notification on a condition variable the configurator thread
+    // waits on. The configurator thread (in configurator.rs) pulls the new spec from the HCC and
+    // applies it.
+    pub async fn signal_refresh_configuration(&self) -> Result<()> {
+        let states_allowing_configuration_refresh = [
+            ComputeStatus::Running,
+            ComputeStatus::Failed,
+            ComputeStatus::RefreshConfigurationPending,
+        ];
+
+        let mut state = self.state.lock().expect("state lock poisoned");
+        if states_allowing_configuration_refresh.contains(&state.status) {
+            state.status = ComputeStatus::RefreshConfigurationPending;
+            self.state_changed.notify_all();
+            Ok(())
+        } else if state.status == ComputeStatus::Init {
+            // If the compute is in Init state, we can't refresh the configuration immediately,
+            // but we should be able to do that soon.
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Cannot refresh compute configuration in state {:?}",
+                state.status
+            ))
+        }
+    }
+
     // Wrapped this around `pg_ctl reload`, but right now we don't use
     // `pg_ctl` for start / stop.
     #[instrument(skip_all)]
@@ -1846,12 +1971,16 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
+        let postgres_port = self.params.connstr.port();
         config::write_postgres_conf(
             pgdata_path,
             &self.params,
             &spec,
+            postgres_port,
             self.params.internal_http_port,
             tls_config,
+            spec.databricks_settings.as_ref(),
+            self.params.lakebase_mode,
         )?;
 
         self.pg_reload_conf()?;
@@ -1957,6 +2086,8 @@ impl ComputeNode {
                             // wait
                             ComputeStatus::Init
                             | ComputeStatus::Configuration
+                            | ComputeStatus::RefreshConfiguration
+                            | ComputeStatus::RefreshConfigurationPending
                             | ComputeStatus::Empty => {
                                 state = self.state_changed.wait(state).unwrap();
                             }
@@ -2511,6 +2642,34 @@ LIMIT 100",
                 spec.suspend_timeout_seconds as u64,
                 std::sync::atomic::Ordering::SeqCst,
             );
+        }
+    }
+
+    /// Set the compute spec and update related metrics.
+    /// This is the central place where pspec is updated.
+    pub fn set_spec(params: &ComputeNodeParams, state: &mut ComputeState, pspec: ParsedSpec) {
+        state.pspec = Some(pspec);
+        ComputeNode::update_attached_metric(params, state);
+        let _ = logger::update_ids(&params.instance_id, &Some(params.compute_id.clone()));
+    }
+
+    pub fn update_attached_metric(params: &ComputeNodeParams, state: &mut ComputeState) {
+        // Update the pg_cctl_attached gauge when all identifiers are available.
+        if let Some(instance_id) = &params.instance_id {
+            if let Some(pspec) = &state.pspec {
+                // Clear all values in the metric
+                COMPUTE_ATTACHED.reset();
+
+                // Set new metric value
+                COMPUTE_ATTACHED
+                    .with_label_values(&[
+                        &params.compute_id,
+                        instance_id,
+                        &pspec.tenant_id.to_string(),
+                        &pspec.timeline_id.to_string(),
+                    ])
+                    .set(1);
+            }
         }
     }
 }

@@ -249,6 +249,10 @@ impl IntentState {
     }
 
     pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
+        // Every assertion here should probably have a corresponding check in
+        // `validate_optimization` unless it is an invariant that should never be violated. Note
+        // that the lock is not held between planning optimizations and applying them so you have to
+        // assume any valid state transition of the intent state may have occurred
         assert!(!self.secondary.contains(&new_secondary));
         assert!(self.attached != Some(new_secondary));
         scheduler.update_node_ref_counts(
@@ -1335,8 +1339,9 @@ impl TenantShard {
         true
     }
 
-    /// Check that the desired modifications to the intent state are compatible with
-    /// the current intent state
+    /// Check that the desired modifications to the intent state are compatible with the current
+    /// intent state. Note that the lock is not held between planning optimizations and applying
+    /// them so any valid state transition of the intent state may have occurred.
     fn validate_optimization(&self, optimization: &ScheduleOptimization) -> bool {
         match optimization.action {
             ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
@@ -1352,6 +1357,9 @@ impl TenantShard {
             }) => {
                 // It's legal to remove a secondary that is not present in the intent state
                 !self.intent.secondary.contains(&new_node_id)
+                    // Ensure the secondary hasn't already been promoted to attached by a concurrent
+                    // optimization/migration.
+                    && self.intent.attached != Some(new_node_id)
             }
             ScheduleOptimizationAction::CreateSecondary(new_node_id) => {
                 !self.intent.secondary.contains(&new_node_id)

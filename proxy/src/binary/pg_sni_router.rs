@@ -26,7 +26,7 @@ use utils::project_git_version;
 use utils::sentry_init::init_sentry;
 
 use crate::context::RequestContext;
-use crate::metrics::{Metrics, ThreadPoolMetrics};
+use crate::metrics::{Metrics, ServiceInfo, ThreadPoolMetrics};
 use crate::pglb::TlsRequired;
 use crate::pqproto::FeStartupPacket;
 use crate::protocol2::ConnectionInfo;
@@ -135,6 +135,12 @@ pub async fn run() -> anyhow::Result<()> {
         cancellation_token.clone(),
     ))
     .map(crate::error::flatten_err);
+
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
+
     let signals_task = tokio::spawn(crate::signals::handle(cancellation_token, || {}));
 
     // the signal task cant ever succeed.

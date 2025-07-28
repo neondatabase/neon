@@ -1530,10 +1530,19 @@ impl Service {
                 // so that waiters will see the correct error after waiting.
                 tenant.set_last_error(result.sequence, e);
 
-                // Skip deletions on reconcile failures
-                let upsert_deltas =
-                    deltas.filter(|delta| matches!(delta, ObservedStateDelta::Upsert(_)));
-                tenant.apply_observed_deltas(upsert_deltas);
+                // If the reconciliation failed, don't clear the observed state for places where we
+                // detached. Instead, mark the observed state as uncertain.
+                let failed_reconcile_deltas = deltas.map(|delta| {
+                    if let ObservedStateDelta::Delete(node_id) = delta {
+                        ObservedStateDelta::Upsert(Box::new((
+                            node_id,
+                            ObservedStateLocation { conf: None },
+                        )))
+                    } else {
+                        delta
+                    }
+                });
+                tenant.apply_observed_deltas(failed_reconcile_deltas);
             }
         }
 

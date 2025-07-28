@@ -33,7 +33,6 @@ env_logger.workspace = true
 framed-websockets.workspace = true
 futures.workspace = true
 hashbrown.workspace = true
-hashlink.workspace = true
 hex.workspace = true
 hmac.workspace = true
 hostname.workspace = true
@@ -54,6 +53,7 @@ json = { path = "../libs/proxy/json" }
 lasso = { workspace = true, features = ["multi-threaded"] }
 measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true
+moka.workspace = true
 once_cell.workspace = true
 opentelemetry = { workspace = true, features = ["trace"] }
 papaya = "0.2.0"
@@ -110,7 +110,7 @@ zerocopy.workspace = true
 # uncomment this to use the real subzero-core crate
 # subzero-core = { git = "https://github.com/neondatabase/subzero", rev = "396264617e78e8be428682f87469bb25429af88a", features = ["postgresql"], optional = true }
 # this is a stub for the subzero-core crate
-subzero-core = { path = "./subzero_core", features = ["postgresql"], optional = true}
+subzero-core = { path = "../libs/proxy/subzero_core", features = ["postgresql"], optional = true}
 ouroboros = { version = "0.18", optional = true }
 
 # jwt stuff
