@@ -2469,7 +2469,7 @@ impl DatadirModification<'_> {
             self.tline
                 .update_rel_size_v2_status(
                     reldir_migration_history.status.clone(),
-                    reldir_migration_history.v1_disabled_at,
+                    reldir_migration_history.v2_enabled_at,
                 )
                 .map_err(WalIngestErrorKind::RelSizeV2Error)?;
             self.put(
