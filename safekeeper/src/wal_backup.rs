@@ -626,8 +626,8 @@ pub async fn read_object(
     let download = backoff::retry(
         || async { storage.download(file_path, &opts, &cancel).await },
         DownloadError::is_permanent,
-        1,
         2,
+        3,
         "download WAL segment",
         &cancel,
     )
