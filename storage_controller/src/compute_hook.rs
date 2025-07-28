@@ -509,7 +509,10 @@ impl ApiMethod for ComputeHookTenant {
             if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("Reconfiguring pageservers for endpoint {endpoint_name}");
 
-                let shard_count = ShardCount(shards.len().try_into().expect("too many shards"));
+                let shard_count = match shards.len() {
+                    1 => ShardCount::unsharded(),
+                    n => ShardCount(n.try_into().expect("too many shards")),
+                };
 
                 let mut shard_infos: HashMap<ShardIndex, PageserverShardInfo> = HashMap::new();
 
@@ -556,7 +559,7 @@ impl ApiMethod for ComputeHookTenant {
                 }
 
                 let pageserver_conninfo = PageserverConnectionInfo {
-                    shard_count: ShardCount::unsharded(),
+                    shard_count,
                     stripe_size: stripe_size.map(|val| ShardStripeSize(val.0)),
                     shards: shard_infos,
                     prefer_protocol,
