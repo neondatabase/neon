@@ -618,7 +618,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			result->effective_request_lsn = result->request_lsn;
 			Assert(last_written_lsn <= result->request_lsn);
 
-			neon_log(DEBUG1, "neon_get_request_lsns request lsn %X/%X, not_modified_since %X/%X",
+			neon_log(DEBUG2, "neon_get_request_lsns request lsn %X/%X, not_modified_since %X/%X",
 					 LSN_FORMAT_ARGS(result->request_lsn), LSN_FORMAT_ARGS(result->not_modified_since));
 		}
 	}
@@ -642,7 +642,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			 * must still in the buffer cache, so our request cannot concern
 			 * those.
 			 */
-			neon_log(DEBUG1, "neon_get_request_lsns GetLastWrittenLSN lsn %X/%X",
+			neon_log(DEBUG2, "neon_get_request_lsns GetLastWrittenLSN lsn %X/%X",
 					 LSN_FORMAT_ARGS(last_written_lsn));
 
 			/*
@@ -2033,7 +2033,7 @@ neon_start_unlogged_build(SMgrRelation reln)
 	if (unlogged_build_phase != UNLOGGED_BUILD_NOT_IN_PROGRESS)
 		neon_log(ERROR, "unlogged relation build is already in progress");
 
-	ereport(SmgrTrace,
+	ereport(DEBUG1,
 			(errmsg(NEON_TAG "starting unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(InfoFromSMgrRel(reln)))));
 
@@ -2108,7 +2108,7 @@ neon_finish_unlogged_build_phase_1(SMgrRelation reln)
 {
 	Assert(RelFileInfoEquals(unlogged_build_rel_info, InfoFromSMgrRel(reln)));
 
-	ereport(SmgrTrace,
+	ereport(DEBUG1,
 			(errmsg(NEON_TAG "finishing phase 1 of unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt((unlogged_build_rel_info)))));
 
@@ -2146,7 +2146,7 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 	Assert(RelFileInfoEquals(unlogged_build_rel_info, rinfo));
 
-	ereport(SmgrTrace,
+	ereport(DEBUG1,
 			(errmsg(NEON_TAG "ending unlogged build of relation %u/%u/%u",
 					RelFileInfoFmt(unlogged_build_rel_info))));
 
