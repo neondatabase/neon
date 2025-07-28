@@ -1,0 +1,384 @@
+name: TPC-C like benchmark using benchbase
+
+on:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │ ┌───────────── day of the month (1 - 31)
+    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:   '0 6 * * *' # run once a day at 6 AM UTC
+  workflow_dispatch: # adds ability to run this manually
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  # Allow only one workflow globally because we do not want to be too noisy in production environment
+  group: benchbase-tpcc-workflow
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  benchbase-tpcc:
+    strategy:
+      fail-fast: false # allow other variants to continue even if one fails
+      matrix:
+        include:
+          - warehouses: 50 # defines number of warehouses and is used to compute number of terminals
+            max_rate: 800  # measured max TPS at scale factor based on experiments. Adjust if performance is better/worse
+            min_cu: 0.25   # simulate free tier plan (0.25 -2 CU)
+            max_cu: 2
+          - warehouses: 500 # serverless plan (2-8 CU)
+            max_rate: 2000
+            min_cu: 2
+            max_cu: 8
+          - warehouses: 1000 # business plan (2-16 CU)
+            max_rate: 2900
+            min_cu: 2
+            max_cu: 16
+      max-parallel: 1 # we want to run each workload size sequentially to avoid noisy neighbors
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
+    env:
+      PG_CONFIG: /tmp/neon/pg_install/v17/bin/pg_config
+      PSQL: /tmp/neon/pg_install/v17/bin/psql
+      PG_17_LIB_PATH: /tmp/neon/pg_install/v17/lib
+      POSTGRES_VERSION: 17
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    timeout-minutes: 1440
+
+    steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Configure AWS credentials # necessary to download artefacts
+      uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours is currently max associated with IAM role
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+        aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+
+    - name: Create Neon Project
+      id: create-neon-project-tpcc
+      uses: ./.github/actions/neon-project-create
+      with:
+        region_id: aws-us-east-2
+        postgres_version: ${{ env.POSTGRES_VERSION }}
+        compute_units: '[${{ matrix.min_cu }}, ${{ matrix.max_cu }}]'
+        api_key: ${{ secrets.NEON_PRODUCTION_API_KEY_4_BENCHMARKS }}
+        api_host: console.neon.tech  # production (!)
+
+    - name: Initialize Neon project
+      env:
+          BENCHMARK_TPCC_CONNSTR: ${{ steps.create-neon-project-tpcc.outputs.dsn }}
+          PROJECT_ID: ${{ steps.create-neon-project-tpcc.outputs.project_id }}
+      run: |
+        echo "Initializing Neon project with project_id: ${PROJECT_ID}"
+        export LD_LIBRARY_PATH=${PG_17_LIB_PATH}
+        
+        # Retry logic for psql connection with 1 minute sleep between attempts
+        for attempt in {1..3}; do
+          echo "Attempt ${attempt}/3: Creating extensions in Neon project"
+          if ${PSQL} "${BENCHMARK_TPCC_CONNSTR}" -c "CREATE EXTENSION IF NOT EXISTS neon; CREATE EXTENSION IF NOT EXISTS neon_utils;"; then
+            echo "Successfully created extensions"
+            break
+          else
+            echo "Failed to create extensions on attempt ${attempt}"
+            if [ ${attempt} -lt 3 ]; then
+              echo "Waiting 60 seconds before retry..."
+              sleep 60
+            else
+              echo "All attempts failed, exiting"
+              exit 1
+            fi
+          fi
+        done
+        
+        echo "BENCHMARK_TPCC_CONNSTR=${BENCHMARK_TPCC_CONNSTR}" >> $GITHUB_ENV
+
+    - name: Generate BenchBase workload configuration
+      env:
+        WAREHOUSES: ${{ matrix.warehouses }}
+        MAX_RATE: ${{ matrix.max_rate }}
+      run: |
+        echo "Generating BenchBase configs for warehouses: ${WAREHOUSES}, max_rate: ${MAX_RATE}"
+        
+        # Extract hostname and password from connection string
+        # Format: postgresql://username:password@hostname/database?params (no port for Neon)
+        HOSTNAME=$(echo "${BENCHMARK_TPCC_CONNSTR}" | sed -n 's|.*://[^:]*:[^@]*@\([^/]*\)/.*|\1|p')
+        PASSWORD=$(echo "${BENCHMARK_TPCC_CONNSTR}" | sed -n 's|.*://[^:]*:\([^@]*\)@.*|\1|p')
+        
+        echo "Extracted hostname: ${HOSTNAME}"
+        
+        # Use runner temp (NVMe) as working directory
+        cd "${RUNNER_TEMP}"
+        
+        # Copy the generator script
+        cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/generate_workload_size.py" .
+        
+        # Generate configs and scripts
+        python3 generate_workload_size.py \
+          --warehouses ${WAREHOUSES} \
+          --max-rate ${MAX_RATE} \
+          --hostname ${HOSTNAME} \
+          --password ${PASSWORD} \
+          --runner-arch ${{ runner.arch }}
+        
+        # Fix path mismatch: move generated configs and scripts to expected locations
+        mv ../configs ./configs
+        mv ../scripts ./scripts
+
+    - name: Prepare database (load data)
+      env:
+        WAREHOUSES: ${{ matrix.warehouses }}
+      run: |
+        cd "${RUNNER_TEMP}"
+        
+        echo "Loading ${WAREHOUSES} warehouses into database..."
+        
+        # Run the loader script and capture output to log file while preserving stdout/stderr
+        ./scripts/load_${WAREHOUSES}_warehouses.sh 2>&1 | tee "load_${WAREHOUSES}_warehouses.log"
+        
+        echo "Database loading completed"
+
+    - name: Run TPC-C benchmark (warmup phase, then benchmark at 70% of configuredmax TPS)
+      env:
+        WAREHOUSES: ${{ matrix.warehouses }}
+      run: |
+        cd "${RUNNER_TEMP}"
+        
+        echo "Running TPC-C benchmark with ${WAREHOUSES} warehouses..."
+        
+        # Run the optimal rate benchmark
+        ./scripts/execute_${WAREHOUSES}_warehouses_opt_rate.sh
+        
+        echo "Benchmark execution completed"
+
+    - name: Run TPC-C benchmark (warmup phase, then ramp down TPS and up again in 5 minute intervals)
+
+      env:
+          WAREHOUSES: ${{ matrix.warehouses }}
+      run: |
+        cd "${RUNNER_TEMP}"
+        
+        echo "Running TPC-C ramp-down-up with ${WAREHOUSES} warehouses..."
+        
+        # Run the optimal rate benchmark
+        ./scripts/execute_${WAREHOUSES}_warehouses_ramp_up.sh
+        
+        echo "Benchmark execution completed"
+
+    - name: Process results (upload to test results database and generate diagrams)
+      env:
+        WAREHOUSES: ${{ matrix.warehouses }}
+        MIN_CU: ${{ matrix.min_cu }}
+        MAX_CU: ${{ matrix.max_cu }}
+        PROJECT_ID: ${{ steps.create-neon-project-tpcc.outputs.project_id }}
+        REVISION: ${{ github.sha }}
+        PERF_DB_CONNSTR: ${{ secrets.PERF_TEST_RESULT_CONNSTR }}
+      run: |
+        cd "${RUNNER_TEMP}"
+        
+        echo "Creating temporary Python environment for results processing..."
+        
+        # Create temporary virtual environment
+        python3 -m venv temp_results_env
+        source temp_results_env/bin/activate
+        
+        # Install required packages in virtual environment
+        pip install matplotlib pandas psycopg2-binary
+        
+        echo "Copying results processing scripts..."
+        
+        # Copy both processing scripts
+        cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/generate_diagrams.py" .
+        cp "${GITHUB_WORKSPACE}/test_runner/performance/benchbase_tpc_c_helpers/upload_results_to_perf_test_results.py" .
+        
+        echo "Processing load phase metrics..."
+        
+        # Find and process load log
+        LOAD_LOG=$(find . -name "load_${WAREHOUSES}_warehouses.log" -type f | head -1)
+        if [ -n "$LOAD_LOG" ]; then
+          echo "Processing load metrics from: $LOAD_LOG"
+          python upload_results_to_perf_test_results.py \
+            --load-log "$LOAD_LOG" \
+            --run-type "load" \
+            --warehouses "${WAREHOUSES}" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
+        else
+          echo "Warning: Load log file not found: load_${WAREHOUSES}_warehouses.log"
+        fi
+        
+        echo "Processing warmup results for optimal rate..."
+        
+        # Find and process warmup results
+        WARMUP_CSV=$(find results_warmup -name "*.results.csv" -type f | head -1)
+        WARMUP_JSON=$(find results_warmup -name "*.summary.json" -type f | head -1)
+        
+        if [ -n "$WARMUP_CSV" ] && [ -n "$WARMUP_JSON" ]; then
+          echo "Generating warmup diagram from: $WARMUP_CSV"
+          python generate_diagrams.py \
+            --input-csv "$WARMUP_CSV" \
+            --output-svg "warmup_${WAREHOUSES}_warehouses_performance.svg" \
+            --title-suffix "Warmup at max TPS"
+            
+          echo "Uploading warmup metrics from: $WARMUP_JSON"
+          python upload_results_to_perf_test_results.py \
+            --summary-json "$WARMUP_JSON" \
+            --results-csv "$WARMUP_CSV" \
+            --run-type "warmup" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
+        else
+          echo "Warning: Missing warmup results files (CSV: $WARMUP_CSV, JSON: $WARMUP_JSON)"
+        fi
+        
+        echo "Processing optimal rate results..."
+        
+        # Find and process optimal rate results  
+        OPTRATE_CSV=$(find results_opt_rate -name "*.results.csv" -type f | head -1)
+        OPTRATE_JSON=$(find results_opt_rate -name "*.summary.json" -type f | head -1)
+        
+        if [ -n "$OPTRATE_CSV" ] && [ -n "$OPTRATE_JSON" ]; then
+          echo "Generating optimal rate diagram from: $OPTRATE_CSV"
+          python generate_diagrams.py \
+            --input-csv "$OPTRATE_CSV" \
+            --output-svg "benchmark_${WAREHOUSES}_warehouses_performance.svg" \
+            --title-suffix "70% of max TPS"
+            
+          echo "Uploading optimal rate metrics from: $OPTRATE_JSON"
+          python upload_results_to_perf_test_results.py \
+            --summary-json "$OPTRATE_JSON" \
+            --results-csv "$OPTRATE_CSV" \
+            --run-type "opt-rate" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
+        else
+          echo "Warning: Missing optimal rate results files (CSV: $OPTRATE_CSV, JSON: $OPTRATE_JSON)"
+        fi
+
+        echo "Processing warmup 2 results for ramp down/up phase..."
+        
+        # Find and process warmup results
+        WARMUP_CSV=$(find results_warmup -name "*.results.csv" -type f | tail -1)
+        WARMUP_JSON=$(find results_warmup -name "*.summary.json" -type f | tail -1)
+        
+        if [ -n "$WARMUP_CSV" ] && [ -n "$WARMUP_JSON" ]; then
+          echo "Generating warmup diagram from: $WARMUP_CSV"
+          python generate_diagrams.py \
+            --input-csv "$WARMUP_CSV" \
+            --output-svg "warmup_2_${WAREHOUSES}_warehouses_performance.svg" \
+            --title-suffix "Warmup at max TPS"
+            
+          echo "Uploading warmup metrics from: $WARMUP_JSON"
+          python upload_results_to_perf_test_results.py \
+            --summary-json "$WARMUP_JSON" \
+            --results-csv "$WARMUP_CSV" \
+            --run-type "warmup" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
+        else
+          echo "Warning: Missing warmup results files (CSV: $WARMUP_CSV, JSON: $WARMUP_JSON)"
+        fi
+        
+        echo "Processing ramp results..."
+        
+        # Find and process ramp results  
+        RAMPUP_CSV=$(find results_ramp_up -name "*.results.csv" -type f | head -1)
+        RAMPUP_JSON=$(find results_ramp_up -name "*.summary.json" -type f | head -1)
+        
+        if [ -n "$RAMPUP_CSV" ] && [ -n "$RAMPUP_JSON" ]; then
+          echo "Generating ramp diagram from: $RAMPUP_CSV"
+          python generate_diagrams.py \
+            --input-csv "$RAMPUP_CSV" \
+            --output-svg "ramp_${WAREHOUSES}_warehouses_performance.svg" \
+            --title-suffix "ramp TPS down and up in 5 minute intervals"
+            
+          echo "Uploading ramp metrics from: $RAMPUP_JSON"
+          python upload_results_to_perf_test_results.py \
+            --summary-json "$RAMPUP_JSON" \
+            --results-csv "$RAMPUP_CSV" \
+            --run-type "ramp-up" \
+            --min-cu "${MIN_CU}" \
+            --max-cu "${MAX_CU}" \
+            --project-id "${PROJECT_ID}" \
+            --revision "${REVISION}" \
+            --connection-string "${PERF_DB_CONNSTR}"
+        else
+          echo "Warning: Missing ramp results files (CSV: $RAMPUP_CSV, JSON: $RAMPUP_JSON)"
+        fi
+        
+        # Deactivate and clean up virtual environment
+        deactivate
+        rm -rf temp_results_env
+        rm upload_results_to_perf_test_results.py
+        
+        echo "Results processing completed and environment cleaned up"
+
+    - name: Set date for upload
+      id: set-date
+      run: echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+    - name: Configure AWS credentials # necessary to upload results
+      uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 900 # 900 is minimum value 
+        
+    - name: Upload benchmark results to S3
+      env:
+        S3_BUCKET: neon-public-benchmark-results
+        S3_PREFIX: benchbase-tpc-c/${{ steps.set-date.outputs.date }}/${{ github.run_id }}/${{ matrix.warehouses }}-warehouses
+      run: |
+        echo "Redacting passwords from configuration files before upload..."
+        
+        # Mask all passwords in XML config files
+        find "${RUNNER_TEMP}/configs" -name "*.xml" -type f -exec sed -i 's|<password>[^<]*</password>|<password>redacted</password>|g' {} \;
+        
+        echo "Uploading benchmark results to s3://${S3_BUCKET}/${S3_PREFIX}/"
+        
+        # Upload the entire benchmark directory recursively
+        aws s3 cp --only-show-errors --recursive "${RUNNER_TEMP}" s3://${S3_BUCKET}/${S3_PREFIX}/
+        
+        echo "Upload completed"
+        
+    - name: Delete Neon Project
+      if: ${{ always() }}
+      uses: ./.github/actions/neon-project-delete
+      with:
+        project_id: ${{ steps.create-neon-project-tpcc.outputs.project_id }}
+        api_key: ${{ secrets.NEON_PRODUCTION_API_KEY_4_BENCHMARKS }} 
+        api_host: console.neon.tech  # production (!)

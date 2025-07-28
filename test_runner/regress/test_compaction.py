@@ -7,6 +7,7 @@ import time
 from enum import StrEnum
 
 import pytest
+from fixtures.common_types import TenantShardId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -57,7 +58,7 @@ PREEMPT_GC_COMPACTION_TENANT_CONF = {
     "compaction_upper_limit": 6,
     "lsn_lease_length": "0s",
     # Enable gc-compaction
-    "gc_compaction_enabled": "true",
+    "gc_compaction_enabled": True,
     "gc_compaction_initial_threshold_kb": 1024,  # At a small threshold
     "gc_compaction_ratio_percent": 1,
     # No PiTR interval and small GC horizon
@@ -539,7 +540,7 @@ def test_pageserver_gc_compaction_trigger(neon_env_builder: NeonEnvBuilder):
         "pitr_interval": "0s",
         "gc_horizon": f"{1024 * 16}",
         "lsn_lease_length": "0s",
-        "gc_compaction_enabled": "true",
+        "gc_compaction_enabled": True,
         "gc_compaction_initial_threshold_kb": "16",
         "gc_compaction_ratio_percent": "50",
         # Do not generate image layers with create_image_layers
@@ -686,7 +687,7 @@ def test_sharding_compaction(
     for _i in range(0, 10):
         # Each of these does some writes then a checkpoint: because we set image_creation_threshold to 1,
         # these should result in image layers each time we write some data into a shard, and also shards
-        # recieving less data hitting their "empty image layer" path (wherre they should skip writing the layer,
+        # receiving less data hitting their "empty image layer" path (where they should skip writing the layer,
         # rather than asserting)
         workload.churn_rows(64)
 
@@ -944,3 +945,204 @@ def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool
                 f"SELECT count(*) FROM foo WHERE id={v} and val=repeat('abcde{v:0>3}', 500)"
             )
             assert res[0][0] == 1
+
+
+# BEGIN_HADRON
+def get_layer_map(env, tenant_shard_id, timeline_id, ps_id):
+    client = env.pageservers[ps_id].http_client()
+    layer_map = client.layer_map_info(tenant_shard_id, timeline_id)
+    image_layer_count = 0
+    delta_layer_count = 0
+    for layer in layer_map.historic_layers:
+        if layer.kind == "Image":
+            image_layer_count += 1
+        elif layer.kind == "Delta":
+            delta_layer_count += 1
+    return image_layer_count, delta_layer_count
+
+
+def test_image_layer_creation_time_threshold(neon_env_builder: NeonEnvBuilder):
+    """
+    Tests that image layers can be created when the time threshold is reached on non-0 shards.
+    """
+    tenant_conf = {
+        "compaction_threshold": "100",
+        "image_creation_threshold": "100",
+        "image_layer_creation_check_threshold": "1",
+        # disable distance based image layer creation check
+        "checkpoint_distance": 10 * 1024 * 1024 * 1024,
+        "checkpoint_timeout": "100ms",
+        "image_layer_force_creation_period": "1s",
+        "pitr_interval": "10s",
+        "gc_period": "1s",
+        "compaction_period": "1s",
+        "lsn_lease_length": "1s",
+    }
+
+    # consider every tenant large to run the image layer generation check more eagerly
+    neon_env_builder.pageserver_config_override = (
+        "image_layer_generation_large_timeline_threshold=0"
+    )
+
+    neon_env_builder.num_pageservers = 1
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start(
+        initial_tenant_conf=tenant_conf,
+        initial_tenant_shard_count=2,
+        initial_tenant_shard_stripe_size=1,
+    )
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("CREATE TABLE foo (id INTEGER, val text)")
+
+    for v in range(10):
+        endpoint.safe_psql(f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))")
+
+    tenant_shard_id = TenantShardId(tenant_id, 1, 2)
+
+    # Generate some rows.
+    for v in range(20):
+        endpoint.safe_psql(f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))")
+
+    # restart page server so that logical size on non-0 shards is missing
+    env.pageserver.restart()
+
+    (old_images, old_deltas) = get_layer_map(env, tenant_shard_id, timeline_id, 0)
+    log.info(f"old images: {old_images}, old deltas: {old_deltas}")
+
+    def check_image_creation():
+        (new_images, old_deltas) = get_layer_map(env, tenant_shard_id, timeline_id, 0)
+        log.info(f"images: {new_images}, deltas: {old_deltas}")
+        assert new_images > old_images
+
+    wait_until(check_image_creation)
+
+    endpoint.stop_and_destroy()
+
+
+def test_image_layer_force_creation_period(neon_env_builder: NeonEnvBuilder):
+    """
+    Tests that page server can force creating new images if image_layer_force_creation_period is enabled
+    """
+    # use large knobs to disable L0 compaction/image creation except for the force image creation
+    tenant_conf = {
+        "compaction_threshold": "100",
+        "image_creation_threshold": "100",
+        "image_layer_creation_check_threshold": "1",
+        "checkpoint_distance": 10 * 1024,
+        "checkpoint_timeout": "1s",
+        "image_layer_force_creation_period": "1s",
+        "pitr_interval": "10s",
+        "gc_period": "1s",
+        "compaction_period": "1s",
+        "lsn_lease_length": "1s",
+    }
+
+    # consider every tenant large to run the image layer generation check more eagerly
+    neon_env_builder.pageserver_config_override = (
+        "image_layer_generation_large_timeline_threshold=0"
+    )
+
+    neon_env_builder.num_pageservers = 1
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+    # Generate some rows.
+    for v in range(10):
+        endpoint.safe_psql(f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))")
+
+    # Sleep a bit such that the inserts are considered when calculating the forced image layer creation LSN.
+    time.sleep(2)
+
+    def check_force_image_creation():
+        ps_http = env.pageserver.http_client()
+        ps_http.timeline_compact(tenant_id, timeline_id)
+        image, delta = get_layer_map(env, tenant_id, timeline_id, 0)
+        log.info(f"images: {image}, deltas: {delta}")
+        assert image > 0
+
+        env.pageserver.assert_log_contains("forcing L0 compaction of")
+        env.pageserver.assert_log_contains("forcing image creation for partitioned range")
+
+    wait_until(check_force_image_creation)
+
+    endpoint.stop_and_destroy()
+
+    env.pageserver.allowed_errors.append(
+        ".*created delta file of size.*larger than double of target.*"
+    )
+
+
+def test_image_consistent_lsn(neon_env_builder: NeonEnvBuilder):
+    """
+    Test the /v1/tenant/<tenant_id>/timeline/<timeline_id> endpoint and the computation of image_consistent_lsn
+    """
+    # use large knobs to disable L0 compaction/image creation except for the force image creation
+    tenant_conf = {
+        "compaction_threshold": "100",
+        "image_creation_threshold": "100",
+        "image_layer_creation_check_threshold": "1",
+        "checkpoint_distance": 10 * 1024,
+        "checkpoint_timeout": "1s",
+        "image_layer_force_creation_period": "1s",
+        "pitr_interval": "10s",
+        "gc_period": "1s",
+        "compaction_period": "1s",
+        "lsn_lease_length": "1s",
+    }
+
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start(
+        initial_tenant_conf=tenant_conf,
+        initial_tenant_shard_count=4,
+        initial_tenant_shard_stripe_size=1,
+    )
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("CREATE TABLE foo (id INTEGER, val text)")
+    for v in range(10):
+        endpoint.safe_psql(
+            f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))", log_query=False
+        )
+
+    response = env.storage_controller.tenant_timeline_describe(tenant_id, timeline_id)
+    shards = response["shards"]
+    for shard in shards:
+        assert shard["image_consistent_lsn"] is not None
+    image_consistent_lsn = response["image_consistent_lsn"]
+    assert image_consistent_lsn is not None
+
+    # do more writes and wait for image_consistent_lsn to advance
+    for v in range(100):
+        endpoint.safe_psql(
+            f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))", log_query=False
+        )
+
+    def check_image_consistent_lsn_advanced():
+        response = env.storage_controller.tenant_timeline_describe(tenant_id, timeline_id)
+        new_image_consistent_lsn = response["image_consistent_lsn"]
+        shards = response["shards"]
+        for shard in shards:
+            print(f"shard {shard['tenant_id']} image_consistent_lsn{shard['image_consistent_lsn']}")
+        assert new_image_consistent_lsn != image_consistent_lsn
+
+    wait_until(check_image_consistent_lsn_advanced)
+
+    endpoint.stop_and_destroy()
+
+    for ps in env.pageservers:
+        ps.allowed_errors.append(".*created delta file of size.*larger than double of target.*")
+
+
+# END_HADRON

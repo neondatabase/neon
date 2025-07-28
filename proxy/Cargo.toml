@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 testing = ["dep:tokio-postgres"]
+rest_broker = ["dep:subzero-core", "dep:ouroboros"]
 
 [dependencies]
 ahash.workspace = true
@@ -16,6 +17,7 @@ async-compression.workspace = true
 async-trait.workspace = true
 atomic-take.workspace = true
 aws-config.workspace = true
+aws-credential-types.workspace = true
 aws-sdk-iam.workspace = true
 aws-sigv4.workspace = true
 base64.workspace = true
@@ -31,7 +33,6 @@ env_logger.workspace = true
 framed-websockets.workspace = true
 futures.workspace = true
 hashbrown.workspace = true
-hashlink.workspace = true
 hex.workspace = true
 hmac.workspace = true
 hostname.workspace = true
@@ -48,9 +49,11 @@ indexmap = { workspace = true, features = ["serde"] }
 ipnet.workspace = true
 itertools.workspace = true
 itoa.workspace = true
+json = { path = "../libs/proxy/json" }
 lasso = { workspace = true, features = ["multi-threaded"] }
 measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true
+moka.workspace = true
 once_cell.workspace = true
 opentelemetry = { workspace = true, features = ["trace"] }
 papaya = "0.2.0"
@@ -63,6 +66,7 @@ postgres-client = { package = "tokio-postgres2", path = "../libs/proxy/tokio-pos
 postgres-protocol = { package = "postgres-protocol2", path = "../libs/proxy/postgres-protocol2" }
 pq_proto.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 regex.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
 reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
@@ -103,6 +107,11 @@ uuid.workspace = true
 x509-cert.workspace = true
 redis.workspace = true
 zerocopy.workspace = true
+# uncomment this to use the real subzero-core crate
+# subzero-core = { git = "https://github.com/neondatabase/subzero", rev = "396264617e78e8be428682f87469bb25429af88a", features = ["postgresql"], optional = true }
+# this is a stub for the subzero-core crate
+subzero-core = { path = "../libs/proxy/subzero_core", features = ["postgresql"], optional = true}
+ouroboros = { version = "0.18", optional = true }
 
 # jwt stuff
 jose-jwa = "0.1.2"
@@ -125,6 +134,6 @@ pbkdf2 = { workspace = true, features = ["simple", "std"] }
 rcgen.workspace = true
 rstest.workspace = true
 walkdir.workspace = true
-rand_distr = "0.4"
+rand_distr = "0.5"
 tokio-postgres.workspace = true
 tracing-test = "0.2"

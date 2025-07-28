@@ -47,6 +47,7 @@ pub(crate) enum LayerManagerLockHolder {
     ImportPgData,
     DetachAncestor,
     Eviction,
+    ComputeImageConsistentLsn,
     #[cfg(test)]
     Testing,
 }

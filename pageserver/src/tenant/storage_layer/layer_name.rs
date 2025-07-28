@@ -225,7 +225,7 @@ impl fmt::Display for ImageLayerName {
 /// storage and object names in remote storage consist of the LayerName plus some extra qualifiers
 /// that uniquely identify the physical incarnation of a layer (see [crate::tenant::remote_timeline_client::remote_layer_path])
 /// and [`crate::tenant::storage_layer::layer::local_layer_path`])
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Ord, PartialOrd)]
 pub enum LayerName {
     Image(ImageLayerName),
     Delta(DeltaLayerName),

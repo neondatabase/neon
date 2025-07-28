@@ -17,6 +17,7 @@ pageserver = { path = ".." }
 pageserver_api.workspace = true
 remote_storage = { path = "../../libs/remote_storage" }
 postgres_ffi.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

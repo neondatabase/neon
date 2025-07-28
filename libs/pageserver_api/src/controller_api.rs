@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 
-use crate::models::{PageserverUtilization, ShardParameters, TenantConfig};
+use crate::models::{PageserverUtilization, ShardParameters, TenantConfig, TimelineInfo};
 use crate::shard::{ShardStripeSize, TenantShardId};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -60,6 +61,11 @@ pub struct NodeRegisterRequest {
     pub listen_https_port: Option<u16>,
 
     pub availability_zone_id: AvailabilityZone,
+
+    // Reachable IP address of the PS/SK registering, if known.
+    // Hadron Cluster Coordiantor will update the DNS record of the registering node
+    // with this IP address.
+    pub node_ip_addr: Option<IpAddr>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,6 +130,13 @@ pub struct TenantDescribeResponse {
     pub stripe_size: ShardStripeSize,
     pub policy: PlacementPolicy,
     pub config: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantTimelineDescribeResponse {
+    pub shards: Vec<TimelineInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_consistent_lsn: Option<Lsn>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -538,6 +551,39 @@ pub struct SafekeeperDescribeResponse {
     pub scheduling_policy: SkSchedulingPolicy,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TimelineSafekeeperPeer {
+    pub node_id: NodeId,
+    pub listen_http_addr: String,
+    pub http_port: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SCSafekeeperTimeline {
+    // SC does not know the tenant id.
+    pub timeline_id: TimelineId,
+    pub peers: Vec<NodeId>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SCSafekeeperTimelinesResponse {
+    pub timelines: Vec<SCSafekeeperTimeline>,
+    pub safekeeper_peers: Vec<TimelineSafekeeperPeer>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SafekeeperTimeline {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub peers: Vec<NodeId>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SafekeeperTimelinesResponse {
+    pub timelines: Vec<SafekeeperTimeline>,
+    pub safekeeper_peers: Vec<TimelineSafekeeperPeer>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SafekeeperSchedulingPolicyRequest {
     pub scheduling_policy: SkSchedulingPolicy,
@@ -550,6 +596,7 @@ pub struct TimelineImportRequest {
     pub timeline_id: TimelineId,
     pub start_lsn: Lsn,
     pub sk_set: Vec<NodeId>,
+    pub force_upsert: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]

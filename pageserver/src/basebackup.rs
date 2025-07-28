@@ -11,6 +11,7 @@
 //! from data stored in object storage.
 //!
 use std::fmt::Write as FmtWrite;
+use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, anyhow};
@@ -114,7 +115,7 @@ where
     // Compute postgres doesn't have any previous WAL files, but the first
     // record that it's going to write needs to include the LSN of the
     // previous record (xl_prev). We include prev_record_lsn in the
-    // "zenith.signal" file, so that postgres can read it during startup.
+    // "neon.signal" file, so that postgres can read it during startup.
     //
     // We don't keep full history of record boundaries in the page server,
     // however, only the predecessor of the latest record on each
@@ -420,12 +421,16 @@ where
         }
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
+
+        let mut dbdir_cnt = 0;
+        let mut rel_cnt = 0;
+
         // Create tablespace directories
         for ((spcnode, dbnode), has_relmap_file) in
             self.timeline.list_dbdirs(self.lsn, self.ctx).await?
         {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
-
+            dbdir_cnt += 1;
             // If full backup is requested, include all relation files.
             // Otherwise only include init forks of unlogged relations.
             let rels = self
@@ -433,6 +438,7 @@ where
                 .list_rels(spcnode, dbnode, Version::at(self.lsn), self.ctx)
                 .await?;
             for &rel in rels.iter() {
+                rel_cnt += 1;
                 // Send init fork as main fork to provide well formed empty
                 // contents of UNLOGGED relations. Postgres copies it in
                 // `reinit.c` during recovery.
@@ -454,6 +460,10 @@ where
                 }
             }
         }
+
+        self.timeline
+            .db_rel_count
+            .store(Some(Arc::new((dbdir_cnt, rel_cnt))));
 
         let start_time = Instant::now();
         let aux_files = self
@@ -751,34 +761,39 @@ where
 
     //
     // Add generated pg_control file and bootstrap WAL segment.
-    // Also send zenith.signal file with extra bootstrap data.
+    // Also send neon.signal and zenith.signal file with extra bootstrap data.
     //
     async fn add_pgcontrol_file(
         &mut self,
         pg_control_bytes: Bytes,
         system_identifier: u64,
     ) -> Result<(), BasebackupError> {
-        // add zenith.signal file
-        let mut zenith_signal = String::new();
+        // add neon.signal file
+        let mut neon_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
             if self.timeline.is_ancestor_lsn(self.lsn) {
-                write!(zenith_signal, "PREV LSN: none")
+                write!(neon_signal, "PREV LSN: none")
                     .map_err(|e| BasebackupError::Server(e.into()))?;
             } else {
-                write!(zenith_signal, "PREV LSN: invalid")
+                write!(neon_signal, "PREV LSN: invalid")
                     .map_err(|e| BasebackupError::Server(e.into()))?;
             }
         } else {
-            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)
+            write!(neon_signal, "PREV LSN: {}", self.prev_record_lsn)
                 .map_err(|e| BasebackupError::Server(e.into()))?;
         }
-        self.ar
-            .append(
-                &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
-                zenith_signal.as_bytes(),
-            )
-            .await
-            .map_err(|e| BasebackupError::Client(e, "add_pgcontrol_file,zenith.signal"))?;
+
+        // TODO: Remove zenith.signal once all historical computes have been replaced
+        // ... and thus support the neon.signal file.
+        for signalfilename in ["neon.signal", "zenith.signal"] {
+            self.ar
+                .append(
+                    &new_tar_header(signalfilename, neon_signal.len() as u64)?,
+                    neon_signal.as_bytes(),
+                )
+                .await
+                .map_err(|e| BasebackupError::Client(e, "add_pgcontrol_file,neon.signal"))?;
+        }
 
         //send pg_control
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;

@@ -1,4 +1,6 @@
 use std::fs::File;
+use std::fs::{self, Permissions};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Result, anyhow, bail};
@@ -9,6 +11,7 @@ use reqwest::StatusCode;
 use tokio_postgres::Client;
 use tracing::{error, info, instrument};
 
+use crate::compute::ComputeNodeParams;
 use crate::config;
 use crate::metrics::{CPLANE_REQUESTS_TOTAL, CPlaneRequestRPC, UNKNOWN_HTTP_STATUS};
 use crate::migration::MigrationRunner;
@@ -132,9 +135,24 @@ pub fn get_config_from_control_plane(base_uri: &str, compute_id: &str) -> Result
 }
 
 /// Check `pg_hba.conf` and update if needed to allow external connections.
-pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
+pub fn update_pg_hba(pgdata_path: &Path, databricks_pg_hba: Option<&String>) -> Result<()> {
     // XXX: consider making it a part of config.json
     let pghba_path = pgdata_path.join("pg_hba.conf");
+
+    // Update pg_hba to contains databricks specfic settings before adding neon settings
+    // PG uses the first record that matches to perform authentication, so we need to have
+    // our rules before the default ones from neon.
+    // See https://www.postgresql.org/docs/current/auth-pg-hba-conf.html
+    if let Some(databricks_pg_hba) = databricks_pg_hba {
+        if config::line_in_file(
+            &pghba_path,
+            &format!("include_if_exists {}\n", *databricks_pg_hba),
+        )? {
+            info!("updated pg_hba.conf to include databricks_pg_hba.conf");
+        } else {
+            info!("pg_hba.conf already included databricks_pg_hba.conf");
+        }
+    }
 
     if config::line_in_file(&pghba_path, PG_HBA_ALL_MD5)? {
         info!("updated pg_hba.conf to allow external connections");
@@ -142,6 +160,59 @@ pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
         info!("pg_hba.conf is up-to-date");
     }
 
+    Ok(())
+}
+
+/// Check `pg_ident.conf` and update if needed to allow databricks config.
+pub fn update_pg_ident(pgdata_path: &Path, databricks_pg_ident: Option<&String>) -> Result<()> {
+    info!("checking pg_ident.conf");
+    let pghba_path = pgdata_path.join("pg_ident.conf");
+
+    // Update pg_ident to contains databricks specfic settings
+    if let Some(databricks_pg_ident) = databricks_pg_ident {
+        if config::line_in_file(
+            &pghba_path,
+            &format!("include_if_exists {}\n", *databricks_pg_ident),
+        )? {
+            info!("updated pg_ident.conf to include databricks_pg_ident.conf");
+        } else {
+            info!("pg_ident.conf already included databricks_pg_ident.conf");
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy tls key_file and cert_file from k8s secret mount directory
+/// to pgdata and set private key file permissions as expected by Postgres.
+/// See this doc for expected permission <https://www.postgresql.org/docs/current/ssl-tcp.html>
+/// K8s secrets mount on dblet does not honor permission and ownership
+/// specified in the Volume or VolumeMount. So we need to explicitly copy the file and set the permissions.
+pub fn copy_tls_certificates(
+    key_file: &String,
+    cert_file: &String,
+    pgdata_path: &Path,
+) -> Result<()> {
+    let files = [cert_file, key_file];
+    for file in files.iter() {
+        let source = Path::new(file);
+        let dest = pgdata_path.join(source.file_name().unwrap());
+        if !dest.exists() {
+            std::fs::copy(source, &dest)?;
+            info!(
+                "Copying tls file: {} to {}",
+                &source.display(),
+                &dest.display()
+            );
+        }
+        if *file == key_file {
+            // Postgres requires private key to be readable only by the owner by having
+            // chmod 600 permissions.
+            let permissions = Permissions::from_mode(0o600);
+            fs::set_permissions(&dest, permissions)?;
+            info!("Setting permission on {}.", &dest.display());
+        }
+    }
     Ok(())
 }
 
@@ -169,7 +240,11 @@ pub async fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
 }
 
 #[instrument(skip_all)]
-pub async fn handle_migrations(client: &mut Client) -> Result<()> {
+pub async fn handle_migrations(
+    params: ComputeNodeParams,
+    client: &mut Client,
+    lakebase_mode: bool,
+) -> Result<()> {
     info!("handle migrations");
 
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -178,29 +253,62 @@ pub async fn handle_migrations(client: &mut Client) -> Result<()> {
 
     // Add new migrations in numerical order.
     let migrations = [
-        include_str!("./migrations/0001-neon_superuser_bypass_rls.sql"),
-        include_str!("./migrations/0002-alter_roles.sql"),
-        include_str!("./migrations/0003-grant_pg_create_subscription_to_neon_superuser.sql"),
-        include_str!("./migrations/0004-grant_pg_monitor_to_neon_superuser.sql"),
-        include_str!("./migrations/0005-grant_all_on_tables_to_neon_superuser.sql"),
-        include_str!("./migrations/0006-grant_all_on_sequences_to_neon_superuser.sql"),
-        include_str!(
-            "./migrations/0007-grant_all_on_tables_to_neon_superuser_with_grant_option.sql"
+        &format!(
+            include_str!("./migrations/0001-add_bypass_rls_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
         ),
-        include_str!(
-            "./migrations/0008-grant_all_on_sequences_to_neon_superuser_with_grant_option.sql"
+        &format!(
+            include_str!("./migrations/0002-alter_roles.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!("./migrations/0003-grant_pg_create_subscription_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!("./migrations/0004-grant_pg_monitor_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!("./migrations/0005-grant_all_on_tables_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!("./migrations/0006-grant_all_on_sequences_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!(
+                "./migrations/0007-grant_all_on_tables_with_grant_option_to_privileged_role.sql"
+            ),
+            privileged_role_name = params.privileged_role_name
+        ),
+        &format!(
+            include_str!(
+                "./migrations/0008-grant_all_on_sequences_with_grant_option_to_privileged_role.sql"
+            ),
+            privileged_role_name = params.privileged_role_name
         ),
         include_str!("./migrations/0009-revoke_replication_for_previously_allowed_roles.sql"),
-        include_str!(
-            "./migrations/0010-grant_snapshot_synchronization_funcs_to_neon_superuser.sql"
+        &format!(
+            include_str!(
+                "./migrations/0010-grant_snapshot_synchronization_funcs_to_privileged_role.sql"
+            ),
+            privileged_role_name = params.privileged_role_name
         ),
-        include_str!(
-            "./migrations/0011-grant_pg_show_replication_origin_status_to_neon_superuser.sql"
+        &format!(
+            include_str!(
+                "./migrations/0011-grant_pg_show_replication_origin_status_to_privileged_role.sql"
+            ),
+            privileged_role_name = params.privileged_role_name
         ),
-        include_str!("./migrations/0012-grant_pg_signal_backend_to_neon_superuser.sql"),
+        &format!(
+            include_str!("./migrations/0012-grant_pg_signal_backend_to_privileged_role.sql"),
+            privileged_role_name = params.privileged_role_name
+        ),
     ];
 
-    MigrationRunner::new(client, &migrations)
+    MigrationRunner::new(client, &migrations, lakebase_mode)
         .run_migrations()
         .await?;
 

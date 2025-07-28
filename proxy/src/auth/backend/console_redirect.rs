@@ -8,11 +8,12 @@ use tracing::{info, info_span};
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
+use crate::cache::node_info::CachedNodeInfo;
 use crate::compute::AuthInfo;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::cplane_proxy_v1;
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
+use crate::control_plane::{self, NodeInfo};
 use crate::error::{ReportableError, UserFacingError};
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
@@ -179,8 +180,6 @@ async fn authenticate(
     {
         return Err(auth::AuthError::NetworkNotAllowed);
     }
-
-    client.write_message(BeMessage::NoticeResponse("Connecting to database."));
 
     // Backwards compatibility. pg_sni_proxy uses "--" in domain names
     // while direct connections do not. Once we migrate to pg_sni_proxy

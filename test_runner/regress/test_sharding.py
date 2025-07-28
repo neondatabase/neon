@@ -1508,20 +1508,55 @@ def test_sharding_split_failures(
     env.storage_controller.consistency_check()
 
 
-@pytest.mark.skip(reason="The backpressure change has not been merged yet.")
+# HADRON
+def test_create_tenant_after_split(neon_env_builder: NeonEnvBuilder):
+    """
+    Tests creating a tenant and a timeline should fail after a tenant split.
+    """
+    env = neon_env_builder.init_start(initial_tenant_shard_count=4)
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*already exists with a different shard count.*",
+        ]
+    )
+
+    ep = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+    ep.safe_psql("CREATE TABLE usertable ( YCSB_KEY INT, FIELD0 TEXT);")
+    ep.safe_psql("INSERT INTO usertable VALUES (1, 'test1');")
+    ep.safe_psql("INSERT INTO usertable VALUES (2, 'test2');")
+    ep.safe_psql("INSERT INTO usertable VALUES (3, 'test3');")
+
+    # Split the tenant
+
+    env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=8)
+
+    with pytest.raises(RuntimeError):
+        env.create_tenant(env.initial_tenant, env.initial_timeline, shard_count=4)
+
+    # run more queries
+    ep.safe_psql("SELECT * FROM usertable;")
+    ep.safe_psql("UPDATE usertable set FIELD0 = 'test4';")
+
+    ep.stop_and_destroy()
+
+
+# HADRON
 def test_back_pressure_during_split(neon_env_builder: NeonEnvBuilder):
     """
-    Test backpressure can ignore new shards during tenant split so that if we abort the split,
-    PG can continue without being blocked.
+    Test backpressure works correctly during a shard split, especially after a split is aborted,
+    PG will not be stuck forever.
     """
-    DBNAME = "regression"
-
-    init_shard_count = 4
+    init_shard_count = 1
     neon_env_builder.num_pageservers = init_shard_count
     stripe_size = 32
 
     env = neon_env_builder.init_start(
-        initial_tenant_shard_count=init_shard_count, initial_tenant_shard_stripe_size=stripe_size
+        initial_tenant_shard_count=init_shard_count,
+        initial_tenant_shard_stripe_size=stripe_size,
+        initial_tenant_conf={
+            "checkpoint_distance": 1024 * 1024 * 1024,
+        },
     )
 
     env.storage_controller.allowed_errors.extend(
@@ -1537,19 +1572,31 @@ def test_back_pressure_during_split(neon_env_builder: NeonEnvBuilder):
         "main",
         config_lines=[
             "max_replication_write_lag = 1MB",
-            "databricks.max_wal_mb_per_second = 1",
             "neon.max_cluster_size = 10GB",
+            "databricks.max_wal_mb_per_second=100",
         ],
     )
-    endpoint.respec(skip_pg_catalog_updates=False)  # Needed for databricks_system to get created.
+    endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
 
-    endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
-
-    endpoint.safe_psql("CREATE TABLE usertable ( YCSB_KEY INT, FIELD0 TEXT);")
+    # generate 10MB of data
+    endpoint.safe_psql(
+        "CREATE TABLE usertable AS SELECT s AS KEY, repeat('a', 1000) as VALUE from generate_series(1, 10000) s;"
+    )
     write_done = Event()
 
-    def write_data(write_done):
+    def get_write_lag():
+        res = endpoint.safe_psql(
+            """
+            SELECT
+                pg_wal_lsn_diff(pg_current_wal_flush_lsn(), received_lsn) as received_lsn_lag
+                FROM neon.backpressure_lsns();
+            """,
+            log_query=False,
+        )
+        return res[0][0]
+
+    def write_data(write_done: Event):
         while not write_done.is_set():
             endpoint.safe_psql(
                 "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
@@ -1560,35 +1607,39 @@ def test_back_pressure_during_split(neon_env_builder: NeonEnvBuilder):
     writer_thread.start()
 
     env.storage_controller.configure_failpoints(("shard-split-pre-complete", "return(1)"))
+    # sleep 10 seconds before re-activating the old shard when aborting the split.
+    # this is to add some backpressures to PG
+    env.pageservers[0].http_client().configure_failpoints(
+        ("attach-before-activate-sleep", "return(10000)"),
+    )
     # split the tenant
     with pytest.raises(StorageControllerApiException):
-        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=16)
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=4)
+
+    def check_tenant_status():
+        status = (
+            env.pageservers[0].http_client().tenant_status(TenantShardId(env.initial_tenant, 0, 1))
+        )
+        assert status["state"]["slug"] == "Active"
+
+    wait_until(check_tenant_status)
 
     write_done.set()
     writer_thread.join()
 
+    log.info(f"current write lag: {get_write_lag()}")
+
     # writing more data to page servers after split is aborted
-    for _i in range(5000):
-        endpoint.safe_psql(
-            "INSERT INTO usertable SELECT random(), repeat('a', 1000);", log_query=False
-        )
+    with endpoint.cursor() as cur:
+        for _i in range(1000):
+            cur.execute("INSERT INTO usertable SELECT random(), repeat('a', 1000);")
 
     # wait until write lag becomes 0
     def check_write_lag_is_zero():
-        res = endpoint.safe_psql(
-            """
-            SELECT
-                pg_wal_lsn_diff(pg_current_wal_flush_lsn(), received_lsn) as received_lsn_lag
-                FROM neon.backpressure_lsns();
-            """,
-            dbname="databricks_system",
-            log_query=False,
-        )
-        log.info(f"received_lsn_lag = {res[0][0]}")
-        assert res[0][0] == 0
+        res = get_write_lag()
+        assert res == 0
 
     wait_until(check_write_lag_is_zero)
-    endpoint.stop_and_destroy()
 
 
 # BEGIN_HADRON
@@ -1673,6 +1724,87 @@ def test_shard_resolve_during_split_abort(neon_env_builder: NeonEnvBuilder):
 # END_HADRON
 
 
+# HADRON
+def test_back_pressure_per_shard(neon_env_builder: NeonEnvBuilder):
+    """
+    Tests back pressure knobs are enforced on the per shard basis instead of at the tenant level.
+    """
+    init_shard_count = 4
+    neon_env_builder.num_pageservers = init_shard_count
+    stripe_size = 1
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=init_shard_count,
+        initial_tenant_shard_stripe_size=stripe_size,
+        initial_tenant_conf={
+            # disable auto-flush of shards and set max_replication_flush_lag as 15MB.
+            # The backpressure parameters must be enforced at the shard level to avoid stalling PG.
+            "checkpoint_distance": 1 * 1024 * 1024 * 1024,
+            "checkpoint_timeout": "1h",
+        },
+    )
+
+    endpoint = env.endpoints.create(
+        "main",
+        config_lines=[
+            "max_replication_write_lag = 0",
+            "max_replication_apply_lag = 0",
+            "max_replication_flush_lag = 15MB",
+            "neon.max_cluster_size = 10GB",
+            "neon.lakebase_mode = true",
+        ],
+    )
+    endpoint.respec(skip_pg_catalog_updates=False)
+    endpoint.start()
+
+    # generate 20MB of data
+    endpoint.safe_psql(
+        "CREATE TABLE usertable AS SELECT s AS KEY, repeat('a', 1000) as VALUE from generate_series(1, 20000) s;"
+    )
+    res = endpoint.safe_psql("SELECT neon.backpressure_throttling_time() as throttling_time")[0]
+    assert res[0] == 0, f"throttling_time should be 0, but got {res[0]}"
+
+
+# HADRON
+def test_shard_split_page_server_timeout(neon_env_builder: NeonEnvBuilder):
+    """
+    Tests that shard split can correctly handle page server timeouts and abort the split
+    """
+    init_shard_count = 2
+    neon_env_builder.num_pageservers = 1
+    stripe_size = 1
+
+    if neon_env_builder.storage_controller_config is None:
+        neon_env_builder.storage_controller_config = {"shard_split_request_timeout": "5s"}
+    else:
+        neon_env_builder.storage_controller_config["shard_split_request_timeout"] = "5s"
+
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=init_shard_count,
+        initial_tenant_shard_stripe_size=stripe_size,
+    )
+
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Enqueuing background abort.*",
+            ".*failpoint.*",
+            ".*Failed to abort.*",
+            ".*Exclusive lock by ShardSplit was held.*",
+        ]
+    )
+    env.pageserver.allowed_errors.extend([".*request was dropped before completing.*"])
+
+    endpoint1 = env.endpoints.create_start(branch_name="main")
+
+    env.pageserver.http_client().configure_failpoints(("shard-split-post-finish-pause", "pause"))
+
+    with pytest.raises(StorageControllerApiException):
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=4)
+
+    env.pageserver.http_client().configure_failpoints(("shard-split-post-finish-pause", "off"))
+    endpoint1.stop_and_destroy()
+
+
 def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
     """
     Check a scenario when one of the shards is much slower than others.
@@ -1725,6 +1857,8 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
             "config_lines": [
                 # Tip: set to 100MB to make the test fail
                 "max_replication_write_lag=1MB",
+                # Hadron: Need to set max_cluster_size to some value to enable any backpressure at all.
+                "neon.max_cluster_size=1GB",
             ],
             # We need `neon` extension for calling backpressure functions,
             # this flag instructs `compute_ctl` to pre-install it.
@@ -1793,14 +1927,14 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
     shards_info()
 
     for _write_iter in range(30):
-        # approximately 1MB of data
-        workload.write_rows(8000, upload=False)
+        # approximately 10MB of data
+        workload.write_rows(80000, upload=False)
         update_write_lsn()
         infos = shards_info()
         min_lsn = min(Lsn(info["last_record_lsn"]) for info in infos)
         max_lsn = max(Lsn(info["last_record_lsn"]) for info in infos)
         diff = max_lsn - min_lsn
-        assert diff < 2 * 1024 * 1024, f"LSN diff={diff}, expected diff < 2MB due to backpressure"
+        assert diff < 8 * 1024 * 1024, f"LSN diff={diff}, expected diff < 8MB due to backpressure"
 
 
 def test_sharding_unlogged_relation(neon_env_builder: NeonEnvBuilder):

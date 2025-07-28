@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod connect_auth;
 pub(crate) mod connect_compute;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
@@ -9,26 +10,27 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use futures::TryStreamExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
+use postgres_client::RawCancelToken;
+use postgres_client::connect_raw::StartupStream;
+use postgres_protocol::message::backend::Message;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::{SmolStr, format_smolstr};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 
-use crate::cache::Cache;
-use crate::cancellation::CancellationHandler;
-use crate::compute::ComputeConnection;
+use crate::cancellation::{CancelClosure, CancellationHandler};
+use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
-use crate::control_plane::client::ControlPlaneClient;
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use crate::pglb::{ClientMode, ClientRequestError};
 use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
-use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::retry::ShouldRetryWakeCompute;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
 use crate::types::EndpointCacheKey;
@@ -90,62 +92,34 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
     auth_info.set_startup_params(params, params_compat);
 
-    let mut node;
-    let mut attempt = 0;
-    let connect = TcpMechanism {
-        locks: &config.connect_compute_locks,
-    };
     let backend = auth::Backend::ControlPlane(cplane, creds.info);
 
-    // NOTE: This is messy, but should hopefully be detangled with PGLB.
-    // We wanted to separate the concerns of **connect** to compute (a PGLB operation),
-    // from **authenticate** to compute (a NeonKeeper operation).
-    //
-    // This unfortunately removed retry handling for one error case where
-    // the compute was cached, and we connected, but the compute cache was actually stale
-    // and is associated with the wrong endpoint. We detect this when the **authentication** fails.
-    // As such, we retry once here if the `authenticate` function fails and the error is valid to retry.
-    let pg_settings = loop {
-        attempt += 1;
+    // TODO: callback to pglb
+    let res = connect_auth::connect_to_compute_and_auth(
+        ctx,
+        config,
+        &backend,
+        auth_info,
+        connect_compute::TlsNegotiation::Postgres,
+    )
+    .await;
 
-        // TODO: callback to pglb
-        let res = connect_to_compute(
-            ctx,
-            &connect,
-            &backend,
-            config.wake_compute_retry_config,
-            &config.connect_to_compute,
-        )
-        .await;
+    let mut node = match res {
+        Ok(node) => node,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
+    };
 
-        match res {
-            Ok(n) => node = n,
-            Err(e) => return Err(client.throw_error(e, Some(ctx)).await)?,
-        }
+    send_client_greeting(ctx, &config.greetings, client);
 
-        let auth::Backend::ControlPlane(cplane, user_info) = &backend else {
-            unreachable!("ensured above");
-        };
-
-        let res = auth_info.authenticate(ctx, &mut node, user_info).await;
-        match res {
-            Ok(pg_settings) => break pg_settings,
-            Err(e) if attempt < 2 && e.should_retry_wake_compute() => {
-                tracing::warn!(error = ?e, "retrying wake compute");
-
-                #[allow(irrefutable_let_patterns)]
-                if let ControlPlaneClient::ProxyV1(cplane_proxy_v1) = &**cplane {
-                    let key = user_info.endpoint_cache_key();
-                    cplane_proxy_v1.caches.node_info.invalidate(&key);
-                }
-            }
-            Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
-        }
+    let auth::Backend::ControlPlane(_, user_info) = backend else {
+        unreachable!("ensured above");
     };
 
     let session = cancellation_handler.get_key();
 
-    finish_client_init(&pg_settings, *session.key(), client);
+    let (process_id, secret_key) =
+        forward_compute_params_to_client(ctx, *session.key(), client, &mut node.stream).await?;
+    let hostname = node.hostname.to_string();
 
     let session_id = ctx.session_id();
     let (cancel_on_shutdown, cancel) = oneshot::channel();
@@ -154,7 +128,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .maintain_cancel_key(
                 session_id,
                 cancel,
-                &pg_settings.cancel_closure,
+                &CancelClosure {
+                    socket_addr: node.socket_addr,
+                    cancel_token: RawCancelToken {
+                        ssl_mode: node.ssl_mode,
+                        process_id,
+                        secret_key,
+                    },
+                    hostname,
+                    user_info,
+                },
                 &config.connect_to_compute,
             )
             .await;
@@ -163,29 +146,104 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     Ok((node, cancel_on_shutdown))
 }
 
-/// Finish client connection initialization: confirm auth success, send params, etc.
-pub(crate) fn finish_client_init(
-    settings: &compute::PostgresSettings,
-    cancel_key_data: CancelKeyData,
+/// Greet the client with any useful information.
+pub(crate) fn send_client_greeting(
+    ctx: &RequestContext,
+    greetings: &String,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) {
-    // Forward all deferred notices to the client.
-    for notice in &settings.delayed_notice {
-        client.write_raw(notice.as_bytes().len(), b'N', |buf| {
-            buf.extend_from_slice(notice.as_bytes());
-        });
+    // Expose session_id to clients if we have a greeting message.
+    if !greetings.is_empty() {
+        let session_msg = format!("{}, session_id: {}", greetings, ctx.session_id());
+        client.write_message(BeMessage::NoticeResponse(session_msg.as_str()));
     }
 
-    // Forward all postgres connection params to the client.
-    for (name, value) in &settings.params {
+    // Forward recorded latencies for probing requests
+    if let Some(testodrome_id) = ctx.get_testodrome_id() {
         client.write_message(BeMessage::ParameterStatus {
-            name: name.as_bytes(),
-            value: value.as_bytes(),
+            name: "neon.testodrome_id".as_bytes(),
+            value: testodrome_id.as_bytes(),
+        });
+
+        let latency_measured = ctx.get_proxy_latency();
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.cplane_latency".as_bytes(),
+            value: latency_measured.cplane.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.client_latency".as_bytes(),
+            value: latency_measured.client.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.compute_latency".as_bytes(),
+            value: latency_measured.compute.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.retry_latency".as_bytes(),
+            value: latency_measured.retry.as_micros().to_string().as_bytes(),
         });
     }
+}
 
-    client.write_message(BeMessage::BackendKeyData(cancel_key_data));
-    client.write_message(BeMessage::ReadyForQuery);
+pub(crate) async fn forward_compute_params_to_client(
+    ctx: &RequestContext,
+    cancel_key_data: CancelKeyData,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    compute: &mut StartupStream<TcpStream, RustlsStream>,
+) -> Result<(i32, i32), ClientRequestError> {
+    let mut process_id = 0;
+    let mut secret_key = 0;
+
+    let err = loop {
+        // if the client buffer is too large, let's write out some bytes now to save some space
+        client.write_if_full().await?;
+
+        let msg = match compute.try_next().await {
+            Ok(msg) => msg,
+            Err(e) => break postgres_client::Error::io(e),
+        };
+
+        match msg {
+            // Send our cancellation key data instead.
+            Some(Message::BackendKeyData(body)) => {
+                client.write_message(BeMessage::BackendKeyData(cancel_key_data));
+                process_id = body.process_id();
+                secret_key = body.secret_key();
+            }
+            // Forward all postgres connection params to the client.
+            Some(Message::ParameterStatus(body)) => {
+                if let Ok(name) = body.name()
+                    && let Ok(value) = body.value()
+                {
+                    client.write_message(BeMessage::ParameterStatus {
+                        name: name.as_bytes(),
+                        value: value.as_bytes(),
+                    });
+                }
+            }
+            // Forward all notices to the client.
+            Some(Message::NoticeResponse(notice)) => {
+                client.write_raw(notice.as_bytes().len(), b'N', |buf| {
+                    buf.extend_from_slice(notice.as_bytes());
+                });
+            }
+            Some(Message::ReadyForQuery(_)) => {
+                client.write_message(BeMessage::ReadyForQuery);
+                return Ok((process_id, secret_key));
+            }
+            Some(Message::ErrorResponse(body)) => break postgres_client::Error::db(body),
+            Some(_) => break postgres_client::Error::unexpected_message(),
+            None => break postgres_client::Error::closed(),
+        }
+    };
+
+    Err(client
+        .throw_error(PostgresError::Postgres(err), Some(ctx))
+        .await)?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -195,15 +253,18 @@ impl NeonOptions {
     // proxy options:
 
     /// `PARAMS_COMPAT` allows opting in to forwarding all startup parameters from client to compute.
-    pub const PARAMS_COMPAT: &str = "proxy_params_compat";
+    pub const PARAMS_COMPAT: &'static str = "proxy_params_compat";
 
     // cplane options:
 
     /// `LSN` allows provisioning an ephemeral compute with time-travel to the provided LSN.
-    const LSN: &str = "lsn";
+    const LSN: &'static str = "lsn";
+
+    /// `TIMESTAMP` allows provisioning an ephemeral compute with time-travel to the provided timestamp.
+    const TIMESTAMP: &'static str = "timestamp";
 
     /// `ENDPOINT_TYPE` allows configuring an ephemeral compute to be read_only or read_write.
-    const ENDPOINT_TYPE: &str = "endpoint_type";
+    const ENDPOINT_TYPE: &'static str = "endpoint_type";
 
     pub(crate) fn parse_params(params: &StartupMessageParams) -> Self {
         params
@@ -228,6 +289,7 @@ impl NeonOptions {
             // This is not a cplane option, we know it does not create ephemeral computes.
             Self::PARAMS_COMPAT => false,
             Self::LSN => true,
+            Self::TIMESTAMP => true,
             Self::ENDPOINT_TYPE => true,
             // err on the side of caution. any cplane options we don't know about
             // might lead to ephemeral computes.

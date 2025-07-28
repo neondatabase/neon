@@ -376,6 +376,37 @@ typedef struct PageserverFeedback
 	uint32		shard_number;
 } PageserverFeedback;
 
+/* BEGIN_HADRON */
+/**
+ * WAL proposer is the only backend that will update `sent_bytes` and `last_recorded_time_us`.
+ * Once the `sent_bytes` reaches the limit, it puts backpressure on PG backends.
+ *
+ * A PG backend checks `should_limit` to see if it should hit backpressure.
+ * - If yes, it also checks the `last_recorded_time_us` to see
+ *   if it's time to push more WALs. This is because the WAL proposer
+ *   only resets `should_limit` to 0 after it is notified about new WALs
+ *   which might take a while.
+ */
+typedef struct WalRateLimiter
+{
+	/* The effective wal write rate. Could be changed dynamically
+	based on whether PG has backpressure or not.*/
+	pg_atomic_uint32 effective_max_wal_bytes_per_second;
+	/* If the value is 1, PG backends will hit backpressure until the time has past batch_end_time_us. */
+	pg_atomic_uint32 should_limit;
+	/* The number of bytes sent in the current second. */
+	uint64		sent_bytes;
+	/* The timestamp when the write starts in the current batch. A batch is a time interval (e.g., )that we 
+	track and throttle writes. Most times a batch is 1s, but it could become larger if the PG overwrites the WALs
+	and we will adjust the batch accordingly to compensate (e.g., if PG writes 10MB at once and max WAL write rate
+	is 1MB/s, then the current batch will become 10s). */
+	pg_atomic_uint64 batch_start_time_us;
+	/* The timestamp (in the future) that the current batch should end and accept more writes
+	(after should_limit is set to 1). */
+	pg_atomic_uint64 batch_end_time_us;
+} WalRateLimiter;
+/* END_HADRON */
+
 typedef struct WalproposerShmemState
 {
 	pg_atomic_uint64 propEpochStartLsn;
@@ -395,6 +426,11 @@ typedef struct WalproposerShmemState
 
 	/* aggregated feedback with min LSNs across shards */
 	PageserverFeedback min_ps_feedback;
+
+	/* BEGIN_HADRON */
+	/* The WAL rate limiter */
+	WalRateLimiter wal_rate_limiter;
+	/* END_HADRON */
 } WalproposerShmemState;
 
 /*

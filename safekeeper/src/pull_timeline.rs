@@ -8,12 +8,13 @@ use bytes::Bytes;
 use camino::Utf8PathBuf;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
+use http::StatusCode;
 use http_utils::error::ApiError;
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::GenericRemoteStorage;
 use reqwest::Certificate;
-use safekeeper_api::Term;
 use safekeeper_api::models::{PullTimelineRequest, PullTimelineResponse, TimelineStatus};
+use safekeeper_api::{Term, membership};
 use safekeeper_client::mgmt_api;
 use safekeeper_client::mgmt_api::Client;
 use serde::Deserialize;
@@ -21,10 +22,11 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
 use tokio::task;
+use tokio::time::sleep;
 use tokio_tar::{Archive, Builder, Header};
 use tokio_util::io::{CopyToBytes, SinkWriter};
 use tokio_util::sync::PollSender;
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 use utils::crashsafe::fsync_async_opt;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::logging::SecretString;
@@ -449,13 +451,42 @@ pub async fn handle_request(
     sk_auth_token: Option<SecretString>,
     ssl_ca_certs: Vec<Certificate>,
     global_timelines: Arc<GlobalTimelines>,
+    wait_for_peer_timeline_status: bool,
 ) -> Result<PullTimelineResponse, ApiError> {
+    if let Some(mconf) = &request.mconf {
+        let sk_id = global_timelines.get_sk_id();
+        if !mconf.contains(sk_id) {
+            return Err(ApiError::BadRequest(anyhow!(
+                "refused to pull timeline with {mconf}, node {sk_id} is not member of it",
+            )));
+        }
+    }
+
     let existing_tli = global_timelines.get(TenantTimelineId::new(
         request.tenant_id,
         request.timeline_id,
     ));
-    if existing_tli.is_ok() {
-        info!("Timeline {} already exists", request.timeline_id);
+    if let Ok(timeline) = existing_tli {
+        let cur_generation = timeline
+            .read_shared_state()
+            .await
+            .sk
+            .state()
+            .mconf
+            .generation;
+
+        info!(
+            "Timeline {} already exists with generation {cur_generation}",
+            request.timeline_id,
+        );
+
+        if let Some(mconf) = request.mconf {
+            timeline
+                .membership_switch(mconf)
+                .await
+                .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
+        }
+
         return Ok(PullTimelineResponse {
             safekeeper_host: None,
         });
@@ -472,37 +503,113 @@ pub async fn handle_request(
     let http_hosts = request.http_hosts.clone();
 
     // Figure out statuses of potential donors.
-    let responses: Vec<Result<TimelineStatus, mgmt_api::Error>> =
-        futures::future::join_all(http_hosts.iter().map(|url| async {
-            let cclient = Client::new(http_client.clone(), url.clone(), sk_auth_token.clone());
-            let info = cclient
-                .timeline_status(request.tenant_id, request.timeline_id)
-                .await?;
-            Ok(info)
-        }))
-        .await;
-
     let mut statuses = Vec::new();
-    for (i, response) in responses.into_iter().enumerate() {
-        match response {
-            Ok(status) => {
-                statuses.push((status, i));
-            }
-            Err(e) => {
-                info!("error fetching status from {}: {e}", http_hosts[i]);
+    if !wait_for_peer_timeline_status {
+        let responses: Vec<Result<TimelineStatus, mgmt_api::Error>> =
+            futures::future::join_all(http_hosts.iter().map(|url| async {
+                let cclient = Client::new(http_client.clone(), url.clone(), sk_auth_token.clone());
+                let resp = cclient
+                    .timeline_status(request.tenant_id, request.timeline_id)
+                    .await?;
+                let info: TimelineStatus = resp
+                    .json()
+                    .await
+                    .context("Failed to deserialize timeline status")
+                    .map_err(|e| mgmt_api::Error::ReceiveErrorBody(e.to_string()))?;
+                Ok(info)
+            }))
+            .await;
+
+        for (i, response) in responses.into_iter().enumerate() {
+            match response {
+                Ok(status) => {
+                    if let Some(mconf) = &request.mconf {
+                        if status.mconf.generation > mconf.generation {
+                            // We probably raced with another timeline membership change with higher generation.
+                            // Ignore this request.
+                            return Err(ApiError::Conflict(format!(
+                                "cannot pull timeline with generation {}: timeline {} already exists with generation {} on {}",
+                                mconf.generation,
+                                request.timeline_id,
+                                status.mconf.generation,
+                                http_hosts[i],
+                            )));
+                        }
+                    }
+                    statuses.push((status, i));
+                }
+                Err(e) => {
+                    info!("error fetching status from {}: {e}", http_hosts[i]);
+                }
             }
         }
-    }
 
-    // Allow missing responses from up to one safekeeper (say due to downtime)
-    // e.g. if we created a timeline on PS A and B, with C being offline. Then B goes
-    // offline and C comes online. Then we want a pull on C with A and B as hosts to work.
-    let min_required_successful = (http_hosts.len() - 1).max(1);
-    if statuses.len() < min_required_successful {
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "only got {} successful status responses. required: {min_required_successful}",
-            statuses.len()
-        )));
+        // Allow missing responses from up to one safekeeper (say due to downtime)
+        // e.g. if we created a timeline on PS A and B, with C being offline. Then B goes
+        // offline and C comes online. Then we want a pull on C with A and B as hosts to work.
+        let min_required_successful = (http_hosts.len() - 1).max(1);
+        if statuses.len() < min_required_successful {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "only got {} successful status responses. required: {min_required_successful}",
+                statuses.len()
+            )));
+        }
+    } else {
+        let mut retry = true;
+        // We must get status from all other peers.
+        // Otherwise, we may run into split-brain scenario.
+        while retry {
+            statuses.clear();
+            retry = false;
+            for (i, url) in http_hosts.iter().enumerate() {
+                let cclient = Client::new(http_client.clone(), url.clone(), sk_auth_token.clone());
+                match cclient
+                    .timeline_status(request.tenant_id, request.timeline_id)
+                    .await
+                {
+                    Ok(resp) => {
+                        if resp.status() == StatusCode::NOT_FOUND {
+                            warn!(
+                                "Timeline {} not found on peer SK {}, no need to pull it",
+                                TenantTimelineId::new(request.tenant_id, request.timeline_id),
+                                url
+                            );
+                            return Ok(PullTimelineResponse {
+                                safekeeper_host: None,
+                            });
+                        }
+                        let info: TimelineStatus = resp
+                            .json()
+                            .await
+                            .context("Failed to deserialize timeline status")
+                            .map_err(ApiError::InternalServerError)?;
+                        statuses.push((info, i));
+                    }
+                    Err(e) => {
+                        match e {
+                            // If we get a 404, it means the timeline doesn't exist on this safekeeper.
+                            // We can ignore this error.
+                            mgmt_api::Error::ApiError(status, _)
+                                if status == StatusCode::NOT_FOUND =>
+                            {
+                                warn!(
+                                    "Timeline {} not found on peer SK {}, no need to pull it",
+                                    TenantTimelineId::new(request.tenant_id, request.timeline_id),
+                                    url
+                                );
+                                return Ok(PullTimelineResponse {
+                                    safekeeper_host: None,
+                                });
+                            }
+                            _ => {}
+                        }
+                        retry = true;
+                        error!("Failed to get timeline status from {}: {:#}", url, e);
+                    }
+                }
+            }
+            sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     // Find the most advanced safekeeper
@@ -511,6 +618,12 @@ pub async fn handle_request(
         .max_by_key(|(status, _)| {
             (
                 status.acceptor_state.epoch,
+                /* BEGIN_HADRON */
+                // We need to pull from the SK with the highest term.
+                // This is because another compute may come online and vote the same highest term again on the other two SKs.
+                // Then, there will be 2 computes running on the same term.
+                status.acceptor_state.term,
+                /* END_HADRON */
                 status.flush_lsn,
                 status.commit_lsn,
             )
@@ -521,15 +634,13 @@ pub async fn handle_request(
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
 
-    let check_tombstone = !request.ignore_tombstone.unwrap_or_default();
-
     match pull_timeline(
         status,
         safekeeper_host,
         sk_auth_token,
         http_client,
         global_timelines,
-        check_tombstone,
+        request.mconf,
     )
     .await
     {
@@ -539,6 +650,10 @@ pub async fn handle_request(
                 Some(TimelineError::AlreadyExists(_)) => Ok(PullTimelineResponse {
                     safekeeper_host: None,
                 }),
+                Some(TimelineError::Deleted(_)) => Err(ApiError::Conflict(format!(
+                    "Timeline {}/{} deleted",
+                    request.tenant_id, request.timeline_id
+                ))),
                 Some(TimelineError::CreationInProgress(_)) => {
                     // We don't return success here because creation might still fail.
                     Err(ApiError::Conflict("Creation in progress".to_owned()))
@@ -555,7 +670,7 @@ async fn pull_timeline(
     sk_auth_token: Option<SecretString>,
     http_client: reqwest::Client,
     global_timelines: Arc<GlobalTimelines>,
-    check_tombstone: bool,
+    mconf: Option<membership::Configuration>,
 ) -> Result<PullTimelineResponse> {
     let ttid = TenantTimelineId::new(status.tenant_id, status.timeline_id);
     info!(
@@ -617,8 +732,11 @@ async fn pull_timeline(
     // fsync temp timeline directory to remember its contents.
     fsync_async_opt(&tli_dir_path, !conf.no_sync).await?;
 
+    let generation = mconf.as_ref().map(|c| c.generation);
+
     // Let's create timeline from temp directory and verify that it's correct
-    let (commit_lsn, flush_lsn) = validate_temp_timeline(conf, ttid, &tli_dir_path).await?;
+    let (commit_lsn, flush_lsn) =
+        validate_temp_timeline(conf, ttid, &tli_dir_path, generation).await?;
     info!(
         "finished downloading timeline {}, commit_lsn={}, flush_lsn={}",
         ttid, commit_lsn, flush_lsn
@@ -626,9 +744,19 @@ async fn pull_timeline(
     assert!(status.commit_lsn <= status.flush_lsn);
 
     // Finally, load the timeline.
-    let _tli = global_timelines
-        .load_temp_timeline(ttid, &tli_dir_path, check_tombstone)
+    let timeline = global_timelines
+        .load_temp_timeline(ttid, &tli_dir_path, generation)
         .await?;
+
+    if let Some(mconf) = mconf {
+        // Switch to provided mconf to guarantee that the timeline will not
+        // be deleted by request with older generation.
+        // The generation might already be higer than the one in mconf, e.g.
+        // if another membership_switch request was executed between `load_temp_timeline`
+        // and `membership_switch`, but that's totaly fine. `membership_switch` will
+        // ignore switch to older generation.
+        timeline.membership_switch(mconf).await?;
+    }
 
     Ok(PullTimelineResponse {
         safekeeper_host: Some(host),

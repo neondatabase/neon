@@ -7,10 +7,14 @@ use std::io::prelude::*;
 use std::path::Path;
 
 use compute_api::responses::TlsConfig;
-use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
+use compute_api::spec::{
+    ComputeAudit, ComputeMode, ComputeSpec, DatabricksSettings, GenericOption,
+};
 
+use crate::compute::ComputeNodeParams;
 use crate::pg_helpers::{
-    GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
+    DatabricksSettingsExt as _, GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize,
+    escape_conf_value,
 };
 use crate::tls::{self, SERVER_CRT, SERVER_KEY};
 
@@ -39,11 +43,16 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
 }
 
 /// Create or completely rewrite configuration file specified by `path`
+#[allow(clippy::too_many_arguments)]
 pub fn write_postgres_conf(
     pgdata_path: &Path,
+    params: &ComputeNodeParams,
     spec: &ComputeSpec,
+    postgres_port: Option<u16>,
     extension_server_port: u16,
     tls_config: &Option<TlsConfig>,
+    databricks_settings: Option<&DatabricksSettings>,
+    lakebase_mode: bool,
 ) -> Result<()> {
     let path = pgdata_path.join("postgresql.conf");
     // File::create() destroys the file content if it exists.
@@ -54,13 +63,14 @@ pub fn write_postgres_conf(
         writeln!(file, "{conf}")?;
     }
 
+    // Stripe size GUC should be defined prior to connection string
+    if let Some(stripe_size) = spec.shard_stripe_size {
+        writeln!(file, "neon.stripe_size={stripe_size}")?;
+    }
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
     if let Some(s) = &spec.pageserver_connstring {
         writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
-    }
-    if let Some(stripe_size) = spec.shard_stripe_size {
-        writeln!(file, "neon.stripe_size={stripe_size}")?;
     }
     if !spec.safekeeper_connstrings.is_empty() {
         let mut neon_safekeepers_value = String::new();
@@ -160,6 +170,12 @@ pub fn write_postgres_conf(
             writeln!(file, "{}", opt.to_pg_setting())?;
         }
     }
+
+    writeln!(
+        file,
+        "neon.privileged_role_name={}",
+        escape_conf_value(params.privileged_role_name.as_str())
+    )?;
 
     // If there are any extra options in the 'settings' field, append those
     if spec.cluster.settings.is_some() {
@@ -274,6 +290,24 @@ pub fn write_postgres_conf(
     // further to customers' log aggregation systems.
     if spec.logs_export_host.is_some() {
         writeln!(file, "log_destination='stderr,syslog'")?;
+    }
+
+    if lakebase_mode {
+        // Explicitly set the port based on the connstr, overriding any previous port setting.
+        // Note: It is important that we don't specify a different port again after this.
+        let port = postgres_port.expect("port must be present in connstr");
+        writeln!(file, "port = {port}")?;
+
+        // This is databricks specific settings.
+        // This should be at the end of the file but before `compute_ctl_temp_override.conf` below
+        // so that it can override any settings above.
+        // `compute_ctl_temp_override.conf` is intended to override any settings above during specific operations.
+        // To prevent potential breakage in the future, we keep it above `compute_ctl_temp_override.conf`.
+        writeln!(file, "# Databricks settings start")?;
+        if let Some(settings) = databricks_settings {
+            writeln!(file, "{}", settings.as_pg_settings())?;
+        }
+        writeln!(file, "# Databricks settings end")?;
     }
 
     // This is essential to keep this line at the end of the file,

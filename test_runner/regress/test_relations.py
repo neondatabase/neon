@@ -7,6 +7,8 @@ if TYPE_CHECKING:
         NeonEnvBuilder,
     )
 
+from fixtures.neon_fixtures import wait_for_last_flush_lsn
+
 
 def test_pageserver_reldir_v2(
     neon_env_builder: NeonEnvBuilder,
@@ -65,6 +67,8 @@ def test_pageserver_reldir_v2(
     endpoint.safe_psql("CREATE TABLE foo4 (id INTEGER PRIMARY KEY, val text)")
     # Delete a relation in v1
     endpoint.safe_psql("DROP TABLE foo1")
+    # wait pageserver to apply the LSN
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
 
     # Check if both relations are still accessible
     endpoint.safe_psql("SELECT * FROM foo2")
@@ -76,12 +80,16 @@ def test_pageserver_reldir_v2(
     # This will acquire a basebackup, which lists all relations.
     endpoint.start()
 
-    # Check if both relations are still accessible
+    # Check if both relations are still accessible after restart
     endpoint.safe_psql("DROP TABLE IF EXISTS foo1")
     endpoint.safe_psql("SELECT * FROM foo2")
     endpoint.safe_psql("SELECT * FROM foo3")
     endpoint.safe_psql("SELECT * FROM foo4")
     endpoint.safe_psql("DROP TABLE foo3")
+    # wait pageserver to apply the LSN
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+
+    # Restart the endpoint again
     endpoint.stop()
     endpoint.start()
 
@@ -99,6 +107,9 @@ def test_pageserver_reldir_v2(
         },
     )
 
+    endpoint.stop()
+    endpoint.start()
+
     # Check if the relation is still accessible
     endpoint.safe_psql("SELECT * FROM foo2")
     endpoint.safe_psql("SELECT * FROM foo4")
@@ -110,4 +121,11 @@ def test_pageserver_reldir_v2(
             "rel_size_migration"
         ]
         == "migrating"
+    )
+
+    assert (
+        env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+            "rel_size_migrated_at"
+        ]
+        is not None
     )

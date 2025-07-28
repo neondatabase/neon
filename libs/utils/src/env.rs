@@ -47,6 +47,7 @@ where
 
 /* BEGIN_HADRON */
 pub enum DeploymentMode {
+    Local,
     Dev,
     Staging,
     Prod,
@@ -64,7 +65,7 @@ pub fn get_deployment_mode() -> Option<DeploymentMode> {
             }
         },
         Err(_) => {
-            tracing::error!("DEPLOYMENT_MODE not set");
+            // tracing::error!("DEPLOYMENT_MODE not set");
             None
         }
     }

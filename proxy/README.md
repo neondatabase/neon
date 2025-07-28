@@ -123,6 +123,11 @@ docker exec -it proxy-postgres psql -U postgres -c "CREATE TABLE neon_control_pl
 docker exec -it proxy-postgres psql -U postgres -c "CREATE ROLE proxy WITH SUPERUSER LOGIN PASSWORD 'password';"
 ```
 
+If you want to test query cancellation, redis is also required:
+```sh
+docker run --detach --name proxy-redis --publish 6379:6379 redis:7.0
+```
+
 Let's create self-signed certificate by running:
 ```sh
 openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key -subj "/CN=*.local.neon.build"
@@ -130,7 +135,10 @@ openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key
 
 Then we need to build proxy with 'testing' feature and run, e.g.:
 ```sh
-RUST_LOG=proxy LOGFMT=text cargo run -p proxy --bin proxy --features testing -- --auth-backend postgres --auth-endpoint 'postgresql://postgres:proxy-postgres@127.0.0.1:5432/postgres' -c server.crt -k server.key
+RUST_LOG=proxy LOGFMT=text cargo run -p proxy --bin proxy --features testing -- \
+  --auth-backend postgres --auth-endpoint 'postgresql://postgres:proxy-postgres@127.0.0.1:5432/postgres' \
+  --redis-auth-type="plain" --redis-plain="redis://127.0.0.1:6379" \
+  -c server.crt -k server.key
 ```
 
 Now from client you can start a new session:
@@ -170,16 +178,24 @@ Create a configuration file called `local_proxy.json` in the root of the repo (u
 
 Start the local proxy:
 ```sh
-cargo run --bin local_proxy -- \
-  --disable_pg_session_jwt true \
+cargo run --bin local_proxy --features testing -- \
+  --disable-pg-session-jwt \
   --http 0.0.0.0:7432
 ```
 
-Start the auth broker:
+Start the auth/rest broker:
+
+Note: to enable the rest broker you need to replace the stub subzero-core crate with the real one.
+
 ```sh
-LOGFMT=text OTEL_SDK_DISABLED=true cargo run --bin proxy --features testing -- \
+cargo add -p proxy subzero-core --git https://github.com/neondatabase/subzero --rev 396264617e78e8be428682f87469bb25429af88a
+```
+
+```sh
+LOGFMT=text OTEL_SDK_DISABLED=true cargo run --bin proxy --features testing,rest_broker -- \
   -c server.crt -k server.key \
   --is-auth-broker true \
+  --is-rest-broker true \
   --wss 0.0.0.0:8080 \
   --http 0.0.0.0:7002 \
   --auth-backend local
@@ -196,4 +212,10 @@ curl -k "https://foo.local.neon.build:8080/sql" \
   -H "Authorization: Bearer $NEON_JWT" \
   -H "neon-connection-string: postgresql://authenticator@foo.local.neon.build/database" \
   -d '{"query":"select 1","params":[]}'
+```
+
+Make a rest request against the auth broker (rest broker):
+```sh
+curl -k "https://foo.local.neon.build:8080/database/rest/v1/items?select=id,name&id=eq.1" \
+-H "Authorization: Bearer $NEON_JWT"
 ```

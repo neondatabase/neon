@@ -13,7 +13,7 @@
  *        accumulate changes. On subtransaction commit, the top of the stack
  *        is merged with the table below it.
  *
- *    Support event triggers for neon_superuser
+ *    Support event triggers for {privileged_role_name}
  *
  * IDENTIFICATION
  *	 contrib/neon/neon_dll_handler.c
@@ -49,6 +49,7 @@
 
 #include "neon_ddl_handler.h"
 #include "neon_utils.h"
+#include "neon.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 static fmgr_hook_type next_fmgr_hook = NULL;
@@ -541,11 +542,11 @@ NeonXactCallback(XactEvent event, void *arg)
 }
 
 static bool
-RoleIsNeonSuperuser(const char *role_name)
+IsPrivilegedRole(const char *role_name)
 {
 	Assert(role_name);
 
-	return strcmp(role_name, "neon_superuser") == 0;
+	return strcmp(role_name, privileged_role_name) == 0;
 }
 
 static void
@@ -578,8 +579,9 @@ HandleCreateDb(CreatedbStmt *stmt)
 	{
 		const char *owner_name = defGetString(downer);
 
-		if (RoleIsNeonSuperuser(owner_name))
-			elog(ERROR, "can't create a database with owner neon_superuser");
+		if (IsPrivilegedRole(owner_name))
+			elog(ERROR, "could not create a database with owner %s", privileged_role_name);
+
 		entry->owner = get_role_oid(owner_name, false);
 	}
 	else
@@ -609,8 +611,9 @@ HandleAlterOwner(AlterOwnerStmt *stmt)
 		memset(entry->old_name, 0, sizeof(entry->old_name));
 
 	new_owner = get_rolespec_name(stmt->newowner);
-	if (RoleIsNeonSuperuser(new_owner))
-		elog(ERROR, "can't alter owner to neon_superuser");
+	if (IsPrivilegedRole(new_owner))
+		elog(ERROR, "could not alter owner to %s", privileged_role_name);
+
 	entry->owner = get_role_oid(new_owner, false);
 	entry->type = Op_Set;
 }
@@ -716,8 +719,8 @@ HandleAlterRole(AlterRoleStmt *stmt)
 	InitRoleTableIfNeeded();
 
 	role_name = get_rolespec_name(stmt->role);
-	if (RoleIsNeonSuperuser(role_name) && !superuser())
-		elog(ERROR, "can't ALTER neon_superuser");
+	if (IsPrivilegedRole(role_name) && !superuser())
+		elog(ERROR, "could not ALTER %s", privileged_role_name);
 
 	dpass = NULL;
 	foreach(option, stmt->options)
@@ -831,7 +834,7 @@ HandleRename(RenameStmt *stmt)
  *
  * In vanilla only superuser can create Event Triggers.
  *
- * We allow it for neon_superuser by temporary switching to superuser. But as
+ * We allow it for {privileged_role_name} by temporary switching to superuser. But as
  * far as event trigger can fire in superuser context we should protect
  * superuser from execution of arbitrary user's code.
  *
@@ -891,7 +894,7 @@ force_noop(FmgrInfo *finfo)
  * Also skip executing Event Triggers when GUC neon.event_triggers has been
  * set to false. This might be necessary to be able to connect again after a
  * LOGIN Event Trigger has been installed that would prevent connections as
- * neon_superuser.
+ * {privileged_role_name}.
  */
 static void
 neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
@@ -910,24 +913,24 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 	}
 
 	/*
-	 * The neon_superuser role can use the GUC neon.event_triggers to disable
+	 * The {privileged_role_name} role can use the GUC neon.event_triggers to disable
 	 * firing Event Trigger.
 	 *
 	 *   SET neon.event_triggers TO false;
 	 *
-	 * This only applies to the neon_superuser role though, and only allows
-	 * skipping Event Triggers owned by neon_superuser, which we check by
-	 * proxy of the Event Trigger function being owned by neon_superuser.
+	 * This only applies to the {privileged_role_name} role though, and only allows
+	 * skipping Event Triggers owned by {privileged_role_name}, which we check by
+	 * proxy of the Event Trigger function being owned by {privileged_role_name}.
 	 *
-	 * A role that is created in role neon_superuser should be allowed to also
+	 * A role that is created in role {privileged_role_name} should be allowed to also
 	 * benefit from the neon_event_triggers GUC, and will be considered the
-	 * same as the neon_superuser role.
+	 * same as the {privileged_role_name} role.
 	 */
 	if (event == FHET_START
 		&& !neon_event_triggers
-		&& is_neon_superuser())
+		&& is_privileged_role())
 	{
-		Oid neon_superuser_oid = get_role_oid("neon_superuser", false);
+		Oid weak_superuser_oid = get_role_oid(privileged_role_name, false);
 
 		/* Find the Function Attributes (owner Oid, security definer) */
 		const char *fun_owner_name = NULL;
@@ -937,8 +940,8 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		LookupFuncOwnerSecDef(flinfo->fn_oid, &fun_owner, &fun_is_secdef);
 		fun_owner_name = GetUserNameFromId(fun_owner, false);
 
-		if (RoleIsNeonSuperuser(fun_owner_name)
-			|| has_privs_of_role(fun_owner, neon_superuser_oid))
+		if (IsPrivilegedRole(fun_owner_name)
+			|| has_privs_of_role(fun_owner, weak_superuser_oid))
 		{
 			elog(WARNING,
 				 "Skipping Event Trigger: neon.event_triggers is false");
@@ -953,7 +956,9 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 
 	/*
 	 * Fire Event Trigger if both function owner and current user are
-	 * superuser, or none of them are.
+	 * superuser. Allow executing Event Trigger function that belongs to a
+	 * superuser when connected as a non-superuser, even when the function is
+	 * SECURITY DEFINER.
 	 */
     else if (event == FHET_START
 		/* still enable it to pass pg_regress tests */
@@ -976,32 +981,7 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		function_is_owned_by_super = superuser_arg(function_owner);
 
 		/*
-		 * 1. Refuse to run SECURITY DEFINER function that belongs to a
-		 * superuser when the current user is not a superuser itself.
-		 */
-		if (!role_is_super
-			&& function_is_owned_by_super
-			&& function_is_secdef)
-		{
-			char *func_name = get_func_name(flinfo->fn_oid);
-
-			ereport(WARNING,
-					(errmsg("Skipping Event Trigger"),
-					 errdetail("Event Trigger function \"%s\" is owned by \"%s\" "
-							   "and is SECURITY DEFINER",
-							   func_name,
-							   GetUserNameFromId(function_owner, false))));
-
-			/*
-			 * we can't skip execution directly inside the fmgr_hook so
-			 * instead we change the event trigger function to a noop
-			 * function.
-			 */
-			force_noop(flinfo);
-		}
-
-		/*
-		 * 2. Refuse to run functions that belongs to a non-superuser when the
+		 * Refuse to run functions that belongs to a non-superuser when the
 		 * current user is a superuser.
 		 *
 		 * We could run a SECURITY DEFINER user-function here and be safe with
@@ -1009,7 +989,7 @@ neon_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *private)
 		 * infrastructure maintenance operations, where we prefer to skip
 		 * running user-defined code.
 		 */
-		else if (role_is_super && !function_is_owned_by_super)
+		if (role_is_super && !function_is_owned_by_super)
 		{
 			char *func_name = get_func_name(flinfo->fn_oid);
 
@@ -1172,13 +1152,13 @@ ProcessCreateEventTrigger(
 	}
 
 	/*
-	 * Allow neon_superuser to create Event Trigger, while keeping the
+	 * Allow {privileged_role_name} to create Event Trigger, while keeping the
 	 * ownership of the object.
 	 *
 	 * For that we give superuser membership to the role for the execution of
 	 * the command.
 	 */
-	if (IsTransactionState() && is_neon_superuser())
+	if (IsTransactionState() && is_privileged_role())
 	{
 		/* Find the Event Trigger function Oid */
 		Oid func_oid = LookupFuncName(stmt->funcname, 0, NULL, false);
@@ -1255,7 +1235,7 @@ ProcessCreateEventTrigger(
 		 *
 		 * That way [ ALTER | DROP ] EVENT TRIGGER commands just work.
 		 */
-		if (IsTransactionState() && is_neon_superuser())
+		if (IsTransactionState() && is_privileged_role())
 		{
 			if (!current_user_is_super)
 			{
@@ -1375,19 +1355,17 @@ NeonProcessUtility(
 }
 
 /*
- * Only neon_superuser is granted privilege to edit neon.event_triggers GUC.
+ * Only {privileged_role_name} is granted privilege to edit neon.event_triggers GUC.
  */
 static void
 neon_event_triggers_assign_hook(bool newval, void *extra)
 {
-	/* MyDatabaseId == InvalidOid || !OidIsValid(GetUserId())	 */
-
-	if (IsTransactionState() && !is_neon_superuser())
+	if (IsTransactionState() && !is_privileged_role())
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("permission denied to set neon.event_triggers"),
-				 errdetail("Only \"neon_superuser\" is allowed to set the GUC")));
+				 errdetail("Only \"%s\" is allowed to set the GUC", privileged_role_name)));
 	}
 }
 

@@ -32,7 +32,8 @@
 //!     config.json                 - passed to `compute_ctl`
 //!     pgdata/
 //!         postgresql.conf       - copy of postgresql.conf created by `compute_ctl`
-//!         zenith.signal
+//!         neon.signal
+//!         zenith.signal         - copy of neon.signal, for backward compatibility
 //!         <other PostgreSQL files>
 //! ```
 //!
@@ -64,7 +65,6 @@ use jsonwebtoken::jwk::{
     OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
 };
 use nix::sys::signal::{Signal, kill};
-use pageserver_api::shard::ShardStripeSize;
 use pem::Pem;
 use reqwest::header::CONTENT_TYPE;
 use safekeeper_api::PgMajorVersion;
@@ -76,6 +76,7 @@ use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::shard::ShardStripeSize;
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
@@ -98,6 +99,7 @@ pub struct EndpointConf {
     features: Vec<ComputeFeature>,
     cluster: Option<Cluster>,
     compute_ctl_config: ComputeCtlConfig,
+    privileged_role_name: Option<String>,
 }
 
 //
@@ -198,6 +200,7 @@ impl ComputeControlPlane {
         grpc: bool,
         skip_pg_catalog_updates: bool,
         drop_subscriptions_before_start: bool,
+        privileged_role_name: Option<String>,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
         let external_http_port = external_http_port.unwrap_or_else(|| self.get_port() + 1);
@@ -235,6 +238,7 @@ impl ComputeControlPlane {
             features: vec![],
             cluster: None,
             compute_ctl_config: compute_ctl_config.clone(),
+            privileged_role_name: privileged_role_name.clone(),
         });
 
         ep.create_endpoint_dir()?;
@@ -256,6 +260,7 @@ impl ComputeControlPlane {
                 features: vec![],
                 cluster: None,
                 compute_ctl_config,
+                privileged_role_name,
             })?,
         )?;
         std::fs::write(
@@ -331,6 +336,9 @@ pub struct Endpoint {
 
     /// The compute_ctl config for the endpoint's compute.
     compute_ctl_config: ComputeCtlConfig,
+
+    /// The name of the privileged role for the endpoint.
+    privileged_role_name: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -431,6 +439,7 @@ impl Endpoint {
             features: conf.features,
             cluster: conf.cluster,
             compute_ctl_config: conf.compute_ctl_config,
+            privileged_role_name: conf.privileged_role_name,
         })
     }
 
@@ -463,7 +472,7 @@ impl Endpoint {
         conf.append("max_connections", "100");
         conf.append("wal_level", "logical");
         // wal_sender_timeout is the maximum time to wait for WAL replication.
-        // It also defines how often the walreciever will send a feedback message to the wal sender.
+        // It also defines how often the walreceiver will send a feedback message to the wal sender.
         conf.append("wal_sender_timeout", "5s");
         conf.append("listen_addresses", &self.pg_address.ip().to_string());
         conf.append("port", &self.pg_address.port().to_string());
@@ -784,6 +793,7 @@ impl Endpoint {
                 autoprewarm: args.autoprewarm,
                 offload_lfc_interval_seconds: args.offload_lfc_interval_seconds,
                 suspend_timeout_seconds: -1, // Only used in neon_local.
+                databricks_settings: None,
             };
 
             // this strange code is needed to support respec() in tests
@@ -869,6 +879,10 @@ impl Endpoint {
             cmd.arg("--dev");
         }
 
+        if let Some(privileged_role_name) = self.privileged_role_name.clone() {
+            cmd.args(["--privileged-role-name", &privileged_role_name]);
+        }
+
         let child = cmd.spawn()?;
         // set up a scopeguard to kill & wait for the child in case we panic or bail below
         let child = scopeguard::guard(child, |mut child| {
@@ -922,8 +936,11 @@ impl Endpoint {
                         ComputeStatus::Empty
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
-                        | ComputeStatus::TerminationPending { .. }
-                        | ComputeStatus::Terminated => {
+                        | ComputeStatus::TerminationPendingFast
+                        | ComputeStatus::TerminationPendingImmediate
+                        | ComputeStatus::Terminated
+                        | ComputeStatus::RefreshConfigurationPending
+                        | ComputeStatus::RefreshConfiguration => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
                     }
@@ -942,6 +959,29 @@ impl Endpoint {
 
         // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
         drop(scopeguard::ScopeGuard::into_inner(child));
+
+        Ok(())
+    }
+
+    // Update the pageservers in the spec file of the endpoint. This is useful to test the spec refresh scenario.
+    pub async fn update_pageservers_in_config(
+        &self,
+        pageservers: Vec<(PageserverProtocol, Host, u16)>,
+    ) -> Result<()> {
+        let config_path = self.endpoint_path().join("config.json");
+        let mut config: ComputeConfig = {
+            let file = std::fs::File::open(&config_path)?;
+            serde_json::from_reader(file)?
+        };
+
+        let pageserver_connstring = Self::build_pageserver_connstr(&pageservers);
+        assert!(!pageserver_connstring.is_empty());
+        let mut spec = config.spec.unwrap();
+        spec.pageserver_connstring = Some(pageserver_connstring);
+        config.spec = Some(spec);
+
+        let file = std::fs::File::create(&config_path)?;
+        serde_json::to_writer_pretty(file, &config)?;
 
         Ok(())
     }
@@ -1109,6 +1149,33 @@ impl Endpoint {
             std::fs::remove_dir_all(self.endpoint_path())?;
         }
         Ok(response)
+    }
+
+    pub async fn refresh_configuration(&self) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let response = client
+            .post(format!(
+                "http://{}:{}/refresh_configuration",
+                self.internal_http_address.ip(),
+                self.internal_http_address.port()
+            ))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text().await {
+                Ok(err_body) => format!("Error: {err_body}"),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
     }
 
     pub fn connstr(&self, user: &str, db_name: &str) -> String {

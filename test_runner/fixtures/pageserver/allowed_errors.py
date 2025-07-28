@@ -115,8 +115,7 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Local data loss suspected.*",
     # Too many frozen layers error is normal during intensive benchmarks
     ".*too many frozen layers.*",
-    # Transient errors when resolving tenant shards by page service
-    ".*Fail to resolve tenant shard in attempt.*",
+    ".*Failed to resolve tenant shard after.*",
     # Expected warnings when pageserver has not refreshed GC info yet
     ".*pitr LSN/interval not found, skipping force image creation LSN calculation.*",
     ".*No broker updates received for a while.*",
@@ -153,6 +152,8 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     ".*reconciler.*neon_local error.*",
     # Tenant rate limits may fire in tests that submit lots of API requests.
     ".*tenant \\S+ is rate limited.*",
+    # Reconciliations may get stuck/delayed e.g. in chaos tests.
+    ".*background_reconcile: Shard reconciliation is stuck.*",
 ]
 
 
