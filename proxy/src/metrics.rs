@@ -554,14 +554,6 @@ impl From<bool> for Bool {
 }
 
 #[derive(LabelGroup)]
-#[label(set = InvalidEndpointsSet)]
-pub struct InvalidEndpointsGroup {
-    pub protocol: Protocol,
-    pub rejected: Bool,
-    pub outcome: ConnectOutcome,
-}
-
-#[derive(LabelGroup)]
 #[label(set = RetriesMetricSet)]
 pub struct RetriesMetricGroup {
     pub outcome: ConnectOutcome,
