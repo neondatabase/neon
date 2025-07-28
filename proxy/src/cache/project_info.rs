@@ -5,11 +5,14 @@ use clashmap::ClashMap;
 use moka::sync::Cache;
 use tracing::{debug, info};
 
-use crate::cache::common::{ControlPlaneResult, CplaneExpiry};
+use crate::cache::common::{
+    ControlPlaneResult, CplaneExpiry, count_cache_insert, count_cache_outcome, eviction_listener,
+};
 use crate::config::ProjectInfoCacheOptions;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Reason};
 use crate::control_plane::{EndpointAccessControl, RoleAccessControl};
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
+use crate::metrics::{CacheKind, Metrics};
 use crate::types::{EndpointId, RoleName};
 
 /// Cache for project info.
@@ -82,17 +85,32 @@ impl ProjectInfoCache {
 
 impl ProjectInfoCache {
     pub(crate) fn new(config: ProjectInfoCacheOptions) -> Self {
+        Metrics::get().cache.capacity.set(
+            CacheKind::ProjectInfoRoles,
+            (config.size * config.max_roles) as i64,
+        );
+        Metrics::get()
+            .cache
+            .capacity
+            .set(CacheKind::ProjectInfoEndpoints, config.size as i64);
+
         // we cache errors for 30 seconds, unless retry_at is set.
         let expiry = CplaneExpiry::default();
         Self {
             role_controls: Cache::builder()
-                .name("role_access_controls")
+                .name("project_info_roles")
+                .eviction_listener(|_k, _v, cause| {
+                    eviction_listener(CacheKind::ProjectInfoRoles, cause);
+                })
                 .max_capacity(config.size * config.max_roles)
                 .time_to_live(config.ttl)
                 .expire_after(expiry)
                 .build(),
             ep_controls: Cache::builder()
-                .name("endpoint_access_controls")
+                .name("project_info_endpoints")
+                .eviction_listener(|_k, _v, cause| {
+                    eviction_listener(CacheKind::ProjectInfoEndpoints, cause);
+                })
                 .max_capacity(config.size)
                 .time_to_live(config.ttl)
                 .expire_after(expiry)
@@ -111,7 +129,10 @@ impl ProjectInfoCache {
         let endpoint_id = EndpointIdInt::get(endpoint_id)?;
         let role_name = RoleNameInt::get(role_name)?;
 
-        self.role_controls.get(&(endpoint_id, role_name))
+        count_cache_outcome(
+            CacheKind::ProjectInfoRoles,
+            self.role_controls.get(&(endpoint_id, role_name)),
+        )
     }
 
     pub(crate) fn get_endpoint_access(
@@ -120,7 +141,10 @@ impl ProjectInfoCache {
     ) -> Option<ControlPlaneResult<EndpointAccessControl>> {
         let endpoint_id = EndpointIdInt::get(endpoint_id)?;
 
-        self.ep_controls.get(&endpoint_id)
+        count_cache_outcome(
+            CacheKind::ProjectInfoEndpoints,
+            self.ep_controls.get(&endpoint_id),
+        )
     }
 
     pub(crate) fn insert_endpoint_access(
@@ -143,6 +167,9 @@ impl ProjectInfoCache {
             key = &*endpoint_id,
             "created a cache entry for endpoint access"
         );
+
+        count_cache_insert(CacheKind::ProjectInfoEndpoints);
+        count_cache_insert(CacheKind::ProjectInfoRoles);
 
         self.ep_controls.insert(endpoint_id, Ok(controls));
         self.role_controls
@@ -172,10 +199,14 @@ impl ProjectInfoCache {
                     // leave the entry alone if it's already Ok
                     Some(entry) if entry.value().is_ok() => moka::ops::compute::Op::Nop,
                     // replace the entry
-                    _ => moka::ops::compute::Op::Put(Err(msg.clone())),
+                    _ => {
+                        count_cache_insert(CacheKind::ProjectInfoEndpoints);
+                        moka::ops::compute::Op::Put(Err(msg.clone()))
+                    }
                 });
         }
 
+        count_cache_insert(CacheKind::ProjectInfoRoles);
         self.role_controls
             .insert((endpoint_id, role_name), Err(msg));
     }

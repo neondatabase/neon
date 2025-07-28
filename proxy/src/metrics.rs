@@ -8,8 +8,8 @@ use measured::label::{
 use measured::metric::histogram::Thresholds;
 use measured::metric::name::MetricName;
 use measured::{
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
-    MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
+    LabelGroup, MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogVec, InfoMetric};
 use tokio::time::{self, Instant};
@@ -29,6 +29,9 @@ pub struct Metrics {
 
     #[metric(namespace = "service")]
     pub service: ServiceMetrics,
+
+    #[metric(namespace = "cache")]
+    pub cache: CacheMetrics,
 }
 
 static SELF: OnceLock<Metrics> = OnceLock::new();
@@ -217,13 +220,6 @@ impl std::fmt::Display for Protocol {
 pub enum Bool {
     True,
     False,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "outcome")]
-pub enum CacheOutcome {
-    Hit,
-    Miss,
 }
 
 #[derive(LabelGroup)]
@@ -703,4 +699,60 @@ pub enum ServiceState {
     Init,
     Running,
     Terminating,
+}
+
+#[derive(MetricGroup)]
+#[metric(new())]
+pub struct CacheMetrics {
+    /// The capacity of the cache
+    pub capacity: GaugeVec<StaticLabelSet<CacheKind>>,
+    /// The total number of entries inserted into the cache
+    pub inserted_total: CounterVec<StaticLabelSet<CacheKind>>,
+    /// The total number of entries removed from the cache
+    pub evicted_total: CounterVec<CacheEvictionSet>,
+    /// The total number of cache requests
+    pub request_total: CounterVec<CacheOutcomeSet>,
+}
+
+impl Default for CacheMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+#[label(singleton = "cache")]
+pub enum CacheKind {
+    NodeInfo,
+    ProjectInfoEndpoints,
+    ProjectInfoRoles,
+    Schema,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+pub enum CacheRemovalCause {
+    Expired,
+    Explicit,
+    Replaced,
+    Size,
+}
+
+#[derive(LabelGroup)]
+#[label(set = CacheEvictionSet)]
+pub struct CacheEviction {
+    pub cache: CacheKind,
+    pub cause: CacheRemovalCause,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+pub enum CacheOutcome {
+    Hit,
+    Miss,
+}
+
+#[derive(LabelGroup)]
+#[label(set = CacheOutcomeSet)]
+pub struct CacheOutcomeGroup {
+    pub cache: CacheKind,
+    pub outcome: CacheOutcome,
 }
