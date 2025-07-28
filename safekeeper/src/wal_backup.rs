@@ -12,7 +12,7 @@ use futures::stream::{self, FuturesOrdered};
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::{
-    DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata,
+    DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata,
 };
 use safekeeper_api::models::PeerInfo;
 use tokio::fs::File;
@@ -620,12 +620,23 @@ pub async fn read_object(
         byte_start: std::ops::Bound::Included(offset),
         ..Default::default()
     };
-    let download = storage
-        .download(file_path, &opts, &cancel)
-        .await
-        .with_context(|| {
-            format!("Failed to open WAL segment download stream for remote path {file_path:?}")
-        })?;
+
+    // This retry only solves the connect errors: subsequent reads can still fail as this function returns
+    // a stream.
+    let download = backoff::retry(
+        || async { storage.download(file_path, &opts, &cancel).await },
+        DownloadError::is_permanent,
+        1,
+        2,
+        "download WAL segment",
+        &cancel,
+    )
+    .await
+    .ok_or_else(|| DownloadError::Cancelled)
+    .and_then(|x| x)
+    .with_context(|| {
+        format!("Failed to open WAL segment download stream for remote path {file_path:?}")
+    })?;
 
     let reader = tokio_util::io::StreamReader::new(download.download_stream);
 
