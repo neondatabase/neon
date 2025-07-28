@@ -1,0 +1,122 @@
+name: 'Create Lakebase Project'
+description: 'Create Lakebase Project using API'
+
+inputs:
+  curl_authorization_options:
+    description: 'Curl authorization options - e.g. --header "Authorization: Bearer <token>"'
+    required: true
+  org_id:
+    description: 'Organization ID, required'
+    required: true
+  api_host:
+    description: 'Lakebase API host, e.g. dbc-55e65913-66de.dev.databricks.com/ajax-api/2.0/lakebase-console'
+    required: true
+  postgres_version:
+    description: 'Postgres version; default is 16'
+    default: '16'
+  compute_units:
+    description: '[Min, Max] compute units'
+    default: '[1, 1]'
+  psql_path:
+    description: 'Path to psql binary - it is caller responsibility to provision the psql binary'
+    required: false
+    default: '/tmp/neon/pg_install/v16/bin/psql'
+  libpq_lib_path:
+    description: 'Path to directory containing libpq library - it is caller responsibility to provision the libpq library'
+    required: false
+    default: '/tmp/neon/pg_install/v16/lib'
+  project_settings:
+    description: 'A JSON object with project settings'
+    required: false
+    default: '{}'
+  fixed_hostname:
+    description: 'Fixed hostname to use for connection URI'
+    required: false
+    default: 'k8s-dpingres-serverle-09ade1e9e9-0d7f675c53b35938.elb.us-west-2.amazonaws.com'
+
+outputs:
+  dsn:
+    description: 'Created Project DSN (for main database)'
+    value: ${{ steps.create-neon-project.outputs.dsn }}
+  project_id:
+    description: 'Created Project ID'
+    value: ${{ steps.create-neon-project.outputs.project_id }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Create Lakebase Project
+      id: create-lakebase-project
+      # A shell without `set -x` to not to expose password/dsn in logs
+      shell: bash -euo pipefail {0}
+      run: |
+        res=$(curl \
+          "https://${API_HOST}/api/v2/projects" \
+          -w "%{http_code}" \
+          --header "Accept: application/json" \
+          --header "Content-Type: application/json" \
+          ${CURL_AUTH} \
+          --data "{
+            \"project\": {
+              \"org_id\": \"${ORG_ID}\",
+              \"name\": \"Created by actions/lakebase-project-create; GITHUB_RUN_ID=${GITHUB_RUN_ID}\",
+              \"pg_version\": ${POSTGRES_VERSION},
+              \"region_id\": \"${REGION_ID}\",
+              \"provisioner\": \"k8s-neonvm\",
+              \"autoscaling_limit_min_cu\": ${MIN_CU},
+              \"autoscaling_limit_max_cu\": ${MAX_CU},
+              \"settings\": ${PROJECT_SETTINGS}
+            }
+          }")
+        
+        code=${res: -3}
+        if [[ ${code} -ge 400 ]]; then
+          echo Request failed with error code ${code}
+          echo ${res::-3}
+          exit 1
+        else
+          project=${res::-3}
+        fi
+
+        # Mask password
+        echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"
+
+        original_dsn=$(echo $project | jq --raw-output '.connection_uris[0].connection_uri')
+        echo "::add-mask::${original_dsn}"
+        
+        # Extract endpoint ID from the original hostname
+        endpoint_id=$(echo "$original_dsn" | sed -n 's/.*@\(ep-[^.]*\)\..*/\1/p')
+        
+        # Parse original URI components
+        user_pass=$(echo "$original_dsn" | sed -n 's/postgresql:\/\/\([^@]*\)@.*/\1/p')
+        database=$(echo "$original_dsn" | sed -n 's/.*\/\([^?]*\).*/\1/p')
+        
+        # Construct the corrected DSN with fixed hostname and endpoint in options
+        if [[ "$original_dsn" == *"?"* ]]; then
+          # Extract existing query parameters
+          existing_params=$(echo "$original_dsn" | sed -n 's/.*?\(.*\)/\1/p')
+          dsn="postgresql://${user_pass}@${FIXED_HOSTNAME}/${database}?${existing_params}&options=endpoint%3d${endpoint_id}"
+        else
+          dsn="postgresql://${user_pass}@${FIXED_HOSTNAME}/${database}?options=endpoint%3d${endpoint_id}"
+        fi
+        
+        echo "::add-mask::${dsn}"
+        echo "dsn=${dsn}" >> $GITHUB_OUTPUT
+
+        project_id=$(echo $project | jq --raw-output '.project.id')
+        echo "project_id=${project_id}" >> $GITHUB_OUTPUT
+
+        echo "Project ${project_id} has been created"
+
+      env:
+        API_HOST: ${{ inputs.api_host }}
+        CURL_AUTH: ${{ inputs.curl_authorization_options }}
+        ORG_ID: ${{ inputs.org_id }}
+        REGION_ID: ${{ inputs.region_id }}
+        POSTGRES_VERSION: ${{ inputs.postgres_version }}
+        MIN_CU: ${{ fromJSON(inputs.compute_units)[0] }}
+        MAX_CU: ${{ fromJSON(inputs.compute_units)[1] }}
+        PSQL: ${{ inputs.psql_path }}
+        LD_LIBRARY_PATH: ${{ inputs.libpq_lib_path }}
+        PROJECT_SETTINGS: ${{ inputs.project_settings }}
+        FIXED_HOSTNAME: ${{ inputs.fixed_hostname }}
