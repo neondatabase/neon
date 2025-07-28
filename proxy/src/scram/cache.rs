@@ -48,7 +48,8 @@ impl Pbkdf2Cache {
         let builder = moka::sync::Cache::builder()
             .name("pbkdf2")
             .max_capacity(SIZE)
-            .time_to_idle(TTL);
+            // We use time_to_live so we don't refresh the lifetime for an invalid password attempt.
+            .time_to_live(TTL);
 
         Metrics::get()
             .cache
