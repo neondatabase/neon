@@ -135,7 +135,6 @@ lock_api = "0.4.13"
 md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
-memoffset = "0.9"
 moka = { version = "0.12", features = ["sync"] }
 nix = { version = "0.30.1", features = ["dir", "fs", "mman", "process", "socket", "signal", "poll"] }
 # Do not update to >= 7.0.0, at least. The update will have a significant impact
