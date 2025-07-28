@@ -678,13 +678,13 @@ impl ConnectionManagerState {
                     (retry.retry_duration_seconds * 1000.0) as i64,
                 ));
 
-        if let Some(next) = &retry.next_retry_at
-            && next > &now
-        {
-            info!(
-                "Next connection retry to {:?} is at {}",
-                wal_connection.sk_id, next
-            );
+        if let Some(next) = &retry.next_retry_at {
+            if next > &now {
+                info!(
+                    "Next connection retry to {:?} is at {}",
+                    wal_connection.sk_id, next
+                );
+            }
         }
 
         let next_retry_duration =
@@ -927,26 +927,28 @@ impl ConnectionManagerState {
                 };
 
                 // If we haven't received any WAL updates for a while and candidate has more WAL, switch to it.
-                if let Some(waiting_for_new_lsn_since) = waiting_for_new_lsn_since
-                    && let Ok(waiting_for_new_wal) = (now - waiting_for_new_lsn_since).to_std()
-                    && candidate_commit_lsn > current_commit_lsn
-                    && waiting_for_new_wal > self.conf.lagging_wal_timeout
-                {
-                    return Some(NewWalConnectionCandidate {
-                        safekeeper_id: new_sk_id,
-                        wal_source_connconf: new_wal_source_connconf,
-                        availability_zone: new_availability_zone,
-                        reason: ReconnectReason::NoWalTimeout {
-                            current_lsn,
-                            current_commit_lsn,
-                            candidate_commit_lsn,
-                            last_wal_interaction: Some(
-                                existing_wal_connection.status.latest_wal_update,
-                            ),
-                            check_time: now,
-                            threshold: self.conf.lagging_wal_timeout,
-                        },
-                    });
+                if let Some(waiting_for_new_lsn_since) = waiting_for_new_lsn_since {
+                    if let Ok(waiting_for_new_wal) = (now - waiting_for_new_lsn_since).to_std() {
+                        if candidate_commit_lsn > current_commit_lsn
+                            && waiting_for_new_wal > self.conf.lagging_wal_timeout
+                        {
+                            return Some(NewWalConnectionCandidate {
+                                safekeeper_id: new_sk_id,
+                                wal_source_connconf: new_wal_source_connconf,
+                                availability_zone: new_availability_zone,
+                                reason: ReconnectReason::NoWalTimeout {
+                                    current_lsn,
+                                    current_commit_lsn,
+                                    candidate_commit_lsn,
+                                    last_wal_interaction: Some(
+                                        existing_wal_connection.status.latest_wal_update,
+                                    ),
+                                    check_time: now,
+                                    threshold: self.conf.lagging_wal_timeout,
+                                },
+                            });
+                        }
+                    }
                 }
 
                 self.wal_connection.as_mut().unwrap().discovered_new_wal = discovered_new_wal;

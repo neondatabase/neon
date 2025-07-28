@@ -231,12 +231,14 @@ pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
     for (ext_name, ext_data) in remote_extensions.extension_data.iter() {
         // Check if extension is present in public or custom.
         // If not, then it is not allowed to be used by this compute.
-        if let Some(public_extensions) = &remote_extensions.public_extensions
-            && !public_extensions.contains(ext_name)
-            && let Some(custom_extensions) = &remote_extensions.custom_extensions
-            && !custom_extensions.contains(ext_name)
-        {
-            continue; // skip this extension, it is not allowed
+        if let Some(public_extensions) = &remote_extensions.public_extensions {
+            if !public_extensions.contains(ext_name) {
+                if let Some(custom_extensions) = &remote_extensions.custom_extensions {
+                    if !custom_extensions.contains(ext_name) {
+                        continue; // skip this extension, it is not allowed
+                    }
+                }
+            }
         }
 
         for (control_name, control_content) in &ext_data.control_data {

@@ -529,10 +529,10 @@ pub(super) fn make_timeline_delete_guard(
         }
     };
 
-    if guard_kind == TimelineDeleteGuardKind::Delete
-        && let TimelineOrOffloaded::Timeline(timeline) = &timeline
-    {
-        timeline.set_state(TimelineState::Stopping);
+    if guard_kind == TimelineDeleteGuardKind::Delete {
+        if let TimelineOrOffloaded::Timeline(timeline) = &timeline {
+            timeline.set_state(TimelineState::Stopping);
+        }
     }
 
     Ok((timeline, delete_lock_guard))

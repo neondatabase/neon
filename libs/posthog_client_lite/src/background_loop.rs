@@ -78,11 +78,13 @@ impl FeatureResolverBackgroundLoop {
                     }
                     {
                         let last_update = this.feature_store.load().0;
-                        if let Ok(elapsed) = last_update.elapsed()
-                            && elapsed < refresh_period
-                        {
-                            tracing::debug!("Skipping feature flag refresh because it's too soon");
-                            continue;
+                        if let Ok(elapsed) = last_update.elapsed() {
+                            if elapsed < refresh_period {
+                                tracing::debug!(
+                                    "Skipping feature flag refresh because it's too soon"
+                                );
+                                continue;
+                            }
                         }
                     }
                     let resp = match this

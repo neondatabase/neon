@@ -2126,15 +2126,15 @@ impl Timeline {
 
         let checkpoint_distance_override = open_layer.tick();
 
-        if let Some(size_override) = checkpoint_distance_override
-            && current_size > size_override
-        {
-            // This is not harmful, but it only happens in relatively rare cases where
-            // time-based checkpoints are not happening fast enough to keep the amount of
-            // ephemeral data within configured limits.  It's a sign of stress on the system.
-            tracing::info!(
-                "Early-rolling open layer at size {current_size} (limit {size_override}) due to dirty data pressure"
-            );
+        if let Some(size_override) = checkpoint_distance_override {
+            if current_size > size_override {
+                // This is not harmful, but it only happens in relatively rare cases where
+                // time-based checkpoints are not happening fast enough to keep the amount of
+                // ephemeral data within configured limits.  It's a sign of stress on the system.
+                tracing::info!(
+                    "Early-rolling open layer at size {current_size} (limit {size_override}) due to dirty data pressure"
+                );
+            }
         }
 
         let checkpoint_distance =
@@ -3130,10 +3130,10 @@ impl Timeline {
             self.remote_client.update_config(&new_conf.location);
 
             let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
-            if let Some(new_capacity) = new_conf.tenant_conf.relsize_snapshot_cache_capacity
-                && new_capacity != rel_size_cache.capacity()
-            {
-                rel_size_cache.set_capacity(new_capacity);
+            if let Some(new_capacity) = new_conf.tenant_conf.relsize_snapshot_cache_capacity {
+                if new_capacity != rel_size_cache.capacity() {
+                    rel_size_cache.set_capacity(new_capacity);
+                }
             }
 
             self.metrics
@@ -3754,21 +3754,21 @@ impl Timeline {
             }
         }
 
-        if let CurrentLogicalSize::Approximate(_) = &current_size
-            && ctx.task_kind() == TaskKind::WalReceiverConnectionHandler
-        {
-            let first = self
-                .current_logical_size
-                .did_return_approximate_to_walreceiver
-                .compare_exchange(
-                    false,
-                    true,
-                    AtomicOrdering::Relaxed,
-                    AtomicOrdering::Relaxed,
-                )
-                .is_ok();
-            if first {
-                crate::metrics::initial_logical_size::TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE.inc();
+        if let CurrentLogicalSize::Approximate(_) = &current_size {
+            if ctx.task_kind() == TaskKind::WalReceiverConnectionHandler {
+                let first = self
+                    .current_logical_size
+                    .did_return_approximate_to_walreceiver
+                    .compare_exchange(
+                        false,
+                        true,
+                        AtomicOrdering::Relaxed,
+                        AtomicOrdering::Relaxed,
+                    )
+                    .is_ok();
+                if first {
+                    crate::metrics::initial_logical_size::TIMELINES_WHERE_WALRECEIVER_GOT_APPROXIMATE_SIZE.inc();
+                }
             }
         }
 
@@ -5001,28 +5001,28 @@ impl Timeline {
 
                 // Stall flushes to backpressure if compaction can't keep up. This is propagated up
                 // to WAL ingestion by having ephemeral layer rolls wait for flushes.
-                if let Some(stall_threshold) = self.get_l0_flush_stall_threshold()
-                    && l0_count >= stall_threshold
-                {
-                    warn!(
-                        "stalling layer flushes for compaction backpressure at {l0_count} \
+                if let Some(stall_threshold) = self.get_l0_flush_stall_threshold() {
+                    if l0_count >= stall_threshold {
+                        warn!(
+                            "stalling layer flushes for compaction backpressure at {l0_count} \
                             L0 layers ({frozen_count} frozen layers with {frozen_size} bytes, {open_layer_size} bytes in open layer)"
-                    );
-                    let stall_timer = self
-                        .metrics
-                        .flush_delay_histo
-                        .start_timer()
-                        .record_on_drop();
-                    tokio::select! {
-                        result = watch_l0.wait_for(|l0| *l0 < stall_threshold) => {
-                            if let Ok(l0) = result.as_deref() {
-                                let delay = stall_timer.elapsed().as_secs_f64();
-                                info!("resuming layer flushes at {l0} L0 layers after {delay:.3}s");
-                            }
-                        },
-                        _ = self.cancel.cancelled() => {},
+                        );
+                        let stall_timer = self
+                            .metrics
+                            .flush_delay_histo
+                            .start_timer()
+                            .record_on_drop();
+                        tokio::select! {
+                            result = watch_l0.wait_for(|l0| *l0 < stall_threshold) => {
+                                if let Ok(l0) = result.as_deref() {
+                                    let delay = stall_timer.elapsed().as_secs_f64();
+                                    info!("resuming layer flushes at {l0} L0 layers after {delay:.3}s");
+                                }
+                            },
+                            _ = self.cancel.cancelled() => {},
+                        }
+                        continue; // check again
                     }
-                    continue; // check again
                 }
 
                 // Flush the layer.
@@ -5053,23 +5053,23 @@ impl Timeline {
                 // Delay the next flush to backpressure if compaction can't keep up. We delay by the
                 // flush duration such that the flush takes 2x as long. This is propagated up to WAL
                 // ingestion by having ephemeral layer rolls wait for flushes.
-                if let Some(delay_threshold) = self.get_l0_flush_delay_threshold()
-                    && l0_count >= delay_threshold
-                {
-                    let delay = flush_duration.as_secs_f64();
-                    info!(
-                        "delaying layer flush by {delay:.3}s for compaction backpressure at \
+                if let Some(delay_threshold) = self.get_l0_flush_delay_threshold() {
+                    if l0_count >= delay_threshold {
+                        let delay = flush_duration.as_secs_f64();
+                        info!(
+                            "delaying layer flush by {delay:.3}s for compaction backpressure at \
                             {l0_count} L0 layers ({frozen_count} frozen layers with {frozen_size} bytes, {open_layer_size} bytes in open layer)"
-                    );
-                    let _delay_timer = self
-                        .metrics
-                        .flush_delay_histo
-                        .start_timer()
-                        .record_on_drop();
-                    tokio::select! {
-                        _ = tokio::time::sleep(flush_duration) => {},
-                        _ = watch_l0.wait_for(|l0| *l0 < delay_threshold) => {},
-                        _ = self.cancel.cancelled() => {},
+                        );
+                        let _delay_timer = self
+                            .metrics
+                            .flush_delay_histo
+                            .start_timer()
+                            .record_on_drop();
+                        tokio::select! {
+                            _ = tokio::time::sleep(flush_duration) => {},
+                            _ = watch_l0.wait_for(|l0| *l0 < delay_threshold) => {},
+                            _ = self.cancel.cancelled() => {},
+                        }
                     }
                 }
             };
@@ -5096,12 +5096,12 @@ impl Timeline {
                 tracing::debug!(
                     "Advancing disk_consistent_lsn across layer gap {old_disk_consistent_lsn}->{frozen_to_lsn}"
                 );
-                if self.set_disk_consistent_lsn(frozen_to_lsn)
-                    && let Err(e) = self.schedule_uploads(frozen_to_lsn, vec![])
-                {
-                    tracing::warn!(
-                        "Failed to schedule metadata upload after updating disk_consistent_lsn: {e}"
-                    );
+                if self.set_disk_consistent_lsn(frozen_to_lsn) {
+                    if let Err(e) = self.schedule_uploads(frozen_to_lsn, vec![]) {
+                        tracing::warn!(
+                            "Failed to schedule metadata upload after updating disk_consistent_lsn: {e}"
+                        );
+                    }
                 }
             }
 
@@ -5803,12 +5803,14 @@ impl Timeline {
 
         let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
         let check_required_after = (|| {
-            if self.shard_identity.is_unsharded()
-                && let CurrentLogicalSize::Exact(logical_size) =
+            if self.shard_identity.is_unsharded() {
+                if let CurrentLogicalSize::Exact(logical_size) =
                     self.current_logical_size.current_size()
-                && Some(Into::<u64>::into(&logical_size)) < large_timeline_threshold
-            {
-                return Duration::from_secs(3600 * 48);
+                {
+                    if Some(Into::<u64>::into(&logical_size)) < large_timeline_threshold {
+                        return Duration::from_secs(3600 * 48);
+                    }
+                }
             }
 
             self.get_checkpoint_timeout()
@@ -6264,11 +6266,11 @@ impl Drop for Timeline {
         if let Some(ancestor) = &self.ancestor_timeline {
             // This lock should never be poisoned, but in case it is we do a .map() instead of
             // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
-            if let Ok(mut gc_info) = ancestor.gc_info.write()
-                && !gc_info.remove_child_not_offloaded(self.timeline_id)
-            {
-                tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
+            if let Ok(mut gc_info) = ancestor.gc_info.write() {
+                if !gc_info.remove_child_not_offloaded(self.timeline_id) {
+                    tracing::error!(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id,
                         "Couldn't remove retain_lsn entry from timeline's parent on drop: already removed");
+                }
             }
         }
         info!(
@@ -6808,18 +6810,18 @@ impl Timeline {
         let standby_horizon = self.standby_horizon.load();
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
-        if standby_horizon != Lsn::INVALID
-            && let Some(standby_lag) = new_gc_cutoff.checked_sub(standby_horizon)
-        {
-            const MAX_ALLOWED_STANDBY_LAG: u64 = 10u64 << 30; // 10 GB
-            if standby_lag.0 < MAX_ALLOWED_STANDBY_LAG {
-                new_gc_cutoff = Lsn::min(standby_horizon, new_gc_cutoff);
-                trace!("holding off GC for standby apply LSN {}", standby_horizon);
-            } else {
-                warn!(
-                    "standby is lagging for more than {}MB, not holding gc for it",
-                    MAX_ALLOWED_STANDBY_LAG / 1024 / 1024
-                )
+        if standby_horizon != Lsn::INVALID {
+            if let Some(standby_lag) = new_gc_cutoff.checked_sub(standby_horizon) {
+                const MAX_ALLOWED_STANDBY_LAG: u64 = 10u64 << 30; // 10 GB
+                if standby_lag.0 < MAX_ALLOWED_STANDBY_LAG {
+                    new_gc_cutoff = Lsn::min(standby_horizon, new_gc_cutoff);
+                    trace!("holding off GC for standby apply LSN {}", standby_horizon);
+                } else {
+                    warn!(
+                        "standby is lagging for more than {}MB, not holding gc for it",
+                        MAX_ALLOWED_STANDBY_LAG / 1024 / 1024
+                    )
+                }
             }
         }
 
@@ -7791,13 +7793,13 @@ impl TimelineWriter<'_> {
 
         assert!(self.write_guard.is_none());
 
-        if let Some(wait_threshold) = wait_threshold
-            && l0_count >= wait_threshold
-        {
-            debug!(
-                "layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers"
-            );
-            self.tl.wait_flush_completion(flush_id).await?;
+        if let Some(wait_threshold) = wait_threshold {
+            if l0_count >= wait_threshold {
+                debug!(
+                    "layer roll waiting for flush due to compaction backpressure at {l0_count} L0 layers"
+                );
+                self.tl.wait_flush_completion(flush_id).await?;
+            }
         }
 
         if current_size >= self.get_checkpoint_distance() * 2 {

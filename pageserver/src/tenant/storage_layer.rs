@@ -698,10 +698,10 @@ impl ValuesReconstructState {
 
     pub(crate) fn on_layer_visited(&mut self, layer: &ReadableLayer) {
         self.layers_visited += 1;
-        if let ReadableLayer::PersistentLayer(layer) = layer
-            && layer.layer_desc().is_delta()
-        {
-            self.delta_layers_visited += 1;
+        if let ReadableLayer::PersistentLayer(layer) = layer {
+            if layer.layer_desc().is_delta() {
+                self.delta_layers_visited += 1;
+            }
         }
     }
 

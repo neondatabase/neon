@@ -547,13 +547,14 @@ impl Service {
 
         // The timeline has no safekeepers: we need to delete it from the db manually,
         // as no safekeeper reconciler will get to it
-        if all_sks.is_empty()
-            && let Err(err) = self
+        if all_sks.is_empty() {
+            if let Err(err) = self
                 .persistence
                 .delete_timeline(tenant_id, timeline_id)
                 .await
-        {
-            tracing::warn!(%tenant_id, %timeline_id, "couldn't delete timeline from db: {err}");
+            {
+                tracing::warn!(%tenant_id, %timeline_id, "couldn't delete timeline from db: {err}");
+            }
         }
 
         // Schedule reconciliations
@@ -926,9 +927,9 @@ impl Service {
 
                         // If min_position is not reached, map the response to an error,
                         // so it isn't counted toward the quorum.
-                        if let Some(min_position) = min_position
-                            && let Ok(ok_res) = &res
-                                && (ok_res.last_log_term, ok_res.flush_lsn) < min_position {
+                        if let Some(min_position) = min_position {
+                            if let Ok(ok_res) = &res {
+                                if (ok_res.last_log_term, ok_res.flush_lsn) < min_position {
                                     // Use Error::Timeout to make this error retriable.
                                     res = Err(mgmt_api::Error::Timeout(
                                         format!(
@@ -939,6 +940,8 @@ impl Service {
                                         )
                                     ));
                                 }
+                            }
+                        }
 
                         res
                     }

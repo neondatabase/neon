@@ -81,10 +81,11 @@ impl HeatmapLayersDownloader {
                             let _dl_guard = dl_guard;
 
                             let res = tl.download_layer(&layer.name, &ctx).await;
-                            if let Err(err) = res
-                                && !err.is_cancelled() {
+                            if let Err(err) = res {
+                                if !err.is_cancelled() {
                                     tracing::warn!(layer=%layer.name,"Failed to download heatmap layer: {err}")
                                 }
+                            }
                         })
                     }
                 )).buffered(concurrency);
@@ -102,13 +103,16 @@ impl HeatmapLayersDownloader {
                     }
                 }
 
-                if recurse && let Some(ancestor) = timeline.ancestor_timeline() {
-                    let ctx = ctx.attached_child();
-                    let res = ancestor.start_heatmap_layers_download(concurrency, recurse, &ctx);
-                    if let Err(err) = res {
-                        tracing::info!(
-                            "Failed to start heatmap layers download for ancestor: {err}"
-                        );
+                if recurse {
+                    if let Some(ancestor) = timeline.ancestor_timeline() {
+                        let ctx = ctx.attached_child();
+                        let res =
+                            ancestor.start_heatmap_layers_download(concurrency, recurse, &ctx);
+                        if let Err(err) = res {
+                            tracing::info!(
+                                "Failed to start heatmap layers download for ancestor: {err}"
+                            );
+                        }
                     }
                 }
             }

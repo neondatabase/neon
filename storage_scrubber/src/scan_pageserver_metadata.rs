@@ -262,14 +262,14 @@ pub async fn scan_pageserver_metadata(
                 timeline_id,
             };
 
-            if let Some(timeline_generation) = timeline_generations.get(&ttid)
-                && &generation >= timeline_generation
-            {
-                // Candidate orphan layer is in the current or future generation relative
-                // to the index we read for this timeline shard, so its absence from the index
-                // doesn't make it an orphan: more likely, it is a case where the layer was
-                // uploaded, but the index referencing the layer wasn't written yet.
-                continue;
+            if let Some(timeline_generation) = timeline_generations.get(&ttid) {
+                if &generation >= timeline_generation {
+                    // Candidate orphan layer is in the current or future generation relative
+                    // to the index we read for this timeline shard, so its absence from the index
+                    // doesn't make it an orphan: more likely, it is a case where the layer was
+                    // uploaded, but the index referencing the layer wasn't written yet.
+                    continue;
+                }
             }
 
             let orphan_path = remote_layer_path(

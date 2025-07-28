@@ -93,7 +93,7 @@ impl<'a> serde::Deserialize<'a> for Partitioning {
                 Ok(Self(crate::keyspace::KeySpace {
                     ranges: ranges
                         .into_iter()
-                        .map(|Range(start, end)| start.0..end.0)
+                        .map(|Range(start, end)| (start.0..end.0))
                         .collect(),
                 }))
             }

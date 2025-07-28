@@ -128,7 +128,7 @@ impl DerefMut for LayerManagerWriteGuard<'_> {
 }
 
 impl LockedLayerManager {
-    pub(crate) async fn read(&self, holder: LayerManagerLockHolder) -> LayerManagerReadGuard<'_> {
+    pub(crate) async fn read(&self, holder: LayerManagerLockHolder) -> LayerManagerReadGuard {
         let guard = ManuallyDrop::new(self.locked.read().await);
         LayerManagerReadGuard {
             guard,
@@ -140,7 +140,7 @@ impl LockedLayerManager {
     pub(crate) fn try_read(
         &self,
         holder: LayerManagerLockHolder,
-    ) -> Result<LayerManagerReadGuard<'_>, tokio::sync::TryLockError> {
+    ) -> Result<LayerManagerReadGuard, tokio::sync::TryLockError> {
         let guard = ManuallyDrop::new(self.locked.try_read()?);
 
         Ok(LayerManagerReadGuard {
@@ -150,7 +150,7 @@ impl LockedLayerManager {
         })
     }
 
-    pub(crate) async fn write(&self, holder: LayerManagerLockHolder) -> LayerManagerWriteGuard<'_> {
+    pub(crate) async fn write(&self, holder: LayerManagerLockHolder) -> LayerManagerWriteGuard {
         let guard = ManuallyDrop::new(self.locked.write().await);
         LayerManagerWriteGuard {
             guard,
@@ -162,7 +162,7 @@ impl LockedLayerManager {
     pub(crate) fn try_write(
         &self,
         holder: LayerManagerLockHolder,
-    ) -> Result<LayerManagerWriteGuard<'_>, tokio::sync::TryLockError> {
+    ) -> Result<LayerManagerWriteGuard, tokio::sync::TryLockError> {
         let guard = ManuallyDrop::new(self.locked.try_write()?);
 
         Ok(LayerManagerWriteGuard {

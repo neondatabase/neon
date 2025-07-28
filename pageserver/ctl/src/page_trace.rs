@@ -22,10 +22,10 @@ pub(crate) fn main(cmd: &PageTraceCmd) -> anyhow::Result<()> {
         match bincode::deserialize_from(&mut file) {
             Ok(event) => events.push(event),
             Err(err) => {
-                if let bincode::ErrorKind::Io(ref err) = *err
-                    && err.kind() == std::io::ErrorKind::UnexpectedEof
-                {
-                    break;
+                if let bincode::ErrorKind::Io(ref err) = *err {
+                    if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                        break;
+                    }
                 }
                 return Err(err.into());
             }

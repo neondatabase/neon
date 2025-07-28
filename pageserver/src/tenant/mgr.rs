@@ -917,18 +917,19 @@ impl TenantManager {
                     generation: _,
                     attach_mode: AttachmentMode::Stale,
                 }) = &new_location_config.mode
-                    && let Some(flush_timeout) = flush
                 {
-                    match tokio::time::timeout(flush_timeout, tenant.flush_remote()).await {
-                        Ok(Err(e)) => {
-                            return Err(UpsertLocationError::Flush(e));
-                        }
-                        Ok(Ok(_)) => return Ok(Some(tenant)),
-                        Err(_) => {
-                            tracing::warn!(
-                                timeout_ms = flush_timeout.as_millis(),
-                                "Timed out waiting for flush to remote storage, proceeding anyway."
-                            )
+                    if let Some(flush_timeout) = flush {
+                        match tokio::time::timeout(flush_timeout, tenant.flush_remote()).await {
+                            Ok(Err(e)) => {
+                                return Err(UpsertLocationError::Flush(e));
+                            }
+                            Ok(Ok(_)) => return Ok(Some(tenant)),
+                            Err(_) => {
+                                tracing::warn!(
+                                    timeout_ms = flush_timeout.as_millis(),
+                                    "Timed out waiting for flush to remote storage, proceeding anyway."
+                                )
+                            }
                         }
                     }
                 }
@@ -1140,7 +1141,7 @@ impl TenantManager {
         &self,
         tenant_shard_id: &TenantShardId,
         mode: TenantSlotAcquireMode,
-    ) -> Result<SlotGuard<'_>, TenantSlotError> {
+    ) -> Result<SlotGuard, TenantSlotError> {
         use TenantSlotAcquireMode::*;
         METRICS.tenant_slot_writes.inc();
 
@@ -1476,12 +1477,15 @@ impl TenantManager {
             anyhow::bail!("Requested split is not a power of two");
         }
 
-        if let Some(new_stripe_size) = new_stripe_size
-            && tenant.get_shard_stripe_size() != new_stripe_size
-            && tenant_shard_id.shard_count.count() > 1
-        {
-            // This tenant already has multiple shards, it is illegal to try and change its stripe size
-            anyhow::bail!("Shard stripe size may not be modified once tenant has multiple shards");
+        if let Some(new_stripe_size) = new_stripe_size {
+            if tenant.get_shard_stripe_size() != new_stripe_size
+                && tenant_shard_id.shard_count.count() > 1
+            {
+                // This tenant already has multiple shards, it is illegal to try and change its stripe size
+                anyhow::bail!(
+                    "Shard stripe size may not be modified once tenant has multiple shards"
+                );
+            }
         }
 
         // Plan: identify what the new child shards will be

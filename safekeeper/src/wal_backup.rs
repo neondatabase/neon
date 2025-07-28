@@ -760,7 +760,7 @@ pub async fn copy_s3_segments(
                     return Ok(());
                 }
 
-                if segno.is_multiple_of(1000) {
+                if segno % 1000 == 0 {
                     info!("copying segment {} {}", segno, segment_name);
                 }
 

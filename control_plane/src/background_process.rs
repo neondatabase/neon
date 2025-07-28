@@ -147,7 +147,7 @@ where
                     // print a message
                     print!("\n{process_name} has not started yet, continuing to wait");
                 }
-                if retries.is_multiple_of(DOT_EVERY_RETRIES) {
+                if retries % DOT_EVERY_RETRIES == 0 {
                     print!(".");
                     io::stdout().flush().unwrap();
                 }
@@ -231,7 +231,7 @@ pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
                     // print a message
                     print!("\n{process_name} has not stopped yet, continuing to wait");
                 }
-                if retries.is_multiple_of(DOT_EVERY_RETRIES) {
+                if retries % DOT_EVERY_RETRIES == 0 {
                     print!(".");
                     io::stdout().flush().unwrap();
                 }

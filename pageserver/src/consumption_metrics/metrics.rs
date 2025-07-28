@@ -347,11 +347,11 @@ impl TenantSnapshot {
             let factory = MetricsKey::synthetic_size(tenant_id);
             let mut synthetic_size = self.synthetic_size;
 
-            if synthetic_size == 0
-                && let Some(item) = cached.get(factory.key())
-            {
-                // use the latest value from previous session, TODO: check generation number
-                synthetic_size = item.value;
+            if synthetic_size == 0 {
+                if let Some(item) = cached.get(factory.key()) {
+                    // use the latest value from previous session, TODO: check generation number
+                    synthetic_size = item.value;
+                }
             }
 
             if synthetic_size != 0 {

@@ -355,30 +355,12 @@ pub(super) async fn handle_walreceiver_connection(
                 // from which the interpreted records were extracted, doesn't match
                 // the end of the previous batch (or the starting point for the first batch),
                 // then kill this WAL receiver connection and start a new one.
-                if validate_wal_contiguity && let Some(raw_wal_start_lsn) = batch.raw_wal_start_lsn
-                {
-                    match raw_wal_start_lsn.cmp(&expected_wal_start) {
-                        std::cmp::Ordering::Greater => {
-                            let msg = format!(
-                                "Gap in streamed WAL: [{expected_wal_start}, {raw_wal_start_lsn}"
-                            );
-                            critical_timeline!(
-                                timeline.tenant_shard_id,
-                                timeline.timeline_id,
-                                "{msg}"
-                            );
-                            return Err(WalReceiverError::Other(anyhow!(msg)));
-                        }
-                        std::cmp::Ordering::Less => {
-                            // Other shards are reading WAL behind us.
-                            // This is valid, but check that we received records
-                            // that we haven't seen before.
-                            if let Some(first_rec) = batch.records.first()
-                                && first_rec.next_record_lsn < last_rec_lsn
-                            {
+                if validate_wal_contiguity {
+                    if let Some(raw_wal_start_lsn) = batch.raw_wal_start_lsn {
+                        match raw_wal_start_lsn.cmp(&expected_wal_start) {
+                            std::cmp::Ordering::Greater => {
                                 let msg = format!(
-                                    "Received record with next_record_lsn multiple times ({} < {})",
-                                    first_rec.next_record_lsn, expected_wal_start
+                                    "Gap in streamed WAL: [{expected_wal_start}, {raw_wal_start_lsn}"
                                 );
                                 critical_timeline!(
                                     timeline.tenant_shard_id,
@@ -387,8 +369,27 @@ pub(super) async fn handle_walreceiver_connection(
                                 );
                                 return Err(WalReceiverError::Other(anyhow!(msg)));
                             }
+                            std::cmp::Ordering::Less => {
+                                // Other shards are reading WAL behind us.
+                                // This is valid, but check that we received records
+                                // that we haven't seen before.
+                                if let Some(first_rec) = batch.records.first() {
+                                    if first_rec.next_record_lsn < last_rec_lsn {
+                                        let msg = format!(
+                                            "Received record with next_record_lsn multiple times ({} < {})",
+                                            first_rec.next_record_lsn, expected_wal_start
+                                        );
+                                        critical_timeline!(
+                                            timeline.tenant_shard_id,
+                                            timeline.timeline_id,
+                                            "{msg}"
+                                        );
+                                        return Err(WalReceiverError::Other(anyhow!(msg)));
+                                    }
+                                }
+                            }
+                            std::cmp::Ordering::Equal => {}
                         }
-                        std::cmp::Ordering::Equal => {}
                     }
                 }
 

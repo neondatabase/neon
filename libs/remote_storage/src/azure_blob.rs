@@ -821,10 +821,10 @@ impl RemoteStorage for AzureBlobStorage {
                         match res {
                             Ok(Ok(_v)) => Ok(()),
                             Ok(Err(azure_err)) => {
-                                if let Some(http_err) = azure_err.as_http_error()
-                                    && http_err.status() == StatusCode::NotFound
-                                {
-                                    return Ok(());
+                                if let Some(http_err) = azure_err.as_http_error() {
+                                    if http_err.status() == StatusCode::NotFound {
+                                        return Ok(());
+                                    }
                                 }
                                 Err(AzureOrTimeout::AzureError(azure_err))
                             }

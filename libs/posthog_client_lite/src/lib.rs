@@ -126,12 +126,12 @@ impl FeatureStore {
     ) -> Result<(), &'static str> {
         self.flags.clear();
         for flag in flags {
-            if let Some(project_id) = project_id
-                && flag.team_id != project_id
-            {
-                return Err(
-                    "Retrieved a spec with different project id, wrong config? Discarding the feature flags.",
-                );
+            if let Some(project_id) = project_id {
+                if flag.team_id != project_id {
+                    return Err(
+                        "Retrieved a spec with different project id, wrong config? Discarding the feature flags.",
+                    );
+                }
             }
             self.flags.insert(flag.key.clone(), flag);
         }

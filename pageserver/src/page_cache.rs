@@ -324,7 +324,7 @@ impl PageCache {
         file_id: FileId,
         blkno: u32,
         ctx: &RequestContext,
-    ) -> anyhow::Result<ReadBufResult<'_>> {
+    ) -> anyhow::Result<ReadBufResult> {
         self.lock_for_read(&(CacheKey::ImmutableFilePage { file_id, blkno }), ctx)
             .await
     }
@@ -364,7 +364,7 @@ impl PageCache {
         &self,
         cache_key: &CacheKey,
         permit: &mut Option<PinnedSlotsPermit>,
-    ) -> Option<PageReadGuard<'_>> {
+    ) -> Option<PageReadGuard> {
         if let Some(slot_idx) = self.search_mapping(cache_key) {
             // The page was found in the mapping. Lock the slot, and re-check
             // that it's still what we expected (because we released the mapping
@@ -415,7 +415,7 @@ impl PageCache {
         &self,
         cache_key: &CacheKey,
         ctx: &RequestContext,
-    ) -> anyhow::Result<ReadBufResult<'_>> {
+    ) -> anyhow::Result<ReadBufResult> {
         let mut permit = Some(self.try_get_pinned_slot_permit().await?);
 
         let (read_access, hit) = match cache_key {
@@ -551,7 +551,7 @@ impl PageCache {
     async fn find_victim(
         &self,
         _permit_witness: &PinnedSlotsPermit,
-    ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<'_, SlotInner>)> {
+    ) -> anyhow::Result<(usize, tokio::sync::RwLockWriteGuard<SlotInner>)> {
         let iter_limit = self.slots.len() * 10;
         let mut iters = 0;
         loop {

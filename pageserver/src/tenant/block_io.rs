@@ -95,7 +95,7 @@ impl BlockReaderRef<'_> {
         &self,
         blknum: u32,
         ctx: &RequestContext,
-    ) -> Result<BlockLease<'_>, std::io::Error> {
+    ) -> Result<BlockLease, std::io::Error> {
         use BlockReaderRef::*;
         match self {
             FileBlockReader(r) => r.read_blk(blknum, ctx).await,
@@ -160,7 +160,7 @@ impl<'a> BlockCursor<'a> {
         &self,
         blknum: u32,
         ctx: &RequestContext,
-    ) -> Result<BlockLease<'_>, std::io::Error> {
+    ) -> Result<BlockLease, std::io::Error> {
         self.reader.read_blk(blknum, ctx).await
     }
 }

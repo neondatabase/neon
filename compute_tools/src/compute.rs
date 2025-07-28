@@ -2225,10 +2225,10 @@ LIMIT 100",
 
         if let Ok(raw_rows) = result {
             for message in raw_rows.iter() {
-                if let postgres::SimpleQueryMessage::Row(row) = message
-                    && let Some(json) = row.get(0)
-                {
-                    result_rows.push(json.to_string());
+                if let postgres::SimpleQueryMessage::Row(row) = message {
+                    if let Some(json) = row.get(0) {
+                        result_rows.push(json.to_string());
+                    }
                 }
             }
 
@@ -2655,21 +2655,21 @@ LIMIT 100",
 
     pub fn update_attached_metric(params: &ComputeNodeParams, state: &mut ComputeState) {
         // Update the pg_cctl_attached gauge when all identifiers are available.
-        if let Some(instance_id) = &params.instance_id
-            && let Some(pspec) = &state.pspec
-        {
-            // Clear all values in the metric
-            COMPUTE_ATTACHED.reset();
+        if let Some(instance_id) = &params.instance_id {
+            if let Some(pspec) = &state.pspec {
+                // Clear all values in the metric
+                COMPUTE_ATTACHED.reset();
 
-            // Set new metric value
-            COMPUTE_ATTACHED
-                .with_label_values(&[
-                    &params.compute_id,
-                    instance_id,
-                    &pspec.tenant_id.to_string(),
-                    &pspec.timeline_id.to_string(),
-                ])
-                .set(1);
+                // Set new metric value
+                COMPUTE_ATTACHED
+                    .with_label_values(&[
+                        &params.compute_id,
+                        instance_id,
+                        &pspec.tenant_id.to_string(),
+                        &pspec.timeline_id.to_string(),
+                    ])
+                    .set(1);
+            }
         }
     }
 }

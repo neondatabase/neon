@@ -341,7 +341,7 @@ impl OpenFiles {
     ///
     /// On return, we hold a lock on the slot, and its 'tag' has been updated
     /// recently_used has been set. It's all ready for reuse.
-    async fn find_victim_slot(&self) -> (SlotHandle, RwLockWriteGuard<'_, SlotInner>) {
+    async fn find_victim_slot(&self) -> (SlotHandle, RwLockWriteGuard<SlotInner>) {
         //
         // Run the clock algorithm to find a slot to replace.
         //
@@ -364,12 +364,12 @@ impl OpenFiles {
             // spinning in the extreme case that all the slots are busy with an
             // I/O operation.
             if retries < num_slots * 2 {
-                if !slot.recently_used.swap(false, Ordering::Release)
-                    && let Ok(guard) = slot.inner.try_write()
-                {
-                    slot_guard = guard;
-                    index = next;
-                    break;
+                if !slot.recently_used.swap(false, Ordering::Release) {
+                    if let Ok(guard) = slot.inner.try_write() {
+                        slot_guard = guard;
+                        index = next;
+                        break;
+                    }
                 }
                 retries += 1;
             } else {
@@ -460,10 +460,10 @@ impl<T> MaybeFatalIo<T> for std::io::Result<T> {
     /// This is appropriate for writes, where we typically want to die on EIO/ACCES etc, but
     /// not on ENOSPC.
     fn maybe_fatal_err(self, context: &str) -> std::io::Result<T> {
-        if let Err(e) = &self
-            && is_fatal_io_error(e)
-        {
-            on_fatal_io_error(e, context);
+        if let Err(e) = &self {
+            if is_fatal_io_error(e) {
+                on_fatal_io_error(e, context);
+            }
         }
         self
     }
@@ -713,11 +713,11 @@ impl VirtualFileInner {
             read_exact_at_impl(slice, offset, |buf, offset| self.read_at(buf, offset, ctx)).await;
         let res = res.map(|_| buf.slice(original_bounds));
 
-        if let Some(original_bounds) = assert_we_return_original_bounds
-            && let Ok(slice) = &res
-        {
-            let returned_bounds = (slice.stable_ptr() as usize, slice.bytes_total());
-            assert_eq!(original_bounds, returned_bounds);
+        if let Some(original_bounds) = assert_we_return_original_bounds {
+            if let Ok(slice) = &res {
+                let returned_bounds = (slice.stable_ptr() as usize, slice.bytes_total());
+                assert_eq!(original_bounds, returned_bounds);
+            }
         }
 
         res

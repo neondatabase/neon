@@ -38,11 +38,11 @@ pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
             }
         }
         Err(err) => {
-            if let Some(state) = err.code()
-                && state == &tokio_postgres::error::SqlState::DISK_FULL
-            {
-                warn!("Tenant disk is full");
-                return Ok(());
+            if let Some(state) = err.code() {
+                if state == &tokio_postgres::error::SqlState::DISK_FULL {
+                    warn!("Tenant disk is full");
+                    return Ok(());
+                }
             }
             return Err(err.into());
         }

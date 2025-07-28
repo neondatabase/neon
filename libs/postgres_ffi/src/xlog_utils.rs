@@ -113,8 +113,8 @@ pub fn IsPartialXLogFileName(fname: &OsStr) -> bool {
 /// If LSN points to the beginning of the page, then shift it to first record,
 /// otherwise align on 8-bytes boundary (required for WAL records)
 pub fn normalize_lsn(lsn: Lsn, seg_sz: usize) -> Lsn {
-    if lsn.0.is_multiple_of(XLOG_BLCKSZ as u64) {
-        let hdr_size = if lsn.0.is_multiple_of(seg_sz as u64) {
+    if lsn.0 % XLOG_BLCKSZ as u64 == 0 {
+        let hdr_size = if lsn.0 % seg_sz as u64 == 0 {
             XLOG_SIZE_OF_XLOG_LONG_PHD
         } else {
             XLOG_SIZE_OF_XLOG_SHORT_PHD

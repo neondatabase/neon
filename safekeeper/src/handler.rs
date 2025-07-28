@@ -250,10 +250,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                     tracing::field::debug(self.appname.clone()),
                 );
 
-            if let Some(shard) = self.shard.as_ref()
-                && let Some(slug) = shard.shard_slug().strip_prefix("-")
-            {
-                tracing::Span::current().record("shard", tracing::field::display(slug));
+            if let Some(shard) = self.shard.as_ref() {
+                if let Some(slug) = shard.shard_slug().strip_prefix("-") {
+                    tracing::Span::current().record("shard", tracing::field::display(slug));
+                }
             }
 
             Ok(())

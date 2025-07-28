@@ -892,7 +892,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(preferred_az) = &preferred_az {
                 let azs = nodes
                     .into_iter()
-                    .map(|n| n.availability_zone_id)
+                    .map(|n| (n.availability_zone_id))
                     .collect::<HashSet<_>>();
                 if !azs.contains(preferred_az) {
                     anyhow::bail!(
@@ -1131,11 +1131,13 @@ async fn main() -> anyhow::Result<()> {
                 .into_iter()
                 .flat_map(|tenant| tenant.shards.into_iter());
             for shard in shards {
-                if let Some(max_shards) = max_shards
-                    && moves.len() >= max_shards
-                {
-                    println!("Stop planning shard moves since the requested maximum was reached");
-                    break;
+                if let Some(max_shards) = max_shards {
+                    if moves.len() >= max_shards {
+                        println!(
+                            "Stop planning shard moves since the requested maximum was reached"
+                        );
+                        break;
+                    }
                 }
 
                 let should_migrate = {
@@ -1448,12 +1450,11 @@ async fn watch_tenant_shard(
         println!("{summary}");
 
         // Maybe drop out if we finished migration
-        if let Some(until_migrated_to) = until_migrated_to
-            && shard.node_attached == Some(until_migrated_to)
-            && !shard.is_reconciling
-        {
-            println!("Tenant shard {tenant_shard_id} is now on node {until_migrated_to}");
-            break;
+        if let Some(until_migrated_to) = until_migrated_to {
+            if shard.node_attached == Some(until_migrated_to) && !shard.is_reconciling {
+                println!("Tenant shard {tenant_shard_id} is now on node {until_migrated_to}");
+                break;
+            }
         }
 
         tokio::time::sleep(WATCH_INTERVAL).await;

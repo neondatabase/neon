@@ -131,7 +131,7 @@ impl<const L: usize> OnDiskNode<'_, L> {
     ///
     /// Interpret a PAGE_SZ page as a node.
     ///
-    fn deparse(buf: &[u8]) -> Result<OnDiskNode<'_, L>> {
+    fn deparse(buf: &[u8]) -> Result<OnDiskNode<L>> {
         let mut cursor = std::io::Cursor::new(buf);
         let num_children = cursor.read_u16::<BE>()?;
         let level = cursor.read_u8()?;
@@ -579,13 +579,13 @@ where
         if value > MAX_VALUE {
             return Err(DiskBtreeError::AppendOverflow(value));
         }
-        if let Some(last_key) = &self.last_key
-            && key <= last_key
-        {
-            return Err(DiskBtreeError::UnsortedInput {
-                key: key.as_slice().into(),
-                last_key: last_key.as_slice().into(),
-            });
+        if let Some(last_key) = &self.last_key {
+            if key <= last_key {
+                return Err(DiskBtreeError::UnsortedInput {
+                    key: key.as_slice().into(),
+                    last_key: last_key.as_slice().into(),
+                });
+            }
         }
         self.last_key = Some(*key);
 

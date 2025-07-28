@@ -60,11 +60,11 @@ impl FeatureFlagService {
                 };
 
                 if let Err(e) = res.await {
-                    if let mgmt_api::Error::ApiError(status, _) = e
-                        && status == StatusCode::NOT_FOUND
-                    {
-                        // This is expected during deployments where the API is not available, so we can ignore it
-                        return;
+                    if let mgmt_api::Error::ApiError(status, _) = e {
+                        if status == StatusCode::NOT_FOUND {
+                            // This is expected during deployments where the API is not available, so we can ignore it
+                            return;
+                        }
                     }
                     tracing::warn!(
                         "Failed to update feature flag spec for {}: {e}",

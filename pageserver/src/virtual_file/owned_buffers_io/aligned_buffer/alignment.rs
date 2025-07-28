@@ -13,7 +13,6 @@ impl<const A: usize> Alignment for ConstAlign<A> {
     }
 }
 
-#[allow(dead_code)]
 /// Alignment at run time.
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeAlign {

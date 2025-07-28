@@ -741,7 +741,7 @@ impl Timeline {
         WriteGuardSharedState::new(self.clone(), self.mutex.write().await)
     }
 
-    pub async fn read_shared_state(&self) -> ReadGuardSharedState<'_> {
+    pub async fn read_shared_state(&self) -> ReadGuardSharedState {
         self.mutex.read().await
     }
 
@@ -1052,7 +1052,7 @@ impl WalResidentTimeline {
     }
 
     /// Ensure that current term is t, erroring otherwise, and lock the state.
-    pub async fn acquire_term(&self, t: Term) -> Result<ReadGuardSharedState<'_>> {
+    pub async fn acquire_term(&self, t: Term) -> Result<ReadGuardSharedState> {
         let ss = self.read_shared_state().await;
         if ss.sk.state().acceptor_state.term != t {
             bail!(

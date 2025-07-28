@@ -840,17 +840,18 @@ impl BatchedFeMessage {
 
                 match batching_strategy {
                     PageServiceProtocolPipelinedBatchingStrategy::UniformLsn => {
-                        if let Some(last_in_batch) = accum_pages.last()
-                            && last_in_batch.lsn_range.effective_lsn
+                        if let Some(last_in_batch) = accum_pages.last() {
+                            if last_in_batch.lsn_range.effective_lsn
                                 != this_pages[0].lsn_range.effective_lsn
-                        {
-                            trace!(
-                                accum_lsn = %last_in_batch.lsn_range.effective_lsn,
-                                this_lsn = %this_pages[0].lsn_range.effective_lsn,
-                                "stopping batching because LSN changed"
-                            );
+                            {
+                                trace!(
+                                    accum_lsn = %last_in_batch.lsn_range.effective_lsn,
+                                    this_lsn = %this_pages[0].lsn_range.effective_lsn,
+                                    "stopping batching because LSN changed"
+                                );
 
-                            return Some(GetPageBatchBreakReason::NonUniformLsn);
+                                return Some(GetPageBatchBreakReason::NonUniformLsn);
+                            }
                         }
                     }
                     PageServiceProtocolPipelinedBatchingStrategy::ScatteredLsn => {
@@ -2517,8 +2518,8 @@ impl PageServerHandler {
         };
 
         let last_record_lsn = timeline.get_last_record_lsn();
-        if max_effective_lsn > last_record_lsn
-            && let Err(e) = timeline
+        if max_effective_lsn > last_record_lsn {
+            if let Err(e) = timeline
                 .wait_lsn(
                     max_effective_lsn,
                     crate::tenant::timeline::WaitLsnWaiter::PageService,
@@ -2533,13 +2534,14 @@ impl PageServerHandler {
                     )
                 })
                 .await
-        {
-            return Vec::from_iter(requests.into_iter().map(|req| {
-                Err(BatchedPageStreamError {
-                    err: PageStreamError::from(e.clone()),
-                    req: req.req.hdr,
-                })
-            }));
+            {
+                return Vec::from_iter(requests.into_iter().map(|req| {
+                    Err(BatchedPageStreamError {
+                        err: PageStreamError::from(e.clone()),
+                        req: req.req.hdr,
+                    })
+                }));
+            }
         }
 
         let results = timeline

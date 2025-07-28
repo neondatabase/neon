@@ -109,12 +109,12 @@ async fn get_holes(path: &Utf8Path, max_holes: usize, ctx: &RequestContext) -> R
             VisitDirection::Forwards,
             |key, _value| {
                 let curr = Key::from_slice(&key[..KEY_SIZE]);
-                if let Some(prev) = prev_key
-                    && curr.to_i128() - prev.to_i128() >= MIN_HOLE_LENGTH
-                {
-                    heap.push(Hole(prev..curr));
-                    if heap.len() > max_holes {
-                        heap.pop(); // remove smallest hole
+                if let Some(prev) = prev_key {
+                    if curr.to_i128() - prev.to_i128() >= MIN_HOLE_LENGTH {
+                        heap.push(Hole(prev..curr));
+                        if heap.len() > max_holes {
+                            heap.pop(); // remove smallest hole
+                        }
                     }
                 }
                 prev_key = Some(curr.next());

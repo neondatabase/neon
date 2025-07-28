@@ -306,12 +306,13 @@ fn validate_prefix(prefix: &str) -> Option<RemotePath> {
             // Ends in either a tenant or timeline ID
             break 'valid;
         }
-        if *last == "timelines"
-            && let Some(before_last) = components.iter().nth_back(1)
-            && let Ok(_tenant_id) = TenantShardId::from_str(before_last)
-        {
-            // Has a valid tenant id
-            break 'valid;
+        if *last == "timelines" {
+            if let Some(before_last) = components.iter().nth_back(1) {
+                if let Ok(_tenant_id) = TenantShardId::from_str(before_last) {
+                    // Has a valid tenant id
+                    break 'valid;
+                }
+            }
         }
 
         return None;

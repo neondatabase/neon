@@ -214,16 +214,16 @@ impl VirtualConnection {
                 if buffer.recv_closed {
                     continue;
                 }
-                if let Some(last_recv) = buffer.last_recv
-                    && now - last_recv >= timeout
-                {
-                    debug!(
-                        "NET: connection {} timed out at {}",
-                        self.connection_id,
-                        receiver_str(direction as MessageDirection)
-                    );
-                    let node_idx = direction ^ 1;
-                    to_close[node_idx] = true;
+                if let Some(last_recv) = buffer.last_recv {
+                    if now - last_recv >= timeout {
+                        debug!(
+                            "NET: connection {} timed out at {}",
+                            self.connection_id,
+                            receiver_str(direction as MessageDirection)
+                        );
+                        let node_idx = direction ^ 1;
+                        to_close[node_idx] = true;
+                    }
                 }
             }
             drop(state);

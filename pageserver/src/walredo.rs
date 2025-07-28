@@ -336,12 +336,13 @@ impl PostgresRedoManager {
     /// rely on our owner calling this function periodically in its own housekeeping
     /// loops.
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
-        if let Ok(g) = self.last_redo_at.try_lock()
-            && let Some(last_redo_at) = *g
-            && last_redo_at.elapsed() >= idle_timeout
-        {
-            drop(g);
-            drop(self.redo_process.get().map(|guard| guard.take_and_deinit()));
+        if let Ok(g) = self.last_redo_at.try_lock() {
+            if let Some(last_redo_at) = *g {
+                if last_redo_at.elapsed() >= idle_timeout {
+                    drop(g);
+                    drop(self.redo_process.get().map(|guard| guard.take_and_deinit()));
+                }
+            }
         }
     }
 

@@ -2712,7 +2712,7 @@ impl BackgroundLoopSemaphoreMetrics {
     pub(crate) fn record(
         &self,
         task: BackgroundLoopKind,
-    ) -> BackgroundLoopSemaphoreMetricsRecorder<'_> {
+    ) -> BackgroundLoopSemaphoreMetricsRecorder {
         BackgroundLoopSemaphoreMetricsRecorder::start(self, task)
     }
 }

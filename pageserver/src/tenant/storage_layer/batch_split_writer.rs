@@ -289,10 +289,10 @@ impl<'a> SplitImageLayerWriter<'a> {
         let Self {
             mut batches, inner, ..
         } = self;
-        if let Some(inner) = inner
-            && inner.num_keys() != 0
-        {
-            batches.add_unfinished_image_writer(inner, self.start_key..end_key, self.lsn);
+        if let Some(inner) = inner {
+            if inner.num_keys() != 0 {
+                batches.add_unfinished_image_writer(inner, self.start_key..end_key, self.lsn);
+            }
         }
         batches.finish_with_discard_fn(tline, ctx, discard_fn).await
     }
@@ -435,11 +435,15 @@ impl<'a> SplitDeltaLayerWriter<'a> {
         let Self {
             mut batches, inner, ..
         } = self;
-        if let Some((start_key, writer)) = inner
-            && writer.num_keys() != 0
-        {
-            let end_key = self.last_key_written.next();
-            batches.add_unfinished_delta_writer(writer, start_key..end_key, self.lsn_range.clone());
+        if let Some((start_key, writer)) = inner {
+            if writer.num_keys() != 0 {
+                let end_key = self.last_key_written.next();
+                batches.add_unfinished_delta_writer(
+                    writer,
+                    start_key..end_key,
+                    self.lsn_range.clone(),
+                );
+            }
         }
         batches.finish_with_discard_fn(tline, ctx, discard_fn).await
     }
