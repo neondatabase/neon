@@ -187,18 +187,20 @@ def test_create_snapshot(
     env.pageserver.stop()
     env.storage_controller.stop()
 
-    # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
-    compatibility_snapshot_dir = (
+    # Directory `new_compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
+    new_compatibility_snapshot_dir = (
         top_output_dir / f"compatibility_snapshot_pg{pg_version.v_prefixed}"
     )
-    if compatibility_snapshot_dir.exists():
-        shutil.rmtree(compatibility_snapshot_dir)
+    if new_compatibility_snapshot_dir.exists():
+        shutil.rmtree(new_compatibility_snapshot_dir)
 
     shutil.copytree(
         test_output_dir,
-        compatibility_snapshot_dir,
-        ignore=shutil.ignore_patterns("pg_dynshmem"),
+        new_compatibility_snapshot_dir,
+        ignore=shutil.ignore_patterns("pg_dynshmem", "neon-communicator.socket"),
     )
+
+    log.info(f"Copied new compatibility snapshot dir to: {new_compatibility_snapshot_dir}")
 
 
 # check_neon_works does recovery from WAL => the compatibility snapshot's WAL is old => will log this warning
@@ -218,6 +220,7 @@ def test_backward_compatibility(
     """
     Test that the new binaries can read old data
     """
+    log.info(f"Using snapshot dir at {compatibility_snapshot_dir}")
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
     env.pageserver.allowed_errors.append(ingest_lag_log_line)
@@ -242,7 +245,6 @@ def test_forward_compatibility(
     test_output_dir: Path,
     top_output_dir: Path,
     pg_version: PgVersion,
-    compatibility_snapshot_dir: Path,
     compute_reconfigure_listener: ComputeReconfigure,
 ):
     """
@@ -266,8 +268,14 @@ def test_forward_compatibility(
     neon_env_builder.neon_binpath = neon_env_builder.compatibility_neon_binpath
     neon_env_builder.pg_distrib_dir = neon_env_builder.compatibility_pg_distrib_dir
 
+    # Note that we are testing with new data, so we should use `new_compatibility_snapshot_dir`, which is created by test_create_snapshot.
+    new_compatibility_snapshot_dir = (
+        top_output_dir / f"compatibility_snapshot_pg{pg_version.v_prefixed}"
+    )
+
+    log.info(f"Using snapshot dir at {new_compatibility_snapshot_dir}")
     env = neon_env_builder.from_repo_dir(
-        compatibility_snapshot_dir / "repo",
+        new_compatibility_snapshot_dir / "repo",
     )
     # there may be an arbitrary number of unrelated tests run between create_snapshot and here
     env.pageserver.allowed_errors.append(ingest_lag_log_line)
@@ -296,7 +304,7 @@ def test_forward_compatibility(
     check_neon_works(
         env,
         test_output_dir=test_output_dir,
-        sql_dump_path=compatibility_snapshot_dir / "dump.sql",
+        sql_dump_path=new_compatibility_snapshot_dir / "dump.sql",
         repo_dir=env.repo_dir,
     )
 
@@ -530,6 +538,7 @@ def test_historic_storage_formats(
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.pg_version = dataset.pg_version
     env = neon_env_builder.init_configs()
+
     env.start()
     assert isinstance(env.pageserver_remote_storage, S3Storage)
 
@@ -567,6 +576,17 @@ def test_historic_storage_formats(
     timelines = env.pageserver.http_client().timeline_list(dataset.tenant_id)
     # All our artifacts should contain at least one timeline
     assert len(timelines) > 0
+
+    if dataset.name == "2025-04-08-tenant-manifest-v1":
+        # This dataset was created at a time where we decided to migrate to v2 reldir by simply disabling writes to v1
+        # and starting writing to v2. This was too risky and we have reworked the migration plan. Therefore, we should
+        # opt in full relv2 mode for this dataset.
+        for timeline in timelines:
+            env.pageserver.http_client().timeline_patch_index_part(
+                dataset.tenant_id,
+                timeline["timeline_id"],
+                {"force_index_update": True, "rel_size_migration": "migrated"},
+            )
 
     # Import tenant does not create the timeline on safekeepers,
     # because it is a debug handler and the timeline may have already been

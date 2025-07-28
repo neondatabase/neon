@@ -1,3 +1,4 @@
+use std::env;
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
@@ -20,13 +21,15 @@ use crate::auth::backend::jwt::JwkCache;
 use crate::auth::backend::local::LocalBackend;
 use crate::auth::{self};
 use crate::cancellation::CancellationHandler;
+#[cfg(feature = "rest_broker")]
+use crate::config::RestConfig;
 use crate::config::{
     self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
     refresh_config_loop,
 };
 use crate::control_plane::locks::ApiLocks;
 use crate::http::health_server::AppMetrics;
-use crate::metrics::{Metrics, ThreadPoolMetrics};
+use crate::metrics::{Metrics, ServiceInfo, ThreadPoolMetrics};
 use crate::rate_limiter::{EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo};
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::cancel_set::CancelSet;
@@ -204,6 +207,11 @@ pub async fn run() -> anyhow::Result<()> {
         endpoint_rate_limiter,
     );
 
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
+
     match futures::future::select(pin!(maintenance_tasks.join_next()), pin!(task)).await {
         // exit immediately on maintenance task completion
         Either::Left((Some(res), _)) => match crate::error::flatten_err(res)? {},
@@ -262,6 +270,14 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         timeout: Duration::from_secs(2),
     };
 
+    let greetings = env::var_os("NEON_MOTD").map_or(String::new(), |s| match s.into_string() {
+        Ok(s) => s,
+        Err(_) => {
+            debug!("NEON_MOTD environment variable is not valid UTF-8");
+            String::new()
+        }
+    });
+
     Ok(Box::leak(Box::new(ProxyConfig {
         tls_config: ArcSwapOption::from(None),
         metric_collection: None,
@@ -276,11 +292,19 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             accept_jwts: true,
             console_redirect_confirmation_timeout: Duration::ZERO,
         },
+        #[cfg(feature = "rest_broker")]
+        rest_config: RestConfig {
+            is_rest_broker: false,
+            db_schema_cache: None,
+            max_schema_size: 0,
+            hostname_prefix: String::new(),
+        },
         proxy_protocol_v2: config::ProxyProtocolV2::Rejected,
         handshake_timeout: Duration::from_secs(10),
         wake_compute_retry_config: RetryConfig::parse(RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
+        greetings,
         #[cfg(feature = "testing")]
         disable_pg_session_jwt: args.disable_pg_session_jwt,
     })))

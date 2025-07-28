@@ -89,7 +89,8 @@ impl ComputeNode {
         self.state.lock().unwrap().lfc_offload_state.clone()
     }
 
-    /// If there is a prewarm request ongoing, return false, true otherwise
+    /// If there is a prewarm request ongoing, return `false`, `true` otherwise.
+    /// Has a failpoint "compute-prewarm"
     pub fn prewarm_lfc(self: &Arc<Self>, from_endpoint: Option<String>) -> bool {
         {
             let state = &mut self.state.lock().unwrap().lfc_prewarm_state;
@@ -101,15 +102,24 @@ impl ComputeNode {
 
         let cloned = self.clone();
         spawn(async move {
-            let Err(err) = cloned.prewarm_impl(from_endpoint).await else {
-                cloned.state.lock().unwrap().lfc_prewarm_state = LfcPrewarmState::Completed;
-                return;
+            let state = match cloned.prewarm_impl(from_endpoint).await {
+                Ok(true) => LfcPrewarmState::Completed,
+                Ok(false) => {
+                    info!(
+                        "skipping LFC prewarm because LFC state is not found in endpoint storage"
+                    );
+                    LfcPrewarmState::Skipped
+                }
+                Err(err) => {
+                    crate::metrics::LFC_PREWARM_ERRORS.inc();
+                    error!(%err, "could not prewarm LFC");
+                    LfcPrewarmState::Failed {
+                        error: format!("{err:#}"),
+                    }
+                }
             };
-            crate::metrics::LFC_PREWARM_ERRORS.inc();
-            error!(%err, "prewarming lfc");
-            cloned.state.lock().unwrap().lfc_prewarm_state = LfcPrewarmState::Failed {
-                error: err.to_string(),
-            };
+
+            cloned.state.lock().unwrap().lfc_prewarm_state = state;
         });
         true
     }
@@ -120,15 +130,25 @@ impl ComputeNode {
         EndpointStoragePair::from_spec_and_endpoint(state.pspec.as_ref().unwrap(), from_endpoint)
     }
 
-    async fn prewarm_impl(&self, from_endpoint: Option<String>) -> Result<()> {
+    /// Request LFC state from endpoint storage and load corresponding pages into Postgres.
+    /// Returns a result with `false` if the LFC state is not found in endpoint storage.
+    async fn prewarm_impl(&self, from_endpoint: Option<String>) -> Result<bool> {
         let EndpointStoragePair { url, token } = self.endpoint_storage_pair(from_endpoint)?;
-        info!(%url, "requesting LFC state from endpoint storage");
 
+        #[cfg(feature = "testing")]
+        fail::fail_point!("compute-prewarm", |_| {
+            bail!("prewarm configured to fail because of a failpoint")
+        });
+
+        info!(%url, "requesting LFC state from endpoint storage");
         let request = Client::new().get(&url).bearer_auth(token);
         let res = request.send().await.context("querying endpoint storage")?;
-        let status = res.status();
-        if status != StatusCode::OK {
-            bail!("{status} querying endpoint storage")
+        match res.status() {
+            StatusCode::OK => (),
+            StatusCode::NOT_FOUND => {
+                return Ok(false);
+            }
+            status => bail!("{status} querying endpoint storage"),
         }
 
         let mut uncompressed = Vec::new();
@@ -141,7 +161,8 @@ impl ComputeNode {
             .await
             .context("decoding LFC state")?;
         let uncompressed_len = uncompressed.len();
-        info!(%url, "downloaded LFC state, uncompressed size {uncompressed_len}, loading into postgres");
+
+        info!(%url, "downloaded LFC state, uncompressed size {uncompressed_len}, loading into Postgres");
 
         ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
@@ -149,7 +170,9 @@ impl ComputeNode {
             .query_one("select neon.prewarm_local_cache($1)", &[&uncompressed])
             .await
             .context("loading LFC state into postgres")
-            .map(|_| ())
+            .map(|_| ())?;
+
+        Ok(true)
     }
 
     /// If offload request is ongoing, return false, true otherwise
@@ -177,41 +200,53 @@ impl ComputeNode {
 
     async fn offload_lfc_with_state_update(&self) {
         crate::metrics::LFC_OFFLOADS.inc();
+
         let Err(err) = self.offload_lfc_impl().await else {
             self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Completed;
             return;
         };
+
         crate::metrics::LFC_OFFLOAD_ERRORS.inc();
-        error!(%err, "offloading lfc");
+        error!(%err, "could not offload LFC state to endpoint storage");
         self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
-            error: err.to_string(),
+            error: format!("{err:#}"),
         };
     }
 
     async fn offload_lfc_impl(&self) -> Result<()> {
         let EndpointStoragePair { url, token } = self.endpoint_storage_pair(None)?;
-        info!(%url, "requesting LFC state from postgres");
+        info!(%url, "requesting LFC state from Postgres");
 
-        let mut compressed = Vec::new();
-        ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
+        let row = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
             .context("connecting to postgres")?
             .query_one("select neon.get_local_cache_state()", &[])
             .await
-            .context("querying LFC state")?
-            .try_get::<usize, &[u8]>(0)
-            .context("deserializing LFC state")
-            .map(ZstdEncoder::new)?
+            .context("querying LFC state")?;
+        let state = row
+            .try_get::<usize, Option<&[u8]>>(0)
+            .context("deserializing LFC state")?;
+        let Some(state) = state else {
+            info!(%url, "empty LFC state, not exporting");
+            return Ok(());
+        };
+
+        let mut compressed = Vec::new();
+        ZstdEncoder::new(state)
             .read_to_end(&mut compressed)
             .await
             .context("compressing LFC state")?;
+
         let compressed_len = compressed.len();
         info!(%url, "downloaded LFC state, compressed size {compressed_len}, writing to endpoint storage");
 
         let request = Client::new().put(url).bearer_auth(token).body(compressed);
         match request.send().await {
             Ok(res) if res.status() == StatusCode::OK => Ok(()),
-            Ok(res) => bail!("Error writing to endpoint storage: {}", res.status()),
+            Ok(res) => bail!(
+                "Request to endpoint storage failed with status: {}",
+                res.status()
+            ),
             Err(err) => Err(err).context("writing to endpoint storage"),
         }
     }

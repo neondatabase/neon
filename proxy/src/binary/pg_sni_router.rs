@@ -26,7 +26,7 @@ use utils::project_git_version;
 use utils::sentry_init::init_sentry;
 
 use crate::context::RequestContext;
-use crate::metrics::{Metrics, ThreadPoolMetrics};
+use crate::metrics::{Metrics, ServiceInfo, ThreadPoolMetrics};
 use crate::pglb::TlsRequired;
 use crate::pqproto::FeStartupPacket;
 use crate::protocol2::ConnectionInfo;
@@ -76,7 +76,7 @@ fn cli() -> clap::Command {
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    let _logging_guard = crate::logging::init().await?;
+    let _logging_guard = crate::logging::init()?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
@@ -135,6 +135,12 @@ pub async fn run() -> anyhow::Result<()> {
         cancellation_token.clone(),
     ))
     .map(crate::error::flatten_err);
+
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
+
     let signals_task = tokio::spawn(crate::signals::handle(cancellation_token, || {}));
 
     // the signal task cant ever succeed.

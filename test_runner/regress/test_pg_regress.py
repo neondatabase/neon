@@ -3,6 +3,7 @@
 #
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
@@ -356,6 +357,64 @@ def test_sql_regress(
     post_checks(env, test_output_dir, DBNAME, endpoint)
 
 
+def test_max_wal_rate(neon_simple_env: NeonEnv):
+    """
+    Test the databricks.max_wal_mb_per_second GUC and how it affects WAL rate
+    limiting.
+    """
+    env = neon_simple_env
+
+    DBNAME = "regression"
+    superuser_name = "databricks_superuser"
+
+    # Connect to postgres and create a database called "regression".
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            # we need this option because default max_cluster_size < 0 will disable throttling completely
+            "neon.max_cluster_size=10GB",
+        ],
+    )
+
+    endpoint.safe_psql_many(
+        [
+            f"CREATE ROLE {superuser_name}",
+            f"CREATE DATABASE {DBNAME}",
+            "CREATE EXTENSION neon",
+        ]
+    )
+
+    endpoint.safe_psql("CREATE TABLE usertable (YCSB_KEY INT, FIELD0 TEXT);", dbname=DBNAME)
+
+    # Write ~1 MB data.
+    with endpoint.cursor(dbname=DBNAME) as cur:
+        for _ in range(0, 1000):
+            cur.execute("INSERT INTO usertable SELECT random(), repeat('a', 1000);")
+
+    # No backpressure
+    tuples = endpoint.safe_psql("SELECT backpressure_throttling_time();")
+    assert tuples[0][0] == 0, "Backpressure throttling detected"
+
+    # 1 MB/s max_wal_rate.
+    endpoint.safe_psql_many(
+        [
+            "ALTER SYSTEM SET databricks.max_wal_mb_per_second = 1;",
+            "SELECT pg_reload_conf();",
+        ]
+    )
+
+    # Write 10 MB data.
+    with endpoint.cursor(dbname=DBNAME) as cur:
+        start = int(time.time())
+        for _ in range(0, 10000):
+            cur.execute("INSERT INTO usertable SELECT random(), repeat('a', 1000);")
+
+    end = int(time.time())
+    assert end - start >= 10, (
+        "Throttling should cause the previous inserts to take greater than or equal to 10 seconds"
+    )
+
+
 @skip_in_debug_build("only run with release build")
 @pytest.mark.parametrize("reldir_type", ["v1", "v2"])
 def test_tx_abort_with_many_relations(
@@ -380,21 +439,6 @@ def test_tx_abort_with_many_relations(
             "max_locks_per_transaction=16384",
         ],
     )
-
-    if reldir_type == "v1":
-        assert (
-            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
-                "rel_size_migration"
-            ]
-            == "legacy"
-        )
-    else:
-        assert (
-            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
-                "rel_size_migration"
-            ]
-            != "legacy"
-        )
 
     # How many relations: this number is tuned to be long enough to take tens of seconds
     # if the rollback code path is buggy, tripping the test's timeout.
@@ -480,3 +524,19 @@ def test_tx_abort_with_many_relations(
         except:
             exec.shutdown(wait=False, cancel_futures=True)
             raise
+
+    # Do the check after everything is done, because the reldirv2 transition won't happen until create table.
+    if reldir_type == "v1":
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            == "legacy"
+        )
+    else:
+        assert (
+            env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
+                "rel_size_migration"
+            ]
+            != "legacy"
+        )

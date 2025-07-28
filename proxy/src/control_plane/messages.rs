@@ -1,8 +1,10 @@
 use std::fmt::{self, Display};
+use std::time::Duration;
 
 use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use tokio::time::Instant;
 
 use crate::auth::IpPattern;
 use crate::intern::{AccountIdInt, BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
@@ -107,7 +109,7 @@ pub(crate) struct ErrorInfo {
     // Schema could also have `metadata` field, but it's not structured. Skip it for now.
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, Deserialize, Default, PartialEq, Eq)]
 pub(crate) enum Reason {
     /// RoleProtected indicates that the role is protected and the attempted operation is not permitted on protected roles.
     #[serde(rename = "ROLE_PROTECTED")]
@@ -133,9 +135,9 @@ pub(crate) enum Reason {
     /// or that the subject doesn't have enough permissions to access the requested branch.
     #[serde(rename = "BRANCH_NOT_FOUND")]
     BranchNotFound,
-    /// InvalidEphemeralEndpointOptions indicates that the specified LSN or timestamp are wrong.
-    #[serde(rename = "INVALID_EPHEMERAL_OPTIONS")]
-    InvalidEphemeralEndpointOptions,
+    /// WrongLsnOrTimestamp indicates that the specified LSN or timestamp are wrong.
+    #[serde(rename = "WRONG_LSN_OR_TIMESTAMP")]
+    WrongLsnOrTimestamp,
     /// RateLimitExceeded indicates that the rate limit for the operation has been exceeded.
     #[serde(rename = "RATE_LIMIT_EXCEEDED")]
     RateLimitExceeded,
@@ -205,7 +207,7 @@ impl Reason {
             | Reason::EndpointNotFound
             | Reason::EndpointDisabled
             | Reason::BranchNotFound
-            | Reason::InvalidEphemeralEndpointOptions => false,
+            | Reason::WrongLsnOrTimestamp => false,
             // we were asked to go away
             Reason::RateLimitExceeded
             | Reason::NonDefaultBranchComputeTimeExceeded
@@ -231,7 +233,13 @@ impl Reason {
 #[derive(Copy, Clone, Debug, Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct RetryInfo {
-    pub(crate) retry_delay_ms: u64,
+    #[serde(rename = "retry_delay_ms", deserialize_with = "milliseconds_from_now")]
+    pub(crate) retry_at: Instant,
+}
+
+fn milliseconds_from_now<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Instant, D::Error> {
+    let millis = u64::deserialize(d)?;
+    Ok(Instant::now() + Duration::from_millis(millis))
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -257,19 +265,19 @@ pub(crate) struct GetEndpointAccessControl {
     pub(crate) rate_limits: EndpointRateLimitConfig,
 }
 
-#[derive(Copy, Clone, Deserialize, Default)]
+#[derive(Copy, Clone, Deserialize, Default, Debug)]
 pub struct EndpointRateLimitConfig {
     pub connection_attempts: ConnectionAttemptsLimit,
 }
 
-#[derive(Copy, Clone, Deserialize, Default)]
+#[derive(Copy, Clone, Deserialize, Default, Debug)]
 pub struct ConnectionAttemptsLimit {
     pub tcp: Option<LeakyBucketSetting>,
     pub ws: Option<LeakyBucketSetting>,
     pub http: Option<LeakyBucketSetting>,
 }
 
-#[derive(Copy, Clone, Deserialize)]
+#[derive(Copy, Clone, Deserialize, Debug)]
 pub struct LeakyBucketSetting {
     pub rps: f64,
     pub burst: f64,

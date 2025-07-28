@@ -16,14 +16,13 @@ use messages::EndpointRateLimitConfig;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::{AuthError, IpPattern, check_peer_addr_is_in_list};
-use crate::cache::{Cached, TimedLru};
-use crate::config::ComputeConfig;
+use crate::cache::node_info::CachedNodeInfo;
 use crate::context::RequestContext;
-use crate::control_plane::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
+use crate::control_plane::messages::MetricsAuxInfo;
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt};
 use crate::protocol2::ConnectionInfoExtra;
 use crate::rate_limiter::{EndpointRateLimiter, LeakyBucketConfig};
-use crate::types::{EndpointCacheKey, EndpointId, RoleName};
+use crate::types::{EndpointId, RoleName};
 use crate::{compute, scram};
 
 /// Various cache-related types.
@@ -72,32 +71,18 @@ pub(crate) struct NodeInfo {
     pub(crate) aux: MetricsAuxInfo,
 }
 
-impl NodeInfo {
-    pub(crate) async fn connect(
-        &self,
-        ctx: &RequestContext,
-        config: &ComputeConfig,
-    ) -> Result<compute::ComputeConnection, compute::ConnectionError> {
-        self.conn_info.connect(ctx, &self.aux, config).await
-    }
-}
-
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, Debug)]
 pub(crate) struct AccessBlockerFlags {
     pub public_access_blocked: bool,
     pub vpc_access_blocked: bool,
 }
 
-pub(crate) type NodeInfoCache =
-    TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ControlPlaneErrorMessage>>>;
-pub(crate) type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RoleAccessControl {
     pub secret: Option<AuthSecret>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EndpointAccessControl {
     pub allowed_ips: Arc<Vec<IpPattern>>,
     pub allowed_vpce: Arc<Vec<String>>,

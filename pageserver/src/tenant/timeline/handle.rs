@@ -362,7 +362,7 @@ impl<T: Types> Cache<T> {
                         tokio::time::sleep(RETRY_BACKOFF).await;
                         continue;
                     } else {
-                        tracing::warn!(
+                        tracing::info!(
                             "Failed to resolve tenant shard after {} attempts: {:?}",
                             GET_MAX_RETRIES,
                             e
@@ -654,7 +654,7 @@ mod tests {
     use pageserver_api::key::{DBDIR_KEY, Key, rel_block_to_key};
     use pageserver_api::models::ShardParameters;
     use pageserver_api::reltag::RelTag;
-    use pageserver_api::shard::ShardStripeSize;
+    use pageserver_api::shard::DEFAULT_STRIPE_SIZE;
     use utils::shard::ShardCount;
     use utils::sync::gate::GateGuard;
 
@@ -955,7 +955,7 @@ mod tests {
         });
         let child_params = ShardParameters {
             count: ShardCount(2),
-            stripe_size: ShardStripeSize::default(),
+            stripe_size: DEFAULT_STRIPE_SIZE,
         };
         let child0 = Arc::new_cyclic(|myself| StubTimeline {
             gate: Default::default(),

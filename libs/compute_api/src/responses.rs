@@ -46,16 +46,33 @@ pub struct ExtensionInstallResponse {
     pub version: ExtVersion,
 }
 
+/// Status of the LFC prewarm process. The same state machine is reused for
+/// both autoprewarm (prewarm after compute/Postgres start using the previously
+/// stored LFC state) and explicit prewarming via API.
 #[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcPrewarmState {
+    /// Default value when compute boots up.
     #[default]
     NotPrewarmed,
+    /// Prewarming thread is active and loading pages into LFC.
     Prewarming,
+    /// We found requested LFC state in the endpoint storage and
+    /// completed prewarming successfully.
     Completed,
-    Failed {
-        error: String,
-    },
+    /// Unexpected error happened during prewarming. Note, `Not Found 404`
+    /// response from the endpoint storage is explicitly excluded here
+    /// because it can normally happen on the first compute start,
+    /// since LFC state is not available yet.
+    Failed { error: String },
+    /// We tried to fetch the corresponding LFC state from the endpoint storage,
+    /// but received `Not Found 404`. This should normally happen only during the
+    /// first endpoint start after creation with `autoprewarm: true`.
+    ///
+    /// During the orchestrated prewarm via API, when a caller explicitly
+    /// provides the LFC state key to prewarm from, it's the caller responsibility
+    /// to handle this status as an error state in this case.
+    Skipped,
 }
 
 impl Display for LfcPrewarmState {
@@ -64,6 +81,7 @@ impl Display for LfcPrewarmState {
             LfcPrewarmState::NotPrewarmed => f.write_str("NotPrewarmed"),
             LfcPrewarmState::Prewarming => f.write_str("Prewarming"),
             LfcPrewarmState::Completed => f.write_str("Completed"),
+            LfcPrewarmState::Skipped => f.write_str("Skipped"),
             LfcPrewarmState::Failed { error } => write!(f, "Error({error})"),
         }
     }
@@ -90,11 +108,10 @@ pub enum PromoteState {
     Failed { error: String },
 }
 
-#[derive(Deserialize, Serialize, Default, Debug, Clone)]
+#[derive(Deserialize, Default, Debug)]
 #[serde(rename_all = "snake_case")]
-/// Result of /safekeepers_lsn
-pub struct SafekeepersLsn {
-    pub safekeepers: String,
+pub struct PromoteConfig {
+    pub spec: ComputeSpec,
     pub wal_flush_lsn: utils::lsn::Lsn,
 }
 
@@ -155,6 +172,11 @@ pub enum ComputeStatus {
     TerminationPendingImmediate,
     // Terminated Postgres
     Terminated,
+    // A spec refresh is being requested
+    RefreshConfigurationPending,
+    // A spec refresh is being applied. We cannot refresh configuration again until the current
+    // refresh is done, i.e., signal_refresh_configuration() will return 500 error.
+    RefreshConfiguration,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -167,6 +189,10 @@ impl Display for ComputeStatus {
         match self {
             ComputeStatus::Empty => f.write_str("empty"),
             ComputeStatus::ConfigurationPending => f.write_str("configuration-pending"),
+            ComputeStatus::RefreshConfiguration => f.write_str("refresh-configuration"),
+            ComputeStatus::RefreshConfigurationPending => {
+                f.write_str("refresh-configuration-pending")
+            }
             ComputeStatus::Init => f.write_str("init"),
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),

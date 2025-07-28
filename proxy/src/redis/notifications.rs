@@ -10,6 +10,7 @@ use super::connection_with_credentials_provider::ConnectionWithCredentialsProvid
 use crate::cache::project_info::ProjectInfoCache;
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
+use crate::util::deserialize_json_string;
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -121,15 +122,6 @@ struct InvalidateRole {
     role_name: RoleNameInt,
 }
 
-fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    T: for<'de2> serde::Deserialize<'de2>,
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    serde_json::from_str(&s).map_err(<D::Error as serde::de::Error>::custom)
-}
-
 // https://github.com/serde-rs/serde/issues/1714
 fn deserialize_unknown_topic<'de, D>(deserializer: D) -> Result<(), D::Error>
 where
@@ -139,11 +131,11 @@ where
     Ok(())
 }
 
-struct MessageHandler<C: ProjectInfoCache + Send + Sync + 'static> {
+struct MessageHandler<C: Send + Sync + 'static> {
     cache: Arc<C>,
 }
 
-impl<C: ProjectInfoCache + Send + Sync + 'static> Clone for MessageHandler<C> {
+impl<C: Send + Sync + 'static> Clone for MessageHandler<C> {
     fn clone(&self) -> Self {
         Self {
             cache: self.cache.clone(),
@@ -151,8 +143,8 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> Clone for MessageHandler<C> {
     }
 }
 
-impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
-    pub(crate) fn new(cache: Arc<C>) -> Self {
+impl MessageHandler<ProjectInfoCache> {
+    pub(crate) fn new(cache: Arc<ProjectInfoCache>) -> Self {
         Self { cache }
     }
 
@@ -232,7 +224,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
     }
 }
 
-fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
+fn invalidate_cache(cache: Arc<ProjectInfoCache>, msg: Notification) {
     match msg {
         Notification::EndpointSettingsUpdate(ids) => ids
             .iter()
@@ -255,8 +247,8 @@ fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
     }
 }
 
-async fn handle_messages<C: ProjectInfoCache + Send + Sync + 'static>(
-    handler: MessageHandler<C>,
+async fn handle_messages(
+    handler: MessageHandler<ProjectInfoCache>,
     redis: ConnectionWithCredentialsProvider,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -292,13 +284,10 @@ async fn handle_messages<C: ProjectInfoCache + Send + Sync + 'static>(
 
 /// Handle console's invalidation messages.
 #[tracing::instrument(name = "redis_notifications", skip_all)]
-pub async fn task_main<C>(
+pub async fn task_main(
     redis: ConnectionWithCredentialsProvider,
-    cache: Arc<C>,
-) -> anyhow::Result<Infallible>
-where
-    C: ProjectInfoCache + Send + Sync + 'static,
-{
+    cache: Arc<ProjectInfoCache>,
+) -> anyhow::Result<Infallible> {
     let handler = MessageHandler::new(cache);
     // 6h - 1m.
     // There will be 1 minute overlap between two tasks. But at least we can be sure that no message is lost.

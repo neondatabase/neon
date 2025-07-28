@@ -862,11 +862,11 @@ impl Reconciler {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     if refreshed {
                         tracing::info!(
-                            node_id=%node.get_id(), "Observed configuration correct after refresh. Notifying compute.");
+                            node_id=%node.get_id(), "[Attached] Observed configuration correct after refresh. Notifying compute.");
                         self.compute_notify().await?;
                     } else {
                         // Nothing to do
-                        tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.");
+                        tracing::info!(node_id=%node.get_id(), "[Attached] Observed configuration already correct.");
                     }
                 }
                 observed => {
@@ -945,17 +945,17 @@ impl Reconciler {
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
                     // Nothing to do
-                    tracing::info!(node_id=%node.get_id(), "Observed configuration already correct.")
+                    tracing::info!(node_id=%node.get_id(), "[Secondary] Observed configuration already correct.")
                 }
                 _ => {
                     // Only try and configure secondary locations on nodes that are available.  This
                     // allows the reconciler to "succeed" while some secondaries are offline (e.g. after
                     // a node failure, where the failed node will have a secondary intent)
                     if node.is_available() {
-                        tracing::info!(node_id=%node.get_id(), "Observed configuration requires update.");
+                        tracing::info!(node_id=%node.get_id(), "[Secondary] Observed configuration requires update.");
                         changes.push((node.clone(), wanted_conf))
                     } else {
-                        tracing::info!(node_id=%node.get_id(), "Skipping configuration as secondary, node is unavailable");
+                        tracing::info!(node_id=%node.get_id(), "[Secondary] Skipping configuration as secondary, node is unavailable");
                         self.observed
                             .locations
                             .insert(node.get_id(), ObservedStateLocation { conf: None });
@@ -981,6 +981,7 @@ impl Reconciler {
             ));
         }
 
+        let mut first_err = None;
         for (node, conf) in changes {
             if self.cancel.is_cancelled() {
                 return Err(ReconcileError::Cancel);
@@ -990,7 +991,12 @@ impl Reconciler {
             // shard _available_ (the attached location), and configuring secondary locations
             // can be done lazily when the node becomes available (via background reconciliation).
             if node.is_available() {
-                self.location_config(&node, conf, None, false).await?;
+                let res = self.location_config(&node, conf, None, false).await;
+                if let Err(err) = res {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
             } else {
                 // If the node is unavailable, we skip and consider the reconciliation successful: this
                 // is a common case where a pageserver is marked unavailable: we demote a location on
@@ -1000,6 +1006,10 @@ impl Reconciler {
                     .locations
                     .insert(node.get_id(), ObservedStateLocation { conf: None });
             }
+        }
+
+        if let Some(err) = first_err {
+            return Err(err);
         }
 
         // The condition below identifies a detach. We must have no attached intent and
@@ -1066,6 +1076,9 @@ impl Reconciler {
             }
             result
         } else {
+            tracing::info!(
+                "Compute notification is skipped because the tenant shard does not have an attached (primary) location"
+            );
             Ok(())
         }
     }

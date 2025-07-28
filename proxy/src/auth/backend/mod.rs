@@ -16,14 +16,14 @@ use tracing::{debug, info};
 
 use crate::auth::{self, ComputeUserInfoMaybeEndpoint, validate_password_and_exchange};
 use crate::cache::Cached;
+use crate::cache::node_info::CachedNodeInfo;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::errors::GetAuthInfoError;
 use crate::control_plane::messages::EndpointRateLimitConfig;
 use crate::control_plane::{
-    self, AccessBlockerFlags, AuthSecret, CachedNodeInfo, ControlPlaneApi, EndpointAccessControl,
-    RoleAccessControl,
+    self, AccessBlockerFlags, AuthSecret, ControlPlaneApi, EndpointAccessControl, RoleAccessControl,
 };
 use crate::intern::EndpointIdInt;
 use crate::pqproto::BeMessage;
@@ -433,11 +433,12 @@ mod tests {
     use super::auth_quirks;
     use super::jwt::JwkCache;
     use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
+    use crate::cache::node_info::CachedNodeInfo;
     use crate::config::AuthenticationConfig;
     use crate::context::RequestContext;
     use crate::control_plane::messages::EndpointRateLimitConfig;
     use crate::control_plane::{
-        self, AccessBlockerFlags, CachedNodeInfo, EndpointAccessControl, RoleAccessControl,
+        self, AccessBlockerFlags, EndpointAccessControl, RoleAccessControl,
     };
     use crate::proxy::NeonOptions;
     use crate::rate_limiter::EndpointRateLimiter;

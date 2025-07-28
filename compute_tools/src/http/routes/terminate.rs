@@ -1,7 +1,7 @@
 use crate::compute::{ComputeNode, forward_termination_signal};
 use crate::http::JsonResponse;
 use axum::extract::State;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum_extra::extract::OptionalQuery;
 use compute_api::responses::{ComputeStatus, TerminateMode, TerminateResponse};
 use http::StatusCode;
@@ -33,7 +33,29 @@ pub(in crate::http) async fn terminate(
         if !matches!(state.status, ComputeStatus::Empty | ComputeStatus::Running) {
             return JsonResponse::invalid_status(state.status);
         }
+
+        // If compute is Empty, there's no Postgres to terminate. The regular compute_ctl termination path
+        // assumes Postgres to be configured and running, so we just special-handle this case by exiting
+        // the process directly.
+        if compute.params.lakebase_mode && state.status == ComputeStatus::Empty {
+            drop(state);
+            info!("terminating empty compute - will exit process");
+
+            // Queue a task to exit the process after 5 seconds. The 5-second delay aims to
+            // give enough time for the HTTP response to be sent so that HCM doesn't get an abrupt
+            // connection termination.
+            tokio::spawn(async {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                info!("exiting process after terminating empty compute");
+                std::process::exit(0);
+            });
+
+            return StatusCode::OK.into_response();
+        }
+
+        // For Running status, proceed with normal termination
         state.set_status(mode.into(), &compute.state_changed);
+        drop(state);
     }
 
     forward_termination_signal(false);

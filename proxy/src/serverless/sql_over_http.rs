@@ -64,7 +64,7 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
+pub(super) const HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
 where
@@ -735,9 +735,7 @@ impl QueryData {
 
         match batch_result {
             // The query successfully completed.
-            Ok(status) => {
-                discard.check_idle(status);
-
+            Ok(_) => {
                 let json_output = String::from_utf8(json_buf).expect("json should be valid utf8");
                 Ok(json_output)
             }
@@ -793,7 +791,7 @@ impl BatchQueryData {
         {
             Ok(json_output) => {
                 info!("commit");
-                let status = transaction
+                transaction
                     .commit()
                     .await
                     .inspect_err(|_| {
@@ -802,7 +800,6 @@ impl BatchQueryData {
                         discard.discard();
                     })
                     .map_err(SqlOverHttpError::Postgres)?;
-                discard.check_idle(status);
                 json_output
             }
             Err(SqlOverHttpError::Cancelled(_)) => {
@@ -815,17 +812,6 @@ impl BatchQueryData {
                 return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
             }
             Err(err) => {
-                info!("rollback");
-                let status = transaction
-                    .rollback()
-                    .await
-                    .inspect_err(|_| {
-                        // if we cannot rollback - for now don't return connection to pool
-                        // TODO: get a query status from the error
-                        discard.discard();
-                    })
-                    .map_err(SqlOverHttpError::Postgres)?;
-                discard.check_idle(status);
                 return Err(err);
             }
         };
@@ -1012,12 +998,6 @@ impl Client {
 }
 
 impl Discard<'_> {
-    fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        match self {
-            Discard::Remote(discard) => discard.check_idle(status),
-            Discard::Local(discard) => discard.check_idle(status),
-        }
-    }
     fn discard(&mut self) {
         match self {
             Discard::Remote(discard) => discard.discard(),

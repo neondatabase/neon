@@ -96,7 +96,7 @@ paths:
         content:
           application/json:
             schema:
-                $ref: "#/components/schemas/SafekeepersLsn"
+              $ref: "#/components/schemas/ComputeSchemaWithLsn"
       responses:
         200:
           description: Promote succeeded or wasn't started
@@ -297,14 +297,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - spec
-              properties:
-                spec:
-                  # XXX: I don't want to explain current spec in the OpenAPI format,
-                  # as it could be changed really soon. Consider doing it later.
-                  type: object
+              $ref: "#/components/schemas/ComputeSchema"
       responses:
         200:
           description: Compute configuration finished.
@@ -591,18 +584,25 @@ components:
           type: string
           example: "1.0.0"
 
-    SafekeepersLsn:
+    ComputeSchema:
       type: object
       required:
-        - safekeepers
+        - spec
+      properties:
+        spec:
+          type: object
+    ComputeSchemaWithLsn:
+      type: object
+      required:
+        - spec
         - wal_flush_lsn
       properties:
-        safekeepers:
-          description: Primary replica safekeepers
-          type: string
+        spec:
+          $ref: "#/components/schemas/ComputeState"
         wal_flush_lsn:
-          description: Primary last WAL flush LSN
           type: string
+          description: "last WAL flush LSN"
+          example: "0/028F10D8"
 
     LfcPrewarmState:
       type: object
@@ -613,11 +613,11 @@ components:
         - skipped
       properties:
         status:
-          description: Lfc prewarm status
-          enum: [not_prewarmed, prewarming, completed, failed]
+          description: LFC prewarm status
+          enum: [not_prewarmed, prewarming, completed, failed, skipped]
           type: string
         error:
-          description: Lfc prewarm error, if any
+          description: LFC prewarm error, if any
           type: string
         total:
           description: Total pages processed
@@ -635,11 +635,11 @@ components:
         - status
       properties:
         status:
-          description: Lfc offload status
+          description: LFC offload status
           enum: [not_offloaded, offloading, completed, failed]
           type: string
         error:
-          description: Lfc offload error, if any
+          description: LFC offload error, if any
           type: string
 
     PromoteState:

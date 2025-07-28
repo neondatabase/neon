@@ -46,6 +46,7 @@ members = [
     "libs/proxy/json",
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
+    "libs/proxy/subzero_core",
     "libs/proxy/tokio-postgres2",
     "endpoint_storage",
     "pgxn/neon/communicator",
@@ -130,10 +131,12 @@ jemalloc_pprof = { version = "0.7", features = ["symbolize", "flamegraph"] }
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
+lock_api = "0.4.13"
 md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
 memoffset = "0.9"
+moka = { version = "0.12", features = ["sync"] }
 nix = { version = "0.30.1", features = ["dir", "fs", "mman", "process", "socket", "signal", "poll"] }
 # Do not update to >= 7.0.0, at least. The update will have a significant impact
 # on compute startup metrics (start_postgres_ms), >= 25% degradation.
@@ -141,10 +144,10 @@ notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.19"
 once_cell = "1.13"
-opentelemetry = "0.27"
-opentelemetry_sdk = "0.27"
-opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "trace", "http", "reqwest-client"] }
-opentelemetry-semantic-conventions = "0.27"
+opentelemetry = "0.30"
+opentelemetry_sdk = "0.30"
+opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-proto", "trace", "http", "reqwest-blocking-client"] }
+opentelemetry-semantic-conventions = "0.30"
 parking_lot = "0.12"
 parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
@@ -156,16 +159,18 @@ procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.13.5"
 prost-types = "0.13.5"
-rand = "0.8"
+rand = "0.9"
+# Remove after p256 is updated to 0.14.
+rand_core = "=0.6"
 redis = { version = "0.29.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_27"] }
+reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_30"] }
 reqwest-middleware = "0.4"
 reqwest-retry = "0.7"
 routerify = "3"
 rpds = "0.13"
-rustc-hash = "1.1.0"
+rustc-hash = "2.1.1"
 rustls = { version = "0.23.16", default-features = false }
 rustls-pemfile = "2"
 rustls-pki-types = "1.11"
@@ -210,17 +215,15 @@ tonic = { version = "0.13.1", default-features = false, features = ["channel", "
 tonic-reflection = { version = "0.13.1", features = ["server"] }
 tower = { version = "0.5.2", default-features = false }
 tower-http = { version = "0.6.2", features = ["auth", "request-id", "trace"] }
-
-# This revision uses opentelemetry 0.27. There's no tag for it.
-tower-otel = { git = "https://github.com/mattiapenati/tower-otel", rev = "56a7321053bcb72443888257b622ba0d43a11fcd" }
-
+tower-otel = { version = "0.6", features = ["axum"] }
 tower-service = "0.3.3"
 tracing = "0.1"
 tracing-error = "0.2"
 tracing-log = "0.2"
-tracing-opentelemetry = "0.28"
+tracing-opentelemetry = "0.31"
 tracing-serde = "0.2.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
+tracing-appender = "0.2.3"
 try-lock = "0.2.5"
 test-log = { version = "0.2.17", default-features = false, features = ["log"] }
 twox-hash = { version = "1.6.3", default-features = false }

@@ -193,6 +193,9 @@ pub struct ComputeSpec {
     ///
     /// We use this value to derive other values, such as the installed extensions metric.
     pub suspend_timeout_seconds: i64,
+
+    // Databricks specific options for compute instance.
+    pub databricks_settings: Option<DatabricksSettings>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -414,6 +417,32 @@ pub struct GenericOption {
     pub name: String,
     pub value: Option<String>,
     pub vartype: String,
+}
+
+/// Postgres compute TLS settings.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PgComputeTlsSettings {
+    // Absolute path to the certificate file for server-side TLS.
+    pub cert_file: String,
+    // Absolute path to the private key file for server-side TLS.
+    pub key_file: String,
+    // Absolute path to the certificate authority file for verifying client certificates.
+    pub ca_file: String,
+}
+
+/// Databricks specific options for compute instance.
+/// This is used to store any other settings that needs to be propagate to Compute
+/// but should not be persisted to ComputeSpec in the database.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DatabricksSettings {
+    pub pg_compute_tls_settings: PgComputeTlsSettings,
+    // Absolute file path to databricks_pg_hba.conf file.
+    pub databricks_pg_hba: String,
+    // Absolute file path to databricks_pg_ident.conf file.
+    pub databricks_pg_ident: String,
+    // Hostname portion of the Databricks workspace URL of the endpoint, or empty string if not known.
+    // A valid hostname is required for the compute instance to support PAT logins.
+    pub databricks_workspace_host: String,
 }
 
 /// Optional collection of `GenericOption`'s. Type alias allows us to

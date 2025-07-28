@@ -52,6 +52,8 @@
 #include "pagestore_client.h"
 #include "communicator.h"
 
+#include "communicator/communicator_bindings.h"
+
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "LFC: assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
 /*
@@ -219,10 +221,6 @@ static char *lfc_path;
 static uint64 lfc_generation;
 static FileCacheControl *lfc_ctl;
 static bool lfc_do_prewarm;
-static shmem_startup_hook_type prev_shmem_startup_hook;
-#if PG_VERSION_NUM>=150000
-static shmem_request_hook_type prev_shmem_request_hook;
-#endif
 
 bool lfc_store_prefetch_result;
 bool lfc_prewarm_update_ws_estimation;
@@ -342,18 +340,14 @@ lfc_ensure_opened(void)
 	return true;
 }
 
-static void
-lfc_shmem_startup(void)
+void
+LfcShmemInit(void)
 {
 	bool		found;
 	static HASHCTL info;
 
-	if (prev_shmem_startup_hook)
-	{
-		prev_shmem_startup_hook();
-	}
-
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	if (lfc_max_size <= 0)
+		return;
 
 	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
 	if (!found)
@@ -398,19 +392,16 @@ lfc_shmem_startup(void)
 			ConditionVariableInit(&lfc_ctl->cv[i]);
 
 	}
-	LWLockRelease(AddinShmemInitLock);
 }
 
-static void
-lfc_shmem_request(void)
+void
+LfcShmemRequest(void)
 {
-#if PG_VERSION_NUM>=150000
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-#endif
-
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
-	RequestNamedLWLockTranche("lfc_lock", 1);
+	if (lfc_max_size > 0)
+	{
+		RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
+		RequestNamedLWLockTranche("lfc_lock", 1);
+	}
 }
 
 static bool
@@ -642,18 +633,6 @@ lfc_init(void)
 							NULL,
 							NULL,
 							NULL);
-
-	if (lfc_max_size == 0)
-		return;
-
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = lfc_shmem_startup;
-#if PG_VERSION_NUM>=150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = lfc_shmem_request;
-#else
-	lfc_shmem_request();
-#endif
 }
 
 FileCacheState*
@@ -2178,6 +2157,38 @@ lfc_approximate_working_set_size_seconds(time_t duration, bool reset)
 		memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
 	return dc;
 }
+
+/*
+ * Get metrics, for the built-in metrics exporter that's part of the communicator
+ * process.
+ *
+ * NB: This is called from a Rust tokio task inside the communicator process.
+ * Acquiring lwlocks, elog(), allocating memory or anything else non-trivial
+ * is strictly prohibited here!
+ */
+struct LfcMetrics
+callback_get_lfc_metrics_unsafe(void)
+{
+	struct LfcMetrics result = {
+		.lfc_cache_size_limit = (int64) lfc_size_limit * 1024 * 1024,
+		.lfc_hits = lfc_ctl ? lfc_ctl->hits : 0,
+		.lfc_misses = lfc_ctl ? lfc_ctl->misses : 0,
+		.lfc_used = lfc_ctl ? lfc_ctl->used : 0,
+		.lfc_writes = lfc_ctl ? lfc_ctl->writes : 0,
+	};
+
+	if (lfc_ctl)
+	{
+		for (int minutes = 1; minutes <= 60; minutes++)
+		{
+			result.lfc_approximate_working_set_size_windows[minutes - 1] =
+				lfc_approximate_working_set_size_seconds(minutes * 60, false);
+		}
+	}
+
+	return result;
+}
+
 
 PG_FUNCTION_INFO_V1(get_local_cache_state);
 
