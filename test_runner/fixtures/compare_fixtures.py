@@ -16,6 +16,7 @@ from typing_extensions import override
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonEnv,
     PgBin,
     PgProtocol,
@@ -128,6 +129,10 @@ class NeonCompare(PgCompare):
 
         # Start pg
         self._pg = self.env.endpoints.create_start("main", "main", self.tenant)
+
+    @property
+    def endpoint(self) -> Endpoint:
+        return self._pg
 
     @property
     @override

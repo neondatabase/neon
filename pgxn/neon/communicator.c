@@ -79,10 +79,6 @@
 #include "access/xlogrecovery.h"
 #endif
 
-#if PG_VERSION_NUM < 160000
-typedef PGAlignedBlock PGIOAlignedBlock;
-#endif
-
 #define NEON_PANIC_CONNECTION_STATE(shard_no, elvl, message, ...) \
 	neon_shard_log(shard_no, elvl, "Broken connection state: " message, \
 				   ##__VA_ARGS__)
@@ -1820,12 +1816,12 @@ nm_to_string(NeonMessage *msg)
 			}
 		case T_NeonGetPageResponse:
 			{
-#if 0
 				NeonGetPageResponse *msg_resp = (NeonGetPageResponse *) msg;
-#endif
 
 				appendStringInfoString(&s, "{\"type\": \"NeonGetPageResponse\"");
-				appendStringInfo(&s, ", \"page\": \"XXX\"}");
+				appendStringInfo(&s, ", \"rinfo\": %u/%u/%u", RelFileInfoFmt(msg_resp->req.rinfo));
+				appendStringInfo(&s, ", \"forknum\": %d", msg_resp->req.forknum);
+				appendStringInfo(&s, ", \"blkno\": %u", msg_resp->req.blkno);
 				appendStringInfoChar(&s, '}');
 				break;
 			}

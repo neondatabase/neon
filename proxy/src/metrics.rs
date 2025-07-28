@@ -2,15 +2,16 @@ use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
 use measured::label::{
-    FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet,
+    FixedCardinalitySet, LabelGroupSet, LabelGroupVisitor, LabelName, LabelSet, LabelValue,
+    StaticLabelSet,
 };
 use measured::metric::histogram::Thresholds;
 use measured::metric::name::MetricName;
 use measured::{
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
-    MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
+    LabelGroup, MetricGroup,
 };
-use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogVec};
+use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogVec, InfoMetric};
 use tokio::time::{self, Instant};
 
 use crate::control_plane::messages::ColdStartInfo;
@@ -25,6 +26,12 @@ pub struct Metrics {
 
     #[metric(namespace = "wake_compute_lock")]
     pub wake_compute_lock: ApiLockMetrics,
+
+    #[metric(namespace = "service")]
+    pub service: ServiceMetrics,
+
+    #[metric(namespace = "cache")]
+    pub cache: CacheMetrics,
 }
 
 static SELF: OnceLock<Metrics> = OnceLock::new();
@@ -215,13 +222,6 @@ pub enum Bool {
     False,
 }
 
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "outcome")]
-pub enum CacheOutcome {
-    Hit,
-    Miss,
-}
-
 #[derive(LabelGroup)]
 #[label(set = ConsoleRequestSet)]
 pub struct ConsoleRequest<'a> {
@@ -385,10 +385,10 @@ pub enum RedisMsgKind {
 
 #[derive(Default, Clone)]
 pub struct LatencyAccumulated {
-    cplane: time::Duration,
-    client: time::Duration,
-    compute: time::Duration,
-    retry: time::Duration,
+    pub cplane: time::Duration,
+    pub client: time::Duration,
+    pub compute: time::Duration,
+    pub retry: time::Duration,
 }
 
 impl std::fmt::Display for LatencyAccumulated {
@@ -659,4 +659,100 @@ pub struct ThreadPoolMetrics {
     pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
     pub worker_task_skips_total: CounterVec<ThreadPoolWorkers>,
+}
+
+#[derive(MetricGroup, Default)]
+pub struct ServiceMetrics {
+    pub info: InfoMetric<ServiceInfo>,
+}
+
+#[derive(Default)]
+pub struct ServiceInfo {
+    pub state: ServiceState,
+}
+
+impl ServiceInfo {
+    pub const fn running() -> Self {
+        ServiceInfo {
+            state: ServiceState::Running,
+        }
+    }
+
+    pub const fn terminating() -> Self {
+        ServiceInfo {
+            state: ServiceState::Terminating,
+        }
+    }
+}
+
+impl LabelGroup for ServiceInfo {
+    fn visit_values(&self, v: &mut impl LabelGroupVisitor) {
+        const STATE: &LabelName = LabelName::from_str("state");
+        v.write_value(STATE, &self.state);
+    }
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug, Default)]
+#[label(singleton = "state")]
+pub enum ServiceState {
+    #[default]
+    Init,
+    Running,
+    Terminating,
+}
+
+#[derive(MetricGroup)]
+#[metric(new())]
+pub struct CacheMetrics {
+    /// The capacity of the cache
+    pub capacity: GaugeVec<StaticLabelSet<CacheKind>>,
+    /// The total number of entries inserted into the cache
+    pub inserted_total: CounterVec<StaticLabelSet<CacheKind>>,
+    /// The total number of entries removed from the cache
+    pub evicted_total: CounterVec<CacheEvictionSet>,
+    /// The total number of cache requests
+    pub request_total: CounterVec<CacheOutcomeSet>,
+}
+
+impl Default for CacheMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+#[label(singleton = "cache")]
+pub enum CacheKind {
+    NodeInfo,
+    ProjectInfoEndpoints,
+    ProjectInfoRoles,
+    Schema,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+pub enum CacheRemovalCause {
+    Expired,
+    Explicit,
+    Replaced,
+    Size,
+}
+
+#[derive(LabelGroup)]
+#[label(set = CacheEvictionSet)]
+pub struct CacheEviction {
+    pub cache: CacheKind,
+    pub cause: CacheRemovalCause,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+pub enum CacheOutcome {
+    Hit,
+    Miss,
+}
+
+#[derive(LabelGroup)]
+#[label(set = CacheOutcomeSet)]
+pub struct CacheOutcomeGroup {
+    pub cache: CacheKind,
+    pub outcome: CacheOutcome,
 }

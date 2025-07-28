@@ -19,7 +19,7 @@ use pageserver_api::shard::{
 };
 use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::Rng;
-use rand::distributions::Alphanumeric;
+use rand::distr::Alphanumeric;
 use remote_storage::TimeoutOrCancel;
 use sysinfo::SystemExt;
 use tokio::fs;
@@ -218,7 +218,7 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
             std::io::ErrorKind::InvalidInput,
             "Path must be absolute",
         ))?;
-    let rand_suffix = rand::thread_rng()
+    let rand_suffix = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(8)
         .map(char::from)
@@ -352,7 +352,8 @@ async fn init_load_generations(
         let client = StorageControllerUpcallClient::new(conf, cancel);
         info!("Calling {} API to re-attach tenants", client.base_url());
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-        match client.re_attach(conf).await {
+        let empty_local_disk = tenant_confs.is_empty();
+        match client.re_attach(conf, empty_local_disk).await {
             Ok(tenants) => tenants
                 .into_iter()
                 .flat_map(|(id, rart)| {

@@ -1,4 +1,3 @@
-#[cfg(any(test, feature = "testing"))]
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -14,14 +13,14 @@ use arc_swap::ArcSwapOption;
 use camino::Utf8PathBuf;
 use futures::future::Either;
 use itertools::{Itertools, Position};
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use remote_storage::RemoteStorageConfig;
 use tokio::net::TcpListener;
 #[cfg(any(test, feature = "testing"))]
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use utils::sentry_init::init_sentry;
 use utils::{project_build_tag, project_git_version};
 
@@ -41,7 +40,7 @@ use crate::config::{
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, ServiceInfo};
 use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::redis::kv_ops::RedisKVClient;
@@ -335,7 +334,7 @@ struct PgSniRouterArgs {
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    let _logging_guard = crate::logging::init().await?;
+    let _logging_guard = crate::logging::init()?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
@@ -536,12 +535,7 @@ pub async fn run() -> anyhow::Result<()> {
     // add a task to flush the db_schema cache every 10 minutes
     #[cfg(feature = "rest_broker")]
     if let Some(db_schema_cache) = &config.rest_config.db_schema_cache {
-        maintenance_tasks.spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(600)).await;
-                db_schema_cache.flush();
-            }
-        });
+        maintenance_tasks.spawn(db_schema_cache.maintain());
     }
 
     if let Some(metrics_config) = &config.metric_collection {
@@ -574,7 +568,7 @@ pub async fn run() -> anyhow::Result<()> {
                             attempt.into_inner()
                         );
                     }
-                    let jitter = thread_rng().gen_range(0..100);
+                    let jitter = rand::rng().random_range(0..100);
                     tokio::time::sleep(Duration::from_millis(1000 + jitter)).await;
                 }
             }
@@ -590,6 +584,11 @@ pub async fn run() -> anyhow::Result<()> {
             maintenance_tasks.spawn(async move { cache.gc_worker().await });
         }
     }
+
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
 
     let maintenance = loop {
         // get one complete task
@@ -712,12 +711,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         info!("Using DbSchemaCache with options={db_schema_cache_config:?}");
 
         let db_schema_cache = if args.is_rest_broker {
-            Some(DbSchemaCache::new(
-                "db_schema_cache",
-                db_schema_cache_config.size,
-                db_schema_cache_config.ttl,
-                true,
-            ))
+            Some(DbSchemaCache::new(db_schema_cache_config))
         } else {
             None
         };
@@ -730,6 +724,25 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         }
     };
 
+    let mut greetings = env::var_os("NEON_MOTD").map_or(String::new(), |s| match s.into_string() {
+        Ok(s) => s,
+        Err(_) => {
+            debug!("NEON_MOTD environment variable is not valid UTF-8");
+            String::new()
+        }
+    });
+
+    match &args.auth_backend {
+        AuthBackendType::ControlPlane => {}
+        #[cfg(any(test, feature = "testing"))]
+        AuthBackendType::Postgres => {}
+        #[cfg(any(test, feature = "testing"))]
+        AuthBackendType::Local => {}
+        AuthBackendType::ConsoleRedirect => {
+            greetings = "Connected to database".to_string();
+        }
+    }
+
     let config = ProxyConfig {
         tls_config,
         metric_collection,
@@ -740,6 +753,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute: compute_config,
+        greetings,
         #[cfg(feature = "testing")]
         disable_pg_session_jwt: false,
         #[cfg(feature = "rest_broker")]

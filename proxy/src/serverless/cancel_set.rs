@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 use parking_lot::Mutex;
-use rand::{Rng, thread_rng};
+use rand::distr::uniform::{UniformSampler, UniformUsize};
 use rustc_hash::FxHasher;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -39,8 +39,9 @@ impl CancelSet {
     }
 
     pub(crate) fn take(&self) -> Option<CancellationToken> {
+        let dist = UniformUsize::new_inclusive(0, usize::MAX).expect("valid bounds");
         for _ in 0..4 {
-            if let Some(token) = self.take_raw(thread_rng().r#gen()) {
+            if let Some(token) = self.take_raw(dist.sample(&mut rand::rng())) {
                 return Some(token);
             }
             tracing::trace!("failed to get cancel token");
@@ -48,7 +49,7 @@ impl CancelSet {
         None
     }
 
-    pub(crate) fn take_raw(&self, rng: usize) -> Option<CancellationToken> {
+    fn take_raw(&self, rng: usize) -> Option<CancellationToken> {
         NonZeroUsize::new(self.shards.len())
             .and_then(|len| self.shards[rng % len].lock().take(rng / len))
     }
