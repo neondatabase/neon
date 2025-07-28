@@ -9,7 +9,7 @@
 
 ```bash
 export BENCHMARK_CONNSTR=postgres://user:pass@ep-abc-xyz-123.us-east-2.aws.neon.build/neondb
-export CLICKHOUSE_PASSWORD=ch_pssword123
+export CLICKHOUSE_PASSWORD=ch_password123
 
 docker compose -f test_runner/logical_repl/clickhouse/docker-compose.yml up -d
 ./scripts/pytest -m remote_cluster -k 'test_clickhouse[release-pg17]'
