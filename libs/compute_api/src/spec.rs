@@ -342,11 +342,11 @@ impl PageserverConnectionInfo {
             .ok_or(anyhow::anyhow!("must have at least one pageserver"))?;
 
         let result = match protocol {
-            PageserverProtocol::Libpq => pageserver
+            PageserverProtocol::Grpc => pageserver
                 .grpc_url
                 .as_ref()
                 .ok_or(anyhow::anyhow!("no grpc_url for shard {shard_index}"))?,
-            PageserverProtocol::Grpc => pageserver
+            PageserverProtocol::Libpq => pageserver
                 .libpq_url
                 .as_ref()
                 .ok_or(anyhow::anyhow!("no libpq_url for shard {shard_index}"))?,
