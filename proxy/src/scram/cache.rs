@@ -42,12 +42,18 @@ impl Drop for Pbkdf2CacheEntry {
 
 impl Pbkdf2Cache {
     pub fn new() -> Self {
+        const SIZE: u64 = 100;
+        const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
         let builder = moka::sync::Cache::builder()
             .name("pbkdf2")
-            .max_capacity(100)
-            .time_to_idle(std::time::Duration::from_secs(60));
+            .max_capacity(SIZE)
+            .time_to_idle(TTL);
 
-        Metrics::get().cache.capacity.set(CacheKind::Pbkdf2, 10);
+        Metrics::get()
+            .cache
+            .capacity
+            .set(CacheKind::Pbkdf2, SIZE as i64);
 
         let builder =
             builder.eviction_listener(|_k, _v, cause| eviction_listener(CacheKind::Pbkdf2, cause));
