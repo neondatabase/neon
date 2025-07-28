@@ -607,6 +607,9 @@ pub(crate) async fn copy_partial_segment(
     storage.copy_object(source, destination, &cancel).await
 }
 
+const WAL_READ_WARN_THRESHOLD: u32 = 2;
+const WAL_READ_MAX_RETRIES: u32 = 3;
+
 pub async fn read_object(
     storage: &GenericRemoteStorage,
     file_path: &RemotePath,
@@ -626,8 +629,8 @@ pub async fn read_object(
     let download = backoff::retry(
         || async { storage.download(file_path, &opts, &cancel).await },
         DownloadError::is_permanent,
-        2,
-        3,
+        WAL_READ_WARN_THRESHOLD,
+        WAL_READ_MAX_RETRIES,
         "download WAL segment",
         &cancel,
     )
