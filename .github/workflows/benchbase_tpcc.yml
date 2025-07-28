@@ -31,15 +31,15 @@ jobs:
         include:
           - warehouses: 50 # defines number of warehouses and is used to compute number of terminals
             max_rate: 800  # measured max TPS at scale factor based on experiments. Adjust if performance is better/worse
-            min_cu: 0.25   # simulate free tier plan (0.25 -2 CU)
+            min_cu: 2   # simulate free tier plan (0.25 -2 CU)
             max_cu: 2
           - warehouses: 500 # serverless plan (2-8 CU)
             max_rate: 2000
-            min_cu: 2
+            min_cu: 8
             max_cu: 8
           - warehouses: 1000 # business plan (2-16 CU)
             max_rate: 2900
-            min_cu: 2
+            min_cu: 16
             max_cu: 16
       max-parallel: 1 # we want to run each workload size sequentially to avoid noisy neighbors
     permissions:
