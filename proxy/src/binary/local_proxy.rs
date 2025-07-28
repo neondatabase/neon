@@ -47,6 +47,9 @@ struct LocalProxyCliArgs {
     /// listen for incoming metrics connections on ip:port
     #[clap(long, default_value = "127.0.0.1:7001")]
     metrics: String,
+    /// listen for incoming TCP connections on ip:port
+    #[clap(short, long, default_value = "127.0.0.1:4432")]
+    proxy: Option<SocketAddr>,
     /// listen for incoming http connections on ip:port
     #[clap(long)]
     http: String,
@@ -156,6 +159,13 @@ pub async fn run() -> anyhow::Result<()> {
 
     let metrics_listener = TcpListener::bind(args.metrics).await?.into_std()?;
     let http_listener = TcpListener::bind(args.http).await?;
+
+    let tcp_listener = if let Some(proxy_addr) = args.proxy {
+        Some(TcpListener::bind(proxy_addr).await?)
+    } else {
+        None
+    };
+
     let shutdown = CancellationToken::new();
 
     // todo: should scale with CU
@@ -206,6 +216,16 @@ pub async fn run() -> anyhow::Result<()> {
         Arc::new(CancellationHandler::new(&config.connect_to_compute)),
         endpoint_rate_limiter,
     );
+
+    // if tcp_listener.is_some() {
+    //     maintenance_tasks.spawn(serverless::tcp_listener::task_main(
+    //         tcp_listener.unwrap(),
+    //         shutdown.clone(),
+    //         auth_backend,
+    //         config,
+    //         endpoint_rate_limiter,
+    //     ));
+    // }
 
     Metrics::get()
         .service
