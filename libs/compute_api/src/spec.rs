@@ -317,6 +317,42 @@ impl PageserverConnectionInfo {
             }
         }
     }
+
+    /// Convenience routine to get the connection string for a shard.
+    pub fn shard_url(
+        &self,
+        shard_number: ShardNumber,
+        protocol: PageserverProtocol,
+    ) -> anyhow::Result<&str> {
+        let shard_index = ShardIndex {
+            shard_number,
+            shard_count: self.shard_count,
+        };
+        let shard = self.shards.get(&shard_index).ok_or_else(|| {
+            anyhow::anyhow!("shard connection info missing for shard {}", shard_index)
+        })?;
+
+        // Just use the first pageserver in the list. That's good enough for this
+        // convenience routine; if you need more control, like round robin policy or
+        // failover support, roll your own. (As of this writing, we never have more than
+        // one pageserver per shard anyway, but that will change in the future.)
+        let pageserver = shard
+            .pageservers
+            .first()
+            .ok_or(anyhow::anyhow!("must have at least one pageserver"))?;
+
+        let result = match protocol {
+            PageserverProtocol::Libpq => pageserver
+                .grpc_url
+                .as_ref()
+                .ok_or(anyhow::anyhow!("no grpc_url for shard {shard_index}"))?,
+            PageserverProtocol::Grpc => pageserver
+                .libpq_url
+                .as_ref()
+                .ok_or(anyhow::anyhow!("no libpq_url for shard {shard_index}"))?,
+        };
+        Ok(result)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]

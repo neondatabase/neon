@@ -1173,22 +1173,10 @@ impl ComputeNode {
             shard_number: ShardNumber(0),
             shard_count: spec.pageserver_conninfo.shard_count,
         };
-        let shard0 = spec
+        let shard0_url = spec
             .pageserver_conninfo
-            .shards
-            .get(&shard0_index)
-            .ok_or_else(|| {
-                anyhow::anyhow!("shard connection info missing for shard {}", shard0_index)
-            })?;
-        let pageserver = shard0
-            .pageservers
-            .first()
-            .ok_or(anyhow::anyhow!("must have at least one pageserver"))?;
-        let shard0_url = pageserver
-            .grpc_url
-            .clone()
-            .ok_or(anyhow::anyhow!("no grpc_url for shard 0"))?;
-
+            .shard_url(ShardNumber(0), PageserverProtocol::Grpc)?
+            .to_owned();
         let (reader, connected) = tokio::runtime::Handle::current().block_on(async move {
             let mut client = page_api::Client::connect(
                 shard0_url,
@@ -1226,26 +1214,10 @@ impl ComputeNode {
     /// Fetches a basebackup via libpq. The connstring must use postgresql://. Returns the timestamp
     /// when the connection was established, and the (compressed) size of the basebackup.
     fn try_get_basebackup_libpq(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
-        let shard0_index = ShardIndex {
-            shard_number: ShardNumber(0),
-            shard_count: spec.pageserver_conninfo.shard_count,
-        };
-        let shard0 = spec
+        let shard0_connstr = spec
             .pageserver_conninfo
-            .shards
-            .get(&shard0_index)
-            .ok_or_else(|| {
-                anyhow::anyhow!("shard connection info missing for shard {}", shard0_index)
-            })?;
-        let pageserver = shard0
-            .pageservers
-            .first()
-            .ok_or(anyhow::anyhow!("must have at least one pageserver"))?;
-        let shard0_connstr = pageserver
-            .libpq_url
-            .clone()
-            .ok_or(anyhow::anyhow!("no libpq_url for shard 0"))?;
-        let mut config = postgres::Config::from_str(&shard0_connstr)?;
+            .shard_url(ShardNumber(0), PageserverProtocol::Libpq)?;
+        let mut config = postgres::Config::from_str(shard0_connstr)?;
 
         // Use the storage auth token from the config file, if given.
         // Note: this overrides any password set in the connection string.
