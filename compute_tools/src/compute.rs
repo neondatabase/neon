@@ -762,10 +762,7 @@ impl ComputeNode {
     ///
     /// Note that this is in the critical path of a compute cold start. Keep this fast.
     /// Try to do things concurrently, to hide the latencies.
-    fn start_compute(
-        self: &Arc<Self>,
-        pg_handle: &mut Option<PostgresHandle>
-    ) -> Result<()> {
+    fn start_compute(self: &Arc<Self>, pg_handle: &mut Option<PostgresHandle>) -> Result<()> {
         let compute_state: ComputeState;
 
         let start_compute_span;
