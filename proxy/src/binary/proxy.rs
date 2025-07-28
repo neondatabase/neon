@@ -40,7 +40,7 @@ use crate::config::{
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, ServiceInfo};
 use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::redis::kv_ops::RedisKVClient;
@@ -535,12 +535,7 @@ pub async fn run() -> anyhow::Result<()> {
     // add a task to flush the db_schema cache every 10 minutes
     #[cfg(feature = "rest_broker")]
     if let Some(db_schema_cache) = &config.rest_config.db_schema_cache {
-        maintenance_tasks.spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(600)).await;
-                db_schema_cache.flush();
-            }
-        });
+        maintenance_tasks.spawn(db_schema_cache.maintain());
     }
 
     if let Some(metrics_config) = &config.metric_collection {
@@ -589,6 +584,11 @@ pub async fn run() -> anyhow::Result<()> {
             maintenance_tasks.spawn(async move { cache.gc_worker().await });
         }
     }
+
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
 
     let maintenance = loop {
         // get one complete task
@@ -711,12 +711,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         info!("Using DbSchemaCache with options={db_schema_cache_config:?}");
 
         let db_schema_cache = if args.is_rest_broker {
-            Some(DbSchemaCache::new(
-                "db_schema_cache",
-                db_schema_cache_config.size,
-                db_schema_cache_config.ttl,
-                true,
-            ))
+            Some(DbSchemaCache::new(db_schema_cache_config))
         } else {
             None
         };

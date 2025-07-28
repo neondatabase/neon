@@ -564,7 +564,9 @@ enum EndpointCmd {
     Create(EndpointCreateCmdArgs),
     Start(EndpointStartCmdArgs),
     Reconfigure(EndpointReconfigureCmdArgs),
+    RefreshConfiguration(EndpointRefreshConfigurationArgs),
     Stop(EndpointStopCmdArgs),
+    UpdatePageservers(EndpointUpdatePageserversCmdArgs),
     GenerateJwt(EndpointGenerateJwtCmdArgs),
 }
 
@@ -726,6 +728,13 @@ struct EndpointReconfigureCmdArgs {
 }
 
 #[derive(clap::Args)]
+#[clap(about = "Refresh the endpoint's configuration by forcing it reload it's spec")]
+struct EndpointRefreshConfigurationArgs {
+    #[clap(help = "Postgres endpoint id")]
+    endpoint_id: String,
+}
+
+#[derive(clap::Args)]
 #[clap(about = "Stop an endpoint")]
 struct EndpointStopCmdArgs {
     #[clap(help = "Postgres endpoint id")]
@@ -740,6 +749,16 @@ struct EndpointStopCmdArgs {
     #[clap(long, help = "Postgres shutdown mode")]
     #[clap(default_value = "fast")]
     mode: EndpointTerminateMode,
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Update the pageservers in the spec file of the compute endpoint")]
+struct EndpointUpdatePageserversCmdArgs {
+    #[clap(help = "Postgres endpoint id")]
+    endpoint_id: String,
+
+    #[clap(short = 'p', long, help = "Specified pageserver id")]
+    pageserver_id: Option<NodeId>,
 }
 
 #[derive(clap::Args)]
@@ -1521,7 +1540,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             let endpoint = cplane
                 .endpoints
                 .get(endpoint_id.as_str())
-                .ok_or_else(|| anyhow::anyhow!("endpoint {endpoint_id} not found"))?;
+                .ok_or_else(|| anyhow!("endpoint {endpoint_id} not found"))?;
 
             if !args.allow_multiple {
                 cplane.check_conflicting_endpoints(
@@ -1622,6 +1641,44 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             println!("Starting existing endpoint {endpoint_id}...");
             endpoint.start(args).await?;
         }
+        EndpointCmd::UpdatePageservers(args) => {
+            let endpoint_id = &args.endpoint_id;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id.as_str())
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            let pageservers = match args.pageserver_id {
+                Some(pageserver_id) => {
+                    let pageserver =
+                        PageServerNode::from_env(env, env.get_pageserver_conf(pageserver_id)?);
+
+                    vec![(
+                        PageserverProtocol::Libpq,
+                        pageserver.pg_connection_config.host().clone(),
+                        pageserver.pg_connection_config.port(),
+                    )]
+                }
+                None => {
+                    let storage_controller = StorageController::from_env(env);
+                    storage_controller
+                        .tenant_locate(endpoint.tenant_id)
+                        .await?
+                        .shards
+                        .into_iter()
+                        .map(|shard| {
+                            (
+                                PageserverProtocol::Libpq,
+                                Host::parse(&shard.listen_pg_addr)
+                                    .expect("Storage controller reported malformed host"),
+                                shard.listen_pg_port,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }
+            };
+
+            endpoint.update_pageservers_in_config(pageservers).await?;
+        }
         EndpointCmd::Reconfigure(args) => {
             let endpoint_id = &args.endpoint_id;
             let endpoint = cplane
@@ -1668,6 +1725,14 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             endpoint
                 .reconfigure(Some(&pageserver_conninfo), safekeepers, None)
                 .await?;
+        }
+        EndpointCmd::RefreshConfiguration(args) => {
+            let endpoint_id = &args.endpoint_id;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id.as_str())
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            endpoint.refresh_configuration().await?;
         }
         EndpointCmd::Stop(args) => {
             let endpoint_id = &args.endpoint_id;

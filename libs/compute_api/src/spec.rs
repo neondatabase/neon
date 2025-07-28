@@ -209,6 +209,9 @@ pub struct ComputeSpec {
     ///
     /// We use this value to derive other values, such as the installed extensions metric.
     pub suspend_timeout_seconds: i64,
+
+    // Databricks specific options for compute instance.
+    pub databricks_settings: Option<DatabricksSettings>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import TYPE_CHECKING, cast, final
 
@@ -11,6 +12,17 @@ if TYPE_CHECKING:
     from typing import Any, Literal
 
     from fixtures.pg_version import PgVersion
+
+
+def connstr_to_env(connstr: str) -> dict[str, str]:
+    # postgresql://neondb_owner:npg_kuv6Rqi1cB@ep-old-silence-w26pxsvz-pooler.us-east-2.aws.neon.build/neondb?sslmode=require&channel_binding=...'
+    parts = re.split(r":|@|\/|\?", connstr.removeprefix("postgresql://"))
+    return {
+        "PGUSER": parts[0],
+        "PGPASSWORD": parts[1],
+        "PGHOST": parts[2],
+        "PGDATABASE": parts[3],
+    }
 
 
 def connection_parameters_to_env(params: dict[str, str]) -> dict[str, str]:
@@ -221,6 +233,16 @@ class NeonAPI:
         resp = self.__request(
             "DELETE",
             f"/projects/{project_id}/branches/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
+    def reset_to_parent(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/reset_to_parent",
             headers={
                 "Accept": "application/json",
             },

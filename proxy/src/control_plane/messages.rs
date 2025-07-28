@@ -1,8 +1,10 @@
 use std::fmt::{self, Display};
+use std::time::Duration;
 
 use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use tokio::time::Instant;
 
 use crate::auth::IpPattern;
 use crate::intern::{AccountIdInt, BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
@@ -231,7 +233,13 @@ impl Reason {
 #[derive(Copy, Clone, Debug, Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct RetryInfo {
-    pub(crate) retry_delay_ms: u64,
+    #[serde(rename = "retry_delay_ms", deserialize_with = "milliseconds_from_now")]
+    pub(crate) retry_at: Instant,
+}
+
+fn milliseconds_from_now<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Instant, D::Error> {
+    let millis = u64::deserialize(d)?;
+    Ok(Instant::now() + Duration::from_millis(millis))
 }
 
 #[derive(Debug, Deserialize, Clone)]

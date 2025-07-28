@@ -1,14 +1,14 @@
 use crate::http::JsonResponse;
-use axum::Form;
+use axum::extract::Json;
 use http::StatusCode;
 
 pub(in crate::http) async fn promote(
     compute: axum::extract::State<std::sync::Arc<crate::compute::ComputeNode>>,
-    Form(safekeepers_lsn): Form<compute_api::responses::SafekeepersLsn>,
+    Json(cfg): Json<compute_api::responses::PromoteConfig>,
 ) -> axum::response::Response {
-    let state = compute.promote(safekeepers_lsn).await;
-    if let compute_api::responses::PromoteState::Failed { error } = state {
-        return JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, error);
+    let state = compute.promote(cfg).await;
+    if let compute_api::responses::PromoteState::Failed { error: _ } = state {
+        return JsonResponse::create_response(StatusCode::INTERNAL_SERVER_ERROR, state);
     }
     JsonResponse::success(StatusCode::OK, state)
 }

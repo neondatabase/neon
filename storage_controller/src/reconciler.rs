@@ -981,6 +981,7 @@ impl Reconciler {
             ));
         }
 
+        let mut first_err = None;
         for (node, conf) in changes {
             if self.cancel.is_cancelled() {
                 return Err(ReconcileError::Cancel);
@@ -990,7 +991,12 @@ impl Reconciler {
             // shard _available_ (the attached location), and configuring secondary locations
             // can be done lazily when the node becomes available (via background reconciliation).
             if node.is_available() {
-                self.location_config(&node, conf, None, false).await?;
+                let res = self.location_config(&node, conf, None, false).await;
+                if let Err(err) = res {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
             } else {
                 // If the node is unavailable, we skip and consider the reconciliation successful: this
                 // is a common case where a pageserver is marked unavailable: we demote a location on
@@ -1000,6 +1006,10 @@ impl Reconciler {
                     .locations
                     .insert(node.get_id(), ObservedStateLocation { conf: None });
             }
+        }
+
+        if let Some(err) = first_err {
+            return Err(err);
         }
 
         // The condition below identifies a detach. We must have no attached intent and
