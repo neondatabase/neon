@@ -16,13 +16,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::requests::ComputeClaimsScope;
-use compute_api::spec::{
-    ComputeMode, PageserverConnectionInfo, PageserverProtocol, PageserverShardInfo,
-};
+use compute_api::spec::{ComputeMode, PageserverProtocol};
 use control_plane::broker::StorageBroker;
 use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode};
 use control_plane::endpoint::{
-    pageserver_conf_to_shard_conn_info, tenant_locate_response_to_conn_info,
+    local_pageserver_conf_to_conn_info, tenant_locate_response_to_conn_info,
 };
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env;
@@ -60,7 +58,6 @@ use utils::auth::{Claims, Scope};
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 use utils::project_git_version;
-use utils::shard::ShardIndex;
 
 // Default id of a safekeeper node, if not specified on the command line.
 const DEFAULT_SAFEKEEPER_ID: NodeId = NodeId(1);
@@ -1558,22 +1555,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
 
             let mut pageserver_conninfo = if let Some(ps_id) = pageserver_id {
                 let conf = env.get_pageserver_conf(ps_id).unwrap();
-                let ps_conninfo = pageserver_conf_to_shard_conn_info(conf)?;
-
-                let shard_info = PageserverShardInfo {
-                    pageservers: vec![ps_conninfo],
-                };
-                // If caller is telling us what pageserver to use, this is not a tenant which is
-                // fully managed by storage controller, therefore not sharded.
-                let shards: HashMap<_, _> = vec![(ShardIndex::unsharded(), shard_info)]
-                    .into_iter()
-                    .collect();
-                PageserverConnectionInfo {
-                    shard_count: ShardCount(0),
-                    stripe_size: None,
-                    shards,
-                    prefer_protocol,
-                }
+                local_pageserver_conf_to_conn_info(conf)?
             } else {
                 // Look up the currently attached location of the tenant, and its striping metadata,
                 // to pass these on to postgres.
@@ -1647,37 +1629,29 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .endpoints
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            let pageservers = match args.pageserver_id {
+            let prefer_protocol = if endpoint.grpc {
+                PageserverProtocol::Grpc
+            } else {
+                PageserverProtocol::Libpq
+            };
+            let mut pageserver_conninfo = match args.pageserver_id {
                 Some(pageserver_id) => {
-                    let pageserver =
-                        PageServerNode::from_env(env, env.get_pageserver_conf(pageserver_id)?);
-
-                    vec![(
-                        PageserverProtocol::Libpq,
-                        pageserver.pg_connection_config.host().clone(),
-                        pageserver.pg_connection_config.port(),
-                    )]
+                    let conf = env.get_pageserver_conf(pageserver_id)?;
+                    local_pageserver_conf_to_conn_info(conf)?
                 }
                 None => {
                     let storage_controller = StorageController::from_env(env);
-                    storage_controller
-                        .tenant_locate(endpoint.tenant_id)
-                        .await?
-                        .shards
-                        .into_iter()
-                        .map(|shard| {
-                            (
-                                PageserverProtocol::Libpq,
-                                Host::parse(&shard.listen_pg_addr)
-                                    .expect("Storage controller reported malformed host"),
-                                shard.listen_pg_port,
-                            )
-                        })
-                        .collect::<Vec<_>>()
+                    let locate_result =
+                        storage_controller.tenant_locate(endpoint.tenant_id).await?;
+
+                    tenant_locate_response_to_conn_info(&locate_result)?
                 }
             };
+            pageserver_conninfo.prefer_protocol = prefer_protocol;
 
-            endpoint.update_pageservers_in_config(pageservers).await?;
+            endpoint
+                .update_pageservers_in_config(&pageserver_conninfo)
+                .await?;
         }
         EndpointCmd::Reconfigure(args) => {
             let endpoint_id = &args.endpoint_id;
@@ -1693,22 +1667,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             };
             let mut pageserver_conninfo = if let Some(ps_id) = args.endpoint_pageserver_id {
                 let conf = env.get_pageserver_conf(ps_id)?;
-                let ps_conninfo = pageserver_conf_to_shard_conn_info(conf)?;
-                let shard_info = PageserverShardInfo {
-                    pageservers: vec![ps_conninfo],
-                };
-
-                // If caller is telling us what pageserver to use, this is not a tenant which is
-                // fully managed by storage controller, therefore not sharded.
-                let shards: HashMap<_, _> = vec![(ShardIndex::unsharded(), shard_info)]
-                    .into_iter()
-                    .collect();
-                PageserverConnectionInfo {
-                    shard_count: ShardCount::unsharded(),
-                    stripe_size: None,
-                    shards,
-                    prefer_protocol,
-                }
+                local_pageserver_conf_to_conn_info(conf)?
             } else {
                 // Look up the currently attached location of the tenant, and its striping metadata,
                 // to pass these on to postgres.

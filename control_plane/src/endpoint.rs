@@ -79,7 +79,7 @@ use spki::der::Decode;
 use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use utils::id::{NodeId, TenantId, TimelineId};
-use utils::shard::{ShardIndex, ShardNumber};
+use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 
 use pageserver_api::config::DEFAULT_GRPC_LISTEN_PORT as DEFAULT_PAGESERVER_GRPC_PORT;
 use postgres_connection::parse_host_port;
@@ -999,7 +999,7 @@ impl Endpoint {
     // Update the pageservers in the spec file of the endpoint. This is useful to test the spec refresh scenario.
     pub async fn update_pageservers_in_config(
         &self,
-        pageservers: Vec<(PageserverProtocol, Host, u16)>,
+        pageserver_conninfo: &PageserverConnectionInfo,
     ) -> Result<()> {
         let config_path = self.endpoint_path().join("config.json");
         let mut config: ComputeConfig = {
@@ -1007,10 +1007,8 @@ impl Endpoint {
             serde_json::from_reader(file)?
         };
 
-        let pageserver_connstring = Self::build_pageserver_connstr(&pageservers);
-        assert!(!pageserver_connstring.is_empty());
         let mut spec = config.spec.unwrap();
-        spec.pageserver_connstring = Some(pageserver_connstring);
+        spec.pageserver_connection_info = Some(pageserver_conninfo.clone());
         config.spec = Some(spec);
 
         let file = std::fs::File::create(&config_path)?;
@@ -1219,9 +1217,11 @@ impl Endpoint {
     }
 }
 
-pub fn pageserver_conf_to_shard_conn_info(
+/// If caller is telling us what pageserver to use, this is not a tenant which is
+/// fully managed by storage controller, therefore not sharded.
+pub fn local_pageserver_conf_to_conn_info(
     conf: &crate::local_env::PageServerConf,
-) -> Result<PageserverShardConnectionInfo> {
+) -> Result<PageserverConnectionInfo> {
     let libpq_url = {
         let (host, port) = parse_host_port(&conf.listen_pg_addr)?;
         let port = port.unwrap_or(5432);
@@ -1234,10 +1234,24 @@ pub fn pageserver_conf_to_shard_conn_info(
     } else {
         None
     };
-    Ok(PageserverShardConnectionInfo {
+    let ps_conninfo = PageserverShardConnectionInfo {
         id: Some(conf.id.to_string()),
         libpq_url,
         grpc_url,
+    };
+
+    let shard_info = PageserverShardInfo {
+        pageservers: vec![ps_conninfo],
+    };
+
+    let shards: HashMap<_, _> = vec![(ShardIndex::unsharded(), shard_info)]
+        .into_iter()
+        .collect();
+    Ok(PageserverConnectionInfo {
+        shard_count: ShardCount::unsharded(),
+        stripe_size: None,
+        shards,
+        prefer_protocol: PageserverProtocol::default(),
     })
 }
 
