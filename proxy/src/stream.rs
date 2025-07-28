@@ -102,7 +102,7 @@ pub struct ReportedError {
 }
 
 impl ReportedError {
-    pub fn new(e: (impl UserFacingError + Into<anyhow::Error>)) -> Self {
+    pub fn new(e: impl UserFacingError + Into<anyhow::Error>) -> Self {
         let error_kind = e.get_error_kind();
         Self {
             source: e.into(),
