@@ -46,11 +46,36 @@ impl TenantShardDrain {
         &self,
         tenants: &BTreeMap<TenantShardId, TenantShard>,
         scheduler: &Scheduler,
-    ) -> Option<NodeId> {
-        let tenant_shard = tenants.get(&self.tenant_shard_id)?;
+    ) -> TenantShardDrainAction {
+        let tenant_shard = match tenants.get(&self.tenant_shard_id) {
+            Some(tenant_shard) => tenant_shard,
+            None => {
+                return TenantShardDrainAction::Skip;
+            }
+        };
 
         if *tenant_shard.intent.get_attached() != Some(self.drained_node) {
-            return None;
+            // If the intent attached node is not the drained node, check the observed state
+            // of the shard on the drained node. If it is Attached*, it means the shard is
+            // beeing migrated from the drained node. The drain loop needs to wait for the
+            // reconciliation to complete for a smooth draining.
+
+            let attach_mode = tenant_shard
+                .observed
+                .locations
+                .get(&self.drained_node)
+                .and_then(|observed| observed.conf.as_ref().map(|conf| conf.mode));
+
+            use pageserver_api::models::LocationConfigMode::{
+                AttachedMulti, AttachedSingle, AttachedStale,
+            };
+
+            return match (attach_mode, tenant_shard.intent.get_attached()) {
+                (Some(AttachedSingle | AttachedMulti | AttachedStale), Some(intent_node_id)) => {
+                    TenantShardDrainAction::Reconcile(*intent_node_id)
+                }
+                _ => TenantShardDrainAction::Skip,
+            };
         }
 
         // Only tenants with a normal (Active) scheduling policy are proactively moved
@@ -63,19 +88,19 @@ impl TenantShardDrain {
             }
             ShardSchedulingPolicy::Pause | ShardSchedulingPolicy::Stop => {
                 // If we have been asked to avoid rescheduling this shard, then do not migrate it during a drain
-                return None;
+                return TenantShardDrainAction::Skip;
             }
         }
 
         match tenant_shard.preferred_secondary(scheduler) {
-            Some(node) => Some(node),
+            Some(node) => TenantShardDrainAction::RescheduleToSecondary(node),
             None => {
                 tracing::warn!(
                     tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(),
                     "No eligible secondary while draining {}", self.drained_node
                 );
 
-                None
+                TenantShardDrainAction::Skip
             }
         }
     }
@@ -137,4 +162,18 @@ impl TenantShardDrain {
             }
         }
     }
+}
+
+/// Action to take when draining a tenant shard.
+pub(crate) enum TenantShardDrainAction {
+    /// The tenant shard is on the draining node.
+    /// Reschedule the tenant shard to a secondary location.
+    /// Holds a destination node id to reschedule to.
+    RescheduleToSecondary(NodeId),
+    /// The tenant shard is beeing migrated from the draining node.
+    /// Wait for the reconciliation to complete.
+    /// Holds the intent attached node id.
+    Reconcile(NodeId),
+    /// The tenant shard is not eligible for drainining, skip it.
+    Skip,
 }
