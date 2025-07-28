@@ -233,6 +233,15 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         log.info(f"`SELECT` query succeed after GC, {ctx=}")
         return offset
 
+    # It's not reliable to let the compute renew the lease in this test case as we have a very tight
+    # lease timeout. Therefore, the test case itself will renew the lease.
+    #
+    # This is a workaround to make the test case more deterministic.
+    def renew_lease(env: NeonEnv, lease_lsn: Lsn):
+        env.storage_controller.pageserver_api().timeline_lsn_lease(
+            env.initial_tenant, env.initial_timeline, lease_lsn
+        )
+
     # Insert some records on main branch
     with env.endpoints.create_start("main", config_lines=["shared_buffers=1MB"]) as ep_main:
         with ep_main.cursor() as cur:
@@ -246,9 +255,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         lsn = Lsn((int(lsn) // XLOG_BLCKSZ) * XLOG_BLCKSZ)
 
         # We need to mock the way cplane works: it gets a lease for a branch before starting the compute.
-        env.storage_controller.pageserver_api().timeline_lsn_lease(
-            env.initial_tenant, env.initial_timeline, lsn
-        )
+        renew_lease(env, lsn)
 
         with env.endpoints.create_start(
             branch_name="main",
@@ -268,15 +275,9 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             # Trigger Pageserver restarts
             for ps in env.pageservers:
                 ps.stop()
-
-            # Static compute should have at least one lease request failure due to connection.
-            time.sleep(LSN_LEASE_LENGTH / 2)
-
-            for ps in env.pageservers:
                 ps.start()
 
-            # Wait for static compute to renew lease at least once.
-            time.sleep(LSN_LEASE_LENGTH)
+            renew_lease(env, lsn)
 
             trigger_gc_and_select(
                 env,
@@ -294,7 +295,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             env.storage_controller.reconcile_until_idle()
 
             # Wait for static compute to renew lease on the new pageserver.
-            time.sleep(LSN_LEASE_LENGTH)
+            time.sleep(LSN_LEASE_LENGTH + 3)
 
             trigger_gc_and_select(
                 env,
@@ -306,7 +307,6 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
         # Do some update so we can increment gc_cutoff
         generate_updates_on_main(env, ep_main, i, end=100)
-
     # Wait for the existing lease to expire.
     time.sleep(LSN_LEASE_LENGTH + 1)
     # Now trigger GC again, layers should be removed.
