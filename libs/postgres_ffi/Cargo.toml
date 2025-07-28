@@ -9,7 +9,6 @@ regex.workspace = true
 bytes.workspace = true
 anyhow.workspace = true
 crc32c.workspace = true
-criterion.workspace = true
 once_cell.workspace = true
 log.workspace = true
 memoffset.workspace = true
@@ -22,6 +21,7 @@ tracing.workspace = true
 postgres_versioninfo.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 env_logger.workspace = true
 postgres.workspace = true
 
