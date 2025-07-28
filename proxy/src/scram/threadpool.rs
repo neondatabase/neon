@@ -10,16 +10,15 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 use futures::FutureExt;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use super::exchange::Pbkdf2CacheEntry;
+use super::cache::Pbkdf2Cache;
 use super::pbkdf2;
 use super::pbkdf2::Pbkdf2;
-use crate::intern::{EndpointIdInt, RoleNameInt};
+use crate::intern::EndpointIdInt;
 use crate::metrics::{ThreadPoolMetrics, ThreadPoolWorkerId};
 use crate::scram::countmin::CountMinSketch;
 
@@ -29,7 +28,7 @@ pub struct ThreadPool {
 
     // we hash a lot of passwords.
     // we keep a cache of partial hashes for faster validation.
-    pub(super) cache: moka::sync::Cache<(EndpointIdInt, RoleNameInt), Pbkdf2CacheEntry>,
+    pub(super) cache: Pbkdf2Cache,
 }
 
 /// How often to reset the sketch values
@@ -75,13 +74,7 @@ impl ThreadPool {
             Self {
                 runtime: Some(runtime),
                 metrics: Arc::new(ThreadPoolMetrics::new(n_workers as usize)),
-                // only store the most common client_keys for a very short period of time.
-                // only helps reduce the CPU load from the whales.
-                cache: moka::sync::Cache::builder()
-                    .name("pbkdf2")
-                    .max_capacity(100)
-                    .time_to_idle(Duration::from_secs(60))
-                    .build(),
+                cache: Pbkdf2Cache::new(),
             }
         })
     }

@@ -1,10 +1,9 @@
 //! Tools for SCRAM server secret management.
 
-use std::time::Instant;
-
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
 use subtle::{Choice, ConstantTimeEq};
+use tokio::time::Instant;
 
 use super::base64_decode_array;
 use super::key::ScramKey;

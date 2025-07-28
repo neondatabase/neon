@@ -1,12 +1,10 @@
 //! Implementation of the SCRAM authentication algorithm.
 
 use std::convert::Infallible;
-use std::time::Instant;
 
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
 use tracing::{debug, trace};
-use x509_cert::der::zeroize::Zeroize;
 
 use super::messages::{
     ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
@@ -18,6 +16,7 @@ use super::threadpool::ThreadPool;
 use super::{ScramKey, pbkdf2};
 use crate::intern::{EndpointIdInt, RoleNameInt};
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
+use crate::scram::cache::Pbkdf2CacheEntry;
 
 /// The only channel binding mode we currently support.
 #[derive(Debug)]
@@ -127,7 +126,7 @@ async fn exchange_with_cache(
     // compute the prefix of the pbkdf2 output.
     let prefix = derive_client_key(pool, endpoint, password, &salt, CACHED_ROUNDS).await;
 
-    if let Some(entry) = pool.cache.get(&(endpoint, role)) {
+    if let Some(entry) = pool.cache.get_entry(endpoint, role) {
         // hot path: let's check the threadpool cache
         if secret.cached_at == entry.cached_from {
             // cache is valid. compute the full hash by adding the prefix to the suffix.
@@ -144,7 +143,7 @@ async fn exchange_with_cache(
 
         // cached key is no longer valid.
         debug!("invalidating cached password");
-        pool.cache.invalidate(&(endpoint, role));
+        entry.invalidate();
     }
 
     // slow path: full password hash.
@@ -163,7 +162,8 @@ async fn exchange_with_cache(
     pbkdf2::xor_assign(&mut suffix, &prefix);
 
     pool.cache.insert(
-        (endpoint, role),
+        endpoint,
+        role,
         Pbkdf2CacheEntry {
             cached_from: secret.cached_at,
             suffix,
@@ -183,27 +183,6 @@ fn validate_pbkdf2(secret: &ServerSecret, hash: &pbkdf2::Block) -> sasl::Outcome
 }
 
 const CACHED_ROUNDS: u32 = 16;
-
-/// To speed up password hashing for more active customers, we store the tail results of the
-/// PBKDF2 algorithm. If the output of PBKDF2 is U1 ^ U2 ^ ⋯ ^ Uc, then we store
-/// suffix = U17 ^ U18 ^ ⋯ ^ Uc. We only need to calculate U1 ^ U2 ^ ⋯ ^ U15 ^ U16
-/// to determine the final result.
-///
-/// The suffix alone isn't enough to crack the password. The stored_key is still required.
-/// While both are cached in memory, given they're in different locations is makes it much
-/// harder to exploit, even if any such memory exploit exists in proxy.
-#[derive(Clone)]
-pub struct Pbkdf2CacheEntry {
-    /// corresponds to [`ServerSecret::cached_at`]
-    cached_from: Instant,
-    suffix: pbkdf2::Block,
-}
-
-impl Drop for Pbkdf2CacheEntry {
-    fn drop(&mut self) {
-        self.suffix.zeroize();
-    }
-}
 
 impl SaslInitial {
     fn transition(

@@ -730,6 +730,7 @@ pub enum CacheKind {
     ProjectInfoEndpoints,
     ProjectInfoRoles,
     Schema,
+    Pbkdf2,
 }
 
 #[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
