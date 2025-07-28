@@ -167,8 +167,7 @@ static XLogReaderState *reader_state;
 static int
 close_range_syscall(unsigned int start_fd, unsigned int count, unsigned int flags)
 {
-	return 0;
-    // return syscall(__NR_close_range, start_fd, count, flags);
+	return syscall(__NR_close_range, start_fd, count, flags);
 }
 
 
