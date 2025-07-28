@@ -102,8 +102,8 @@ def debezium(remote_pg: RemotePostgres):
     assert len(dbz.list_connectors()) == 1
     from kafka import KafkaConsumer
 
-    kafka_host = "kafka" if ("CI" in os.environ) else "127.0.0.1"
-    kafka_port = 9092 if ("CI" in os.environ) else 29092
+    kafka_host = "kafka" if (os.getenv("CI", "false") == "true") else "127.0.0.1"
+    kafka_port = 9092 if (os.getenv("CI", "false") == "true") else 29092
     log.info("Connecting to Kafka: %s:%s", kafka_host, kafka_port)
 
     consumer = KafkaConsumer(
