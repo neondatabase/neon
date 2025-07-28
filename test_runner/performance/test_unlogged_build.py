@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-@pytest.mark.timeout(10000)
 def test_unlogged_build(neon_env_builder: NeonEnvBuilder):
     """
     Check for race conditions between end of unlogged build and backends
