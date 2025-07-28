@@ -1923,7 +1923,7 @@ static void
 reset_min_request_lsn(int code, Datum arg)
 {
 	if (MyProcNumber != -1)
-		neon_per_backend_counters_shared[MyProcNumber].min_request_lsn = InvalidXLogRecPtr;
+		MIN_BACKEND_REQUEST_LSN = InvalidXLogRecPtr;
 }
 
 /*
@@ -1937,7 +1937,7 @@ communicator_init(void)
 	if (MyPState != NULL)
 		return;
 
-	on_shmem_exit(reset_min_request_lsn, 0);
+	before_shmem_exit(reset_min_request_lsn, 0);
 
 	/*
 	 * Sanity check that theperf counters array is sized correctly. We got
