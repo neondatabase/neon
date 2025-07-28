@@ -132,7 +132,7 @@ async fn exchange_with_cache(
         if secret.cached_at == entry.cached_from {
             // cache is valid. compute the full hash by adding the prefix to the suffix.
             let mut hash = prefix;
-            pbkdf2::xor(&mut hash, &entry.suffix);
+            pbkdf2::xor_assign(&mut hash, &entry.suffix);
             let outcome = validate_pbkdf2(secret, &hash);
 
             if matches!(outcome, sasl::Outcome::Success(_)) {
@@ -160,7 +160,7 @@ async fn exchange_with_cache(
 
     // time to cache, compute the suffix by subtracting the prefix from the hash.
     let mut suffix = hash;
-    pbkdf2::xor(&mut suffix, &prefix);
+    pbkdf2::xor_assign(&mut suffix, &prefix);
 
     pool.cache.insert(
         (endpoint, role),

@@ -72,7 +72,7 @@ impl Pbkdf2 {
         let n = (*iterations).clamp(0, 4096);
         for _ in 0..n {
             let next = single_round(hmac, prev);
-            xor(hi, &next);
+            xor_assign(hi, &next);
             *prev = next;
         }
 
@@ -89,7 +89,7 @@ impl Pbkdf2 {
 }
 
 #[inline(always)]
-pub fn xor(x: &mut Block, y: &Block) {
+pub fn xor_assign(x: &mut Block, y: &Block) {
     for (x, &y) in std::iter::zip(x, y) {
         *x ^= y;
     }
