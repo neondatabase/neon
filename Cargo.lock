@@ -5077,7 +5077,6 @@ dependencies = [
  "crc32c",
  "criterion",
  "env_logger",
- "log",
  "once_cell",
  "postgres",
  "postgres_ffi_types",
