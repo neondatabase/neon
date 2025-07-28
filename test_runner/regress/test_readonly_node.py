@@ -130,7 +130,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
     """
 
     LSN_LEASE_LENGTH = (
-        20  # This value needs to be large enough for compute_ctl to send two lease requests.
+        14  # This value needs to be large enough for compute_ctl to send two lease requests.
     )
 
     neon_env_builder.num_pageservers = 2
@@ -292,6 +292,9 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
                 env.pageservers[0].id, {"availability": "Offline"}
             )
             env.storage_controller.reconcile_until_idle()
+
+            # Wait for static compute to renew lease on the new pageserver.
+            time.sleep(LSN_LEASE_LENGTH)
 
             trigger_gc_and_select(
                 env,
