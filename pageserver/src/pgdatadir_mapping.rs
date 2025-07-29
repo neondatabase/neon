@@ -518,6 +518,7 @@ impl Timeline {
         }
 
         // Pre-deserialize the rel directory to avoid duplicated work in `get_relsize_cached`.
+        // TODO: refactor this read path to use reldir v2.
         let reldir_key = rel_dir_to_key(spcnode, dbnode);
         let buf = version.get(self, reldir_key, ctx).await?;
         let reldir = RelDirectory::des(&buf)?;
@@ -2425,9 +2426,9 @@ impl DatadirModification<'_> {
         }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
-        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
+        let mut dbdir: DbDirectory = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
         let mut is_dbdir_dirty = false;
-
+        
         let dbdir_exists =
             if let hash_map::Entry::Vacant(e) = dbdir.dbdirs.entry((rel.spcnode, rel.dbnode)) {
                 // Didn't exist. Update dbdir
