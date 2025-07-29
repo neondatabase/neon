@@ -29,7 +29,7 @@ use crate::config::{
 };
 use crate::control_plane::locks::ApiLocks;
 use crate::http::health_server::AppMetrics;
-use crate::metrics::{Metrics, ThreadPoolMetrics};
+use crate::metrics::{Metrics, ServiceInfo};
 use crate::rate_limiter::{EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo};
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::cancel_set::CancelSet;
@@ -113,8 +113,6 @@ pub async fn run() -> anyhow::Result<()> {
     let _logging_guard = crate::logging::init_local_proxy()?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
-
-    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
 
     // TODO: refactor these to use labels
     debug!("Version: {GIT_VERSION}");
@@ -207,6 +205,11 @@ pub async fn run() -> anyhow::Result<()> {
         endpoint_rate_limiter,
     );
 
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
+
     match futures::future::select(pin!(maintenance_tasks.join_next()), pin!(task)).await {
         // exit immediately on maintenance task completion
         Either::Left((Some(res), _)) => match crate::error::flatten_err(res)? {},
@@ -279,7 +282,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         http_config,
         authentication_config: AuthenticationConfig {
             jwks_cache: JwkCache::default(),
-            thread_pool: ThreadPool::new(0),
+            scram_thread_pool: ThreadPool::new(0),
             scram_protocol_timeout: Duration::from_secs(10),
             ip_allowlist_check_enabled: true,
             is_vpc_acccess_proxy: false,

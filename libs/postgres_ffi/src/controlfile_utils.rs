@@ -34,9 +34,8 @@ const SIZEOF_CONTROLDATA: usize = size_of::<ControlFileData>();
 impl ControlFileData {
     /// Compute the offset of the `crc` field within the `ControlFileData` struct.
     /// Equivalent to offsetof(ControlFileData, crc) in C.
-    // Someday this can be const when the right compiler features land.
-    fn pg_control_crc_offset() -> usize {
-        memoffset::offset_of!(ControlFileData, crc)
+    const fn pg_control_crc_offset() -> usize {
+        std::mem::offset_of!(ControlFileData, crc)
     }
 
     ///

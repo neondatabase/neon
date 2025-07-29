@@ -13,10 +13,11 @@ use tracing::{debug, info};
 use super::{EndpointAccessControl, RoleAccessControl};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
-use crate::cache::project_info::ProjectInfoCacheImpl;
+use crate::cache::node_info::{CachedNodeInfo, NodeInfoCache};
+use crate::cache::project_info::ProjectInfoCache;
 use crate::config::{CacheOptions, ProjectInfoCacheOptions};
 use crate::context::RequestContext;
-use crate::control_plane::{CachedNodeInfo, ControlPlaneApi, NodeInfoCache, errors};
+use crate::control_plane::{ControlPlaneApi, errors};
 use crate::error::ReportableError;
 use crate::metrics::ApiLockMetrics;
 use crate::rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token};
@@ -119,7 +120,7 @@ pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub(crate) node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
-    pub project_info: Arc<ProjectInfoCacheImpl>,
+    pub project_info: Arc<ProjectInfoCache>,
 }
 
 impl ApiCaches {
@@ -128,13 +129,8 @@ impl ApiCaches {
         project_info_cache_config: ProjectInfoCacheOptions,
     ) -> Self {
         Self {
-            node_info: NodeInfoCache::new(
-                "node_info_cache",
-                wake_compute_cache_config.size,
-                wake_compute_cache_config.ttl,
-                true,
-            ),
-            project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
+            node_info: NodeInfoCache::new(wake_compute_cache_config),
+            project_info: Arc::new(ProjectInfoCache::new(project_info_cache_config)),
         }
     }
 }

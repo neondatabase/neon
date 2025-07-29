@@ -20,7 +20,6 @@
 #include "neon.h"
 #include "neon_perf_counters.h"
 #include "walproposer.h"
-#include "walproposer.h"
 
 /* BEGIN_HADRON */
 databricks_metrics *databricks_metrics_shared;

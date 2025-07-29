@@ -185,6 +185,7 @@ impl Client {
         ssl_mode: SslMode,
         process_id: i32,
         secret_key: i32,
+        write_buf: BytesMut,
     ) -> Client {
         Client {
             inner: InnerClient {
@@ -195,7 +196,7 @@ impl Client {
                     waiting: 0,
                     received: 0,
                 },
-                buffer: Default::default(),
+                buffer: write_buf,
             },
             cached_typeinfo: Default::default(),
 

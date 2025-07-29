@@ -4,10 +4,8 @@ use std::convert::Infallible;
 
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use tracing::{debug, trace};
 
-use super::ScramKey;
 use super::messages::{
     ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
 };
@@ -15,8 +13,10 @@ use super::pbkdf2::Pbkdf2;
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
 use super::threadpool::ThreadPool;
-use crate::intern::EndpointIdInt;
+use super::{ScramKey, pbkdf2};
+use crate::intern::{EndpointIdInt, RoleNameInt};
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
+use crate::scram::cache::Pbkdf2CacheEntry;
 
 /// The only channel binding mode we currently support.
 #[derive(Debug)]
@@ -77,45 +77,112 @@ impl<'a> Exchange<'a> {
     }
 }
 
-// copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L236-L248>
 async fn derive_client_key(
     pool: &ThreadPool,
     endpoint: EndpointIdInt,
     password: &[u8],
     salt: &[u8],
     iterations: u32,
-) -> ScramKey {
-    let salted_password = pool
-        .spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
-        .await;
-
-    let make_key = |name| {
-        let key = Hmac::<Sha256>::new_from_slice(&salted_password)
-            .expect("HMAC is able to accept all key sizes")
-            .chain_update(name)
-            .finalize();
-
-        <[u8; 32]>::from(key.into_bytes())
-    };
-
-    make_key(b"Client Key").into()
+) -> pbkdf2::Block {
+    pool.spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
+        .await
 }
 
+/// For cleartext flow, we need to derive the client key to
+/// 1. authenticate the client.
+/// 2. authenticate with compute.
 pub(crate) async fn exchange(
     pool: &ThreadPool,
     endpoint: EndpointIdInt,
+    role: RoleNameInt,
+    secret: &ServerSecret,
+    password: &[u8],
+) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
+    if secret.iterations > CACHED_ROUNDS {
+        exchange_with_cache(pool, endpoint, role, secret, password).await
+    } else {
+        let salt = BASE64_STANDARD.decode(&*secret.salt_base64)?;
+        let hash = derive_client_key(pool, endpoint, password, &salt, secret.iterations).await;
+        Ok(validate_pbkdf2(secret, &hash))
+    }
+}
+
+/// Compute the client key using a cache. We cache the suffix of the pbkdf2 result only,
+/// which is not enough by itself to perform an offline brute force.
+async fn exchange_with_cache(
+    pool: &ThreadPool,
+    endpoint: EndpointIdInt,
+    role: RoleNameInt,
     secret: &ServerSecret,
     password: &[u8],
 ) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
     let salt = BASE64_STANDARD.decode(&*secret.salt_base64)?;
-    let client_key = derive_client_key(pool, endpoint, password, &salt, secret.iterations).await;
 
+    debug_assert!(
+        secret.iterations > CACHED_ROUNDS,
+        "we should not cache password data if there isn't enough rounds needed"
+    );
+
+    // compute the prefix of the pbkdf2 output.
+    let prefix = derive_client_key(pool, endpoint, password, &salt, CACHED_ROUNDS).await;
+
+    if let Some(entry) = pool.cache.get_entry(endpoint, role) {
+        // hot path: let's check the threadpool cache
+        if secret.cached_at == entry.cached_from {
+            // cache is valid. compute the full hash by adding the prefix to the suffix.
+            let mut hash = prefix;
+            pbkdf2::xor_assign(&mut hash, &entry.suffix);
+            let outcome = validate_pbkdf2(secret, &hash);
+
+            if matches!(outcome, sasl::Outcome::Success(_)) {
+                trace!("password validated from cache");
+            }
+
+            return Ok(outcome);
+        }
+
+        // cached key is no longer valid.
+        debug!("invalidating cached password");
+        entry.invalidate();
+    }
+
+    // slow path: full password hash.
+    let hash = derive_client_key(pool, endpoint, password, &salt, secret.iterations).await;
+    let outcome = validate_pbkdf2(secret, &hash);
+
+    let client_key = match outcome {
+        sasl::Outcome::Success(client_key) => client_key,
+        sasl::Outcome::Failure(_) => return Ok(outcome),
+    };
+
+    trace!("storing cached password");
+
+    // time to cache, compute the suffix by subtracting the prefix from the hash.
+    let mut suffix = hash;
+    pbkdf2::xor_assign(&mut suffix, &prefix);
+
+    pool.cache.insert(
+        endpoint,
+        role,
+        Pbkdf2CacheEntry {
+            cached_from: secret.cached_at,
+            suffix,
+        },
+    );
+
+    Ok(sasl::Outcome::Success(client_key))
+}
+
+fn validate_pbkdf2(secret: &ServerSecret, hash: &pbkdf2::Block) -> sasl::Outcome<ScramKey> {
+    let client_key = super::ScramKey::client_key(&(*hash).into());
     if secret.is_password_invalid(&client_key).into() {
-        Ok(sasl::Outcome::Failure("password doesn't match"))
+        sasl::Outcome::Failure("password doesn't match")
     } else {
-        Ok(sasl::Outcome::Success(client_key))
+        sasl::Outcome::Success(client_key)
     }
 }
+
+const CACHED_ROUNDS: u32 = 16;
 
 impl SaslInitial {
     fn transition(

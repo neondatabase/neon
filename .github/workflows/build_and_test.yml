@@ -634,7 +634,9 @@ jobs:
             DEBIAN_VERSION=bookworm
           secrets: |
             SUBZERO_ACCESS_TOKEN=${{ secrets.CI_ACCESS_TOKEN }}
-          provenance: false
+          attests: |
+            type=provenance,mode=max
+            type=sbom,generator=docker.io/docker/buildkit-syft-scanner:1
           push: true
           pull: true
           file: Dockerfile
@@ -747,7 +749,9 @@ jobs:
             PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
-          provenance: false
+          attests: |
+            type=provenance,mode=max
+            type=sbom,generator=docker.io/docker/buildkit-syft-scanner:1
           push: true
           pull: true
           file: compute/compute-node.Dockerfile
@@ -766,7 +770,9 @@ jobs:
             PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.meta.outputs.release-tag || needs.meta.outputs.build-tag }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
-          provenance: false
+          attests: |
+            type=provenance,mode=max
+            type=sbom,generator=docker.io/docker/buildkit-syft-scanner:1
           push: true
           pull: true
           file: compute/compute-node.Dockerfile

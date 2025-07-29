@@ -508,19 +508,45 @@ backpressure_lag_impl(void)
 			 LSN_FORMAT_ARGS(flushPtr),
 			 LSN_FORMAT_ARGS(applyPtr));
 
-		if ((writePtr != InvalidXLogRecPtr && max_replication_write_lag > 0 && myFlushLsn > writePtr + max_replication_write_lag * MB))
+		if (lakebase_mode)
 		{
-			return (myFlushLsn - writePtr - max_replication_write_lag * MB);
-		}
+			// in case PG does not have shard map initialized, we assume PG always has 1 shard at minimum.
+			shardno_t num_shards = Max(1, get_num_shards());
+			int tenant_max_replication_apply_lag = num_shards * max_replication_apply_lag;
+			int tenant_max_replication_flush_lag = num_shards * max_replication_flush_lag;
+			int tenant_max_replication_write_lag = num_shards * max_replication_write_lag;
 
-		if ((flushPtr != InvalidXLogRecPtr && max_replication_flush_lag > 0 && myFlushLsn > flushPtr + max_replication_flush_lag * MB))
-		{
-			return (myFlushLsn - flushPtr - max_replication_flush_lag * MB);
-		}
+			if ((writePtr != InvalidXLogRecPtr && tenant_max_replication_write_lag > 0 && myFlushLsn > writePtr + tenant_max_replication_write_lag * MB))
+			{
+				return (myFlushLsn - writePtr - tenant_max_replication_write_lag * MB);
+			}
 
-		if ((applyPtr != InvalidXLogRecPtr && max_replication_apply_lag > 0 && myFlushLsn > applyPtr + max_replication_apply_lag * MB))
+			if ((flushPtr != InvalidXLogRecPtr && tenant_max_replication_flush_lag > 0 && myFlushLsn > flushPtr + tenant_max_replication_flush_lag * MB))
+			{
+				return (myFlushLsn - flushPtr - tenant_max_replication_flush_lag * MB);
+			}
+
+			if ((applyPtr != InvalidXLogRecPtr && tenant_max_replication_apply_lag > 0 && myFlushLsn > applyPtr + tenant_max_replication_apply_lag * MB))
+			{
+				return (myFlushLsn - applyPtr - tenant_max_replication_apply_lag * MB);
+			}
+		}
+		else
 		{
-			return (myFlushLsn - applyPtr - max_replication_apply_lag * MB);
+			if ((writePtr != InvalidXLogRecPtr && max_replication_write_lag > 0 && myFlushLsn > writePtr + max_replication_write_lag * MB))
+			{
+				return (myFlushLsn - writePtr - max_replication_write_lag * MB);
+			}
+
+			if ((flushPtr != InvalidXLogRecPtr && max_replication_flush_lag > 0 && myFlushLsn > flushPtr + max_replication_flush_lag * MB))
+			{
+				return (myFlushLsn - flushPtr - max_replication_flush_lag * MB);
+			}
+
+			if ((applyPtr != InvalidXLogRecPtr && max_replication_apply_lag > 0 && myFlushLsn > applyPtr + max_replication_apply_lag * MB))
+			{
+				return (myFlushLsn - applyPtr - max_replication_apply_lag * MB);
+			}
 		}
 	}
 	return 0;
