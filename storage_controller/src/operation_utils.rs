@@ -47,11 +47,8 @@ impl TenantShardDrain {
         tenants: &BTreeMap<TenantShardId, TenantShard>,
         scheduler: &Scheduler,
     ) -> TenantShardDrainAction {
-        let tenant_shard = match tenants.get(&self.tenant_shard_id) {
-            Some(tenant_shard) => tenant_shard,
-            None => {
-                return TenantShardDrainAction::Skip;
-            }
+        let Some(tenant_shard) = tenants.get(&self.tenant_shard_id) else {
+            return TenantShardDrainAction::Skip;
         };
 
         if *tenant_shard.intent.get_attached() != Some(self.drained_node) {
@@ -60,15 +57,13 @@ impl TenantShardDrain {
             // beeing migrated from the drained node. The drain loop needs to wait for the
             // reconciliation to complete for a smooth draining.
 
+            use pageserver_api::models::LocationConfigMode::*;
+
             let attach_mode = tenant_shard
                 .observed
                 .locations
                 .get(&self.drained_node)
                 .and_then(|observed| observed.conf.as_ref().map(|conf| conf.mode));
-
-            use pageserver_api::models::LocationConfigMode::{
-                AttachedMulti, AttachedSingle, AttachedStale,
-            };
 
             return match (attach_mode, tenant_shard.intent.get_attached()) {
                 (Some(AttachedSingle | AttachedMulti | AttachedStale), Some(intent_node_id)) => {
