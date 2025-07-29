@@ -53,7 +53,7 @@ typedef struct LfcStatsEntry
 	bool		isnull;
 	uint64		value;
 } LfcStatsEntry;
-extern LfcStatsEntry *lfc_get_stats(int *num_entries);
+extern LfcStatsEntry *lfc_get_stats(size_t *num_entries);
 
 typedef struct
 {
@@ -65,7 +65,7 @@ typedef struct
 	BlockNumber blocknum;
 	uint16		accesscount;
 } LocalCachePagesRec;
-extern LocalCachePagesRec *lfc_local_cache_pages(uint32 *num_entries);
+extern LocalCachePagesRec *lfc_local_cache_pages(size_t *num_entries);
 
 extern int32 lfc_approximate_working_set_size_seconds(time_t duration, bool reset);
 

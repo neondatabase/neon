@@ -714,7 +714,7 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 #define NUM_NEON_GET_STATS_COLS        2
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	LfcStatsEntry *entries;
-	int			num_entries;
+	size_t		num_entries;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -722,7 +722,7 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 	entries = lfc_get_stats(&num_entries);
 
 	/* Convert the LfcStatsEntrys to a result set */
-	for (int i = 0; i < num_entries; i++)
+	for (size_t i = 0; i < num_entries; i++)
 	{
 		LfcStatsEntry *entry = &entries[i];
 		Datum		values[NUM_NEON_GET_STATS_COLS];
@@ -744,7 +744,7 @@ local_cache_pages(PG_FUNCTION_ARGS)
 #define NUM_LOCALCACHE_PAGES_ELEM	7
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	LocalCachePagesRec *entries;
-	uint32		num_entries;
+	size_t		num_entries;
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -752,7 +752,7 @@ local_cache_pages(PG_FUNCTION_ARGS)
 	entries = lfc_local_cache_pages(&num_entries);
 
 	/* Convert the LocalCachePagesRec structs to a result set */
-	for (uint32 i = 0; i < num_entries; i++)
+	for (size_t i = 0; i < num_entries; i++)
 	{
 		LocalCachePagesRec *entry = &entries[i];
 		Datum		values[NUM_LOCALCACHE_PAGES_ELEM];

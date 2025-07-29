@@ -1839,10 +1839,10 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
  * of the returned array is returned in *num_entries.
  */
 LfcStatsEntry *
-lfc_get_stats(int *num_entries)
+lfc_get_stats(size_t *num_entries)
 {
 	LfcStatsEntry *entries;
-	int			n = 0;
+	size_t		n = 0;
 
 #define MAX_ENTRIES 10
 	entries = palloc(sizeof(LfcStatsEntry) * MAX_ENTRIES);
@@ -1879,12 +1879,12 @@ lfc_get_stats(int *num_entries)
  * relation node/tablespace/database/blocknum and access_counter
  */
 LocalCachePagesRec *
-lfc_local_cache_pages(uint32 *num_entries)
+lfc_local_cache_pages(size_t *num_entries)
 {
 	HASH_SEQ_STATUS status;
 	FileCacheEntry *entry;
-	uint32		n_pages;
-	uint32		n;
+	size_t		n_pages;
+	size_t		n;
 	LocalCachePagesRec *result;
 
 	if (!lfc_ctl)
