@@ -9,7 +9,7 @@ use postgres_protocol2::message::backend::{ErrorFields, ErrorResponseBody};
 pub use self::sqlstate::*;
 
 #[allow(clippy::unreadable_literal)]
-mod sqlstate;
+pub mod sqlstate;
 
 /// The severity of a Postgres error or notice.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

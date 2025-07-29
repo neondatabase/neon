@@ -826,9 +826,9 @@ impl TenantManager {
         peek_slot.is_some()
     }
 
-    /// Returns whether a local slot exists for a child shard of the given tenant and shard count.
-    /// Note that this just checks for a shard with a larger shard count, and it may not be a
-    /// direct child of the given shard.
+    /// Returns whether a local shard exists that's a child of the given tenant shard. Note that
+    /// this just checks for any shard with a larger shard count, and it may not be a direct child
+    /// of the given shard (their keyspace may not overlap).
     pub(crate) fn has_child_shard(&self, tenant_id: TenantId, shard_index: ShardIndex) -> bool {
         match &*self.tenants.read().unwrap() {
             TenantsMap::Initializing => false,
@@ -1536,9 +1536,10 @@ impl TenantManager {
         // Phase 2: Put the parent shard to InProgress and grab a reference to the parent Tenant
         //
         // TODO: keeping the parent as InProgress while spawning the children causes read
-        // unavailability, as we can't acquire a timeline handle for it. The parent should be
-        // available for reads until the children are ready -- potentially until *all* subsplits
-        // across all parent shards are complete and the compute has been notified. See:
+        // unavailability, as we can't acquire a new timeline handle for it (existing handles appear
+        // to still work though, even downgraded ones). The parent should be available for reads
+        // until the children are ready -- potentially until *all* subsplits across all parent
+        // shards are complete and the compute has been notified. See:
         // <https://databricks.atlassian.net/browse/LKB-672>.
         drop(tenant);
         let mut parent_slot_guard =

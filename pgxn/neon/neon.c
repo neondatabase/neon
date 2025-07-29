@@ -53,6 +53,7 @@ void		_PG_init(void);
 bool lakebase_mode = false;
 
 static int  running_xacts_overflow_policy;
+static emit_log_hook_type prev_emit_log_hook;
 static bool monitor_query_exec_time = false;
 
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
@@ -82,6 +83,8 @@ uint32		WAIT_EVENT_NEON_PS_SEND;
 uint32		WAIT_EVENT_NEON_PS_READ;
 uint32		WAIT_EVENT_NEON_WAL_DL;
 #endif
+
+int databricks_test_hook = 0;
 
 enum RunningXactsOverflowPolicies {
 	OP_IGNORE,
@@ -447,6 +450,20 @@ ReportSearchPath(void)
 static int neon_pgstat_file_size_limit;
 #endif
 
+static void DatabricksSqlErrorHookImpl(ErrorData *edata) {
+	if (prev_emit_log_hook != NULL) {
+		prev_emit_log_hook(edata);
+	}
+
+	if (edata->sqlerrcode == ERRCODE_DATA_CORRUPTED) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->data_corruption_count, 1);
+	} else if (edata->sqlerrcode == ERRCODE_INDEX_CORRUPTED) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->index_corruption_count, 1);
+	} else if (edata->sqlerrcode == ERRCODE_INTERNAL_ERROR) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->internal_error_count, 1);
+	}
+}
+
 void
 _PG_init(void)
 {
@@ -467,6 +484,11 @@ _PG_init(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+	if (lakebase_mode) {
+		prev_emit_log_hook = emit_log_hook;
+		emit_log_hook = DatabricksSqlErrorHookImpl;
+	}
 
 	/*
 	 * Initializing a pre-loaded Postgres extension happens in three stages:
@@ -605,6 +627,19 @@ _PG_init(void)
 							&lakebase_mode,
 							false,
 							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
+
+	// A test hook used in sql regress to trigger specific behaviors
+	// to test features easily.
+	DefineCustomIntVariable(
+							"databricks.test_hook",
+							"The test hook used in sql regress tests only",
+							NULL,
+							&databricks_test_hook,
+							0,
+							0, INT32_MAX,
+							PGC_SUSET,
 							0,
 							NULL, NULL, NULL);
 
@@ -842,6 +877,9 @@ neon_shmem_startup_hook(void)
 	LfcShmemInit();
 	PrewarmShmemInit();
 	NeonPerfCountersShmemInit();
+	if (lakebase_mode) {
+		DatabricksMetricsShmemInit();
+	}
 	PagestoreShmemInit();
 	RelsizeCacheShmemInit();
 	WalproposerShmemInit();
