@@ -8,7 +8,7 @@ BEGIN
     )
     THEN
         CREATE TABLE neon.drop_subscriptions_done
-        (id pg_catalog.serial primary key, timeline_id pg_catalog.text);
+        (id pg_catalog.int4 primary key generated as identity, timeline_id pg_catalog.text);
     END IF;
 
     -- preserve the timeline_id of the last drop_subscriptions run
