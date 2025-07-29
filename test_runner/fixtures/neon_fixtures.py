@@ -5280,16 +5280,32 @@ class EndpointFactory:
         )
 
     def stop_all(self, fail_on_error=True) -> Self:
-        exception = None
-        for ep in self.endpoints:
+        """
+        Stop all the endpoints in parallel.
+        """
+
+        # Note: raising an exception from a task in a task group cancels
+        # all the other tasks. We don't want that, hence the 'stop_one'
+        # function catches exceptions and puts them on the 'exceptions'
+        # list for later processing.
+        exceptions = []
+
+        async def stop_one(ep):
             try:
-                ep.stop()
+                await asyncio.to_thread(ep.stop)
             except Exception as e:
                 log.error(f"Failed to stop endpoint {ep.endpoint_id}: {e}")
-                exception = e
+                exceptions.append(e)
 
-        if fail_on_error and exception is not None:
-            raise exception
+        async def async_stop_all():
+            async with asyncio.TaskGroup() as tg:
+                for ep in self.endpoints:
+                    tg.create_task(stop_one(ep))
+
+        asyncio.run(async_stop_all())
+
+        if fail_on_error and exceptions:
+            raise ExceptionGroup("stopping an endpoint failed", exceptions)
 
         return self
 
