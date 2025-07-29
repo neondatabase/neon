@@ -1868,6 +1868,7 @@ lfc_get_stats(size_t *num_entries)
 	entries[n++] = (LfcStatsEntry) {"file_cache_chunks_pinned", lfc_ctl == NULL,
 									lfc_ctl ? lfc_ctl->pinned : 0 };
 	Assert(n <= MAX_ENTRIES);
+#undef MAX_ENTRIES
 
 	*num_entries = n;
 	return entries;

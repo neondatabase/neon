@@ -734,14 +734,15 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 		nulls[1] = entry->isnull;
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
-
 	PG_RETURN_VOID();
+
+#undef NUM_NEON_GET_STATS_COLS
 }
 
 Datum
 local_cache_pages(PG_FUNCTION_ARGS)
 {
-#define NUM_LOCALCACHE_PAGES_ELEM	7
+#define NUM_LOCALCACHE_PAGES_COLS	7
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	LocalCachePagesRec *entries;
 	size_t		num_entries;
@@ -755,8 +756,8 @@ local_cache_pages(PG_FUNCTION_ARGS)
 	for (size_t i = 0; i < num_entries; i++)
 	{
 		LocalCachePagesRec *entry = &entries[i];
-		Datum		values[NUM_LOCALCACHE_PAGES_ELEM];
-		bool		nulls[NUM_LOCALCACHE_PAGES_ELEM] = {
+		Datum		values[NUM_LOCALCACHE_PAGES_COLS];
+		bool		nulls[NUM_LOCALCACHE_PAGES_COLS] = {
 			false, false, false, false, false, false, false
 		};
 
@@ -773,6 +774,8 @@ local_cache_pages(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_VOID();
+
+#undef NUM_LOCALCACHE_PAGES_COLS
 }
 
 /*
