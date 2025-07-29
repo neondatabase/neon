@@ -79,7 +79,7 @@ use spki::der::Decode;
 use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use utils::id::{NodeId, TenantId, TimelineId};
-use utils::shard::{ShardIndex, ShardNumber};
+use utils::shard::{ShardCount, ShardIndex, ShardNumber};
 
 use pageserver_api::config::DEFAULT_GRPC_LISTEN_PORT as DEFAULT_PAGESERVER_GRPC_PORT;
 use postgres_connection::parse_host_port;
@@ -728,14 +728,13 @@ impl Endpoint {
 
         // For the sake of backwards-compatibility, also fill in 'pageserver_connstring'
         //
+        // XXX: I believe this is not really needed, except to make
+        // test_forward_compatibility happy.
+        //
         // Use a closure so that we can conviniently return None in the middle of the
         // loop.
         let pageserver_connstring: Option<String> = (|| {
-            let num_shards = if args.pageserver_conninfo.shard_count.is_unsharded() {
-                1
-            } else {
-                args.pageserver_conninfo.shard_count.0
-            };
+            let num_shards = args.pageserver_conninfo.shard_count.count();
             let mut connstrings = Vec::new();
             for shard_no in 0..num_shards {
                 let shard_index = ShardIndex {
@@ -827,6 +826,7 @@ impl Endpoint {
                 autoprewarm: args.autoprewarm,
                 offload_lfc_interval_seconds: args.offload_lfc_interval_seconds,
                 suspend_timeout_seconds: -1, // Only used in neon_local.
+                databricks_settings: None,
             };
 
             // this strange code is needed to support respec() in tests
@@ -971,7 +971,9 @@ impl Endpoint {
                         | ComputeStatus::Configuration
                         | ComputeStatus::TerminationPendingFast
                         | ComputeStatus::TerminationPendingImmediate
-                        | ComputeStatus::Terminated => {
+                        | ComputeStatus::Terminated
+                        | ComputeStatus::RefreshConfigurationPending
+                        | ComputeStatus::RefreshConfiguration => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
                     }
@@ -990,6 +992,27 @@ impl Endpoint {
 
         // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
         drop(scopeguard::ScopeGuard::into_inner(child));
+
+        Ok(())
+    }
+
+    // Update the pageservers in the spec file of the endpoint. This is useful to test the spec refresh scenario.
+    pub async fn update_pageservers_in_config(
+        &self,
+        pageserver_conninfo: &PageserverConnectionInfo,
+    ) -> Result<()> {
+        let config_path = self.endpoint_path().join("config.json");
+        let mut config: ComputeConfig = {
+            let file = std::fs::File::open(&config_path)?;
+            serde_json::from_reader(file)?
+        };
+
+        let mut spec = config.spec.unwrap();
+        spec.pageserver_connection_info = Some(pageserver_conninfo.clone());
+        config.spec = Some(spec);
+
+        let file = std::fs::File::create(&config_path)?;
+        serde_json::to_writer_pretty(file, &config)?;
 
         Ok(())
     }
@@ -1156,6 +1179,33 @@ impl Endpoint {
         Ok(response)
     }
 
+    pub async fn refresh_configuration(&self) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let response = client
+            .post(format!(
+                "http://{}:{}/refresh_configuration",
+                self.internal_http_address.ip(),
+                self.internal_http_address.port()
+            ))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text().await {
+                Ok(err_body) => format!("Error: {err_body}"),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
+    }
+
     pub fn connstr(&self, user: &str, db_name: &str) -> String {
         format!(
             "postgresql://{}@{}:{}/{}",
@@ -1167,9 +1217,11 @@ impl Endpoint {
     }
 }
 
-pub fn pageserver_conf_to_shard_conn_info(
+/// If caller is telling us what pageserver to use, this is not a tenant which is
+/// fully managed by storage controller, therefore not sharded.
+pub fn local_pageserver_conf_to_conn_info(
     conf: &crate::local_env::PageServerConf,
-) -> Result<PageserverShardConnectionInfo> {
+) -> Result<PageserverConnectionInfo> {
     let libpq_url = {
         let (host, port) = parse_host_port(&conf.listen_pg_addr)?;
         let port = port.unwrap_or(5432);
@@ -1182,10 +1234,24 @@ pub fn pageserver_conf_to_shard_conn_info(
     } else {
         None
     };
-    Ok(PageserverShardConnectionInfo {
-        id: Some(conf.id.to_string()),
+    let ps_conninfo = PageserverShardConnectionInfo {
+        id: Some(conf.id),
         libpq_url,
         grpc_url,
+    };
+
+    let shard_info = PageserverShardInfo {
+        pageservers: vec![ps_conninfo],
+    };
+
+    let shards: HashMap<_, _> = vec![(ShardIndex::unsharded(), shard_info)]
+        .into_iter()
+        .collect();
+    Ok(PageserverConnectionInfo {
+        shard_count: ShardCount::unsharded(),
+        stripe_size: None,
+        shards,
+        prefer_protocol: PageserverProtocol::default(),
     })
 }
 
@@ -1210,7 +1276,7 @@ pub fn tenant_locate_response_to_conn_info(
 
         let shard_info = PageserverShardInfo {
             pageservers: vec![PageserverShardConnectionInfo {
-                id: Some(shard.node_id.to_string()),
+                id: Some(shard.node_id),
                 libpq_url,
                 grpc_url,
             }],
@@ -1222,7 +1288,7 @@ pub fn tenant_locate_response_to_conn_info(
     let stripe_size = if response.shard_params.count.is_unsharded() {
         None
     } else {
-        Some(response.shard_params.stripe_size.0)
+        Some(response.shard_params.stripe_size)
     };
     Ok(PageserverConnectionInfo {
         shard_count: response.shard_params.count,

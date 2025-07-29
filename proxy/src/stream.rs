@@ -102,7 +102,7 @@ pub struct ReportedError {
 }
 
 impl ReportedError {
-    pub fn new(e: (impl UserFacingError + Into<anyhow::Error>)) -> Self {
+    pub fn new(e: impl UserFacingError + Into<anyhow::Error>) -> Self {
         let error_kind = e.get_error_kind();
         Self {
             source: e.into(),
@@ -152,6 +152,15 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Write the message into an internal buffer
     pub fn write_message(&mut self, message: BeMessage<'_>) {
         message.write_message(&mut self.write);
+    }
+
+    /// Write the buffer to the socket until we have some more space again.
+    pub async fn write_if_full(&mut self) -> io::Result<()> {
+        while self.write.occupied_len() > 2048 {
+            self.stream.write_buf(&mut self.write).await?;
+        }
+
+        Ok(())
     }
 
     /// Flush the output buffer into the underlying stream.

@@ -1370,10 +1370,10 @@ communicator_new_approximate_working_set_size_seconds(time_t duration, bool rese
  * Return an array of LfcStatsEntrys
  */
 LfcStatsEntry *
-communicator_new_get_lfc_stats(uint32 *num_entries)
+communicator_new_lfc_get_stats(size_t *num_entries)
 {
 	LfcStatsEntry *entries;
-	int			n = 0;
+	size_t		n = 0;
 	uint64		cache_misses = 0;
 	uint64		cache_hits = 0;
 

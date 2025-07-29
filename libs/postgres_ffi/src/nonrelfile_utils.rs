@@ -4,12 +4,11 @@
 use crate::pg_constants;
 use crate::transaction_id_precedes;
 use bytes::BytesMut;
-use log::*;
 
 use super::bindings::MultiXactId;
 
 pub fn transaction_id_set_status(xid: u32, status: u8, page: &mut BytesMut) {
-    trace!(
+    tracing::trace!(
         "handle_apply_request for RM_XACT_ID-{} (1-commit, 2-abort, 3-sub_commit)",
         status
     );

@@ -62,6 +62,7 @@ tokio-stream.workspace = true
 tonic.workspace = true
 tower-otel.workspace = true
 tracing.workspace = true
+tracing-appender.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true

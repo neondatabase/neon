@@ -10,7 +10,7 @@ use super::backend::ComputeCredentialKeys;
 use super::{AuthError, PasswordHackPayload};
 use crate::context::RequestContext;
 use crate::control_plane::AuthSecret;
-use crate::intern::EndpointIdInt;
+use crate::intern::{EndpointIdInt, RoleNameInt};
 use crate::pqproto::{BeAuthenticationSaslMessage, BeMessage};
 use crate::sasl;
 use crate::scram::threadpool::ThreadPool;
@@ -46,6 +46,7 @@ pub(crate) struct PasswordHack;
 pub(crate) struct CleartextPassword {
     pub(crate) pool: Arc<ThreadPool>,
     pub(crate) endpoint: EndpointIdInt,
+    pub(crate) role: RoleNameInt,
     pub(crate) secret: AuthSecret,
 }
 
@@ -111,6 +112,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
         let outcome = validate_password_and_exchange(
             &self.state.pool,
             self.state.endpoint,
+            self.state.role,
             password,
             self.state.secret,
         )
@@ -165,13 +167,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
 pub(crate) async fn validate_password_and_exchange(
     pool: &ThreadPool,
     endpoint: EndpointIdInt,
+    role: RoleNameInt,
     password: &[u8],
     secret: AuthSecret,
 ) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
     match secret {
         // perform scram authentication as both client and server to validate the keys
         AuthSecret::Scram(scram_secret) => {
-            let outcome = crate::scram::exchange(pool, endpoint, &scram_secret, password).await?;
+            let outcome =
+                crate::scram::exchange(pool, endpoint, role, &scram_secret, password).await?;
 
             let client_key = match outcome {
                 sasl::Outcome::Success(client_key) => client_key,

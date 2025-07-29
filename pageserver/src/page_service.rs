@@ -69,6 +69,7 @@ use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
+use crate::feature_resolver::FeatureResolver;
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, GetPageBatchBreakReason, LIVE_CONNECTIONS,
     MISROUTED_PAGESTREAM_REQUESTS, PAGESTREAM_HANDLER_RESULTS_TOTAL, SmgrOpTimer, TimelineMetrics,
@@ -140,6 +141,7 @@ pub fn spawn(
     perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
     tls_config: Option<Arc<rustls::ServerConfig>>,
+    feature_resolver: FeatureResolver,
 ) -> Listener {
     let cancel = CancellationToken::new();
     let libpq_ctx = RequestContext::todo_child(
@@ -161,6 +163,7 @@ pub fn spawn(
             conf.pg_auth_type,
             tls_config,
             conf.page_service_pipelining.clone(),
+            feature_resolver,
             libpq_ctx,
             cancel.clone(),
         )
@@ -219,6 +222,7 @@ pub async fn libpq_listener_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    feature_resolver: FeatureResolver,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -262,6 +266,7 @@ pub async fn libpq_listener_main(
                     auth_type,
                     tls_config.clone(),
                     pipelining_config.clone(),
+                    feature_resolver.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
@@ -304,6 +309,7 @@ async fn page_service_conn_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
+    feature_resolver: FeatureResolver,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
@@ -371,6 +377,7 @@ async fn page_service_conn_main(
         perf_span_fields,
         connection_ctx,
         cancel.clone(),
+        feature_resolver.clone(),
         gate_guard,
     );
     let pgbackend =
@@ -422,6 +429,8 @@ struct PageServerHandler {
     pipelining_config: PageServicePipeliningConfig,
     get_vectored_concurrent_io: GetVectoredConcurrentIo,
 
+    feature_resolver: FeatureResolver,
+
     gate_guard: GateGuard,
 }
 
@@ -459,13 +468,6 @@ impl TimelineHandles {
         self.handles
             .get(timeline_id, shard_selector, &self.wrapper)
             .await
-            .map_err(|e| match e {
-                timeline::handle::GetError::TenantManager(e) => e,
-                timeline::handle::GetError::PerTimelineStateShutDown => {
-                    trace!("per-timeline state shut down");
-                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
-                }
-            })
     }
 
     fn tenant_id(&self) -> Option<TenantId> {
@@ -488,11 +490,9 @@ pub(crate) struct TenantManagerWrapper {
     tenant_id: once_cell::sync::OnceCell<TenantId>,
 }
 
-#[derive(Debug)]
 pub(crate) struct TenantManagerTypes;
 
 impl timeline::handle::Types for TenantManagerTypes {
-    type TenantManagerError = GetActiveTimelineError;
     type TenantManager = TenantManagerWrapper;
     type Timeline = TenantManagerCacheItem;
 }
@@ -544,6 +544,7 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
             match resolved {
                 ShardResolveResult::Found(tenant_shard) => break tenant_shard,
                 ShardResolveResult::NotFound => {
+                    MISROUTED_PAGESTREAM_REQUESTS.inc();
                     return Err(GetActiveTimelineError::Tenant(
                         GetActiveTenantError::NotFound(GetTenantError::NotFound(*tenant_id)),
                     ));
@@ -593,6 +594,15 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
             gate_guard,
         })
     }
+}
+
+/// Whether to hold the applied GC cutoff guard when processing GetPage requests.
+/// This is determined once at the start of pagestream subprotocol handling based on
+/// feature flags, configuration, and test conditions.
+#[derive(Debug, Clone, Copy)]
+enum HoldAppliedGcCutoffGuard {
+    Yes,
+    No,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -738,6 +748,7 @@ enum BatchedFeMessage {
     GetPage {
         span: Span,
         shard: WeakHandle<TenantManagerTypes>,
+        applied_gc_cutoff_guard: Option<RcuReadGuard<Lsn>>,
         pages: SmallVec<[BatchedGetPageRequest; 1]>,
         batch_break_reason: GetPageBatchBreakReason,
     },
@@ -917,6 +928,7 @@ impl PageServerHandler {
         perf_span_fields: ConnectionPerfSpanFields,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
+        feature_resolver: FeatureResolver,
         gate_guard: GateGuard,
     ) -> Self {
         PageServerHandler {
@@ -928,6 +940,7 @@ impl PageServerHandler {
             cancel,
             pipelining_config,
             get_vectored_concurrent_io,
+            feature_resolver,
             gate_guard,
         }
     }
@@ -967,6 +980,7 @@ impl PageServerHandler {
         ctx: &RequestContext,
         protocol_version: PagestreamProtocolVersion,
         parent_span: Span,
+        hold_gc_cutoff_guard: HoldAppliedGcCutoffGuard,
     ) -> Result<Option<BatchedFeMessage>, QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
@@ -1204,17 +1218,25 @@ impl PageServerHandler {
                 })
                 .await?;
 
+                let applied_gc_cutoff_guard = shard.get_applied_gc_cutoff_lsn(); // hold guard
                 // We're holding the Handle
                 let effective_lsn = match Self::effective_request_lsn(
                     &shard,
                     shard.get_last_record_lsn(),
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
-                    &shard.get_applied_gc_cutoff_lsn(),
+                    &applied_gc_cutoff_guard,
                 ) {
                     Ok(lsn) => lsn,
                     Err(e) => {
                         return respond_error!(span, e);
+                    }
+                };
+                let applied_gc_cutoff_guard = match hold_gc_cutoff_guard {
+                    HoldAppliedGcCutoffGuard::Yes => Some(applied_gc_cutoff_guard),
+                    HoldAppliedGcCutoffGuard::No => {
+                        drop(applied_gc_cutoff_guard);
+                        None
                     }
                 };
 
@@ -1237,6 +1259,7 @@ impl PageServerHandler {
                 BatchedFeMessage::GetPage {
                     span,
                     shard: shard.downgrade(),
+                    applied_gc_cutoff_guard,
                     pages: smallvec![BatchedGetPageRequest {
                         req,
                         timer,
@@ -1337,13 +1360,28 @@ impl PageServerHandler {
                 match (eligible_batch, this_msg) {
                     (
                         BatchedFeMessage::GetPage {
-                            pages: accum_pages, ..
+                            pages: accum_pages,
+                            applied_gc_cutoff_guard: accum_applied_gc_cutoff_guard,
+                            ..
                         },
                         BatchedFeMessage::GetPage {
-                            pages: this_pages, ..
+                            pages: this_pages,
+                            applied_gc_cutoff_guard: this_applied_gc_cutoff_guard,
+                            ..
                         },
                     ) => {
                         accum_pages.extend(this_pages);
+                        // the minimum of the two guards will keep data for both alive
+                        match (&accum_applied_gc_cutoff_guard, this_applied_gc_cutoff_guard) {
+                            (None, None) => (),
+                            (None, Some(this)) => *accum_applied_gc_cutoff_guard = Some(this),
+                            (Some(_), None) => (),
+                            (Some(accum), Some(this)) => {
+                                if **accum > *this {
+                                    *accum_applied_gc_cutoff_guard = Some(this);
+                                }
+                            }
+                        };
                         Ok(())
                     }
                     #[cfg(feature = "testing")]
@@ -1658,6 +1696,7 @@ impl PageServerHandler {
             BatchedFeMessage::GetPage {
                 span,
                 shard,
+                applied_gc_cutoff_guard,
                 pages,
                 batch_break_reason,
             } => {
@@ -1677,6 +1716,7 @@ impl PageServerHandler {
                         .instrument(span.clone())
                         .await;
                         assert_eq!(res.len(), npages);
+                        drop(applied_gc_cutoff_guard);
                         res
                     },
                     span,
@@ -1758,7 +1798,7 @@ impl PageServerHandler {
     /// Coding discipline within this function: all interaction with the `pgb` connection
     /// needs to be sensitive to connection shutdown, currently signalled via [`Self::cancel`].
     /// This is so that we can shutdown page_service quickly.
-    #[instrument(skip_all)]
+    #[instrument(skip_all, fields(hold_gc_cutoff_guard))]
     async fn handle_pagerequests<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -1804,6 +1844,30 @@ impl PageServerHandler {
             .take()
             .expect("implementation error: timeline_handles should not be locked");
 
+        // Evaluate the expensive feature resolver check once per pagestream subprotocol handling
+        // instead of once per GetPage request. This is shared between pipelined and serial paths.
+        let hold_gc_cutoff_guard = if cfg!(test) || cfg!(feature = "testing") {
+            HoldAppliedGcCutoffGuard::Yes
+        } else {
+            // Use the global feature resolver with the tenant ID directly, avoiding the need
+            // to get a timeline/shard which might not be available on this pageserver node.
+            let empty_properties = std::collections::HashMap::new();
+            match self.feature_resolver.evaluate_boolean(
+                "page-service-getpage-hold-applied-gc-cutoff-guard",
+                tenant_id,
+                &empty_properties,
+            ) {
+                Ok(()) => HoldAppliedGcCutoffGuard::Yes,
+                Err(_) => HoldAppliedGcCutoffGuard::No,
+            }
+        };
+        // record it in the span of handle_pagerequests so that both the request_span
+        // and the pipeline implementation spans contains the field.
+        Span::current().record(
+            "hold_gc_cutoff_guard",
+            tracing::field::debug(&hold_gc_cutoff_guard),
+        );
+
         let request_span = info_span!("request");
         let ((pgb_reader, timeline_handles), result) = match self.pipelining_config.clone() {
             PageServicePipeliningConfig::Pipelined(pipelining_config) => {
@@ -1817,6 +1881,7 @@ impl PageServerHandler {
                     pipelining_config,
                     protocol_version,
                     io_concurrency,
+                    hold_gc_cutoff_guard,
                     &ctx,
                 )
                 .await
@@ -1831,6 +1896,7 @@ impl PageServerHandler {
                     request_span,
                     protocol_version,
                     io_concurrency,
+                    hold_gc_cutoff_guard,
                     &ctx,
                 )
                 .await
@@ -1859,6 +1925,7 @@ impl PageServerHandler {
         request_span: Span,
         protocol_version: PagestreamProtocolVersion,
         io_concurrency: IoConcurrency,
+        hold_gc_cutoff_guard: HoldAppliedGcCutoffGuard,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1880,6 +1947,7 @@ impl PageServerHandler {
                 ctx,
                 protocol_version,
                 request_span.clone(),
+                hold_gc_cutoff_guard,
             )
             .await;
             let msg = match msg {
@@ -1927,6 +1995,7 @@ impl PageServerHandler {
         pipelining_config: PageServicePipeliningConfigPipelined,
         protocol_version: PagestreamProtocolVersion,
         io_concurrency: IoConcurrency,
+        hold_gc_cutoff_guard: HoldAppliedGcCutoffGuard,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -2030,6 +2099,7 @@ impl PageServerHandler {
                         &ctx,
                         protocol_version,
                         request_span.clone(),
+                        hold_gc_cutoff_guard,
                     )
                     .await;
                     let Some(read_res) = read_res.transpose() else {
@@ -2076,6 +2146,7 @@ impl PageServerHandler {
                         pages,
                         span: _,
                         shard: _,
+                        applied_gc_cutoff_guard: _,
                         batch_break_reason: _,
                     } = &mut batch
                     {
@@ -3480,8 +3551,6 @@ impl GrpcPageServiceHandler {
     /// NB: errors returned from here are intercepted in get_pages(), and may be converted to a
     /// GetPageResponse with an appropriate status code to avoid terminating the stream.
     ///
-    /// TODO: verify that the requested pages belong to this shard.
-    ///
     /// TODO: get_vectored() currently enforces a batch limit of 32. Postgres will typically send
     /// batches up to effective_io_concurrency = 100. Either we have to accept large batches, or
     /// split them up in the client or server.
@@ -3500,6 +3569,19 @@ impl GrpcPageServiceHandler {
         received_at: Instant,
     ) -> Result<page_api::GetPageResponse, tonic::Status> {
         let ctx = ctx.with_scope_page_service_pagestream(&timeline);
+
+        for &blkno in &req.block_numbers {
+            let shard = timeline.get_shard_identity();
+            let key = rel_block_to_key(req.rel, blkno);
+            if !shard.is_key_local(&key) {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "block {blkno} of relation {} requested on wrong shard {} (is on {})",
+                    req.rel,
+                    timeline.get_shard_index(),
+                    ShardIndex::new(shard.get_shard_number(&key), shard.count),
+                )));
+            }
+        }
 
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn(); // hold guard
         let effective_lsn = PageServerHandler::effective_request_lsn(

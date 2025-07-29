@@ -543,7 +543,7 @@ impl ApiMethod for ComputeHookTenant {
                         None
                     };
                     let pageserver = PageserverShardConnectionInfo {
-                        id: Some(shard.node_id.to_string()),
+                        id: Some(shard.node_id),
                         libpq_url,
                         grpc_url,
                     };
@@ -561,7 +561,7 @@ impl ApiMethod for ComputeHookTenant {
 
                 let pageserver_conninfo = PageserverConnectionInfo {
                     shard_count,
-                    stripe_size: stripe_size.map(|val| val.0),
+                    stripe_size: stripe_size.map(|val| ShardStripeSize(val.0)),
                     shards: shard_infos,
                     prefer_protocol,
                 };

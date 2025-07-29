@@ -39,13 +39,13 @@ COPY build-tools/patches/pgcopydbv017.patch /pgcopydbv017.patch
 
 RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         set -e && \
-        apt update && \
-        apt install -y --no-install-recommends \
+        apt-get update && \
+        apt-get install -y --no-install-recommends \
         ca-certificates wget gpg && \
         wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg && \
         echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
         apt-get update && \
-        apt install -y --no-install-recommends \
+        apt-get install -y --no-install-recommends \
         build-essential \
         autotools-dev \
         libedit-dev \
@@ -89,8 +89,7 @@ RUN useradd -ms /bin/bash nonroot -b /home
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-RUN mkdir -p /pgcopydb/bin && \
-    mkdir -p /pgcopydb/lib && \
+RUN mkdir -p /pgcopydb/{bin,lib} && \    
     chmod -R 755 /pgcopydb && \
     chown -R nonroot:nonroot /pgcopydb
 
@@ -106,8 +105,8 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
 # 'gdb' is included so that we get backtraces of core dumps produced in
 # regression tests
 RUN set -e \
-    && apt update \
-    && apt install -y \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
         autoconf \
         automake \
         bison \
@@ -183,22 +182,22 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
 ENV LLVM_VERSION=20
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
     && echo "deb http://apt.llvm.org/${DEBIAN_VERSION}/ llvm-toolchain-${DEBIAN_VERSION}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
-    && apt update \
-    && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Install node
 ENV NODE_VERSION=24
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
-    && apt install -y nodejs \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Install docker
 RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION} stable" > /etc/apt/sources.list.d/docker.list \
-    && apt update \
-    && apt install -y docker-ce docker-ce-cli \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce docker-ce-cli \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Configure sudo & docker
@@ -215,12 +214,11 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
 # Mold: A Modern Linker
 ENV MOLD_VERSION=v2.37.1
 RUN set -e \
-    && git clone https://github.com/rui314/mold.git \
+    && git clone -b "${MOLD_VERSION}" --depth 1 https://github.com/rui314/mold.git \
     && mkdir mold/build \
-    && cd mold/build \
-    && git checkout ${MOLD_VERSION} \
+    && cd mold/build \    
     && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ .. \
-    && cmake --build . -j $(nproc) \
+    && cmake --build . -j "$(nproc)" \
     && cmake --install . \
     && cd .. \
     && rm -rf mold
@@ -254,7 +252,7 @@ ENV ICU_VERSION=67.1
 ENV ICU_PREFIX=/usr/local/icu
 
 # Download and build static ICU
-RUN wget -O /tmp/libicu-${ICU_VERSION}.tgz https://github.com/unicode-org/icu/releases/download/release-${ICU_VERSION//./-}/icu4c-${ICU_VERSION//./_}-src.tgz && \
+RUN wget -O "/tmp/libicu-${ICU_VERSION}.tgz" https://github.com/unicode-org/icu/releases/download/release-${ICU_VERSION//./-}/icu4c-${ICU_VERSION//./_}-src.tgz && \
     echo "94a80cd6f251a53bd2a997f6f1b5ac6653fe791dfab66e1eb0227740fb86d5dc /tmp/libicu-${ICU_VERSION}.tgz" | sha256sum --check && \
     mkdir /tmp/icu && \
     pushd /tmp/icu && \
@@ -265,8 +263,7 @@ RUN wget -O /tmp/libicu-${ICU_VERSION}.tgz https://github.com/unicode-org/icu/re
     make install && \
     popd && \
     rm -rf icu && \
-    rm -f /tmp/libicu-${ICU_VERSION}.tgz && \
-    popd
+    rm -f /tmp/libicu-${ICU_VERSION}.tgz
 
 # Switch to nonroot user
 USER nonroot:nonroot
@@ -279,19 +276,19 @@ ENV PYTHON_VERSION=3.11.12 \
     PYENV_ROOT=/home/nonroot/.pyenv \
     PATH=/home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
 RUN set -e \
-    && cd $HOME \
+    && cd "$HOME" \
     && curl -sSO https://raw.githubusercontent.com/pyenv/pyenv-installer/master/bin/pyenv-installer \
     && chmod +x pyenv-installer \
     && ./pyenv-installer \
     && export PYENV_ROOT=/home/nonroot/.pyenv \
     && export PATH="$PYENV_ROOT/bin:$PATH" \
     && export PATH="$PYENV_ROOT/shims:$PATH" \
-    && pyenv install ${PYTHON_VERSION} \
-    && pyenv global ${PYTHON_VERSION} \
+    && pyenv install "${PYTHON_VERSION}" \
+    && pyenv global "${PYTHON_VERSION}" \
     && python --version \
-    && pip install --upgrade pip \
+    && pip install --no-cache-dir --upgrade pip \
     && pip --version \
-    && pip install pipenv wheel poetry
+    && pip install --no-cache-dir pipenv wheel poetry
 
 # Switch to nonroot user (again)
 USER nonroot:nonroot
@@ -302,6 +299,7 @@ WORKDIR /home/nonroot
 ENV RUSTC_VERSION=1.88.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
+ARG CARGO_AUDITABLE_VERSION=0.7.0
 ARG RUSTFILT_VERSION=0.2.1
 ARG CARGO_HAKARI_VERSION=0.9.36
 ARG CARGO_DENY_VERSION=0.18.2
@@ -317,14 +315,16 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
     rustup component add llvm-tools rustfmt clippy && \
-    cargo install rustfilt      --locked --version ${RUSTFILT_VERSION} && \
-    cargo install cargo-hakari  --locked --version ${CARGO_HAKARI_VERSION} && \
-    cargo install cargo-deny    --locked --version ${CARGO_DENY_VERSION} && \
-    cargo install cargo-hack    --locked --version ${CARGO_HACK_VERSION} && \
-    cargo install cargo-nextest --locked --version ${CARGO_NEXTEST_VERSION} && \
-    cargo install cargo-chef    --locked --version ${CARGO_CHEF_VERSION} && \
-    cargo install diesel_cli    --locked --version ${CARGO_DIESEL_CLI_VERSION} \
-                                --features postgres-bundled --no-default-features && \
+    cargo install cargo-auditable           --locked --version "${CARGO_AUDITABLE_VERSION}" && \
+    cargo auditable install cargo-auditable --locked --version "${CARGO_AUDITABLE_VERSION}" --force && \
+    cargo auditable install rustfilt                 --version "${RUSTFILT_VERSION}" && \
+    cargo auditable install cargo-hakari    --locked --version "${CARGO_HAKARI_VERSION}" && \
+    cargo auditable install cargo-deny      --locked --version "${CARGO_DENY_VERSION}" && \
+    cargo auditable install cargo-hack      --locked --version "${CARGO_HACK_VERSION}" && \
+    cargo auditable install cargo-nextest   --locked --version "${CARGO_NEXTEST_VERSION}" && \
+    cargo auditable install cargo-chef      --locked --version "${CARGO_CHEF_VERSION}" && \
+    cargo auditable install diesel_cli      --locked --version "${CARGO_DIESEL_CLI_VERSION}" \
+                                            --features postgres-bundled --no-default-features && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 

@@ -129,6 +129,12 @@ impl<L: LabelGroup> InfoMetric<L> {
     }
 }
 
+impl<L: LabelGroup + Default> Default for InfoMetric<L, GaugeState> {
+    fn default() -> Self {
+        InfoMetric::new(L::default())
+    }
+}
+
 impl<L: LabelGroup, M: MetricType<Metadata = ()>> InfoMetric<L, M> {
     pub fn with_metric(label: L, metric: M) -> Self {
         Self {
