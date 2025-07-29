@@ -30,8 +30,8 @@ use std::sync::Arc;
 use tokio::net::UnixListener;
 
 use crate::NEON_COMMUNICATOR_SOCKET_NAME;
-use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 use crate::worker_process::lfc_metrics::LfcMetricsCollector;
+use crate::worker_process::main_loop::CommunicatorWorkerProcessStruct;
 
 enum ControlSocketState<'a> {
     Full(&'a CommunicatorWorkerProcessStruct<'a>),
@@ -147,12 +147,10 @@ async fn dump_cache_map(State(state): State<Arc<ControlSocketState<'_>>>) -> Res
                 .body(Body::from(buf))
                 .unwrap()
         }
-        ControlSocketState::Legacy(_) => {
-            Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header(CONTENT_TYPE, "application/text")
-                .body(Body::from(Vec::new()))
-                .unwrap()
-        }
+        ControlSocketState::Legacy(_) => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(CONTENT_TYPE, "application/text")
+            .body(Body::from(Vec::new()))
+            .unwrap(),
     }
 }
