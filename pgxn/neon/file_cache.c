@@ -680,7 +680,7 @@ lfc_get_state(size_t max_entries)
 					}
 					else
 					{
-						elog(LOG, "LFC: Skipping invalid buffer tag during cache state capture: blockNum=%u", test_tag.blockNum);
+						elog(ERROR, "LFC: Skipping invalid buffer tag during cache state capture: blockNum=%u", test_tag.blockNum);
 					}
 				}
 			}
