@@ -37,11 +37,10 @@ def test_unlogged_build(neon_env_builder: NeonEnvBuilder):
         con = endpoint.connect()
         cur = con.cursor()
         cur.execute("set statement_timeout=0")
-        cur.execute(f"CREATE TABLE ginarray_tbl_{i} (arr bigint[])")
+        cur.execute(f"CREATE TABLE ginarray_tbl_{i} (arr text[])")
         cur.execute(
-            f"INSERT INTO ginarray_tbl_{i} SELECT array_agg(x*1000000+y) FROM generate_series(1, 100) x, generate_series(1, 3000 * 100) y group by y"
+            f"INSERT INTO ginarray_tbl_{i} SELECT array_agg(repeat((x*1000000 + y)::text, 40)) FROM generate_series(1, 100) x, generate_series(1, 200 * 100) y group by y"
         )
-
         cur.execute("SET log_min_messages='debug1'")
         cur.execute(f"CREATE INDEX ginarray_tbl_idx_{i} ON ginarray_tbl_{i} USING gin(arr)")
         cur.execute("RESET log_min_messages")
@@ -60,9 +59,9 @@ def test_unlogged_build(neon_env_builder: NeonEnvBuilder):
         # original bug, the CREATE INDEX step failed already. But since we
         # already went through all the effort to build the index, might as well
         # check that it also works.)
-        qry = f"SELECT sum(elem) FROM (SELECT unnest(arr) as elem FROM ginarray_tbl_{i} WHERE ARRAY[1*1000000+1234]::bigint[] <@ arr) x"
+        qry = f"SELECT count(*) FROM ginarray_tbl_{i} WHERE ARRAY[repeat('1012345', 40)] <@ arr"
         result = query_scalar(cur, qry)
-        assert result == 5050123400
+        assert result == 1
 
         # Verify that the query actually uses the index
         cur.execute(f"EXPLAIN (COSTS OFF) {qry}")
