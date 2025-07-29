@@ -5293,7 +5293,6 @@ dependencies = [
  "criterion",
  "env_logger",
  "log",
- "memoffset 0.9.0",
  "once_cell",
  "postgres",
  "postgres_ffi_types",
@@ -5714,7 +5713,6 @@ dependencies = [
  "futures",
  "gettid",
  "hashbrown 0.14.5",
- "hashlink 0.9.1",
  "hex",
  "hmac",
  "hostname",
@@ -5803,6 +5801,7 @@ dependencies = [
  "workspace_hack",
  "x509-cert",
  "zerocopy 0.8.24",
+ "zeroize",
 ]
 
 [[package]]
@@ -8050,9 +8049,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.46.1"
+version = "1.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc3a2344dafbe23a245241fe8b09735b521110d30fcefbbd5feb1797ca35d17"
+checksum = "43864ed400b6043a4757a25c7a64a8efde741aed79a056a2fb348a406701bb35"
 dependencies = [
  "backtrace",
  "bytes",
@@ -8063,9 +8062,9 @@ dependencies = [
  "pin-project-lite",
  "signal-hook-registry",
  "slab",
- "socket2 0.5.5",
+ "socket2 0.6.0",
  "tokio-macros",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9457,6 +9456,7 @@ dependencies = [
  "ahash",
  "anstream",
  "anyhow",
+ "arrayvec",
  "axum",
  "axum-core",
  "base64 0.21.7",
@@ -9467,18 +9467,21 @@ dependencies = [
  "chrono",
  "clap",
  "clap_builder",
+ "concurrent-queue",
  "const-oid",
  "crossbeam-epoch",
  "crossbeam-utils",
  "crypto-bigint 0.5.5",
  "der 0.7.8",
  "deranged",
+ "diesel",
  "digest",
  "ecdsa 0.16.9",
  "either",
  "elliptic-curve 0.13.8",
  "env_filter",
  "env_logger",
+ "event-listener 5.4.0",
  "fail",
  "form_urlencoded",
  "futures-channel",
@@ -9491,6 +9494,7 @@ dependencies = [
  "getrandom 0.2.11",
  "half",
  "hashbrown 0.14.5",
+ "hashbrown 0.15.2",
  "hex",
  "hmac",
  "hyper 0.14.30",
@@ -9508,14 +9512,18 @@ dependencies = [
  "num",
  "num-bigint",
  "num-complex",
+ "num-format",
  "num-integer",
  "num-iter",
  "num-rational",
  "num-traits",
  "once_cell",
+ "opentelemetry_sdk",
  "p256 0.13.2",
  "parquet",
+ "percent-encoding",
  "portable-atomic",
+ "postgresql_archive",
  "prettyplease",
  "proc-macro2",
  "prost 0.13.5",
@@ -9525,6 +9533,8 @@ dependencies = [
  "regex-automata 0.4.9",
  "regex-syntax 0.8.5",
  "reqwest",
+ "reqwest-middleware",
+ "reqwest-tracing",
  "rustls 0.23.29",
  "rustls-pki-types",
  "rustls-webpki 0.103.4",
@@ -9539,7 +9549,7 @@ dependencies = [
  "stable_deref_trait",
  "subtle",
  "syn 2.0.100",
- "sync_wrapper 0.1.2",
+ "sync_wrapper 1.0.1",
  "thiserror 2.0.12",
  "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
@@ -9557,6 +9567,7 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "url",
+ "uuid",
  "zeroize",
  "zstd",
  "zstd-safe",

@@ -195,7 +195,6 @@ pub struct ComputeSpec {
     pub suspend_timeout_seconds: i64,
 
     // Databricks specific options for compute instance.
-    // These settings are not part of postgresql.conf.
     pub databricks_settings: Option<DatabricksSettings>,
 }
 

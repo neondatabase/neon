@@ -3309,6 +3309,7 @@ def test_ps_unavailable_after_delete(
         ps.allowed_errors.append(".*request was dropped before completing.*")
         env.storage_controller.node_delete(ps.id, force=True)
         wait_until(lambda: assert_nodes_count(2))
+        env.storage_controller.reconcile_until_idle()
     elif deletion_api == DeletionAPIKind.OLD:
         env.storage_controller.node_delete_old(ps.id)
         assert_nodes_count(2)
