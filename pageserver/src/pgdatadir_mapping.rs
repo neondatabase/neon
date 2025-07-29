@@ -2348,6 +2348,22 @@ impl DatadirModification<'_> {
         Ok::<_, WalIngestError>(())
     }
 
+    async fn put_rel_creation_v1_placeholder(
+        &mut self,
+        rel: RelTag,
+        dbdir_exists: bool,
+        _ctx: &RequestContext,
+    ) -> Result<(), WalIngestError> {
+        if !dbdir_exists {
+            let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
+            self.put(
+                rel_dir_key,
+                Value::Image(Bytes::from(RelDirectory::ser(&RelDirectory::default())?)),
+            );
+        }
+        Ok(())
+    }
+
     async fn put_rel_creation_v1(
         &mut self,
         rel: RelTag,
@@ -2428,7 +2444,7 @@ impl DatadirModification<'_> {
         // tablespace.  Create the reldir entry for it if so.
         let mut dbdir: DbDirectory = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
         let mut is_dbdir_dirty = false;
-        
+
         let dbdir_exists =
             if let hash_map::Entry::Vacant(e) = dbdir.dbdirs.entry((rel.spcnode, rel.dbnode)) {
                 // Didn't exist. Update dbdir
@@ -2473,6 +2489,10 @@ impl DatadirModification<'_> {
 
         if v2_mode.current_status != RelSizeMigration::Migrated {
             self.put_rel_creation_v1(rel, dbdir_exists, ctx).await?;
+        } else {
+            // collect_keyspace depends on the rel_dir_to_key to be present, so we need to create a placeholder
+            self.put_rel_creation_v1_placeholder(rel, dbdir_exists, ctx)
+                .await?;
         }
 
         if v2_mode.current_status != RelSizeMigration::Legacy {
