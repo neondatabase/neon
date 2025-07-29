@@ -2218,13 +2218,13 @@ impl ComputeNode {
         let result = client
             .simple_query(
                 "SELECT
-    row_to_json(pg_stat_statements)
+    pg_catalog.row_to_json(pss)
 FROM
-    pg_stat_statements
+    public.pg_stat_statements pss
 WHERE
-    userid != 'cloud_admin'::regrole::oid
+    pss.userid != 'cloud_admin'::pg_catalog.regrole::pg_catalog.oid
 ORDER BY
-    (mean_exec_time + mean_plan_time) DESC
+    (pss.mean_exec_time + pss.mean_plan_time) DESC
 LIMIT 100",
             )
             .await;
@@ -2352,11 +2352,11 @@ LIMIT 100",
 
         // check the role grants first - to gracefully handle read-replicas.
         let select = "SELECT privilege_type
-            FROM pg_namespace
-                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) acl ON true
-                JOIN pg_user users ON acl.grantee = users.usesysid
-            WHERE users.usename = $1
-                AND nspname = $2";
+            FROM pg_catalog.pg_namespace
+                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) AS acl ON true
+                JOIN pg_catalog.pg_user users ON acl.grantee = users.usesysid
+            WHERE users.usename OPERATOR(pg_catalog.=) $1::pg_catalog.name
+                AND nspname OPERATOR(pg_catalog.=) $2::pg_catalog.name";
         let rows = db_client
             .query(select, &[role_name, schema_name])
             .await

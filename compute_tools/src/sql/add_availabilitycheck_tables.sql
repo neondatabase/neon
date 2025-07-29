@@ -3,16 +3,17 @@ BEGIN
     IF NOT EXISTS(
         SELECT 1
         FROM pg_catalog.pg_tables
-        WHERE tablename = 'health_check'
+        WHERE tablename::pg_catalog.name OPERATOR(pg_catalog.=) 'health_check'::pg_catalog.name
+        AND schemaname::pg_catalog.name OPERATOR(pg_catalog.=) 'public'::pg_catalog.name
     )
     THEN
     CREATE TABLE public.health_check (
-        id serial primary key,
-        updated_at timestamptz default now()
+        id pg_catalog.serial primary key,
+        updated_at pg_catalog.timestamptz default pg_catalog.now()
     );
-    INSERT INTO public.health_check VALUES (1, now())
+    INSERT INTO public.health_check VALUES (1, pg_catalog.now())
         ON CONFLICT (id) DO UPDATE
-         SET updated_at = now();
+         SET updated_at = pg_catalog.now();
     END IF;
 END
 $$

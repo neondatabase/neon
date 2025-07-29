@@ -78,7 +78,7 @@ impl ComputeNode {
         const RETRIES: i32 = 20;
         for i in 0..=RETRIES {
             let row = client
-                .query_one("SELECT pg_last_wal_replay_lsn()", &[])
+                .query_one("SELECT pg_catalog.pg_last_wal_replay_lsn()", &[])
                 .await
                 .context("getting last replay lsn")?;
             let lsn: u64 = row.get::<usize, postgres_types::PgLsn>(0).into();
@@ -103,7 +103,7 @@ impl ComputeNode {
             .await
             .context("setting safekeepers")?;
         client
-            .query("SELECT pg_reload_conf()", &[])
+            .query("SELECT pg_catalog.pg_reload_conf()", &[])
             .await
             .context("reloading postgres config")?;
 
@@ -113,7 +113,7 @@ impl ComputeNode {
         });
 
         let row = client
-            .query_one("SELECT * FROM pg_promote()", &[])
+            .query_one("SELECT * FROM pg_catalog.pg_promote()", &[])
             .await
             .context("pg_promote")?;
         if !row.get::<usize, bool>(0) {

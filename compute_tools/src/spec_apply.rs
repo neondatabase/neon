@@ -80,7 +80,7 @@ impl ComputeNode {
                 info!("Checking if drop subscription operation was already performed for timeline_id: {}", timeline_id);
 
                 drop_subscriptions_done = match
-                    client.query("select 1 from neon.drop_subscriptions_done where timeline_id = $1", &[&timeline_id.to_string()]).await {
+                    client.query("select 1 from neon.drop_subscriptions_done where timeline_id OPERATOR(pg_catalog.=) $1", &[&timeline_id.to_string()]).await {
                     Ok(result) => !result.is_empty(),
                     Err(e) =>
                     {
@@ -1073,7 +1073,7 @@ async fn get_operations<'a>(
                 },
                 Operation {
                     query: String::from(
-                        "UPDATE pg_extension SET extrelocatable = true WHERE extname = 'neon'",
+                        "UPDATE pg_catalog.pg_extension SET extrelocatable = true WHERE extname OPERATOR(pg_catalog.=) 'neon'::pg_catalog.name AND extrelocatable OPERATOR(pg_catalog.=) false",
                     ),
                     comment: Some(String::from("compat/fix: make neon relocatable")),
                 },

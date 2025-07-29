@@ -16,7 +16,7 @@ BEGIN
     LOOP
         FOR grantor IN EXECUTE
             pg_catalog.format(
-                'SELECT DISTINCT rtg.grantor FROM information_schema.role_table_grants AS rtg WHERE grantee = %s',
+                'SELECT DISTINCT rtg.grantor FROM information_schema.role_table_grants AS rtg WHERE grantee OPERATOR(pg_catalog.=) %s',
                 -- N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`
                 quote_literal({role_name})
             )
