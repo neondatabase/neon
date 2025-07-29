@@ -9,7 +9,7 @@
 [submodule "vendor/postgres-v16"]
 	path = vendor/postgres-v16
 	url = ../postgres.git
-	branch = cherry-pick/16/37717cc9430
+	branch = REL_16_STABLE_neon
 [submodule "vendor/postgres-v17"]
 	path = vendor/postgres-v17
 	url = ../postgres.git

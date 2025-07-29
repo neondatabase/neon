@@ -51,6 +51,7 @@ void		_PG_init(void);
 bool lakebase_mode = false;
 
 static int  running_xacts_overflow_policy;
+static emit_log_hook_type prev_emit_log_hook;
 static bool monitor_query_exec_time = false;
 
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
@@ -447,17 +448,19 @@ ReportSearchPath(void)
 static int neon_pgstat_file_size_limit;
 #endif
 
-#if PG_VERSION_NUM >= 160000 && PG_VERSION_NUM < 170000
-static void DatabricksSqlErrorHookImpl(int sqlerrcode) {
-	if (sqlerrcode == ERRCODE_DATA_CORRUPTED) {
+static void DatabricksSqlErrorHookImpl(ErrorData *edata) {
+	if (prev_emit_log_hook != NULL) {
+		prev_emit_log_hook(edata);
+	}
+
+	if (edata->sqlerrcode == ERRCODE_DATA_CORRUPTED) {
 		pg_atomic_fetch_add_u32(&databricks_metrics_shared->data_corruption_count, 1);
-	} else if (sqlerrcode == ERRCODE_INDEX_CORRUPTED) {
+	} else if (edata->sqlerrcode == ERRCODE_INDEX_CORRUPTED) {
 		pg_atomic_fetch_add_u32(&databricks_metrics_shared->index_corruption_count, 1);
-	} else if (sqlerrcode == ERRCODE_INTERNAL_ERROR) {
+	} else if (edata->sqlerrcode == ERRCODE_INTERNAL_ERROR) {
 		pg_atomic_fetch_add_u32(&databricks_metrics_shared->internal_error_count, 1);
 	}
 }
-#endif
 
 void
 _PG_init(void)
@@ -470,11 +473,8 @@ _PG_init(void)
 	load_file("$libdir/neon_rmgr", false);
 #endif
 
-#if PG_VERSION_NUM >= 160000 && PG_VERSION_NUM < 170000
-	if (lakebase_mode) {
-		SqlErrorCode_hook = DatabricksSqlErrorHookImpl;
-	}
-#endif
+	prev_emit_log_hook = emit_log_hook;
+	emit_log_hook = DatabricksSqlErrorHookImpl;
 
 	/*
 	 * Initializing a pre-loaded Postgres extension happens in three stages:
