@@ -482,7 +482,7 @@ impl ComputeNode {
         // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
         // Unset them via connection string options before connecting to the database.
         // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
-        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0 -c pgaudit.log=none";
+        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path='' -c statement_timeout=0 -c pgaudit.log=none";
         let options = match conn_conf.get_options() {
             // Allow the control plane to override any options set by the
             // compute
@@ -1775,7 +1775,7 @@ impl ComputeNode {
 
                     // It doesn't matter what were the options before, here we just want
                     // to connect and create a new superuser role.
-                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path='' -c statement_timeout=0";
                     zenith_admin_conf.options(ZENITH_OPTIONS);
 
                     let mut client =
@@ -1806,12 +1806,6 @@ impl ComputeNode {
                 error!("maintenance client connection error: {}", e);
             }
         });
-
-        // Ensure only pg_catalog is on the search path
-        client
-            .simple_query("SET search_path = pg_catalog")
-            .await
-            .context("apply_config SET search_path = pg_catalog")?;
 
         // Disable DDL forwarding because control plane already knows about the roles/databases
         // we're about to modify.
