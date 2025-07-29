@@ -26,7 +26,7 @@ use utils::project_git_version;
 use utils::sentry_init::init_sentry;
 
 use crate::context::RequestContext;
-use crate::metrics::{Metrics, ServiceInfo, ThreadPoolMetrics};
+use crate::metrics::{Metrics, ServiceInfo};
 use crate::pglb::TlsRequired;
 use crate::pqproto::FeStartupPacket;
 use crate::protocol2::ConnectionInfo;
@@ -79,8 +79,6 @@ pub async fn run() -> anyhow::Result<()> {
     let _logging_guard = crate::logging::init()?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
-
-    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
 
     let args = cli().get_matches();
     let destination: String = args
