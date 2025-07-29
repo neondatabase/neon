@@ -351,7 +351,7 @@ impl Node {
         warn_threshold: u32,
         max_retries: u32,
         timeout: Duration,
-        cancel: &CancellationToken,
+        cancel_new_retries: &CancellationToken,
     ) -> Option<mgmt_api::Result<T>>
     where
         O: FnMut(PageserverClient) -> F,
@@ -402,7 +402,7 @@ impl Node {
                 self.id,
                 self.base_url(),
             ),
-            cancel,
+            cancel_new_retries,
         )
         .await
     }

@@ -110,7 +110,7 @@ impl Safekeeper {
         warn_threshold: u32,
         max_retries: u32,
         timeout: Duration,
-        cancel: &CancellationToken,
+        cancel_new_retries: &CancellationToken,
     ) -> mgmt_api::Result<T>
     where
         O: FnMut(SafekeeperClient) -> F,
@@ -161,7 +161,7 @@ impl Safekeeper {
                 self.id,
                 self.base_url(),
             ),
-            cancel,
+            cancel_new_retries,
         )
         .await
         .unwrap_or(Err(mgmt_api::Error::Cancelled))

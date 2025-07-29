@@ -149,14 +149,14 @@ impl Service {
             .map(SecretString::from);
         let mut joinset = JoinSet::new();
 
-        let cancel = CancellationToken::new();
+        let cancel_new_retries = CancellationToken::new();
 
         for (idx, sk) in safekeepers.iter().enumerate() {
             let sk = sk.clone();
             let http_client = self.http_client.clone();
             let jwt = jwt.clone();
             let op = op.clone();
-            let cancel = cancel.clone();
+            let cancel_new_retries = cancel_new_retries.clone();
             joinset.spawn(async move {
                 let res = sk
                     .with_client_retries(
@@ -168,7 +168,7 @@ impl Service {
                         // TODO(diko): This is a wrong timeout.
                         // It should be scaled to the retry count.
                         timeout,
-                        &cancel,
+                        &cancel_new_retries,
                     )
                     .await;
                 (idx, res)
@@ -211,7 +211,10 @@ impl Service {
                         if res.is_ok() {
                             success_count += 1;
                             if desired_success_count == Some(success_count) {
-                                cancel.cancel();
+                                // We reached the desired number of successful responses, cancel new retries for
+                                // the remaining safekeepers.
+                                // It does not cancel already started requests, we will still wait for them.
+                                cancel_new_retries.cancel();
                             }
                         }
                         results[idx] = res;
