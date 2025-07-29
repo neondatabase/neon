@@ -3484,9 +3484,6 @@ impl GrpcPageServiceHandler {
 
         // TODO: untangle acquisition from TenantManagerWrapper::resolve() and Cache::get(), to
         // avoid the unnecessary overhead.
-        //
-        // TODO: this does internal retries, which will delay requests during shard splits (we won't
-        // look for the child until the parent's retries are exhausted). Don't do that.
         let mut handles = TimelineHandles::new(self.tenant_manager.clone());
         match handles
             .get(tenant_id, timeline_id, ShardSelector::Known(shard_index))
@@ -3911,9 +3908,6 @@ impl proto::PageService for GrpcPageServiceHandler {
         // reroute requests to the child shards below, but we also detect the common cases here
         // where either the shard exists or no shards exist at all. If we have a child shard, we
         // can't acquire a weak handle because we don't know which child shard to use yet.
-        //
-        // TODO: TimelineHandles.get() does internal retries, which will delay requests during shard
-        // splits. It shouldn't.
         let TenantTimelineId {
             tenant_id,
             timeline_id,
