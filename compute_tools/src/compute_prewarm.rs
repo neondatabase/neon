@@ -90,6 +90,7 @@ impl ComputeNode {
     }
 
     /// If there is a prewarm request ongoing, return `false`, `true` otherwise.
+    /// Has a failpoint "compute-prewarm"
     pub fn prewarm_lfc(self: &Arc<Self>, from_endpoint: Option<String>) -> bool {
         {
             let state = &mut self.state.lock().unwrap().lfc_prewarm_state;
@@ -112,9 +113,8 @@ impl ComputeNode {
                 Err(err) => {
                     crate::metrics::LFC_PREWARM_ERRORS.inc();
                     error!(%err, "could not prewarm LFC");
-
                     LfcPrewarmState::Failed {
-                        error: err.to_string(),
+                        error: format!("{err:#}"),
                     }
                 }
             };
@@ -135,16 +135,20 @@ impl ComputeNode {
     async fn prewarm_impl(&self, from_endpoint: Option<String>) -> Result<bool> {
         let EndpointStoragePair { url, token } = self.endpoint_storage_pair(from_endpoint)?;
 
+        #[cfg(feature = "testing")]
+        fail::fail_point!("compute-prewarm", |_| {
+            bail!("prewarm configured to fail because of a failpoint")
+        });
+
         info!(%url, "requesting LFC state from endpoint storage");
         let request = Client::new().get(&url).bearer_auth(token);
         let res = request.send().await.context("querying endpoint storage")?;
-        let status = res.status();
-        match status {
+        match res.status() {
             StatusCode::OK => (),
             StatusCode::NOT_FOUND => {
                 return Ok(false);
             }
-            _ => bail!("{status} querying endpoint storage"),
+            status => bail!("{status} querying endpoint storage"),
         }
 
         let mut uncompressed = Vec::new();
@@ -205,7 +209,7 @@ impl ComputeNode {
         crate::metrics::LFC_OFFLOAD_ERRORS.inc();
         error!(%err, "could not offload LFC state to endpoint storage");
         self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
-            error: err.to_string(),
+            error: format!("{err:#}"),
         };
     }
 
@@ -213,16 +217,22 @@ impl ComputeNode {
         let EndpointStoragePair { url, token } = self.endpoint_storage_pair(None)?;
         info!(%url, "requesting LFC state from Postgres");
 
-        let mut compressed = Vec::new();
-        ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
+        let row = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
             .context("connecting to postgres")?
             .query_one("select neon.get_local_cache_state()", &[])
             .await
-            .context("querying LFC state")?
-            .try_get::<usize, &[u8]>(0)
-            .context("deserializing LFC state")
-            .map(ZstdEncoder::new)?
+            .context("querying LFC state")?;
+        let state = row
+            .try_get::<usize, Option<&[u8]>>(0)
+            .context("deserializing LFC state")?;
+        let Some(state) = state else {
+            info!(%url, "empty LFC state, not exporting");
+            return Ok(());
+        };
+
+        let mut compressed = Vec::new();
+        ZstdEncoder::new(state)
             .read_to_end(&mut compressed)
             .await
             .context("compressing LFC state")?;

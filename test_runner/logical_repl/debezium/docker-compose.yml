@@ -1,18 +1,28 @@
 services:
   zookeeper:
-    image: quay.io/debezium/zookeeper:2.7
+    image: quay.io/debezium/zookeeper:3.1.3.Final
+    ports:
+      - 127.0.0.1:2181:2181
+      - 127.0.0.1:2888:2888
+      - 127.0.0.1:3888:3888
   kafka:
-    image: quay.io/debezium/kafka:2.7
+    image: quay.io/debezium/kafka:3.1.3.Final
+    depends_on: [zookeeper]
     environment:
       ZOOKEEPER_CONNECT: "zookeeper:2181"
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_BROKER_ID: 1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_JMX_PORT: 9991
     ports:
-      - 127.0.0.1:9092:9092
+      - 9092:9092
+      - 29092:29092
   debezium:
-    image: quay.io/debezium/connect:2.7
+    image: quay.io/debezium/connect:3.1.3.Final
+    depends_on: [kafka]
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: 1

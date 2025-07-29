@@ -1,18 +1,16 @@
-use async_trait::async_trait;
 use tokio::time;
 use tracing::{debug, info, warn};
 
+use crate::cache::node_info::CachedNodeInfo;
 use crate::compute::{self, COULD_NOT_CONNECT, ComputeConnection};
-use crate::config::{ComputeConfig, RetryConfig};
+use crate::config::{ComputeConfig, ProxyConfig, RetryConfig};
 use crate::context::RequestContext;
-use crate::control_plane::errors::WakeComputeError;
+use crate::control_plane::NodeInfo;
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::{self, NodeInfo};
-use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType,
 };
-use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute, retry_after, should_retry};
+use crate::proxy::retry::{ShouldRetryWakeCompute, retry_after, should_retry};
 use crate::proxy::wake_compute::{WakeComputeBackend, wake_compute};
 use crate::types::Host;
 
@@ -20,7 +18,7 @@ use crate::types::Host;
 /// (e.g. the compute node's address might've changed at the wrong time).
 /// Invalidate the cache entry (if any) to prevent subsequent errors.
 #[tracing::instrument(skip_all)]
-pub(crate) fn invalidate_cache(node_info: control_plane::CachedNodeInfo) -> NodeInfo {
+pub(crate) fn invalidate_cache(node_info: CachedNodeInfo) -> NodeInfo {
     let is_cached = node_info.cached();
     if is_cached {
         warn!("invalidating stalled compute node info cache entry");
@@ -35,29 +33,32 @@ pub(crate) fn invalidate_cache(node_info: control_plane::CachedNodeInfo) -> Node
     node_info.invalidate()
 }
 
-#[async_trait]
 pub(crate) trait ConnectMechanism {
     type Connection;
-    type ConnectError: ReportableError;
-    type Error: From<Self::ConnectError>;
     async fn connect_once(
         &self,
         ctx: &RequestContext,
-        node_info: &control_plane::CachedNodeInfo,
+        node_info: &CachedNodeInfo,
         config: &ComputeConfig,
-    ) -> Result<Self::Connection, Self::ConnectError>;
+    ) -> Result<Self::Connection, compute::ConnectionError>;
 }
 
-pub(crate) struct TcpMechanism {
+struct TcpMechanism<'a> {
     /// connect_to_compute concurrency lock
-    pub(crate) locks: &'static ApiLocks<Host>,
+    locks: &'a ApiLocks<Host>,
+    tls: TlsNegotiation,
 }
 
-#[async_trait]
-impl ConnectMechanism for TcpMechanism {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TlsNegotiation {
+    /// TLS is assumed
+    Direct,
+    /// We must ask for TLS using the postgres SSLRequest message
+    Postgres,
+}
+
+impl ConnectMechanism for TcpMechanism<'_> {
     type Connection = ComputeConnection;
-    type ConnectError = compute::ConnectionError;
-    type Error = compute::ConnectionError;
 
     #[tracing::instrument(skip_all, fields(
         pid = tracing::field::Empty,
@@ -66,27 +67,49 @@ impl ConnectMechanism for TcpMechanism {
     async fn connect_once(
         &self,
         ctx: &RequestContext,
-        node_info: &control_plane::CachedNodeInfo,
+        node_info: &CachedNodeInfo,
         config: &ComputeConfig,
-    ) -> Result<ComputeConnection, Self::Error> {
+    ) -> Result<ComputeConnection, compute::ConnectionError> {
         let permit = self.locks.get_permit(&node_info.conn_info.host).await?;
-        permit.release_result(node_info.connect(ctx, config).await)
+
+        permit.release_result(
+            node_info
+                .conn_info
+                .connect(ctx, &node_info.aux, config, self.tls)
+                .await,
+        )
     }
 }
 
 /// Try to connect to the compute node, retrying if necessary.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn connect_to_compute<M: ConnectMechanism, B: WakeComputeBackend>(
+pub(crate) async fn connect_to_compute<B: WakeComputeBackend>(
+    ctx: &RequestContext,
+    config: &ProxyConfig,
+    user_info: &B,
+    tls: TlsNegotiation,
+) -> Result<ComputeConnection, compute::ConnectionError> {
+    connect_to_compute_inner(
+        ctx,
+        &TcpMechanism {
+            locks: &config.connect_compute_locks,
+            tls,
+        },
+        user_info,
+        config.wake_compute_retry_config,
+        &config.connect_to_compute,
+    )
+    .await
+}
+
+/// Try to connect to the compute node, retrying if necessary.
+pub(crate) async fn connect_to_compute_inner<M: ConnectMechanism, B: WakeComputeBackend>(
     ctx: &RequestContext,
     mechanism: &M,
     user_info: &B,
     wake_compute_retry_config: RetryConfig,
     compute: &ComputeConfig,
-) -> Result<M::Connection, M::Error>
-where
-    M::ConnectError: CouldRetry + ShouldRetryWakeCompute + std::fmt::Debug,
-    M::Error: From<WakeComputeError>,
-{
+) -> Result<M::Connection, compute::ConnectionError> {
     let mut num_retries = 0;
     let node_info =
         wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
@@ -120,7 +143,7 @@ where
                 },
                 num_retries.into(),
             );
-            return Err(err.into());
+            return Err(err);
         }
         node_info
     } else {
@@ -161,7 +184,7 @@ where
                         },
                         num_retries.into(),
                     );
-                    return Err(e.into());
+                    return Err(e);
                 }
 
                 warn!(error = ?e, num_retries, retriable = true, COULD_NOT_CONNECT);

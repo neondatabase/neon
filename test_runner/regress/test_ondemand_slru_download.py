@@ -16,7 +16,7 @@ def test_ondemand_download_pg_xact(neon_env_builder: NeonEnvBuilder, shard_count
         neon_env_builder.num_pageservers = shard_count
 
     tenant_conf = {
-        "lazy_slru_download": "true",
+        "lazy_slru_download": True,
         # set PITR interval to be small, so we can do GC
         "pitr_interval": "0 s",
     }
@@ -82,7 +82,7 @@ def test_ondemand_download_replica(neon_env_builder: NeonEnvBuilder, shard_count
         neon_env_builder.num_pageservers = shard_count
 
     tenant_conf = {
-        "lazy_slru_download": "true",
+        "lazy_slru_download": True,
     }
     env = neon_env_builder.init_start(
         initial_tenant_conf=tenant_conf, initial_tenant_shard_count=shard_count
@@ -141,7 +141,7 @@ def test_ondemand_download_after_wal_switch(neon_env_builder: NeonEnvBuilder):
     """
 
     tenant_conf = {
-        "lazy_slru_download": "true",
+        "lazy_slru_download": True,
     }
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
 

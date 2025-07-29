@@ -846,6 +846,7 @@ impl Endpoint {
                 autoprewarm: args.autoprewarm,
                 offload_lfc_interval_seconds: args.offload_lfc_interval_seconds,
                 suspend_timeout_seconds: -1, // Only used in neon_local.
+                databricks_settings: None,
             };
 
             // this strange code is needed to support respec() in tests
@@ -990,7 +991,9 @@ impl Endpoint {
                         | ComputeStatus::Configuration
                         | ComputeStatus::TerminationPendingFast
                         | ComputeStatus::TerminationPendingImmediate
-                        | ComputeStatus::Terminated => {
+                        | ComputeStatus::Terminated
+                        | ComputeStatus::RefreshConfigurationPending
+                        | ComputeStatus::RefreshConfiguration => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
                     }
@@ -1009,6 +1012,29 @@ impl Endpoint {
 
         // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
         drop(scopeguard::ScopeGuard::into_inner(child));
+
+        Ok(())
+    }
+
+    // Update the pageservers in the spec file of the endpoint. This is useful to test the spec refresh scenario.
+    pub async fn update_pageservers_in_config(
+        &self,
+        pageservers: Vec<(PageserverProtocol, Host, u16)>,
+    ) -> Result<()> {
+        let config_path = self.endpoint_path().join("config.json");
+        let mut config: ComputeConfig = {
+            let file = std::fs::File::open(&config_path)?;
+            serde_json::from_reader(file)?
+        };
+
+        let pageserver_connstring = Self::build_pageserver_connstr(&pageservers);
+        assert!(!pageserver_connstring.is_empty());
+        let mut spec = config.spec.unwrap();
+        spec.pageserver_connstring = Some(pageserver_connstring);
+        config.spec = Some(spec);
+
+        let file = std::fs::File::create(&config_path)?;
+        serde_json::to_writer_pretty(file, &config)?;
 
         Ok(())
     }
@@ -1176,6 +1202,33 @@ impl Endpoint {
             std::fs::remove_dir_all(self.endpoint_path())?;
         }
         Ok(response)
+    }
+
+    pub async fn refresh_configuration(&self) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let response = client
+            .post(format!(
+                "http://{}:{}/refresh_configuration",
+                self.internal_http_address.ip(),
+                self.internal_http_address.port()
+            ))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text().await {
+                Ok(err_body) => format!("Error: {err_body}"),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
     }
 
     pub fn connstr(&self, user: &str, db_name: &str) -> String {

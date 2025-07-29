@@ -25,6 +25,7 @@ use crate::control_plane::messages::MetricsAuxInfo;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::pqproto::StartupMessageParams;
+use crate::proxy::connect_compute::TlsNegotiation;
 use crate::proxy::neon_option;
 use crate::types::Host;
 
@@ -84,6 +85,14 @@ pub(crate) enum ConnectionError {
 
     #[error("error acquiring resource permit: {0}")]
     TooManyConnectionAttempts(#[from] ApiLockError),
+
+    #[cfg(test)]
+    #[error("retryable: {retryable}, wakeable: {wakeable}, kind: {kind:?}")]
+    TestError {
+        retryable: bool,
+        wakeable: bool,
+        kind: crate::error::ErrorKind,
+    },
 }
 
 impl UserFacingError for ConnectionError {
@@ -94,6 +103,8 @@ impl UserFacingError for ConnectionError {
                 "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
             }
             ConnectionError::TlsError(_) => COULD_NOT_CONNECT.to_owned(),
+            #[cfg(test)]
+            ConnectionError::TestError { .. } => self.to_string(),
         }
     }
 }
@@ -104,6 +115,8 @@ impl ReportableError for ConnectionError {
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
+            #[cfg(test)]
+            ConnectionError::TestError { kind, .. } => *kind,
         }
     }
 }
@@ -256,6 +269,7 @@ impl ConnectInfo {
     async fn connect_raw(
         &self,
         config: &ComputeConfig,
+        tls: TlsNegotiation,
     ) -> Result<(SocketAddr, MaybeTlsStream<TcpStream, RustlsStream>), TlsError> {
         let timeout = config.timeout;
 
@@ -298,7 +312,7 @@ impl ConnectInfo {
         match connect_once(&*addrs).await {
             Ok((sockaddr, stream)) => Ok((
                 sockaddr,
-                tls::connect_tls(stream, self.ssl_mode, config, host).await?,
+                tls::connect_tls(stream, self.ssl_mode, config, host, tls).await?,
             )),
             Err(err) => {
                 warn!("couldn't connect to compute node at {host}:{port}: {err}");
@@ -329,9 +343,10 @@ impl ConnectInfo {
         ctx: &RequestContext,
         aux: &MetricsAuxInfo,
         config: &ComputeConfig,
+        tls: TlsNegotiation,
     ) -> Result<ComputeConnection, ConnectionError> {
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let (socket_addr, stream) = self.connect_raw(config).await?;
+        let (socket_addr, stream) = self.connect_raw(config, tls).await?;
         drop(pause);
 
         tracing::Span::current().record("compute_id", tracing::field::display(&aux.compute_id));
