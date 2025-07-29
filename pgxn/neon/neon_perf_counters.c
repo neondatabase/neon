@@ -42,7 +42,6 @@ NeonPerfCountersShmemRequest(void)
 }
 
 
-
 void
 NeonPerfCountersShmemInit(void)
 {

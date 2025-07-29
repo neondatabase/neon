@@ -154,6 +154,11 @@ typedef struct
 	 * Histogram of query execution time.
 	 */
 	QTHistogramData query_time_hist;
+
+	/*
+	 * Minimal LSN of in-fligth request requests
+	 */
+	XLogRecPtr min_request_lsn;
 } neon_per_backend_counters;
 
 /* Pointer to the shared memory array of neon_per_backend_counters structs */
@@ -168,6 +173,12 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
 #define NUM_NEON_PERF_COUNTER_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
 
 #define MyNeonCounters (&neon_per_backend_counters_shared[MyProcNumber])
+
+/*
+ * Backend-local minimal in-flight request LSN.
+ * We store it in neon_per_backend_counters_shared and not in separate array to minimize false cache sharing
+ */
+#define MIN_BACKEND_REQUEST_LSN MyNeonCounters->min_request_lsn
 
 extern void inc_getpage_wait(uint64 latency);
 extern void inc_page_cache_read_wait(uint64 latency);

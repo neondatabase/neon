@@ -243,6 +243,7 @@ extern char *neon_timeline;
 extern char *neon_tenant;
 extern int32 max_cluster_size;
 extern int  neon_protocol_version;
+extern XLogRecPtr last_replay_lsn;
 
 extern shardno_t get_shard_number(BufferTag* tag);
 
