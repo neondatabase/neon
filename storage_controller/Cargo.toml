@@ -75,13 +75,3 @@ utils = { path = "../libs/utils/" }
 metrics = { path = "../libs/metrics/" }
 control_plane = { path = "../control_plane" }
 workspace_hack = { version = "0.1", path = "../workspace_hack" }
-
-[dev-dependencies]
-postgresql_archive = "0.19.0"
-postgresql_embedded = { version = "0.19.0", features = ["blocking"] }
-diesel = { version = "2.2.6", features = [
-    "postgres",
-    "serde_json",
-    "chrono",
-    "uuid",
-] }
