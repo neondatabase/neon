@@ -1235,7 +1235,7 @@ pub fn local_pageserver_conf_to_conn_info(
         None
     };
     let ps_conninfo = PageserverShardConnectionInfo {
-        id: Some(conf.id.to_string()),
+        id: Some(conf.id),
         libpq_url,
         grpc_url,
     };
@@ -1276,7 +1276,7 @@ pub fn tenant_locate_response_to_conn_info(
 
         let shard_info = PageserverShardInfo {
             pageservers: vec![PageserverShardConnectionInfo {
-                id: Some(shard.node_id.to_string()),
+                id: Some(shard.node_id),
                 libpq_url,
                 grpc_url,
             }],

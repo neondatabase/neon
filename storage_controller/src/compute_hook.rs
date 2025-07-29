@@ -542,7 +542,7 @@ impl ApiMethod for ComputeHookTenant {
                         None
                     };
                     let pageserver = PageserverShardConnectionInfo {
-                        id: Some(shard.node_id.to_string()),
+                        id: Some(shard.node_id),
                         libpq_url,
                         grpc_url,
                     };

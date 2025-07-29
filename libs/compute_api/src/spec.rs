@@ -12,7 +12,7 @@ use regex::Regex;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use url::Url;
-use utils::id::{TenantId, TimelineId};
+use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
 
@@ -362,7 +362,7 @@ pub struct PageserverShardInfo {
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct PageserverShardConnectionInfo {
-    pub id: Option<String>,
+    pub id: Option<NodeId>,
     pub libpq_url: Option<String>,
     pub grpc_url: Option<String>,
 }
