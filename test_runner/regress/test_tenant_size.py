@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -768,6 +769,14 @@ def test_lsn_lease_storcon(neon_env_builder: NeonEnvBuilder):
         "compaction_period": "0s",
     }
     env = neon_env_builder.init_start(initial_tenant_conf=conf)
+    # ShardSplit is slow in debug builds, so ignore the warning
+    if os.getenv("BUILD_TYPE", "debug") == "debug":
+        env.storage_controller.allowed_errors.extend(
+            [
+                ".*Exclusive lock by ShardSplit was held.*",
+            ]
+        )
+
     with env.endpoints.create_start(
         "main",
     ) as ep:
