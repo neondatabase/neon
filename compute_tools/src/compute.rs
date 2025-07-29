@@ -2134,6 +2134,25 @@ impl ComputeNode {
         Ok(())
     }
 
+    /// Tell postgres/pgbouncer/local_proxy to reload their configurations.
+    #[instrument(skip_all)]
+    pub fn reload(&self, spec: ComputeSpec) -> Result<()> {
+        let rt = tokio::runtime::Handle::current();
+        if spec.pgbouncer_settings.is_some() {
+            rt.block_on(reload_pgbouncer())?;
+        }
+        if spec.local_proxy_config.is_some() {
+            local_proxy::reload()?;
+        }
+        self.pg_reload_conf()?;
+
+        let unknown_op = "unknown".to_string();
+        let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
+        info!("finished reload of compute node for operation {op_id}");
+
+        Ok(())
+    }
+
     #[instrument(skip_all)]
     pub fn configure_as_primary(&self, compute_state: &ComputeState) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
