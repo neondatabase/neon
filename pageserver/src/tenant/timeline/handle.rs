@@ -484,30 +484,28 @@ impl<T: Types> Cache<T> {
             .upgrade()
             .ok()
             .expect("we just created it and it's not linked anywhere yet");
-        {
-            let mut lock_guard = timeline
-                .per_timeline_state()
-                .handles
-                .lock()
-                .expect("mutex poisoned");
-            let Some(per_timeline_state) = &mut *lock_guard else {
-                return Err(GetActiveTimelineError::Timeline(
-                    GetTimelineError::ShuttingDown,
-                ));
-            };
-            let replaced = per_timeline_state.insert(self.id, Arc::clone(&handle_inner_arc));
-            assert!(replaced.is_none(), "some earlier code left a stale handle");
-            match self.map.entry(key) {
-                hash_map::Entry::Occupied(_o) => {
-                    // This cannot not happen because
-                    // 1. we're the _miss_ handle, i.e., `self.map` didn't contain an entry and
-                    // 2. we were holding &mut self during .resolve().await above, so, no other thread can have inserted a handle
-                    //    while we were waiting for the tenant manager.
-                    unreachable!()
-                }
-                hash_map::Entry::Vacant(v) => {
-                    v.insert(handle_weak);
-                }
+        let mut lock_guard = timeline
+            .per_timeline_state()
+            .handles
+            .lock()
+            .expect("mutex poisoned");
+        let Some(per_timeline_state) = &mut *lock_guard else {
+            return Err(GetActiveTimelineError::Timeline(
+                GetTimelineError::ShuttingDown,
+            ));
+        };
+        let replaced = per_timeline_state.insert(self.id, Arc::clone(&handle_inner_arc));
+        assert!(replaced.is_none(), "some earlier code left a stale handle");
+        match self.map.entry(key) {
+            hash_map::Entry::Occupied(_o) => {
+                // This cannot not happen because
+                // 1. we're the _miss_ handle, i.e., `self.map` didn't contain an entry and
+                // 2. we were holding &mut self during .resolve().await above, so, no other thread can have inserted a handle
+                //    while we were waiting for the tenant manager.
+                unreachable!()
+            }
+            hash_map::Entry::Vacant(v) => {
+                v.insert(handle_weak);
             }
         }
         Ok(handle)
