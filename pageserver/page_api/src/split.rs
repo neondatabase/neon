@@ -3,18 +3,18 @@ use std::collections::HashMap;
 use anyhow::anyhow;
 use bytes::Bytes;
 
+use crate::model::*;
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::shard::key_to_shard_number;
-use pageserver_page_api as page_api;
 use utils::shard::{ShardCount, ShardIndex, ShardStripeSize};
 
 /// Splits GetPageRequests that straddle shard boundaries and assembles the responses.
 /// TODO: add tests for this.
 pub struct GetPageSplitter {
     /// Split requests by shard index.
-    requests: HashMap<ShardIndex, page_api::GetPageRequest>,
+    requests: HashMap<ShardIndex, GetPageRequest>,
     /// The response being assembled. Preallocated with empty pages, to be filled in.
-    response: page_api::GetPageResponse,
+    response: GetPageResponse,
     /// Maps the offset in `request.block_numbers` and `response.pages` to the owning shard. Used
     /// to assemble the response pages in the same order as the original request.
     block_shards: Vec<ShardIndex>,
@@ -24,7 +24,7 @@ impl GetPageSplitter {
     /// Checks if the given request only touches a single shard, and returns the shard ID. This is
     /// the common case, so we check first in order to avoid unnecessary allocations and overhead.
     pub fn for_single_shard(
-        req: &page_api::GetPageRequest,
+        req: &GetPageRequest,
         count: ShardCount,
         stripe_size: Option<ShardStripeSize>,
     ) -> anyhow::Result<Option<ShardIndex>> {
@@ -57,7 +57,7 @@ impl GetPageSplitter {
 
     /// Splits the given request.
     pub fn split(
-        req: page_api::GetPageRequest,
+        req: GetPageRequest,
         count: ShardCount,
         stripe_size: Option<ShardStripeSize>,
     ) -> anyhow::Result<Self> {
@@ -84,7 +84,7 @@ impl GetPageSplitter {
 
             requests
                 .entry(shard_id)
-                .or_insert_with(|| page_api::GetPageRequest {
+                .or_insert_with(|| GetPageRequest {
                     request_id: req.request_id,
                     request_class: req.request_class,
                     rel: req.rel,
@@ -98,16 +98,16 @@ impl GetPageSplitter {
 
         // Construct a response to be populated by shard responses. Preallocate empty page slots
         // with the expected block numbers.
-        let response = page_api::GetPageResponse {
+        let response = GetPageResponse {
             request_id: req.request_id,
-            status_code: page_api::GetPageStatusCode::Ok,
+            status_code: GetPageStatusCode::Ok,
             reason: None,
             rel: req.rel,
             pages: req
                 .block_numbers
                 .into_iter()
                 .map(|block_number| {
-                    page_api::Page {
+                    Page {
                         block_number,
                         image: Bytes::new(), // empty page slot to be filled in
                     }
@@ -123,9 +123,7 @@ impl GetPageSplitter {
     }
 
     /// Drains the per-shard requests, moving them out of the splitter to avoid extra allocations.
-    pub fn drain_requests(
-        &mut self,
-    ) -> impl Iterator<Item = (ShardIndex, page_api::GetPageRequest)> {
+    pub fn drain_requests(&mut self) -> impl Iterator<Item = (ShardIndex, GetPageRequest)> {
         self.requests.drain()
     }
 
@@ -135,10 +133,10 @@ impl GetPageSplitter {
     pub fn add_response(
         &mut self,
         shard_id: ShardIndex,
-        response: page_api::GetPageResponse,
+        response: GetPageResponse,
     ) -> anyhow::Result<()> {
         // The caller should already have converted status codes into tonic::Status.
-        if response.status_code != page_api::GetPageStatusCode::Ok {
+        if response.status_code != GetPageStatusCode::Ok {
             return Err(anyhow!(
                 "unexpected non-OK response for shard {shard_id}: {} {}",
                 response.status_code,
@@ -209,7 +207,7 @@ impl GetPageSplitter {
 
     /// Fetches the final, assembled response.
     #[allow(clippy::result_large_err)]
-    pub fn get_response(self) -> anyhow::Result<page_api::GetPageResponse> {
+    pub fn get_response(self) -> anyhow::Result<GetPageResponse> {
         // Check that the response is complete.
         for (i, page) in self.response.pages.iter().enumerate() {
             if page.image.is_empty() {

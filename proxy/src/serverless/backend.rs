@@ -4,6 +4,7 @@ use std::time::Duration;
 use ed25519_dalek::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use jose_jwk::jose_b64;
+use postgres_client::error::SqlState;
 use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use rand_core::OsRng;
 use tracing::field::display;
@@ -26,7 +27,7 @@ use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::intern::EndpointIdInt;
+use crate::intern::{EndpointIdInt, RoleNameInt};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::{connect_auth, connect_compute};
 use crate::rate_limiter::EndpointRateLimiter;
@@ -76,9 +77,11 @@ impl PoolingBackend {
         };
 
         let ep = EndpointIdInt::from(&user_info.endpoint);
+        let role = RoleNameInt::from(&user_info.user);
         let auth_outcome = crate::auth::validate_password_and_exchange(
-            &self.config.authentication_config.thread_pool,
+            &self.config.authentication_config.scram_thread_pool,
             ep,
+            role,
             password,
             secret,
         )
@@ -457,15 +460,14 @@ impl ReportableError for HttpConnError {
         match self {
             HttpConnError::ConnectError(_) => ErrorKind::Compute,
             HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
-            HttpConnError::PostgresConnectionError(p) => {
-                if p.as_db_error().is_some() {
-                    // postgres rejected the connection
-                    ErrorKind::Postgres
-                } else {
-                    // couldn't even reach postgres
-                    ErrorKind::Compute
-                }
-            }
+            HttpConnError::PostgresConnectionError(p) => match p.as_db_error() {
+                // user provided a wrong database name
+                Some(err) if err.code() == &SqlState::INVALID_CATALOG_NAME => ErrorKind::User,
+                // postgres rejected the connection
+                Some(_) => ErrorKind::Postgres,
+                // couldn't even reach postgres
+                None => ErrorKind::Compute,
+            },
             HttpConnError::LocalProxyConnectionError(_) => ErrorKind::Compute,
             HttpConnError::ComputeCtl(_) => ErrorKind::Service,
             HttpConnError::JwtPayloadError(_) => ErrorKind::User,

@@ -103,7 +103,7 @@ RUN  --mount=type=secret,uid=1000,id=SUBZERO_ACCESS_TOKEN \
     && if [ -s /run/secrets/SUBZERO_ACCESS_TOKEN ]; then \
         export CARGO_FEATURES="rest_broker"; \
     fi \
-    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo build \
+    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo auditable build \
       --features $CARGO_FEATURES \
       --bin pg_sni_router  \
       --bin pageserver  \

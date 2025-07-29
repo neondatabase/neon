@@ -49,10 +49,10 @@ use compute_tools::compute::{
     BUILD_TAG, ComputeNode, ComputeNodeParams, forward_termination_signal,
 };
 use compute_tools::extension_server::get_pg_version_string;
-use compute_tools::logger::*;
 use compute_tools::params::*;
 use compute_tools::pg_isready::get_pg_isready_bin;
 use compute_tools::spec::*;
+use compute_tools::{hadron_metrics, installed_extensions, logger::*};
 use rlimit::{Resource, setrlimit};
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -81,6 +81,15 @@ struct Cli {
     /// the neon extension (for installing remote extensions) and local_proxy.
     #[arg(long, default_value_t = 3081)]
     pub internal_http_port: u16,
+
+    /// Backwards-compatible --http-port for Hadron deployments. Functionally the
+    /// same as --external-http-port.
+    #[arg(
+        long,
+        conflicts_with = "external_http_port",
+        conflicts_with = "internal_http_port"
+    )]
+    pub http_port: Option<u16>,
 
     #[arg(short = 'D', long, value_name = "DATADIR")]
     pub pgdata: String,
@@ -181,6 +190,26 @@ impl Cli {
     }
 }
 
+// Hadron helpers to get compatible compute_ctl http ports from Cli. The old `--http-port`
+// arg is used and acts the same as `--external-http-port`. The internal http port is defined
+// to be http_port + 1. Hadron runs in the dblet environment which uses the host network, so
+// we need to be careful with the ports to choose.
+fn get_external_http_port(cli: &Cli) -> u16 {
+    if cli.lakebase_mode {
+        return cli.http_port.unwrap_or(cli.external_http_port);
+    }
+    cli.external_http_port
+}
+fn get_internal_http_port(cli: &Cli) -> u16 {
+    if cli.lakebase_mode {
+        return cli
+            .http_port
+            .map(|p| p + 1)
+            .unwrap_or(cli.internal_http_port);
+    }
+    cli.internal_http_port
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -205,9 +234,17 @@ fn main() -> Result<()> {
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
 
+    if cli.lakebase_mode {
+        installed_extensions::initialize_metrics();
+        hadron_metrics::initialize_metrics();
+    }
+
     let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
 
     let config = get_config(&cli)?;
+
+    let external_http_port = get_external_http_port(&cli);
+    let internal_http_port = get_internal_http_port(&cli);
 
     let compute_node = ComputeNode::new(
         ComputeNodeParams {
@@ -217,8 +254,8 @@ fn main() -> Result<()> {
             pgdata: cli.pgdata.clone(),
             pgbin: cli.pgbin.clone(),
             pgversion: get_pg_version_string(&cli.pgbin),
-            external_http_port: cli.external_http_port,
-            internal_http_port: cli.internal_http_port,
+            external_http_port,
+            internal_http_port,
             remote_ext_base_url: cli.remote_ext_base_url.clone(),
             resize_swap_on_bind: cli.resize_swap_on_bind,
             set_disk_quota_for_fs: cli.set_disk_quota_for_fs,

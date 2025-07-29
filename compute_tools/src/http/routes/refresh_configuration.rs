@@ -9,7 +9,7 @@ use axum::{
 use http::StatusCode;
 
 use crate::compute::ComputeNode;
-// use crate::hadron_metrics::POSTGRES_PAGESTREAM_REQUEST_ERRORS;
+use crate::hadron_metrics::POSTGRES_PAGESTREAM_REQUEST_ERRORS;
 use crate::http::JsonResponse;
 
 /// The /refresh_configuration POST method is used to nudge compute_ctl to pull a new spec
@@ -21,6 +21,7 @@ use crate::http::JsonResponse;
 pub(in crate::http) async fn refresh_configuration(
     State(compute): State<Arc<ComputeNode>>,
 ) -> Response {
+    POSTGRES_PAGESTREAM_REQUEST_ERRORS.inc();
     match compute.signal_refresh_configuration().await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, e),
