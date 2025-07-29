@@ -6,7 +6,8 @@ use compute_api::responses::{
     LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
-    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverProtocol, PgIdent,
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, GenericOption,
+    PageserverProtocol, PgIdent, Role,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -411,6 +412,66 @@ struct StartVmMonitorResult {
     token: tokio_util::sync::CancellationToken,
     #[cfg(target_os = "linux")]
     vm_monitor: Option<JoinHandle<Result<()>>>,
+}
+
+// BEGIN_HADRON
+/// This function creates roles that are used by Databricks.
+/// These roles are not needs to be botostrapped at PG Compute provisioning time.
+/// The auth method for these roles are configured in databricks_pg_hba.conf in universe repository.
+pub(crate) fn create_databricks_roles() -> Vec<String> {
+    let roles = vec![
+        // Role for prometheus_stats_exporter
+        Role {
+            name: "databricks_monitor".to_string(),
+            // This uses "local" connection and auth method for that is "trust", so no password is needed.
+            encrypted_password: None,
+            options: Some(vec![GenericOption {
+                name: "IN ROLE pg_monitor".to_string(),
+                value: None,
+                vartype: "string".to_string(),
+            }]),
+        },
+        // Role for brickstore control plane
+        Role {
+            name: "databricks_control_plane".to_string(),
+            // Certificate user does not need password.
+            encrypted_password: None,
+            options: Some(vec![GenericOption {
+                name: "SUPERUSER".to_string(),
+                value: None,
+                vartype: "string".to_string(),
+            }]),
+        },
+        // Role for brickstore httpgateway.
+        Role {
+            name: "databricks_gateway".to_string(),
+            // Certificate user does not need password.
+            encrypted_password: None,
+            options: None,
+        },
+    ];
+
+    roles
+        .into_iter()
+        .map(|role| {
+            let query = format!(
+                r#"
+                DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT FROM pg_catalog.pg_roles WHERE rolname = '{}')
+                        THEN
+                            CREATE ROLE {} {};
+                        END IF;
+                    END
+                $$;"#,
+                role.name,
+                role.name.pg_quote(),
+                role.to_pg_options(),
+            );
+            query
+        })
+        .collect()
 }
 
 /// Databricks-specific environment variables to be passed to the `postgres` sub-process.
