@@ -473,8 +473,10 @@ _PG_init(void)
 	load_file("$libdir/neon_rmgr", false);
 #endif
 
-	prev_emit_log_hook = emit_log_hook;
-	emit_log_hook = DatabricksSqlErrorHookImpl;
+	if (lakebase_mode) {
+		prev_emit_log_hook = emit_log_hook;
+		emit_log_hook = DatabricksSqlErrorHookImpl;
+	}
 
 	/*
 	 * Initializing a pre-loaded Postgres extension happens in three stages:
