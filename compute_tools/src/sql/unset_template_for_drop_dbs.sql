@@ -6,7 +6,7 @@ DO ${outer_tag}$
             WHERE datname = {datname}
         )
         THEN
-            EXECUTE format('ALTER DATABASE %I is_template false', {datname});
+            EXECUTE pg_catalog.format('ALTER DATABASE %I is_template false', {datname});
         END IF;
     END
 ${outer_tag}$;

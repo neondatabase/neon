@@ -1033,7 +1033,9 @@ async fn get_operations<'a>(
             if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
                 if libs.contains("pg_stat_statements") {
                     return Ok(Box::new(once(Operation {
-                        query: String::from("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"),
+                        query: String::from(
+                            "CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA public",
+                        ),
                         comment: Some(String::from("create system extensions")),
                     })));
                 }
@@ -1041,11 +1043,13 @@ async fn get_operations<'a>(
             Ok(Box::new(empty()))
         }
         ApplySpecPhase::CreatePgauditExtension => Ok(Box::new(once(Operation {
-            query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit"),
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit WITH SCHEMA public"),
             comment: Some(String::from("create pgaudit extensions")),
         }))),
         ApplySpecPhase::CreatePgauditlogtofileExtension => Ok(Box::new(once(Operation {
-            query: String::from("CREATE EXTENSION IF NOT EXISTS pgauditlogtofile"),
+            query: String::from(
+                "CREATE EXTENSION IF NOT EXISTS pgauditlogtofile WITH SCHEMA public",
+            ),
             comment: Some(String::from("create pgauditlogtofile extensions")),
         }))),
         // Disable pgaudit logging for postgres database.

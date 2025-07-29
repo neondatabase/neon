@@ -1807,6 +1807,12 @@ impl ComputeNode {
             }
         });
 
+        // Ensure only pg_catalog is on the search path
+        client
+            .simple_query("SET search_path = pg_catalog")
+            .await
+            .context("apply_config SET search_path = pg_catalog")?;
+
         // Disable DDL forwarding because control plane already knows about the roles/databases
         // we're about to modify.
         client
@@ -2419,8 +2425,9 @@ LIMIT 100",
                 .await
                 .with_context(|| format!("Failed to execute query: {query}"))?;
         } else {
-            let query =
-                format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
+            let query = format!(
+                "CREATE EXTENSION IF NOT EXISTS {ext_name} WITH SCHEMA public VERSION {quoted_version}"
+            );
             db_client
                 .simple_query(&query)
                 .await

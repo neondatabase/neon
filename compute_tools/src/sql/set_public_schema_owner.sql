@@ -15,7 +15,7 @@ DO ${outer_tag}$
 
             IF schema_owner = 'cloud_admin' OR schema_owner = 'zenith_admin'
             THEN
-                EXECUTE format('ALTER SCHEMA public OWNER TO %I', {db_owner});
+                EXECUTE pg_catalog.format('ALTER SCHEMA public OWNER TO %I', {db_owner});
             END IF;
         END IF;
     END
