@@ -679,7 +679,12 @@ async fn get_operations<'a>(
         ApplySpecPhase::CreatePrivilegedRole => Ok(Box::new(once(Operation {
             query: format!(
                 include_str!("sql/create_privileged_role.sql"),
-                privileged_role_name = params.privileged_role_name
+                privileged_role_name = params.privileged_role_name,
+                privileges = if params.lakebase_mode {
+                    "CREATEDB CREATEROLE NOLOGIN REPLICATION BYPASSRLS"
+                } else {
+                    "CREATEDB CREATEROLE NOLOGIN BYPASSRLS"
+                }
             ),
             comment: None,
         }))),
