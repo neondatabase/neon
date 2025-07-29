@@ -194,7 +194,6 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "numerator": 0,
             "denominator": 10,
         },
-        "rel_size_v1_access_disabled": True,
     }
 
     vps_http = env.storage_controller.pageserver_api()

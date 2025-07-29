@@ -585,6 +585,12 @@ def test_historic_storage_formats(
             dataset.tenant_id,
             {"rel_size_v1_access_disabled": True, "rel_size_v2_enabled": True},
         )
+        for timeline in timelines:
+            env.pageserver.http_client().timeline_patch_index_part(
+                dataset.tenant_id,
+                timeline["timeline_id"],
+                {"force_index_update": True, "rel_size_migration": "migrated"},
+            )
 
     # Import tenant does not create the timeline on safekeepers,
     # because it is a debug handler and the timeline may have already been

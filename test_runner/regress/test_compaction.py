@@ -12,10 +12,12 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     generate_uploads_and_deletions,
+    wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
+from regress.test_pg_regress import patch_tenant_conf
 
 AGGRESSIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
@@ -1101,7 +1103,8 @@ def test_image_consistent_lsn(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_pageservers = 2
     neon_env_builder.num_safekeepers = 1
     env = neon_env_builder.init_start(
-        initial_tenant_conf=tenant_conf,
+        # We have to run this test with v1 to avoid v2 migration producing too many delta layers.
+        initial_tenant_conf=patch_tenant_conf(tenant_conf, "v1"),
         initial_tenant_shard_count=4,
         initial_tenant_shard_stripe_size=1,
     )
@@ -1115,6 +1118,8 @@ def test_image_consistent_lsn(neon_env_builder: NeonEnvBuilder):
         endpoint.safe_psql(
             f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))", log_query=False
         )
+
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
 
     response = env.storage_controller.tenant_timeline_describe(tenant_id, timeline_id)
     shards = response["shards"]
