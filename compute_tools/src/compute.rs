@@ -6,7 +6,8 @@ use compute_api::responses::{
     LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
-    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PageserverProtocol, PgIdent,
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, GenericOption,
+    PageserverProtocol, PgIdent, Role,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -413,6 +414,66 @@ struct StartVmMonitorResult {
     vm_monitor: Option<JoinHandle<Result<()>>>,
 }
 
+// BEGIN_HADRON
+/// This function creates roles that are used by Databricks.
+/// These roles are not needs to be botostrapped at PG Compute provisioning time.
+/// The auth method for these roles are configured in databricks_pg_hba.conf in universe repository.
+pub(crate) fn create_databricks_roles() -> Vec<String> {
+    let roles = vec![
+        // Role for prometheus_stats_exporter
+        Role {
+            name: "databricks_monitor".to_string(),
+            // This uses "local" connection and auth method for that is "trust", so no password is needed.
+            encrypted_password: None,
+            options: Some(vec![GenericOption {
+                name: "IN ROLE pg_monitor".to_string(),
+                value: None,
+                vartype: "string".to_string(),
+            }]),
+        },
+        // Role for brickstore control plane
+        Role {
+            name: "databricks_control_plane".to_string(),
+            // Certificate user does not need password.
+            encrypted_password: None,
+            options: Some(vec![GenericOption {
+                name: "SUPERUSER".to_string(),
+                value: None,
+                vartype: "string".to_string(),
+            }]),
+        },
+        // Role for brickstore httpgateway.
+        Role {
+            name: "databricks_gateway".to_string(),
+            // Certificate user does not need password.
+            encrypted_password: None,
+            options: None,
+        },
+    ];
+
+    roles
+        .into_iter()
+        .map(|role| {
+            let query = format!(
+                r#"
+                DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT FROM pg_catalog.pg_roles WHERE rolname = '{}')
+                        THEN
+                            CREATE ROLE {} {};
+                        END IF;
+                    END
+                $$;"#,
+                role.name,
+                role.name.pg_quote(),
+                role.to_pg_options(),
+            );
+            query
+        })
+        .collect()
+}
+
 /// Databricks-specific environment variables to be passed to the `postgres` sub-process.
 pub struct DatabricksEnvVars {
     /// The Databricks "endpoint ID" of the compute instance. Used by `postgres` to check
@@ -421,14 +482,27 @@ pub struct DatabricksEnvVars {
     /// Hostname of the Databricks workspace URL this compute instance belongs to.
     /// Used by postgres to verify Databricks PAT tokens.
     pub workspace_host: String,
+
+    pub lakebase_mode: bool,
 }
 
 impl DatabricksEnvVars {
-    pub fn new(compute_spec: &ComputeSpec, compute_id: Option<&String>) -> Self {
-        // compute_id is a string format of "{endpoint_id}/{compute_idx}"
-        // endpoint_id is a uuid. We only need to pass down endpoint_id to postgres.
-        // Panics if compute_id is not set or not in the expected format.
-        let endpoint_id = compute_id.unwrap().split('/').next().unwrap().to_string();
+    pub fn new(
+        compute_spec: &ComputeSpec,
+        compute_id: Option<&String>,
+        instance_id: Option<String>,
+        lakebase_mode: bool,
+    ) -> Self {
+        let endpoint_id = if let Some(instance_id) = instance_id {
+            // Use instance_id as endpoint_id if it is set. This code path is for PuPr model.
+            instance_id
+        } else {
+            // Use compute_id as endpoint_id if instance_id is not set. The code path is for PrPr model.
+            // compute_id is a string format of "{endpoint_id}/{compute_idx}"
+            // endpoint_id is a uuid. We only need to pass down endpoint_id to postgres.
+            // Panics if compute_id is not set or not in the expected format.
+            compute_id.unwrap().split('/').next().unwrap().to_string()
+        };
         let workspace_host = compute_spec
             .databricks_settings
             .as_ref()
@@ -437,6 +511,7 @@ impl DatabricksEnvVars {
         Self {
             endpoint_id,
             workspace_host,
+            lakebase_mode,
         }
     }
 
@@ -446,6 +521,10 @@ impl DatabricksEnvVars {
 
     /// Convert DatabricksEnvVars to a list of string pairs that can be passed as env vars. Consumes `self`.
     pub fn to_env_var_list(self) -> Vec<(String, String)> {
+        if !self.lakebase_mode {
+            // In neon env, we don't need to pass down the env vars to postgres.
+            return vec![];
+        }
         vec![
             (
                 Self::DATABRICKS_ENDPOINT_ID_ENVVAR.to_string(),
@@ -495,7 +574,11 @@ impl ComputeNode {
         let mut new_state = ComputeState::new();
         if let Some(spec) = config.spec {
             let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
-            new_state.pspec = Some(pspec);
+            if params.lakebase_mode {
+                ComputeNode::set_spec(&params, &mut new_state, pspec);
+            } else {
+                new_state.pspec = Some(pspec);
+            }
         }
 
         Ok(ComputeNode {
@@ -1093,7 +1176,14 @@ impl ComputeNode {
         // If it is something different then create_dir() will error out anyway.
         let pgdata = &self.params.pgdata;
         let _ok = fs::remove_dir_all(pgdata);
-        fs::create_dir(pgdata)?;
+        if self.params.lakebase_mode {
+            // Ignore creation errors if the directory already exists (e.g. mounting it ahead of time).
+            // If it is something different then PG startup will error out anyway.
+            let _ok = fs::create_dir(pgdata);
+        } else {
+            fs::create_dir(pgdata)?;
+        }
+
         fs::set_permissions(pgdata, fs::Permissions::from_mode(0o700))?;
 
         Ok(())
@@ -1572,7 +1662,7 @@ impl ComputeNode {
         // symlink doesn't affect anything.
         //
         // See https://github.com/neondatabase/autoscaling/issues/800
-        std::fs::remove_dir(pgdata_path.join("pg_dynshmem"))?;
+        std::fs::remove_dir_all(pgdata_path.join("pg_dynshmem"))?;
         symlink("/dev/shm/", pgdata_path.join("pg_dynshmem"))?;
 
         match spec.mode {
@@ -1587,6 +1677,12 @@ impl ComputeNode {
 
     /// Start and stop a postgres process to warm up the VM for startup.
     pub fn prewarm_postgres_vm_memory(&self) -> Result<()> {
+        if self.params.lakebase_mode {
+            // We are running in Hadron mode. Disabling this prewarming step for now as it could run
+            // into dblet port conflicts and also doesn't add much value with our current infra.
+            info!("Skipping postgres prewarming in Hadron mode");
+            return Ok(());
+        }
         info!("prewarming VM memory");
 
         // Create pgdata
@@ -1648,7 +1744,12 @@ impl ComputeNode {
             let databricks_env_vars = {
                 let state = self.state.lock().unwrap();
                 let spec = &state.pspec.as_ref().unwrap().spec;
-                DatabricksEnvVars::new(spec, Some(&self.params.compute_id))
+                DatabricksEnvVars::new(
+                    spec,
+                    Some(&self.params.compute_id),
+                    self.params.instance_id.clone(),
+                    self.params.lakebase_mode,
+                )
             };
 
             info!(
@@ -1820,7 +1921,15 @@ impl ComputeNode {
     /// Do initial configuration of the already started Postgres.
     #[instrument(skip_all)]
     pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
-        let conf = self.get_tokio_conn_conf(Some("compute_ctl:apply_config"));
+        let mut conf = self.get_tokio_conn_conf(Some("compute_ctl:apply_config"));
+
+        if self.params.lakebase_mode {
+            // Set a 2-minute statement_timeout for the session applying config. The individual SQL statements
+            // used in apply_spec_sql() should not take long (they are just creating users and installing
+            // extensions). If any of them are stuck for an extended period of time it usually indicates a
+            // pageserver connectivity problem and we should bail out.
+            conf.options("-c statement_timeout=2min");
+        }
 
         let conf = Arc::new(conf);
         let spec = Arc::new(
@@ -2138,7 +2247,17 @@ impl ComputeNode {
     pub fn check_for_core_dumps(&self) -> Result<()> {
         let core_dump_dir = match std::env::consts::OS {
             "macos" => Path::new("/cores/"),
-            _ => Path::new(&self.params.pgdata),
+            // BEGIN HADRON
+            // NB: Read core dump files from a fixed location outside of
+            // the data directory since `compute_ctl` wipes the data directory
+            // across container restarts.
+            _ => {
+                if self.params.lakebase_mode {
+                    Path::new("/databricks/logs/brickstore")
+                } else {
+                    Path::new(&self.params.pgdata)
+                }
+            } // END HADRON
         };
 
         // Collect core dump paths if any
@@ -2451,7 +2570,7 @@ LIMIT 100",
         if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
             libs_vec = libs
                 .split(&[',', '\'', ' '])
-                .filter(|s| *s != "neon" && !s.is_empty())
+                .filter(|s| *s != "neon" && *s != "databricks_auth" && !s.is_empty())
                 .map(str::to_string)
                 .collect();
         }
@@ -2470,7 +2589,7 @@ LIMIT 100",
             if let Some(libs) = shared_preload_libraries_line.split("='").nth(1) {
                 preload_libs_vec = libs
                     .split(&[',', '\'', ' '])
-                    .filter(|s| *s != "neon" && !s.is_empty())
+                    .filter(|s| *s != "neon" && *s != "databricks_auth" && !s.is_empty())
                     .map(str::to_string)
                     .collect();
             }
