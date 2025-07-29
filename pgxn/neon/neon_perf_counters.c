@@ -45,6 +45,7 @@ DatabricksMetricsShmemInit(void)
 		pg_atomic_init_u32(&databricks_metrics_shared->index_corruption_count, 0);
 		pg_atomic_init_u32(&databricks_metrics_shared->data_corruption_count, 0);
 		pg_atomic_init_u32(&databricks_metrics_shared->internal_error_count, 0);
+		pg_atomic_init_u32(&databricks_metrics_shared->ps_corruption_detected, 0);
 	}
 }
 /* END_HADRON */
@@ -440,6 +441,7 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 				{"sql_index_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->index_corruption_count)},
 				{"sql_data_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->data_corruption_count)},
 				{"sql_internal_error_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->internal_error_count)},
+				{"ps_corruption_detected", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->ps_corruption_detected)},
 				{NULL, false, 0, 0},
 			};
 			for (int i = 0; databricks_metrics[i].name != NULL; i++)

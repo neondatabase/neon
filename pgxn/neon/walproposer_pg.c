@@ -49,6 +49,7 @@
 
 #include "libpqwalproposer.h"
 #include "neon.h"
+#include "neon_perf_counters.h"
 #include "neon_walreader.h"
 #include "walproposer.h"
 
@@ -740,6 +741,11 @@ record_pageserver_feedback(PageserverFeedback *ps_feedback, shardno_t num_shards
 	Assert(ps_feedback->present);
 	Assert(ps_feedback->shard_number < MAX_SHARDS);
 	Assert(ps_feedback->shard_number < num_shards);
+
+	// Begin Hadron: Record any corruption signal from the pageserver first.
+	if (ps_feedback->corruption_detected) {
+		pg_atomic_write_u32(&databricks_metrics_shared->ps_corruption_detected, 1);
+	}
 
 	SpinLockAcquire(&walprop_shared->mutex);
 

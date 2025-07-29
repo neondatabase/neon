@@ -397,6 +397,11 @@ pub struct Timeline {
     /// If true, the last compaction failed.
     compaction_failed: AtomicBool,
 
+    /// Begin Hadron: If true, the pageserver has likely detected data corruption in the timeline.
+    /// We need to feed this information back to the Safekeeper and postgres for them to take the
+    /// appropriate action.
+    corruption_detected: AtomicBool,
+
     /// Notifies the tenant compaction loop that there is pending L0 compaction work.
     l0_compaction_trigger: Arc<Notify>,
 
@@ -3310,6 +3315,7 @@ impl Timeline {
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 compaction_failed: AtomicBool::default(),
+                corruption_detected: AtomicBool::default(),
                 l0_compaction_trigger: resources.l0_compaction_trigger,
                 gc_lock: tokio::sync::Mutex::default(),
 
@@ -6004,6 +6010,17 @@ impl Timeline {
                 )))
             });
 
+            // Begin Hadron
+            //
+            fail_point!("create-image-layer-fail-simulated-corruption", |_| {
+                self.corruption_detected
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Err(CreateImageLayersError::Other(anyhow::anyhow!(
+                    "failpoint create-image-layer-fail-simulated-corruption"
+                )))
+            });
+            // End Hadron
+
             let io_concurrency = IoConcurrency::spawn_from_conf(
                 self.conf.get_vectored_concurrent_io,
                 self.gate
@@ -7149,6 +7166,7 @@ impl Timeline {
                             critical_timeline!(
                                 self.tenant_shard_id,
                                 self.timeline_id,
+                                Some(&self.corruption_detected),
                                 "walredo failure during page reconstruction: {err:?}"
                             );
                         }
