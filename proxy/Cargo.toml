@@ -107,6 +107,7 @@ uuid.workspace = true
 x509-cert.workspace = true
 redis.workspace = true
 zerocopy.workspace = true
+zeroize.workspace = true
 # uncomment this to use the real subzero-core crate
 # subzero-core = { git = "https://github.com/neondatabase/subzero", rev = "396264617e78e8be428682f87469bb25429af88a", features = ["postgresql"], optional = true }
 # this is a stub for the subzero-core crate

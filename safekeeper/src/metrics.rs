@@ -518,6 +518,7 @@ pub async fn time_io_closure<E: Into<anyhow::Error>>(
 pub struct FullTimelineInfo {
     pub ttid: TenantTimelineId,
     pub ps_feedback_count: u64,
+    pub ps_corruption_detected: bool,
     pub last_ps_feedback: PageserverFeedback,
     pub wal_backup_active: bool,
     pub timeline_is_active: bool,
@@ -547,6 +548,7 @@ pub struct TimelineCollector {
     ps_last_received_lsn: GenericGaugeVec<AtomicU64>,
     feedback_last_time_seconds: GenericGaugeVec<AtomicU64>,
     ps_feedback_count: GenericGaugeVec<AtomicU64>,
+    ps_corruption_detected: IntGaugeVec,
     timeline_active: GenericGaugeVec<AtomicU64>,
     wal_backup_active: GenericGaugeVec<AtomicU64>,
     connected_computes: IntGaugeVec,
@@ -649,6 +651,15 @@ impl TimelineCollector {
             Opts::new(
                 "safekeeper_ps_feedback_count_total",
                 "Number of feedbacks received from the pageserver",
+            ),
+            &["tenant_id", "timeline_id"],
+        )
+        .unwrap();
+
+        let ps_corruption_detected = IntGaugeVec::new(
+            Opts::new(
+                "safekeeper_ps_corruption_detected",
+                "1 if corruption was detected in the timeline according to feedback from the pageserver, 0 otherwise",
             ),
             &["tenant_id", "timeline_id"],
         )
@@ -774,6 +785,7 @@ impl TimelineCollector {
             ps_last_received_lsn,
             feedback_last_time_seconds,
             ps_feedback_count,
+            ps_corruption_detected,
             timeline_active,
             wal_backup_active,
             connected_computes,
@@ -892,6 +904,9 @@ impl Collector for TimelineCollector {
             self.ps_feedback_count
                 .with_label_values(labels)
                 .set(tli.ps_feedback_count);
+            self.ps_corruption_detected
+                .with_label_values(labels)
+                .set(tli.ps_corruption_detected as i64);
             if let Ok(unix_time) = tli
                 .last_ps_feedback
                 .replytime
@@ -925,6 +940,7 @@ impl Collector for TimelineCollector {
         mfs.extend(self.ps_last_received_lsn.collect());
         mfs.extend(self.feedback_last_time_seconds.collect());
         mfs.extend(self.ps_feedback_count.collect());
+        mfs.extend(self.ps_corruption_detected.collect());
         mfs.extend(self.timeline_active.collect());
         mfs.extend(self.wal_backup_active.collect());
         mfs.extend(self.connected_computes.collect());

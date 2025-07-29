@@ -812,8 +812,6 @@ impl TenantShard {
     /// if the swap is not possible and leaves the intent state in its original state.
     ///
     /// Arguments:
-    /// `attached_to`: the currently attached location matching the intent state (may be None if the
-    /// shard is not attached)
     /// `promote_to`: an optional secondary location of this tenant shard. If set to None, we ask
     /// the scheduler to recommend a node
     pub(crate) fn reschedule_to_secondary(

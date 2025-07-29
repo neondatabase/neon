@@ -14,7 +14,6 @@ use super::xlog_utils::*;
 use crate::WAL_SEGMENT_SIZE;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::*;
-use log::*;
 use std::cmp::min;
 use std::num::NonZeroU32;
 use utils::lsn::Lsn;
@@ -236,7 +235,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
         // XLOG_SWITCH records are special. If we see one, we need to skip
         // to the next WAL segment.
         let next_lsn = if xlogrec.is_xlog_switch_record() {
-            trace!("saw xlog switch record at {}", self.lsn);
+            tracing::trace!("saw xlog switch record at {}", self.lsn);
             self.lsn + self.lsn.calc_padding(WAL_SEGMENT_SIZE as u64)
         } else {
             // Pad to an 8-byte boundary

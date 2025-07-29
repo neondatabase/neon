@@ -426,6 +426,7 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         remote_consistent_lsn: 0,
         replytime: 0,
         shard_number: 0,
+        corruption_detected: false,
     };
 
     let empty_wal_rate_limiter = crate::bindings::WalRateLimiter {

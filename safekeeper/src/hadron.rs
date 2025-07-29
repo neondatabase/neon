@@ -387,6 +387,7 @@ pub fn get_filesystem_usage(path: &std::path::Path) -> u64 {
             critical_timeline!(
                 placeholder_ttid.tenant_id,
                 placeholder_ttid.timeline_id,
+                None::<&AtomicBool>,
                 "Global disk usage watcher failed to read filesystem usage: {:?}",
                 e
             );

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
@@ -305,6 +306,9 @@ impl InterpretedWalReader {
                             critical_timeline!(
                                 ttid.tenant_id,
                                 ttid.timeline_id,
+                                // Hadron: The corruption flag is only used in PS so that it can feed this information back to SKs.
+                                // We do not use these flags in SKs.
+                                None::<&AtomicBool>,
                                 "failed to read WAL record: {err:?}"
                             );
                         }
@@ -375,6 +379,9 @@ impl InterpretedWalReader {
                 critical_timeline!(
                     ttid.tenant_id,
                     ttid.timeline_id,
+                    // Hadron: The corruption flag is only used in PS so that it can feed this information back to SKs.
+                    // We do not use these flags in SKs.
+                    None::<&AtomicBool>,
                     "failed to decode WAL record: {err:?}"
                 );
             }

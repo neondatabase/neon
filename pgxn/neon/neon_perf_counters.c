@@ -19,7 +19,36 @@
 
 #include "neon.h"
 #include "neon_perf_counters.h"
-#include "neon_pgversioncompat.h"
+#include "walproposer.h"
+
+/* BEGIN_HADRON */
+databricks_metrics *databricks_metrics_shared;
+
+Size
+DatabricksMetricsShmemSize(void)
+{
+	return sizeof(databricks_metrics);
+}
+
+void
+DatabricksMetricsShmemInit(void)
+{
+	bool		found;
+
+	databricks_metrics_shared =
+		ShmemInitStruct("Databricks counters",
+						DatabricksMetricsShmemSize(),
+						&found);
+	Assert(found == IsUnderPostmaster);
+	if (!found)
+	{
+		pg_atomic_init_u32(&databricks_metrics_shared->index_corruption_count, 0);
+		pg_atomic_init_u32(&databricks_metrics_shared->data_corruption_count, 0);
+		pg_atomic_init_u32(&databricks_metrics_shared->internal_error_count, 0);
+		pg_atomic_init_u32(&databricks_metrics_shared->ps_corruption_detected, 0);
+	}
+}
+/* END_HADRON */
 
 neon_per_backend_counters *neon_per_backend_counters_shared;
 
@@ -38,10 +67,11 @@ NeonPerfCountersShmemRequest(void)
 #else
 	size = mul_size(NUM_NEON_PERF_COUNTER_SLOTS, sizeof(neon_per_backend_counters));
 #endif
+	if (lakebase_mode) {
+		size = add_size(size, DatabricksMetricsShmemSize());
+	}
 	RequestAddinShmemSpace(size);
 }
-
-
 
 void
 NeonPerfCountersShmemInit(void)
@@ -395,6 +425,34 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 		metric_to_datums(&metrics[i], &values[0], &nulls[0]);
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
+
+	if (lakebase_mode) {
+
+		if (databricks_test_hook == TestHookCorruption) {
+			ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						errmsg("test corruption")));
+		}
+
+		// Not ideal but piggyback our databricks counters into the neon perf counters view
+		// so that we don't need to introduce neon--1.x+1.sql to add a new view.
+		{
+			metric_t databricks_metrics[] = {
+				{"sql_index_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->index_corruption_count)},
+				{"sql_data_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->data_corruption_count)},
+				{"sql_internal_error_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->internal_error_count)},
+				{"ps_corruption_detected", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->ps_corruption_detected)},
+				{NULL, false, 0, 0},
+			};
+			for (int i = 0; databricks_metrics[i].name != NULL; i++)
+			{
+				metric_to_datums(&databricks_metrics[i], &values[0], &nulls[0]);
+				tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+			}
+		}
+		/* END_HADRON */
+	}
+
 	pfree(metrics);
 
 	return (Datum) 0;
