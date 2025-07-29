@@ -3640,12 +3640,13 @@ impl GrpcPageServiceHandler {
     }
 
     /// Processes a GetPage request when there is a potential shard split in progress. We have to
-    /// reroute the request any local child shards, and split batch requests that straddle multiple
-    /// child shards.
+    /// reroute the request to any local child shards, and split batch requests that straddle
+    /// multiple child shards.
     ///
-    /// Parent shards are split and removed incrementally, but the compute is only notified once the
-    /// entire split commits, which can take several minutes. In the meanwhile, the compute will be
-    /// sending requests to the parent shard.
+    /// Parent shards are split and removed incrementally (there may be many parent shards when
+    /// splitting an already-sharded tenant), but the compute is only notified once the overall
+    /// split commits, which can take several minutes. In the meanwhile, the compute will be sending
+    /// requests to the parent shards.
     ///
     /// TODO: add test infrastructure to provoke this situation frequently and for long periods of
     /// time, to properly exercise it.
