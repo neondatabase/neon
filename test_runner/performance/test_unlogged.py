@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import threading
+from contextlib import closing
 from typing import TYPE_CHECKING
 
 import pytest
+from pytest_lazyfixture import lazy_fixture
 
 if TYPE_CHECKING:
-    from fixtures.neon_fixtures import NeonEnvBuilder
+    from fixtures.compare_fixtures import PgCompare
 
 
 #
@@ -25,34 +27,39 @@ if TYPE_CHECKING:
 #
 # On Linux, introducing the relpersistence cache shows about 2x time speed improvement in this test.
 #
-@pytest.mark.timeout(10000)
-def test_unlogged(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.timeout(1000)
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param(lazy_fixture("neon_compare"), id="neon"),
+        pytest.param(lazy_fixture("vanilla_compare"), id="vanilla"),
+    ],
+)
+def test_unlogged(env: PgCompare):
     n_tables = 20
     n_records = 1000
     n_updates = 1000
-    shared_buffers = 1
 
-    env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start(
-        "main", config_lines=[f"shared_buffers='{shared_buffers}MB'"]
-    )
-
-    with endpoint.connect().cursor() as cur:
-        for i in range(n_tables):
-            cur.execute(
-                f"create unlogged table t{i}(pk integer primary key, sk integer, fillter text default repeat('x', 1000)) with (fillfactor=10)"
-            )
-            cur.execute(f"insert into t{i} values (generate_series(1,{n_records}),0)")
+    with env.record_duration("insert"):
+        with closing(env.pg.connect()) as conn:
+            with conn.cursor() as cur:
+                for i in range(n_tables):
+                    cur.execute(
+                        f"create unlogged table t{i}(pk integer primary key, sk integer, fillter text default repeat('x', 1000)) with (fillfactor=10)"
+                    )
+                    cur.execute(f"insert into t{i} values (generate_series(1,{n_records}),0)")
 
     def do_updates(table_id: int):
-        with endpoint.connect().cursor() as cur:
-            for _ in range(n_updates):
-                cur.execute(f"update t{table_id} set sk=sk+1")
+        with closing(env.pg.connect()) as conn:
+            with conn.cursor() as cur:
+                for _ in range(n_updates):
+                    cur.execute(f"update t{table_id} set sk=sk+1")
 
-    threads = [threading.Thread(target=do_updates, args=(i,)) for i in range(n_tables)]
+    with env.record_duration("update"):
+        threads = [threading.Thread(target=do_updates, args=(i,)) for i in range(n_tables)]
 
-    for thread in threads:
-        thread.start()
+        for thread in threads:
+            thread.start()
 
-    for thread in threads:
-        thread.join()
+        for thread in threads:
+            thread.join()
