@@ -253,16 +253,8 @@ impl SafekeeperNode {
     }
 
     fn safekeeper_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let mut env_vars = vec![];
-        // Generate a token to connect from safekeeper to peers
-        if self.conf.auth_type != AuthType::Trust {
-            let token = self
-                .env
-                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
-            // TODO: Safekeepers don't read this env var
-            env_vars.push(("SAFEKEEPER_AUTH_TOKEN".to_owned(), token.clone()));
-        }
-        Ok(env_vars)
+        // TODO: remove me
+        Ok(vec![])
     }
 
     ///
