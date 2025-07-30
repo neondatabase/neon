@@ -57,7 +57,6 @@ use crate::rsyslog::{
 use crate::spec::*;
 use crate::swap::resize_swap;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
-use crate::tls::watch_cert_for_changes;
 use crate::{config, extension_server, local_proxy};
 
 pub static SYNC_SAFEKEEPERS_PID: AtomicU32 = AtomicU32::new(0);
@@ -844,9 +843,8 @@ impl ComputeNode {
         // Make sure TLS certificates are properly loaded and in the right place.
         if self.compute_ctl_config.tls.is_some() {
             let this = self.clone();
-            pre_tasks.spawn(async move {
-                this.watch_cert_for_changes().await;
-
+            pre_tasks.spawn_blocking(|| {
+                this.watch_cert_for_changes();
                 Ok::<(), anyhow::Error>(())
             });
         }
@@ -2187,16 +2185,20 @@ impl ComputeNode {
         Ok(())
     }
 
-    pub async fn watch_cert_for_changes(self: Arc<Self>) {
+    pub fn watch_cert_for_changes(self: Arc<Self>) {
         // update status on cert renewal
         if let Some(tls_config) = &self.compute_ctl_config.tls {
             let tls_config = tls_config.clone();
 
             // wait until the cert exists.
-            let mut cert_watch = watch_cert_for_changes(tls_config.cert_path.clone()).await;
+            let mut digest = crate::tls::compute_digest(&tls_config.cert_path);
+            info!(
+                cert_path = tls_config.cert_path,
+                key_path = tls_config.key_path,
+                "TLS certificates found"
+            );
 
             tokio::task::spawn_blocking(move || {
-                let handle = tokio::runtime::Handle::current();
                 'cert_update: loop {
                     // let postgres/pgbouncer/local_proxy know the new cert/key exists.
                     // we need to wait until it's configurable first.
@@ -2233,11 +2235,13 @@ impl ComputeNode {
                     drop(state);
 
                     // wait for a new certificate update
-                    if handle.block_on(cert_watch.changed()).is_err() {
-                        error!("certificate renewal monitoring task closed unexpectedly");
-                        break;
-                    }
-                    info!("TLS certificates renewed");
+                    digest = crate::tls::wait_until_cert_changed(digest, &tls_config.cert_path);
+
+                    info!(
+                        cert_path = tls_config.cert_path,
+                        key_path = tls_config.key_path,
+                        "TLS certificates renewed",
+                    );
                 }
             });
         }
