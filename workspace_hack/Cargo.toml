@@ -95,7 +95,7 @@ smallvec = { version = "1", default-features = false, features = ["const_new", "
 spki = { version = "0.7", default-features = false, features = ["pem", "std"] }
 stable_deref_trait = { version = "1" }
 subtle = { version = "2" }
-sync_wrapper = { version = "1", default-features = false, features = ["futures"] }
+sync_wrapper = { version = "0.1", default-features = false, features = ["futures"] }
 thiserror = { version = "2" }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
 tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
