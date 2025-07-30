@@ -2648,7 +2648,11 @@ LIMIT 100",
     /// the pageserver connection strings has changed.
     ///
     /// The operation will time out after a specified duration.
-    pub fn wait_timeout_while_pageserver_connstr_unchanged(&self, duration: Duration) {
+    pub fn wait_timeout_while_pageserver_connstr_unchanged(
+        &self,
+        duration: Duration,
+        request_pageserver_conninfo: &PageserverConnectionInfo,
+    ) {
         let state = self.state.lock().unwrap();
         let old_pageserver_conninfo = state
             .pspec
@@ -2656,6 +2660,10 @@ LIMIT 100",
             .expect("spec must be set")
             .pageserver_conninfo
             .clone();
+        if request_pageserver_conninfo != &old_pageserver_conninfo {
+            info!("Pageserver config changed during the previous request");
+            return;
+        }
         let mut unchanged = true;
         let _ = self
             .state_changed
