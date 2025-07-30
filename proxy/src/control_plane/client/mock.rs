@@ -15,6 +15,7 @@ use crate::auth::IpPattern;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
+use crate::cache::node_info::CachedNodeInfo;
 use crate::compute::ConnectInfo;
 use crate::context::RequestContext;
 use crate::control_plane::errors::{
@@ -22,8 +23,7 @@ use crate::control_plane::errors::{
 };
 use crate::control_plane::messages::{EndpointRateLimitConfig, MetricsAuxInfo};
 use crate::control_plane::{
-    AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, EndpointAccessControl, NodeInfo,
-    RoleAccessControl,
+    AccessBlockerFlags, AuthInfo, AuthSecret, EndpointAccessControl, NodeInfo, RoleAccessControl,
 };
 use crate::intern::RoleNameInt;
 use crate::scram;

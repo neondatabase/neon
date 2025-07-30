@@ -346,6 +346,9 @@ extern "C" fn reset_safekeeper_statuses_for_metrics(wp: *mut WalProposer, num_sa
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
+        if api.is_null() {
+            return;
+        }
         (*api).reset_safekeeper_statuses_for_metrics(&mut (*wp), num_safekeepers);
     }
 }
@@ -358,6 +361,9 @@ extern "C" fn update_safekeeper_status_for_metrics(
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
+        if api.is_null() {
+            return;
+        }
         (*api).update_safekeeper_status_for_metrics(&mut (*wp), sk_index, status);
     }
 }

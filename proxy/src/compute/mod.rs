@@ -8,6 +8,7 @@ use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use postgres_client::config::{AuthKeys, ChannelBinding, SslMode};
 use postgres_client::connect_raw::StartupStream;
+use postgres_client::error::SqlState;
 use postgres_client::maybe_tls_stream::MaybeTlsStream;
 use postgres_client::tls::MakeTlsConnect;
 use thiserror::Error;
@@ -22,7 +23,7 @@ use crate::context::RequestContext;
 use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::MetricsAuxInfo;
-use crate::error::{ReportableError, UserFacingError};
+use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::pqproto::StartupMessageParams;
 use crate::proxy::connect_compute::TlsNegotiation;
@@ -65,12 +66,13 @@ impl UserFacingError for PostgresError {
 }
 
 impl ReportableError for PostgresError {
-    fn get_error_kind(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> ErrorKind {
         match self {
-            PostgresError::Postgres(e) if e.as_db_error().is_some() => {
-                crate::error::ErrorKind::Postgres
-            }
-            PostgresError::Postgres(_) => crate::error::ErrorKind::Compute,
+            PostgresError::Postgres(err) => match err.as_db_error() {
+                Some(err) if err.code() == &SqlState::INVALID_CATALOG_NAME => ErrorKind::User,
+                Some(_) => ErrorKind::Postgres,
+                None => ErrorKind::Compute,
+            },
         }
     }
 }
@@ -110,9 +112,9 @@ impl UserFacingError for ConnectionError {
 }
 
 impl ReportableError for ConnectionError {
-    fn get_error_kind(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> ErrorKind {
         match self {
-            ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::TlsError(_) => ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
             #[cfg(test)]

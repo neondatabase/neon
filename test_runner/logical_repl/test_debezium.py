@@ -17,6 +17,7 @@ from fixtures.utils import wait_until
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import RemotePostgres
+    from kafka import KafkaConsumer
 
 
 class DebeziumAPI:
@@ -101,9 +102,13 @@ def debezium(remote_pg: RemotePostgres):
     assert len(dbz.list_connectors()) == 1
     from kafka import KafkaConsumer
 
+    kafka_host = "kafka" if (os.getenv("CI", "false") == "true") else "127.0.0.1"
+    kafka_port = 9092 if (os.getenv("CI", "false") == "true") else 29092
+    log.info("Connecting to Kafka: %s:%s", kafka_host, kafka_port)
+
     consumer = KafkaConsumer(
         "dbserver1.inventory.customers",
-        bootstrap_servers=["kafka:9092"],
+        bootstrap_servers=[f"{kafka_host}:{kafka_port}"],
         auto_offset_reset="earliest",
         enable_auto_commit=False,
     )
@@ -112,7 +117,7 @@ def debezium(remote_pg: RemotePostgres):
     assert resp.status_code == 204
 
 
-def get_kafka_msg(consumer, ts_ms, before=None, after=None) -> None:
+def get_kafka_msg(consumer: KafkaConsumer, ts_ms, before=None, after=None) -> None:
     """
     Gets the message from Kafka and checks its validity
     Arguments:
@@ -124,6 +129,7 @@ def get_kafka_msg(consumer, ts_ms, before=None, after=None) -> None:
         after:    a dictionary, if not None, the after field from the kafka message must
                   have the same values for the same keys
     """
+    log.info("Bootstrap servers: %s", consumer.config["bootstrap_servers"])
     msg = consumer.poll()
     assert msg, "Empty message"
     for val in msg.values():

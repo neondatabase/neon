@@ -587,7 +587,9 @@ class NeonLocalCli(AbstractNeonCli):
         ]
         extra_env_vars = env or {}
         if basebackup_request_tries is not None:
-            extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_TRIES"] = str(basebackup_request_tries)
+            extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_RETRIES"] = str(
+                basebackup_request_tries
+            )
         if remote_ext_base_url is not None:
             args.extend(["--remote-ext-base-url", remote_ext_base_url])
 
@@ -623,6 +625,7 @@ class NeonLocalCli(AbstractNeonCli):
         pageserver_id: int | None = None,
         safekeepers: list[int] | None = None,
         check_return_code=True,
+        timeout_sec: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = ["endpoint", "reconfigure", endpoint_id]
         if tenant_id is not None:
@@ -631,7 +634,7 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--pageserver-id", str(pageserver_id)])
         if safekeepers is not None:
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
-        return self.raw_cli(args, check_return_code=check_return_code)
+        return self.raw_cli(args, check_return_code=check_return_code, timeout=timeout_sec)
 
     def endpoint_refresh_configuration(
         self,

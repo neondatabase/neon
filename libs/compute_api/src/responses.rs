@@ -174,6 +174,9 @@ pub enum ComputeStatus {
     Terminated,
     // A spec refresh is being requested
     RefreshConfigurationPending,
+    // A spec refresh is being applied. We cannot refresh configuration again until the current
+    // refresh is done, i.e., signal_refresh_configuration() will return 500 error.
+    RefreshConfiguration,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -186,6 +189,10 @@ impl Display for ComputeStatus {
         match self {
             ComputeStatus::Empty => f.write_str("empty"),
             ComputeStatus::ConfigurationPending => f.write_str("configuration-pending"),
+            ComputeStatus::RefreshConfiguration => f.write_str("refresh-configuration"),
+            ComputeStatus::RefreshConfigurationPending => {
+                f.write_str("refresh-configuration-pending")
+            }
             ComputeStatus::Init => f.write_str("init"),
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),
@@ -195,9 +202,6 @@ impl Display for ComputeStatus {
                 f.write_str("termination-pending-immediate")
             }
             ComputeStatus::Terminated => f.write_str("terminated"),
-            ComputeStatus::RefreshConfigurationPending => {
-                f.write_str("refresh-configuration-pending")
-            }
         }
     }
 }
