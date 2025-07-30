@@ -700,7 +700,10 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
         is_vpc_acccess_proxy: args.is_private_access_proxy,
         is_auth_broker: args.is_auth_broker,
+        #[cfg(not(feature = "rest_broker"))]
         accept_jwts: args.is_auth_broker,
+        #[cfg(feature = "rest_broker")]
+        accept_jwts: args.is_auth_broker || args.is_rest_broker,
         console_redirect_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
