@@ -645,7 +645,7 @@ components:
       properties:
         status:
           description: LFC offload status
-          enum: [not_offloaded, offloading, completed, failed]
+          enum: [not_offloaded, offloading, completed, skipped, failed]
           type: string
         error:
           description: LFC offload error, if any

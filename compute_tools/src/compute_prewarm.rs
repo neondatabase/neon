@@ -225,20 +225,20 @@ impl ComputeNode {
 
     async fn offload_lfc_with_state_update(&self) {
         crate::metrics::LFC_OFFLOADS.inc();
-
-        let Err(err) = self.offload_lfc_impl().await else {
-            self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Completed;
-            return;
+        let state = match self.offload_lfc_impl().await {
+            Ok(state) => state,
+            Err(err) => {
+                crate::metrics::LFC_OFFLOAD_ERRORS.inc();
+                error!(%err, "could not offload LFC");
+                let error = format!("{err:#}");
+                LfcOffloadState::Failed { error }
+            }
         };
 
-        crate::metrics::LFC_OFFLOAD_ERRORS.inc();
-        error!(%err, "could not offload LFC state to endpoint storage");
-        self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
-            error: format!("{err:#}"),
-        };
+        self.state.lock().unwrap().lfc_offload_state = state;
     }
 
-    async fn offload_lfc_impl(&self) -> Result<()> {
+    async fn offload_lfc_impl(&self) -> Result<LfcOffloadState> {
         let EndpointStoragePair { url, token } = self.endpoint_storage_pair(None)?;
         info!(%url, "requesting LFC state from Postgres");
 
@@ -253,7 +253,7 @@ impl ComputeNode {
             .context("deserializing LFC state")?;
         let Some(state) = state else {
             info!(%url, "empty LFC state, not exporting");
-            return Ok(());
+            return Ok(LfcOffloadState::Skipped);
         };
 
         let mut compressed = Vec::new();
@@ -267,7 +267,7 @@ impl ComputeNode {
 
         let request = Client::new().put(url).bearer_auth(token).body(compressed);
         match request.send().await {
-            Ok(res) if res.status() == StatusCode::OK => Ok(()),
+            Ok(res) if res.status() == StatusCode::OK => Ok(LfcOffloadState::Completed),
             Ok(res) => bail!(
                 "Request to endpoint storage failed with status: {}",
                 res.status()
