@@ -3445,7 +3445,6 @@ impl Timeline {
             Some(rel_size_v2_status.clone()),
             rel_size_migrated_at,
         )));
-        // The index_part upload is not used as source of truth anymore, but we still need to upload it to make it work across branches.
         self.remote_client
             .schedule_index_upload_for_rel_size_v2_status_update(
                 rel_size_v2_status,
