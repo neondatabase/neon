@@ -9,11 +9,11 @@ inputs:
     description: 'Organization ID, required'
     required: true
   api_host:
-    description: 'Lakebase API host, e.g. dbc-55e65913-66de.dev.databricks.com/ajax-api/2.0/lakebase-console'
+    description: 'Lakebase API host, e.g. dbc-55e65913-66de.dev.databricks.com/lakebase-console'
     required: true
   postgres_version:
     description: 'Postgres version; default is 16'
-    default: '16'
+    default: '17'
   compute_units:
     description: '[Min, Max] compute units'
     default: '[1, 1]'
@@ -33,6 +33,10 @@ inputs:
     description: 'Fixed hostname to use for connection URI'
     required: false
     default: 'k8s-dpingres-serverle-09ade1e9e9-0d7f675c53b35938.elb.us-west-2.amazonaws.com'
+  region_id:
+    description: 'Project region ID'
+    required: false
+    default: 'aws-us-east-2'
 
 outputs:
   dsn:
