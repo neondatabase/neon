@@ -142,6 +142,12 @@ impl TenantRefAccumulator {
             .or_default()
             .insert(this_shard_idx);
 
+        // TODO: change this to "is X days ago?"
+        if index_part.deleted_at.is_some() {
+            tracing::info!(%ttid, "The timeline is already deleted, skipping");
+            return;
+        }
+
         let mut ancestor_refs = Vec::new();
         for (layer_name, layer_metadata) in &index_part.layer_metadata {
             if layer_metadata.shard != this_shard_idx {
