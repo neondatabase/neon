@@ -382,8 +382,8 @@ def test_safekeeper_migration_stale_timeline(neon_env_builder: NeonEnvBuilder):
 
 def test_pull_from_most_advanced_sk(neon_env_builder: NeonEnvBuilder):
     """
-    Test that we pull timeline from the most advanced safekeeper during the
-    migration and do not loose committed WAL.
+    Test that we pull the timeline from the most advanced safekeeper during the
+    migration and do not lose committed WAL.
     """
     neon_env_builder.num_safekeepers = 4
     neon_env_builder.storage_controller_config = {
