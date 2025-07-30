@@ -16,6 +16,6 @@ BEGIN
     -- use upsert to avoid the table bloat in case of cascade branching (branch of a branch)
     INSERT INTO neon.drop_subscriptions_done VALUES (1, pg_catalog.current_setting('neon.timeline_id'))
     ON CONFLICT (id) DO UPDATE
-    SET timeline_id::pg_catalog.text OPERATOR(pg_catalog.=) pg_catalog.current_setting('neon.timeline_id')::pg_catalog.text;
+    SET timeline_id = pg_catalog.current_setting('neon.timeline_id')::pg_catalog.text;
 END
 $$
