@@ -2671,26 +2671,27 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	}
 
 	/*
-	 * we don't have the buffer in memory, update lwLsn past this record, also
-	 * evict page from file cache
+	 * We don't have the buffer in shared buffers. Check if it's in the LFC.
+	 * If it's not there either, update the lwLsn past this record.
 	 */
 	if (no_redo_needed)
 	{
+		bool		in_cache;
+
 		/*
-		 * Redo changes if page exists in LFC.
-		 * We should perform this check after assigning LwLSN to prevent
-		 * prefetching of some older version of the page by some other backend.
+		 * Redo changes if the page is present in the LFC.
 		 */
 		if (neon_use_communicator_worker)
 		{
-			no_redo_needed = communicator_new_cache_contains(rinfo, forknum, blkno);
-			// FIXME: update lwlsn
+			in_cache = communicator_new_update_lwlsn_for_block_if_not_cached(rinfo, forknum, blkno, end_recptr);
 		}
 		else
 		{
-			no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);
+			in_cache = lfc_cache_contains(rinfo, forknum, blkno);
 			neon_set_lwlsn_block(end_recptr, rinfo, forknum, blkno);
 		}
+
+		no_redo_needed = !in_cache;
 	}
 
 	LWLockRelease(partitionLock);

@@ -397,21 +397,23 @@ communicator_new_prefetch_register_bufferv(NRelFileInfo rinfo, ForkNumber forkNu
 }
 
 /*
- * Does the LFC contains the given buffer?
+ * Check if LFC contains the given buffer, and update its last-written LSN if
+ * not.
  *
  * This is used in WAL replay in read replica, to skip updating pages that are
  * not in cache.
  */
 bool
-communicator_new_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
-								BlockNumber blockno)
+communicator_new_update_lwlsn_for_block_if_not_cached(NRelFileInfo rinfo, ForkNumber forkNum,
+													  BlockNumber blockno, XLogRecPtr lsn)
 {
-	return bcomm_cache_contains(my_bs,
-								NInfoGetSpcOid(rinfo),
-								NInfoGetDbOid(rinfo),
-								NInfoGetRelNumber(rinfo),
-								forkNum,
-								blockno);
+	return bcomm_update_lw_lsn_for_block_if_not_cached(my_bs,
+													   NInfoGetSpcOid(rinfo),
+													   NInfoGetDbOid(rinfo),
+													   NInfoGetRelNumber(rinfo),
+													   forkNum,
+													   blockno,
+													   lsn);
 }
 
 /* Dump a list of blocks in the LFC, for use in prewarming later */
@@ -571,7 +573,7 @@ wait_request_completion(int request_idx, struct NeonIOResult *result_p)
 			 * This needs to be removed once more regression tests are passing.
 			 */
 			now = GetCurrentTimestamp();
-			if (now - start_time > 60 * 1000 * 1000)
+			if (now - start_time > 120 * 1000 * 1000)
 			{
 				elog(PANIC, "timed out waiting for response from communicator process at slot %d", request_idx);
 			}

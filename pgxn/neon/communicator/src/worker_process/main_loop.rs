@@ -266,7 +266,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     // This needs to be removed once more regression tests are passing.
                     // See also similar hack in the backend code, in wait_request_completion()
                     let result = tokio::time::timeout(
-                        tokio::time::Duration::from_secs(30),
+                        tokio::time::Duration::from_secs(60),
                         self.handle_request(slot.get_request()),
                     )
                     .await

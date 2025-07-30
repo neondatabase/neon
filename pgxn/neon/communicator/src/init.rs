@@ -122,8 +122,6 @@ pub extern "C" fn rcommunicator_shmem_init(
     cis
 }
 
-// fixme: currently unused
-#[allow(dead_code)]
 pub fn alloc_from_slice<T>(
     area: &mut [MaybeUninit<u8>],
 ) -> (&mut MaybeUninit<T>, &mut [MaybeUninit<u8>]) {
