@@ -373,7 +373,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 {
                     Ok(Some(nblocks)) => {
                         // update the cache
-                        tracing::info!(
+                        tracing::trace!(
                             "updated relsize for {:?} in cache: {}, lsn {}",
                             rel,
                             nblocks,
@@ -413,7 +413,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 {
                     Ok(slru_bytes) => {
                         if let Err(e) = tokio::fs::write(&file_path, &slru_bytes).await {
-                            info!("could not write slru segment to file {file_path}: {e}");
+                            error!("could not write slru segment to file {file_path}: {e}");
                             return NeonIOResult::Error(e.raw_os_error().unwrap_or(libc::EIO));
                         }
 
@@ -599,7 +599,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             .map(|(blkno, _lsn, _dest, _guard)| *blkno)
             .collect();
         let read_lsn = self.request_lsns(not_modified_since);
-        info!(
+        trace!(
             "sending getpage request for blocks {:?} in rel {:?} lsns {}",
             block_numbers, rel, read_lsn
         );
@@ -626,7 +626,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     return Err(-1);
                 }
 
-                info!(
+                trace!(
                     "received getpage response for blocks {:?} in rel {:?} lsns {}",
                     block_numbers, rel, read_lsn
                 );

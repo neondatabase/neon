@@ -392,7 +392,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     pub fn remember_rel_size(&'t self, rel: &RelTag, nblocks: u32, lsn: Lsn) {
         match self.relsize_cache.entry(RelKey::from(rel)) {
             Entry::Vacant(e) => {
-                tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
+                tracing::trace!("inserting rel entry for {rel:?}, {nblocks} blocks");
                 // FIXME: what to do if we run out of memory? Evict other relation entries?
                 _ = e
                     .insert(RelEntry {
@@ -402,7 +402,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     .expect("out of memory");
             }
             Entry::Occupied(e) => {
-                tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
+                tracing::trace!("updating rel entry for {rel:?}, {nblocks} blocks");
                 e.get().nblocks.store(nblocks, Ordering::Relaxed);
                 e.get().lw_lsn.store(lsn);
             }
@@ -574,7 +574,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
     pub fn forget_rel(&'t self, rel: &RelTag, _nblocks: Option<u32>, flush_lsn: Lsn) {
-        tracing::info!("forgetting rel entry for {rel:?}");
+        tracing::trace!("forgetting rel entry for {rel:?}");
         self.relsize_cache.remove(&RelKey::from(rel));
 
         // update with flush LSN

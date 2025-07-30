@@ -528,7 +528,7 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 	inflight_requests[num_inflight_requests] = request_idx;
 	num_inflight_requests++;
 
-	elog(LOG, "started communicator request %s at slot %d", print_neon_io_request(request), request_idx);
+	elog(DEBUG5, "started communicator request %s at slot %d", print_neon_io_request(request), request_idx);
 
 	return request_idx;
 }
