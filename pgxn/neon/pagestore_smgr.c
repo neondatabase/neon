@@ -302,7 +302,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 */
 		lsns[batch_size++] = lsn;
 
-		if (batch_size >= BLOCK_BATCH_SIZE)
+		if (batch_size >= BLOCK_BATCH_SIZE && !neon_use_communicator_worker)
 		{
 			neon_set_lwlsn_block_v(lsns, InfoFromSMgrRel(reln), forknum,
 									   batch_blockno,
@@ -312,7 +312,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		}
 	}
 
-	if (batch_size != 0)
+	if (batch_size != 0 && !neon_use_communicator_worker)
 	{
 		neon_set_lwlsn_block_v(lsns, InfoFromSMgrRel(reln), forknum,
 								   batch_blockno,
@@ -564,6 +564,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 {
 	XLogRecPtr	last_written_lsns[PG_IOV_MAX];
 
+	Assert(!neon_use_communicator_worker);
 	Assert(nblocks <= PG_IOV_MAX);
 
 	neon_get_lwlsn_v(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
@@ -987,6 +988,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 #endif
 {
 	XLogRecPtr	lsn;
+	bool		lsn_was_zero;
 	BlockNumber n_blocks = 0;
 
 	switch (reln->smgr_relpersistence)
@@ -1051,9 +1053,19 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
+	/*
+	 * smgr_extend is often called with an all-zeroes page, so
+	 * lsn==InvalidXLogRecPtr. An smgr_write() call will come for the buffer
+	 * later, after it has been initialized with the real page contents, and
+	 * it is eventually evicted from the buffer cache. But we need a valid LSN
+	 * to the relation metadata update now.
+	 */
+	lsn_was_zero = (lsn == InvalidXLogRecPtr);
+	if (lsn_was_zero)
+		lsn = GetXLogInsertRecPtr();
+
 	if (neon_use_communicator_worker)
 	{
-		// FIXME: this can pass lsn == invalid. Is that ok?
 		communicator_new_rel_extend(InfoFromSMgrRel(reln), forkNum, blkno, (const void *) buffer, lsn);
 
 		if (debug_compare_local)
@@ -1080,11 +1092,8 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		 * it is eventually evicted from the buffer cache. But we need a valid LSN
 		 * to the relation metadata update now.
 		 */
-		if (lsn == InvalidXLogRecPtr)
-		{
-			lsn = GetXLogInsertRecPtr();
+		if (lsn_was_zero)
 			neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum, blkno);
-		}
 		neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
 	}
 }
@@ -2667,16 +2676,21 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	 */
 	if (no_redo_needed)
 	{
-		neon_set_lwlsn_block(end_recptr, rinfo, forknum, blkno);
 		/*
 		 * Redo changes if page exists in LFC.
 		 * We should perform this check after assigning LwLSN to prevent
 		 * prefetching of some older version of the page by some other backend.
 		 */
 		if (neon_use_communicator_worker)
+		{
 			no_redo_needed = communicator_new_cache_contains(rinfo, forknum, blkno);
+			// FIXME: update lwlsn
+		}
 		else
+		{
 			no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);
+			neon_set_lwlsn_block(end_recptr, rinfo, forknum, blkno);
+		}
 	}
 
 	LWLockRelease(partitionLock);

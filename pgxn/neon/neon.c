@@ -526,7 +526,7 @@ _PG_init(void)
 	lfc_init();
 	pg_init_prewarm();
 	pg_init_walproposer();
-	init_lwlsncache();
+	pg_init_lwlsncache();
 
 	pg_init_communicator_process();
 
