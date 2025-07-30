@@ -909,8 +909,25 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 		if (isRedo)
 		{
+			/*
+			 * TODO: the protocol can check for existence and get the relsize
+			 * in one roundtrip. Add a similar call to the
+			 * backend<->communicator API. (The size is cached on the
+			 * rel_exists call, so this does only one roundtrip to the
+			 * pageserver, but two function calls and two cache lookups.)
+			 */
 			if (!communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum))
+			{
 				communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum, lsn);
+				reln->smgr_cached_nblocks[forkNum] = 0;
+			}
+			else
+			{
+				BlockNumber nblocks;
+
+				nblocks = communicator_new_rel_nblocks(InfoFromSMgrRel(reln), forkNum);
+				reln->smgr_cached_nblocks[forkNum] = nblocks;
+			}
 		}
 		else
 			communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum, lsn);
@@ -2516,10 +2533,6 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		if (blkno >= relsize)
 			communicator_new_rel_zeroextend(rinfo, forknum, relsize, (blkno - relsize) + 1, end_recptr);
 
-		/*
-		 * FIXME: does this need to update the last-written LSN too, like the
-		 * old implementation?
-		 */
 		return;
 	}
 
