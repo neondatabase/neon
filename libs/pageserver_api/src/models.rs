@@ -1539,7 +1539,7 @@ pub struct OffloadedTimelineInfo {
     pub archived_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// The state of the rel size migration. This is persisted in the DbDir key and index part. Do not change without considering
+/// The state of the rel size migration. This is persisted in the index part.
 /// compatibility.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

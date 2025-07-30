@@ -83,7 +83,6 @@ pub struct IndexPart {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) last_aux_file_policy: Option<AuxFilePolicy>,
 
-    /// Deprecated: the field is not used anymore and the source of truth is now stored in the dbdir key.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) rel_size_migration: Option<RelSizeMigration>,
 
@@ -116,7 +115,6 @@ pub struct IndexPart {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) marked_invisible_at: Option<NaiveDateTime>,
 
-    /// Deprecated: the field is not used anymore and the source of truth is now stored in the dbdir key.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) rel_size_migrated_at: Option<Lsn>,
 }

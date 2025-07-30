@@ -2883,10 +2883,9 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.compaction_threshold)
     }
 
-    /// Returns the expected state of the rel size migration. The actual state is persisted in the
-    /// DbDir key.
-    ///
-    /// The expected state is the state that the tenant config expects.
+    /// Returns `true` if the rel_size_v2 config is enabled. NOTE: the write path and read path
+    /// should look at `get_rel_size_v2_status()` to get the actual status of the timeline. It is
+    /// possible that the index part persists the state while the config doesn't get persisted.
     pub(crate) fn get_rel_size_v2_expected_state(&self) -> RelSizeMigration {
         let tenant_conf = self.tenant_conf.load();
         let v2_enabled = tenant_conf
