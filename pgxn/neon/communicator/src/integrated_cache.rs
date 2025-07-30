@@ -477,39 +477,43 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
             // FIXME: unpin the block entry on error
 
             // Update the block entry
-            let entry = self.block_map.entry(key.clone());
-            assert_eq!(found_existing, matches!(entry, Entry::Occupied(_)));
-            match entry {
-                Entry::Occupied(e) => {
-                    let block_entry = e.get();
-                    // Update the cache block
-                    let old_blk = block_entry.cache_block.compare_exchange(
-                        INVALID_CACHE_BLOCK,
-                        cache_block,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    );
-                    assert!(old_blk == Ok(INVALID_CACHE_BLOCK) || old_blk == Err(cache_block));
+            loop {
+                let entry = self.block_map.entry(key.clone());
+                assert_eq!(found_existing, matches!(entry, Entry::Occupied(_)));
+                match entry {
+                    Entry::Occupied(e) => {
+                        let block_entry = e.get();
+                        // Update the cache block
+                        let old_blk = block_entry.cache_block.compare_exchange(
+                            INVALID_CACHE_BLOCK,
+                            cache_block,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        );
+                        assert!(old_blk == Ok(INVALID_CACHE_BLOCK) || old_blk == Err(cache_block));
 
-                    block_entry.lw_lsn.store(lw_lsn);
+                        block_entry.lw_lsn.store(lw_lsn);
 
-                    block_entry.referenced.store(true, Ordering::Relaxed);
+                        block_entry.referenced.store(true, Ordering::Relaxed);
 
-                    let pin_count = block_entry.pinned.fetch_sub(1, Ordering::Relaxed);
-                    assert!(pin_count > 0);
-                }
-                Entry::Vacant(e) => {
-                    // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
-                    // block entries first?
-                    _ = e
-                        .insert(BlockEntry {
+                        let pin_count = block_entry.pinned.fetch_sub(1, Ordering::Relaxed);
+                        assert!(pin_count > 0);
+                        break;
+                    }
+                    Entry::Vacant(e) => {
+                        if let Ok(_) = e.insert(BlockEntry {
                             lw_lsn: AtomicLsn::new(lw_lsn.0),
                             cache_block: AtomicU64::new(cache_block),
                             pinned: AtomicU64::new(0),
                             referenced: AtomicBool::new(true),
-                        })
-                        .expect("out of memory");
+                        }) {
+                            break;
+                        } else {
+                            // The hash map was full. Evict an entry and retry.
+                        }
+                    }
                 }
+                self.try_evict_block_entry();
             }
         } else {
             // !is_write
