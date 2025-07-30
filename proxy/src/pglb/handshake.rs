@@ -137,7 +137,13 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
                         // check the ALPN, if exists, as required.
                         match conn_info.alpn_protocol() {
-                            None | Some(PG_ALPN_PROTOCOL) => {}
+                            None => {
+                                if direct.is_some() {
+                                    warn!("missing ALPN protocol 'postgresql'");
+                                    return Err(HandshakeError::ProtocolViolation);
+                                }
+                            }
+                            Some(PG_ALPN_PROTOCOL) => {}
                             Some(other) => {
                                 let alpn = String::from_utf8_lossy(other);
                                 warn!(%alpn, "unexpected ALPN");
