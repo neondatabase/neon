@@ -17,7 +17,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import skip_in_debug_build, wait_until
 from fixtures.workload import Workload
-from regress.test_pg_regress import patch_tenant_conf
+from test_pg_regress import patch_tenant_conf
 
 AGGRESSIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
