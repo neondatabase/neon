@@ -11,7 +11,7 @@ inputs:
   oidc_host:
     description: 'OIDC host URL'
     required: false
-    default: 'https://dbc-55e65913-66de.dev.databricks.com'
+    default: 'dbc-55e65913-66de.dev.databricks.com'
 
 outputs:
   lakebase_bearer_token:
@@ -26,7 +26,7 @@ runs:
       # A shell without `set -x` to not expose secrets in logs
       shell: bash -euo pipefail {0}
       run: |
-        res=$(curl -X POST "${OIDC_HOST}/oidc/v1/token" \
+        res=$(curl -X POST "https://${OIDC_HOST}/oidc/v1/token" \
           -w "%{http_code}" \
           --header "Content-Type: application/x-www-form-urlencoded" \
           --data "grant_type=client_credentials" \
