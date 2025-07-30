@@ -62,7 +62,11 @@ async fn lsn_lease_bg_task(
             "Request succeeded, sleeping for {} seconds",
             sleep_duration.as_secs()
         );
-        compute.wait_timeout_while_pageserver_connstr_unchanged(sleep_duration);
+        let compute = compute.clone();
+        tokio::task::spawn_blocking(move || {
+            compute.wait_timeout_while_pageserver_connstr_unchanged(sleep_duration);
+        })
+        .await?;
     }
 }
 

@@ -233,15 +233,6 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         log.info(f"`SELECT` query succeed after GC, {ctx=}")
         return offset
 
-    # It's not reliable to let the compute renew the lease in this test case as we have a very tight
-    # lease timeout. Therefore, the test case itself will renew the lease.
-    #
-    # This is a workaround to make the test case more deterministic.
-    def renew_lease(env: NeonEnv, lease_lsn: Lsn):
-        env.storage_controller.pageserver_api().timeline_lsn_lease(
-            env.initial_tenant, env.initial_timeline, lease_lsn
-        )
-
     # Insert some records on main branch
     with env.endpoints.create_start("main", config_lines=["shared_buffers=1MB"]) as ep_main:
         with ep_main.cursor() as cur:
@@ -253,9 +244,6 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         # Round down to the closest LSN on page boundary (unnormalized).
         XLOG_BLCKSZ = 8192
         lsn = Lsn((int(lsn) // XLOG_BLCKSZ) * XLOG_BLCKSZ)
-
-        # We need to mock the way cplane works: it gets a lease for a branch before starting the compute.
-        renew_lease(env, lsn)
 
         with env.endpoints.create_start(
             branch_name="main",
@@ -276,8 +264,6 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             for ps in env.pageservers:
                 ps.stop()
                 ps.start()
-
-            renew_lease(env, lsn)
 
             trigger_gc_and_select(
                 env,
