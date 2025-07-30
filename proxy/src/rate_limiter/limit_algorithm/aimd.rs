@@ -89,6 +89,7 @@ mod tests {
         let limiter = DynamicLimiter::new(config);
 
         let token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();
@@ -97,6 +98,7 @@ mod tests {
         assert_eq!(limiter.state().limit(), 2);
 
         let token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();
@@ -104,6 +106,7 @@ mod tests {
         assert_eq!(limiter.state().limit(), 2);
 
         let token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();
@@ -111,6 +114,7 @@ mod tests {
         assert_eq!(limiter.state().limit(), 1);
 
         let token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();
@@ -136,6 +140,7 @@ mod tests {
         let limiter = DynamicLimiter::new(config);
 
         let token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(100))
             .await
             .unwrap();
@@ -162,11 +167,13 @@ mod tests {
         let limiter = DynamicLimiter::new(config);
 
         let token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();
         let now = tokio::time::Instant::now();
         limiter
+            .clone()
             .acquire_timeout(Duration::from_secs(1))
             .await
             .err()
@@ -197,14 +204,17 @@ mod tests {
         let limiter = DynamicLimiter::new(config);
 
         let token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();
         let _token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();
         let _token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();
@@ -231,6 +241,7 @@ mod tests {
         let limiter = DynamicLimiter::new(config);
 
         let token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();
@@ -261,6 +272,7 @@ mod tests {
         let limiter = DynamicLimiter::new(config);
 
         let token = limiter
+            .clone()
             .acquire_timeout(Duration::from_millis(1))
             .await
             .unwrap();

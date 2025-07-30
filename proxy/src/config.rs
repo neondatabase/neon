@@ -290,8 +290,6 @@ impl RetryConfig {
 /// Helper for cmdline cache options parsing.
 #[derive(serde::Deserialize)]
 pub struct ConcurrencyLockOptions {
-    /// The number of shards the lock map should have
-    pub shards: usize,
     /// The number of allowed concurrent requests for each endpoitn
     #[serde(flatten)]
     pub limiter: RateLimiterConfig,
@@ -308,7 +306,7 @@ impl ConcurrencyLockOptions {
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
     /// Default options for [`crate::control_plane::client::ApiLocks`].
     pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
-        "shards=64,permits=100,epoch=10m,timeout=10ms";
+        "permits=100,epoch=1m,timeout=10ms";
 
     // pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "shards=32,permits=4,epoch=10m,timeout=1s";
 
@@ -320,7 +318,6 @@ impl ConcurrencyLockOptions {
             return Ok(serde_json::from_str(options)?);
         }
 
-        let mut shards = None;
         let mut permits = None;
         let mut epoch = None;
         let mut timeout = None;
@@ -331,7 +328,8 @@ impl ConcurrencyLockOptions {
                 .with_context(|| format!("bad key-value pair: {option}"))?;
 
             match key {
-                "shards" => shards = Some(value.parse()?),
+                // removed
+                "shards" => {}
                 "permits" => permits = Some(value.parse()?),
                 "epoch" => epoch = Some(humantime::parse_duration(value)?),
                 "timeout" => timeout = Some(humantime::parse_duration(value)?),
@@ -343,12 +341,10 @@ impl ConcurrencyLockOptions {
         if let Some(0) = permits {
             timeout = Some(Duration::default());
             epoch = Some(Duration::default());
-            shards = Some(2);
         }
 
         let permits = permits.context("missing `permits`")?;
         let out = Self {
-            shards: shards.context("missing `shards`")?,
             limiter: RateLimiterConfig {
                 algorithm: RateLimitAlgorithm::Fixed,
                 initial_limit: permits,
@@ -356,12 +352,6 @@ impl ConcurrencyLockOptions {
             epoch: epoch.context("missing `epoch`")?,
             timeout: timeout.context("missing `timeout`")?,
         };
-
-        ensure!(out.shards > 1, "shard count must be > 1");
-        ensure!(
-            out.shards.is_power_of_two(),
-            "shard count must be a power of two"
-        );
 
         Ok(out)
     }
@@ -552,36 +542,30 @@ mod tests {
         let ConcurrencyLockOptions {
             epoch,
             limiter,
-            shards,
             timeout,
         } = "shards=32,permits=4,epoch=10m,timeout=1s".parse()?;
         assert_eq!(epoch, Duration::from_secs(10 * 60));
         assert_eq!(timeout, Duration::from_secs(1));
-        assert_eq!(shards, 32);
         assert_eq!(limiter.initial_limit, 4);
         assert_eq!(limiter.algorithm, RateLimitAlgorithm::Fixed);
 
         let ConcurrencyLockOptions {
             epoch,
             limiter,
-            shards,
             timeout,
         } = "epoch=60s,shards=16,timeout=100ms,permits=8".parse()?;
         assert_eq!(epoch, Duration::from_secs(60));
         assert_eq!(timeout, Duration::from_millis(100));
-        assert_eq!(shards, 16);
         assert_eq!(limiter.initial_limit, 8);
         assert_eq!(limiter.algorithm, RateLimitAlgorithm::Fixed);
 
         let ConcurrencyLockOptions {
             epoch,
             limiter,
-            shards,
             timeout,
         } = "permits=0".parse()?;
         assert_eq!(epoch, Duration::ZERO);
         assert_eq!(timeout, Duration::ZERO);
-        assert_eq!(shards, 2);
         assert_eq!(limiter.initial_limit, 0);
         assert_eq!(limiter.algorithm, RateLimitAlgorithm::Fixed);
 
@@ -593,13 +577,11 @@ mod tests {
         let ConcurrencyLockOptions {
             epoch,
             limiter,
-            shards,
             timeout,
         } = r#"{"shards":32,"initial_limit":44,"aimd":{"min":5,"max":500,"inc":10,"dec":0.9,"utilisation":0.8},"epoch":"10m","timeout":"1s"}"#
             .parse()?;
         assert_eq!(epoch, Duration::from_secs(10 * 60));
         assert_eq!(timeout, Duration::from_secs(1));
-        assert_eq!(shards, 32);
         assert_eq!(limiter.initial_limit, 44);
         assert_eq!(
             limiter.algorithm,

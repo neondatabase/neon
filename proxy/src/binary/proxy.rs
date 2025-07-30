@@ -658,21 +658,14 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
 
     let config::ConcurrencyLockOptions {
-        shards,
         limiter,
         epoch,
         timeout,
     } = args.connect_compute_lock.parse()?;
-    info!(
-        ?limiter,
-        shards,
-        ?epoch,
-        "Using NodeLocks (connect_compute)"
-    );
+    info!(?limiter, ?epoch, "Using NodeLocks (connect_compute)");
     let connect_compute_locks = control_plane::locks::ApiLocks::new(
         "connect_compute_lock",
         limiter,
-        shards,
         timeout,
         epoch,
         &Metrics::get().proxy.connect_compute_lock,
@@ -796,16 +789,14 @@ fn build_auth_backend(
             )));
 
             let config::ConcurrencyLockOptions {
-                shards,
                 limiter,
                 epoch,
                 timeout,
             } = args.wake_compute_lock.parse()?;
-            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            info!(?limiter, ?epoch, "Using NodeLocks (wake_compute)");
             let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
                 "wake_compute_lock",
                 limiter,
-                shards,
                 timeout,
                 epoch,
                 &Metrics::get().wake_compute_lock,
@@ -874,16 +865,14 @@ fn build_auth_backend(
             )));
 
             let config::ConcurrencyLockOptions {
-                shards,
                 limiter,
                 epoch,
                 timeout,
             } = args.wake_compute_lock.parse()?;
-            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            info!(?limiter, ?epoch, "Using NodeLocks (wake_compute)");
             let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
                 "wake_compute_lock",
                 limiter,
-                shards,
                 timeout,
                 epoch,
                 &Metrics::get().wake_compute_lock,

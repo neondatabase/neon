@@ -6,7 +6,6 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clashmap::ClashMap;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
@@ -138,7 +137,7 @@ impl ApiCaches {
 /// Various caches for [`control_plane`](super).
 pub struct ApiLocks<K> {
     name: &'static str,
-    node_locks: ClashMap<K, Arc<DynamicLimiter>>,
+    node_locks: papaya::HashMap<K, Arc<DynamicLimiter>>,
     config: RateLimiterConfig,
     timeout: Duration,
     epoch: std::time::Duration,
@@ -163,14 +162,13 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
     pub fn new(
         name: &'static str,
         config: RateLimiterConfig,
-        shards: usize,
         timeout: Duration,
         epoch: std::time::Duration,
         metrics: &'static ApiLockMetrics,
     ) -> Self {
         Self {
             name,
-            node_locks: ClashMap::with_shard_amount(shards),
+            node_locks: papaya::HashMap::new(),
             config,
             timeout,
             epoch,
@@ -184,21 +182,17 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
                 permit: Token::disabled(),
             });
         }
+
         let now = Instant::now();
-        let semaphore = {
-            // get fast path
-            if let Some(semaphore) = self.node_locks.get(key) {
-                semaphore.clone()
-            } else {
-                self.node_locks
-                    .entry(key.clone())
-                    .or_insert_with(|| {
-                        self.metrics.semaphores_registered.inc();
-                        DynamicLimiter::new(self.config)
-                    })
-                    .clone()
-            }
-        };
+
+        let semaphore = self
+            .node_locks
+            .pin()
+            .get_or_insert_with(key.clone(), || {
+                self.metrics.semaphores_registered.inc();
+                DynamicLimiter::new(self.config)
+            })
+            .clone();
         let permit = semaphore.acquire_timeout(self.timeout).await;
 
         self.metrics
@@ -217,28 +211,28 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         if self.config.initial_limit == 0 {
             return;
         }
-        let mut interval =
-            tokio::time::interval(self.epoch / (self.node_locks.shards().len()) as u32);
+        let mut interval = tokio::time::interval(self.epoch);
         loop {
-            for (i, shard) in self.node_locks.shards().iter().enumerate() {
-                interval.tick().await;
-                // temporary lock a single shard and then clear any semaphores that aren't currently checked out
-                // race conditions: if strong_count == 1, there's no way that it can increase while the shard is locked
-                // therefore releasing it is safe from race conditions
-                info!(
-                    name = self.name,
-                    shard = i,
-                    "performing epoch reclamation on api lock"
-                );
-                let mut lock = shard.write();
-                let timer = self.metrics.reclamation_lag_seconds.start_timer();
-                let count = lock
-                    .extract_if(|(_, semaphore)| Arc::strong_count(semaphore) == 1)
-                    .count();
-                drop(lock);
-                self.metrics.semaphores_unregistered.inc_by(count as u64);
-                timer.observe();
+            interval.tick().await;
+            info!(name = self.name, "performing epoch reclamation on api lock");
+
+            let timer = self.metrics.reclamation_lag_seconds.start_timer();
+
+            let mut count = 0;
+            let guard = self.node_locks.pin();
+            for (key, sem) in &guard {
+                // check if we might be able to remove
+                if Arc::strong_count(sem) == 1 {
+                    // try and atomically remove
+                    let res = guard.remove_if(key, |_key, sem| Arc::strong_count(sem) == 1);
+                    if let Ok(Some(..)) = res {
+                        count += 1;
+                    }
+                }
             }
+            drop(guard);
+            timer.observe();
+            self.metrics.semaphores_unregistered.inc_by(count as u64);
         }
     }
 }

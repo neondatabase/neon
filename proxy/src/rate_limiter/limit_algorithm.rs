@@ -160,25 +160,27 @@ impl DynamicLimiter {
 
     /// Try to acquire a concurrency [Token], waiting for `duration` if there are none available.
     pub(crate) async fn acquire_timeout(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         duration: Duration,
     ) -> Result<Token, Elapsed> {
         tokio::time::timeout(duration, self.acquire()).await?
     }
 
     /// Try to acquire a concurrency [Token].
-    async fn acquire(self: &Arc<Self>) -> Result<Token, Elapsed> {
+    async fn acquire(self: Arc<Self>) -> Result<Token, Elapsed> {
         if self.config.initial_limit == 0 {
             // If the rate limiter is disabled, we can always acquire a token.
-            Ok(Token::disabled())
-        } else {
+            return Ok(Token::disabled());
+        }
+
+        {
             let mut notified = pin!(self.ready.notified());
             let mut ready = notified.as_mut().enable();
             loop {
                 if ready {
                     let mut inner = self.inner.lock();
                     if inner.take(&self.ready).is_some() {
-                        break Ok(Token::new(self.clone()));
+                        break;
                     }
                     notified.set(self.ready.notified());
                 }
@@ -186,6 +188,8 @@ impl DynamicLimiter {
                 ready = true;
             }
         }
+
+        Ok(Token::new(self))
     }
 
     /// Return the concurrency [Token], along with the outcome of the job.

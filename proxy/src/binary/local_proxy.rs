@@ -225,21 +225,14 @@ pub async fn run() -> anyhow::Result<()> {
 /// ProxyConfig is created at proxy startup, and lives forever.
 fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let config::ConcurrencyLockOptions {
-        shards,
         limiter,
         epoch,
         timeout,
     } = args.connect_compute_lock.parse()?;
-    info!(
-        ?limiter,
-        shards,
-        ?epoch,
-        "Using NodeLocks (connect_compute)"
-    );
+    info!(?limiter, ?epoch, "Using NodeLocks (connect_compute)");
     let connect_compute_locks = ApiLocks::new(
         "connect_compute_lock",
         limiter,
-        shards,
         timeout,
         epoch,
         &Metrics::get().proxy.connect_compute_lock,
