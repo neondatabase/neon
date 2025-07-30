@@ -139,6 +139,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LfcPrewarmState"
+    delete:
+      tags:
+        - Prewarm
+      summary: Cancel ongoing LFC prewarm
+      description: ""
+      operationId: cancelLfcPrewarm
+      responses:
+        202:
+          description: Prewarm cancelled
 
   /lfc/offload:
     post:

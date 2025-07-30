@@ -32,6 +32,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 use tokio::{spawn, sync::watch, task::JoinHandle, time};
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use url::Url;
 use utils::id::{TenantId, TimelineId};
@@ -192,6 +193,7 @@ pub struct ComputeState {
     pub startup_span: Option<tracing::span::Span>,
 
     pub lfc_prewarm_state: LfcPrewarmState,
+    pub lfc_prewarm_token: CancellationToken,
     pub lfc_offload_state: LfcOffloadState,
 
     /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
@@ -217,6 +219,7 @@ impl ComputeState {
             lfc_offload_state: LfcOffloadState::default(),
             terminate_flush_lsn: None,
             promote_state: None,
+            lfc_prewarm_token: CancellationToken::new(),
         }
     }
 

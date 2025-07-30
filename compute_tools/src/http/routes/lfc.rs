@@ -46,3 +46,8 @@ pub(in crate::http) async fn offload(compute: Compute) -> Response {
         )
     }
 }
+
+pub(in crate::http) async fn cancel_prewarm(compute: Compute) -> StatusCode {
+    compute.cancel_prewarm();
+    StatusCode::ACCEPTED
+}
