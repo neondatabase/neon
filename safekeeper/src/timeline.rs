@@ -195,12 +195,14 @@ impl StateSK {
         to: Configuration,
     ) -> Result<TimelineMembershipSwitchResponse> {
         let result = self.state_mut().membership_switch(to).await?;
+        let flush_lsn = self.flush_lsn();
+        let last_log_term = self.state().acceptor_state.get_last_log_term(flush_lsn);
 
         Ok(TimelineMembershipSwitchResponse {
             previous_conf: result.previous_conf,
             current_conf: result.current_conf,
-            last_log_term: self.state().acceptor_state.term,
-            flush_lsn: self.flush_lsn(),
+            last_log_term,
+            flush_lsn,
         })
     }
 

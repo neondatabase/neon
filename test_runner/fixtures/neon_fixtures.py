@@ -2314,6 +2314,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         timeline_id: TimelineId,
         new_sk_set: list[int],
     ):
+        log.info(f"migrate_safekeepers({tenant_id}, {timeline_id}, {new_sk_set})")
         response = self.request(
             "POST",
             f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate",
