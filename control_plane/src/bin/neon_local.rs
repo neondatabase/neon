@@ -1089,8 +1089,8 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
             default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
             storage_controller: None,
             control_plane_hooks_api: None,
-            generate_local_ssl_certs: false,
-            generate_compute_ssl_certs: false,
+            generate_local_tls_certs: false,
+            generate_compute_tls_certs: false,
         }
     };
 

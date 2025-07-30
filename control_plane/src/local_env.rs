@@ -96,10 +96,10 @@ pub struct LocalEnv {
 
     /// Flag to generate SSL certificates for components that need it.
     /// Also generates root CA certificate that is used to sign all other certificates.
-    pub generate_local_ssl_certs: bool,
+    pub generate_local_tls_certs: bool,
 
     /// Flag to generate SSL certificates for compute.
-    pub generate_compute_ssl_certs: bool,
+    pub generate_compute_tls_certs: bool,
 }
 
 /// On-disk state stored in `.neon/config`.
@@ -127,11 +127,11 @@ pub struct OnDiskConfig {
     // Note: skip serializing because in compat tests old storage controller fails
     // to load new config file. May be removed after this field is in release branch.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub generate_local_ssl_certs: bool,
+    pub generate_local_tls_certs: bool,
     // Note: skip serializing because in compat tests old storage controller fails
     // to load new config file. May be removed after this field is in release branch.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub generate_compute_ssl_certs: bool,
+    pub generate_compute_tls_certs: bool,
 }
 
 fn fail_if_pageservers_field_specified<'de, D>(_: D) -> Result<Vec<PageServerConf>, D::Error>
@@ -160,8 +160,8 @@ pub struct NeonLocalInitConf {
     pub endpoint_storage: EndpointStorageConf,
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
-    pub generate_local_ssl_certs: bool,
-    pub generate_compute_ssl_certs: bool,
+    pub generate_local_tls_certs: bool,
+    pub generate_compute_tls_certs: bool,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -520,7 +520,7 @@ impl LocalEnv {
     }
 
     pub fn ssl_ca_cert_path(&self) -> Option<PathBuf> {
-        if self.generate_local_ssl_certs {
+        if self.generate_local_tls_certs {
             Some(self.base_data_dir.join("rootCA.crt"))
         } else {
             None
@@ -528,7 +528,7 @@ impl LocalEnv {
     }
 
     pub fn ssl_ca_key_path(&self) -> Option<PathBuf> {
-        if self.generate_local_ssl_certs {
+        if self.generate_local_tls_certs {
             Some(self.base_data_dir.join("rootCA.key"))
         } else {
             None
@@ -555,7 +555,7 @@ impl LocalEnv {
     }
 
     fn compute_ssl_paths(&self) -> Option<(PathBuf, PathBuf)> {
-        if self.generate_compute_ssl_certs {
+        if self.generate_compute_tls_certs {
             Some((
                 self.base_data_dir.join("compute_server.crt"),
                 self.base_data_dir.join("compute_server.key"),
@@ -709,8 +709,8 @@ impl LocalEnv {
                 control_plane_hooks_api,
                 control_plane_compute_hook_api: _,
                 branch_name_mappings,
-                generate_local_ssl_certs,
-                generate_compute_ssl_certs,
+                generate_local_tls_certs,
+                generate_compute_tls_certs,
                 endpoint_storage,
             } = on_disk_config;
             LocalEnv {
@@ -727,8 +727,8 @@ impl LocalEnv {
                 control_plane_api: control_plane_api.unwrap(),
                 control_plane_hooks_api,
                 branch_name_mappings,
-                generate_local_ssl_certs,
-                generate_compute_ssl_certs,
+                generate_local_tls_certs,
+                generate_compute_tls_certs,
                 endpoint_storage,
             }
         };
@@ -844,8 +844,8 @@ impl LocalEnv {
                 control_plane_hooks_api: self.control_plane_hooks_api.clone(),
                 control_plane_compute_hook_api: None,
                 branch_name_mappings: self.branch_name_mappings.clone(),
-                generate_local_ssl_certs: self.generate_local_ssl_certs,
-                generate_compute_ssl_certs: self.generate_compute_ssl_certs,
+                generate_local_tls_certs: self.generate_local_tls_certs,
+                generate_compute_tls_certs: self.generate_compute_tls_certs,
                 endpoint_storage: self.endpoint_storage.clone(),
             },
         )
@@ -966,8 +966,8 @@ impl LocalEnv {
             pageservers,
             safekeepers,
             control_plane_api,
-            generate_local_ssl_certs,
-            generate_compute_ssl_certs,
+            generate_local_tls_certs,
+            generate_compute_tls_certs,
             control_plane_hooks_api,
             endpoint_storage,
         } = conf;
@@ -1020,15 +1020,15 @@ impl LocalEnv {
             control_plane_api: control_plane_api.unwrap(),
             control_plane_hooks_api,
             branch_name_mappings: Default::default(),
-            generate_local_ssl_certs,
-            generate_compute_ssl_certs,
+            generate_local_tls_certs,
+            generate_compute_tls_certs,
             endpoint_storage,
         };
 
-        if generate_local_ssl_certs {
+        if generate_local_tls_certs {
             env.generate_ssl_ca_cert()?;
         }
-        if generate_compute_ssl_certs {
+        if generate_compute_tls_certs {
             env.generate_compute_ssl_cert()?;
         }
 
