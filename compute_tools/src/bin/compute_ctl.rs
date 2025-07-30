@@ -245,7 +245,7 @@ fn main() -> Result<()> {
         config,
     )?;
 
-    let exit_code = compute_node.run()?;
+    let exit_code = compute_node.run().context("running compute node")?;
 
     scenario.teardown();
 
