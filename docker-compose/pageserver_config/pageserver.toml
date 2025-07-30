@@ -1,6 +1,7 @@
 broker_endpoint='http://storage_broker:50051'
 pg_distrib_dir='/usr/local/'
 listen_pg_addr='0.0.0.0:6400'
+listen_grpc_addr='0.0.0.0:6401'
 listen_http_addr='0.0.0.0:9898'
 remote_storage={ endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/pageserver' }
 control_plane_api='http://0.0.0.0:6666' # No storage controller in docker compose, specify a junk address
