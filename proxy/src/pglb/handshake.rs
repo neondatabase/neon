@@ -139,7 +139,7 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
                         match conn_info.alpn_protocol() {
                             None => {
                                 if direct.is_some() {
-                                    warn!("missing ALPN protocol 'postgresql'");
+                                    warn!("missing ALPN");
                                     return Err(HandshakeError::ProtocolViolation);
                                 }
                             }
