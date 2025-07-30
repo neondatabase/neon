@@ -373,6 +373,8 @@ def test_max_wal_rate(neon_simple_env: NeonEnv):
         config_lines=[
             # we need this option because default max_cluster_size < 0 will disable throttling completely
             "neon.max_cluster_size=10GB",
+            # enable lakebase mode for WAL Rate Limiting
+            "neon.lakebase_mode=true",
         ],
     )
 
