@@ -863,7 +863,6 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
     assert not env.pageserver.log_contains(".*Circuit breaker failure ended.*")
 
 
-@pytest.mark.skip(reason="Lakebase mode")
 def test_ps_corruption_detection_feedback(neon_env_builder: NeonEnvBuilder):
     """
     Test that when the pageserver detects corruption during image layer creation,
@@ -890,7 +889,9 @@ def test_ps_corruption_detection_feedback(neon_env_builder: NeonEnvBuilder):
     timeline_id = env.initial_timeline
 
     pageserver_http = env.pageserver.http_client()
-    workload = Workload(env, tenant_id, timeline_id)
+    workload = Workload(
+        env, tenant_id, timeline_id, endpoint_opts={"config_lines": ["neon.lakebase_mode=true"]}
+    )
     workload.init()
 
     # Enable the failpoint that will cause image layer creation to fail due to a (simulated) detected
