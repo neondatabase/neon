@@ -1947,7 +1947,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.auth_enabled = auth_enabled
         self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
         self.logfile = self.env.repo_dir / "storage_controller_1" / "storage_controller.log"
-        self.ssl_ca_file = env.ssl_ca_file
+        self.tls_ca_file = env.tls_ca_file
 
     def start(
         self,
@@ -2020,8 +2020,8 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return PageserverHttpClient(self.port, lambda: True, auth_token, *args, **kwargs)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
-        if self.ssl_ca_file is not None:
-            kwargs["verify"] = self.ssl_ca_file
+        if self.tls_ca_file is not None:
+            kwargs["verify"] = self.tls_ca_file
         resp = requests.request(method, *args, **kwargs)
         NeonStorageController.raise_api_exception(resp)
 

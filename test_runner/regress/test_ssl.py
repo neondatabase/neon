@@ -19,7 +19,7 @@ def test_pageserver_https_api(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     addr = f"https://localhost:{env.pageserver.service_port.https}/v1/status"
-    requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
+    requests.get(addr, verify=str(env.tls_ca_file)).raise_for_status()
 
 
 def test_safekeeper_https_api(neon_env_builder: NeonEnvBuilder):
@@ -37,7 +37,7 @@ def test_safekeeper_https_api(neon_env_builder: NeonEnvBuilder):
 
     # 1. Make simple https request.
     addr = f"https://localhost:{sk.port.https}/v1/status"
-    requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
+    requests.get(addr, verify=str(env.tls_ca_file)).raise_for_status()
 
     # Note: http_port is intentionally wrong.
     # Storcon should not use it if use_https is on.
@@ -83,7 +83,7 @@ def test_storage_controller_https_api(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     addr = f"https://localhost:{env.storage_controller.port}/status"
-    requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
+    requests.get(addr, verify=str(env.tls_ca_file)).raise_for_status()
 
 
 def test_certificate_rotation(neon_env_builder: NeonEnvBuilder):
@@ -111,7 +111,7 @@ def test_certificate_rotation(neon_env_builder: NeonEnvBuilder):
 
     # 1. Check if https works.
     addr = f"https://localhost:{port}/v1/status"
-    requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
+    requests.get(addr, verify=str(env.tls_ca_file)).raise_for_status()
 
     ps_cert_path = env.pageserver.workdir / "server.crt"
     ps_key_path = env.pageserver.workdir / "server.key"
@@ -136,7 +136,7 @@ def test_certificate_rotation(neon_env_builder: NeonEnvBuilder):
     wait_until(error_reloading_cert)
 
     # 4. Check that it uses old cert.
-    requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
+    requests.get(addr, verify=str(env.tls_ca_file)).raise_for_status()
     cur_cert = ssl.get_server_certificate(("localhost", port))
     assert cur_cert == ps_cert
 
@@ -150,7 +150,7 @@ def test_certificate_rotation(neon_env_builder: NeonEnvBuilder):
     wait_until(cert_reloaded)
 
     # 6. Check that server returns new cert.
-    requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
+    requests.get(addr, verify=str(env.tls_ca_file)).raise_for_status()
     cur_cert = ssl.get_server_certificate(("localhost", port))
     assert cur_cert == sk_cert
 
@@ -174,7 +174,7 @@ def test_server_and_cert_metrics(neon_env_builder: NeonEnvBuilder):
     )
 
     addr = f"https://localhost:{env.pageserver.service_port.https}/v1/status"
-    requests.get(addr, verify=str(env.ssl_ca_file)).raise_for_status()
+    requests.get(addr, verify=str(env.tls_ca_file)).raise_for_status()
 
     new_https_conn_count = (
         ps_client.get_metric_value("http_server_connection_started_total", filter_https) or 0
@@ -227,7 +227,7 @@ def test_storage_broker_https_api(neon_env_builder: NeonEnvBuilder):
     # 1. Simple check that HTTPS is enabled and works.
     url = env.broker.client_url() + "/status"
     assert url.startswith("https://")
-    requests.get(url, verify=str(env.ssl_ca_file)).raise_for_status()
+    requests.get(url, verify=str(env.tls_ca_file)).raise_for_status()
 
     # 2. Simple workload to check that SK -> broker -> PS communication works over HTTPS.
     workload = Workload(env, env.initial_tenant, env.initial_timeline)
@@ -248,6 +248,6 @@ def test_compute_tls(
         res = endpoint.safe_psql(
             "select ssl from pg_stat_ssl where pid = pg_backend_pid();",
             sslmode="verify-full",
-            sslrootcert=env.ssl_ca_file,
+            sslrootcert=env.tls_ca_file,
         )
         assert res == [(True,)]
