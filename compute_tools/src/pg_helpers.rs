@@ -299,9 +299,9 @@ pub async fn get_existing_dbs_async(
         .query_raw::<str, &String, &[String; 0]>(
             "SELECT
                 datname AS name,
-                (SELECT rolname FROM pg_roles WHERE oid = datdba) AS owner,
+                (SELECT rolname FROM pg_catalog.pg_roles WHERE oid OPERATOR(pg_catalog.=) datdba) AS owner,
                 NOT datallowconn AS restrict_conn,
-                datconnlimit = - 2 AS invalid
+                datconnlimit OPERATOR(pg_catalog.=) (OPERATOR(pg_catalog.-) 2) AS invalid
             FROM
                 pg_catalog.pg_database;",
             &[],

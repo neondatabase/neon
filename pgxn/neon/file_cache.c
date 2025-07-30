@@ -49,6 +49,7 @@
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
+#include "neon_utils.h"
 #include "pagestore_client.h"
 #include "communicator.h"
 
@@ -624,8 +625,19 @@ lfc_get_state(size_t max_entries)
 			{
 				if (GET_STATE(entry, j) != UNAVAILABLE)
 				{
-					BITMAP_SET(bitmap, i*lfc_blocks_per_chunk + j);
-					n_pages += 1;
+					/* Validate the buffer tag before including it */
+					BufferTag test_tag = entry->key;
+					test_tag.blockNum += j;
+
+					if (BufferTagIsValid(&test_tag))
+					{
+						BITMAP_SET(bitmap, i*lfc_blocks_per_chunk + j);
+						n_pages += 1;
+					}
+					else
+					{
+						elog(ERROR, "LFC: Skipping invalid buffer tag during cache state capture: blockNum=%u", test_tag.blockNum);
+					}
 				}
 			}
 			if (++i == n_entries)
@@ -634,7 +646,7 @@ lfc_get_state(size_t max_entries)
 		Assert(i == n_entries);
 		fcs->n_pages = n_pages;
 		Assert(pg_popcount((char*)bitmap, ((n_entries << lfc_chunk_size_log) + 7)/8) == n_pages);
-		elog(LOG, "LFC: save state of %d chunks %d pages", (int)n_entries, (int)n_pages);
+		elog(LOG, "LFC: save state of %d chunks %d pages (validated)", (int)n_entries, (int)n_pages);
 	}
 
 	LWLockRelease(lfc_lock);

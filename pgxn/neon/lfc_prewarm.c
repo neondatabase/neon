@@ -17,6 +17,7 @@
 #include "file_cache.h"
 #include "lfc_prewarm.h"
 #include "neon.h"
+#include "neon_utils.h"
 #include "pagestore_client.h"
 
 #include "funcapi.h"
@@ -350,6 +351,10 @@ lfc_prewarm_main(Datum main_arg)
 				{
 					tag = fcs->chunks[snd_idx >> fcs_chunk_size_log];
 					tag.blockNum += snd_idx & ((1 << fcs_chunk_size_log) - 1);
+
+					if (!BufferTagIsValid(&tag))
+						elog(ERROR, "LFC: Invalid buffer tag: %u", tag.blockNum);
+
 					if (!lfc_cache_contains(BufTagGetNRelFileInfo(tag), tag.forkNum, tag.blockNum))
 					{
 						(void) communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
@@ -477,6 +482,9 @@ lfc_prewarm_with_async_requests(FileCacheState *fcs)
 		BufferTag *chunk_tag = &fcs->chunks[chunkno];
 		BlockNumber request_startblkno = InvalidBlockNumber;
 		BlockNumber request_endblkno;
+
+		if (!BufferTagIsValid(chunk_tag))
+			elog(ERROR, "LFC: Invalid buffer tag: %u", chunk_tag->blockNum);
 
 		if (lfc_prewarm_cancel)
 		{
