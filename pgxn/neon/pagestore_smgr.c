@@ -437,11 +437,17 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 						forknum, LSN_FORMAT_ARGS(lsn))));
 	}
 
-	/*
-	 * Remember the LSN on this page. When we read the page again, we must
-	 * read the same or newer version of it.
-	 */
-	neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
+	if (!neon_use_communicator_worker)
+	{
+		/*
+		 * Remember the LSN on this page. When we read the page again, we must
+		 * read the same or newer version of it.
+		 *
+		 * (With the new communicator, the caller will make a write-request
+		 * for this page, which updates the last-written LSN too)
+		 */
+		neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
+	}
 }
 
 /*
