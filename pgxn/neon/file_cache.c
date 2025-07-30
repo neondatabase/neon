@@ -49,6 +49,7 @@
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
+#include "neon_utils.h"
 #include "pagestore_client.h"
 #include "communicator.h"
 
@@ -673,8 +674,19 @@ lfc_get_state(size_t max_entries)
 			{
 				if (GET_STATE(entry, j) != UNAVAILABLE)
 				{
-					BITMAP_SET(bitmap, i*lfc_blocks_per_chunk + j);
-					n_pages += 1;
+					/* Validate the buffer tag before including it */
+					BufferTag test_tag = entry->key;
+					test_tag.blockNum += j;
+
+					if (BufferTagIsValid(&test_tag))
+					{
+						BITMAP_SET(bitmap, i*lfc_blocks_per_chunk + j);
+						n_pages += 1;
+					}
+					else
+					{
+						elog(ERROR, "LFC: Skipping invalid buffer tag during cache state capture: blockNum=%u", test_tag.blockNum);
+					}
 				}
 			}
 			if (++i == n_entries)
@@ -683,7 +695,7 @@ lfc_get_state(size_t max_entries)
 		Assert(i == n_entries);
 		fcs->n_pages = n_pages;
 		Assert(pg_popcount((char*)bitmap, ((n_entries << lfc_chunk_size_log) + 7)/8) == n_pages);
-		elog(LOG, "LFC: save state of %d chunks %d pages", (int)n_entries, (int)n_pages);
+		elog(LOG, "LFC: save state of %d chunks %d pages (validated)", (int)n_entries, (int)n_pages);
 	}
 
 	LWLockRelease(lfc_lock);
@@ -702,6 +714,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 	size_t n_entries;
 	size_t prewarm_batch = Min(lfc_prewarm_batch, readahead_buffer_size);
 	size_t fcs_size;
+	uint32_t max_prefetch_pages;
 	dsm_segment *seg;
 	BackgroundWorkerHandle* bgw_handle[MAX_PREWARM_WORKERS];
 
@@ -745,6 +758,11 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 
 	n_entries = Min(fcs->n_chunks, lfc_prewarm_limit);
 	Assert(n_entries != 0);
+
+	max_prefetch_pages = n_entries << fcs_chunk_size_log;
+	if (fcs->n_pages > max_prefetch_pages) {
+		elog(ERROR, "LFC: Number of pages in file cache state (%d) is more than the limit (%d)", fcs->n_pages, max_prefetch_pages);
+	}
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
@@ -898,6 +916,11 @@ lfc_prewarm_main(Datum main_arg)
 				{
 					tag = fcs->chunks[snd_idx >> fcs_chunk_size_log];
 					tag.blockNum += snd_idx & ((1 << fcs_chunk_size_log) - 1);
+
+					if (!BufferTagIsValid(&tag)) {
+						elog(ERROR, "LFC: Invalid buffer tag: %u", tag.blockNum);
+					}
+
 					if (!lfc_cache_contains(BufTagGetNRelFileInfo(tag), tag.forkNum, tag.blockNum))
 					{
 						(void)communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);

@@ -71,7 +71,7 @@ char	   *neon_project_id;
 char	   *neon_branch_id;
 char	   *neon_endpoint_id;
 int32		max_cluster_size;
-char	   *page_server_connstring;
+char	   *pageserver_connstring;
 char	   *neon_auth_token;
 
 int			readahead_buffer_size = 128;
@@ -1453,7 +1453,7 @@ PagestoreShmemInit(void)
 		pg_atomic_init_u64(&pagestore_shared->begin_update_counter, 0);
 		pg_atomic_init_u64(&pagestore_shared->end_update_counter, 0);
 		memset(&pagestore_shared->shard_map, 0, sizeof(ShardMap));
-		AssignPageserverConnstring(page_server_connstring, NULL);
+		AssignPageserverConnstring(pageserver_connstring, NULL);
 	}
 }
 
@@ -1472,7 +1472,7 @@ pg_init_libpagestore(void)
 	DefineCustomStringVariable("neon.pageserver_connstring",
 							   "connection string to the page server",
 							   NULL,
-							   &page_server_connstring,
+							   &pageserver_connstring,
 							   "",
 							   PGC_SIGHUP,
 							   0,	/* no flags required */
@@ -1643,7 +1643,7 @@ pg_init_libpagestore(void)
 	if (neon_auth_token)
 		neon_log(LOG, "using storage auth token from NEON_AUTH_TOKEN environment variable");
 
-	if (page_server_connstring && page_server_connstring[0])
+	if (pageserver_connstring[0])
 	{
 		neon_log(PageStoreTrace, "set neon_smgr hook");
 		smgr_hook = smgr_neon;
