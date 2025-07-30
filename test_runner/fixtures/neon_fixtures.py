@@ -262,7 +262,6 @@ class PgProtocol:
         # pooler does not support statement_timeout
         # Check if the hostname contains the string 'pooler'
         hostname = result.get("host", "")
-        log.info(f"Hostname: {hostname}")
         options = result.get("options", "")
         if "statement_timeout" not in options and "pooler" not in hostname:
             options = f"-cstatement_timeout=120s {options}"
