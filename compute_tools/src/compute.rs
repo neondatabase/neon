@@ -841,13 +841,11 @@ impl ComputeNode {
         let mut pre_tasks = tokio::task::JoinSet::new();
 
         // Make sure TLS certificates are properly loaded and in the right place.
-        if self.compute_ctl_config.tls.is_some() {
+        let tls_task = self.compute_ctl_config.tls.as_ref().map(|tls_config| {
             let this = self.clone();
-            pre_tasks.spawn_blocking(|| {
-                this.watch_cert_for_changes();
-                Ok::<(), anyhow::Error>(())
-            });
-        }
+            let tls_config = tls_config.clone();
+            tokio::task::spawn_blocking(|| this.watch_cert_for_changes(tls_config))
+        });
 
         let tls_config = self.tls_config(&pspec.spec);
 
@@ -900,6 +898,13 @@ impl ComputeNode {
 
                 Ok::<(), anyhow::Error>(())
             });
+        }
+
+        // Wait for TLS certificates to be issued before updating pgbouncer and local proxy.
+        let rt = tokio::runtime::Handle::current();
+        if let Some(tls_task) = tls_task {
+            rt.block_on(tls_task)
+                .context("TLS certificate renewal task panicked")?;
         }
 
         // tune pgbouncer
@@ -984,7 +989,6 @@ impl ComputeNode {
         let _configurator_handle = launch_configurator(self);
 
         // Wait for all the pre-tasks to finish before starting postgres
-        let rt = tokio::runtime::Handle::current();
         while let Some(res) = rt.block_on(pre_tasks.join_next()) {
             res??;
         }
@@ -2185,66 +2189,61 @@ impl ComputeNode {
         Ok(())
     }
 
-    pub fn watch_cert_for_changes(self: Arc<Self>) {
-        // update status on cert renewal
-        if let Some(tls_config) = &self.compute_ctl_config.tls {
-            let tls_config = tls_config.clone();
+    pub fn watch_cert_for_changes(self: Arc<Self>, tls_config: TlsConfig) {
+        // wait until the cert exists.
+        let mut digest = crate::tls::compute_digest(&tls_config.cert_path);
+        info!(
+            cert_path = tls_config.cert_path,
+            key_path = tls_config.key_path,
+            "TLS certificates found"
+        );
 
-            // wait until the cert exists.
-            let mut digest = crate::tls::compute_digest(&tls_config.cert_path);
-            info!(
-                cert_path = tls_config.cert_path,
-                key_path = tls_config.key_path,
-                "TLS certificates found"
-            );
+        tokio::task::spawn_blocking(move || {
+            'cert_update: loop {
+                // let postgres/pgbouncer/local_proxy know the new cert/key exists.
+                // we need to wait until it's configurable first.
 
-            tokio::task::spawn_blocking(move || {
-                'cert_update: loop {
-                    // let postgres/pgbouncer/local_proxy know the new cert/key exists.
-                    // we need to wait until it's configurable first.
+                let mut state = self.state.lock().unwrap();
+                'status_update: loop {
+                    match state.status {
+                        // let's update the state to config pending
+                        ComputeStatus::ConfigurationPending | ComputeStatus::Running => {
+                            info!("reconfiguring compute due to TLS certificate renewal");
+                            state.set_status(
+                                ComputeStatus::ConfigurationPending,
+                                &self.state_changed,
+                            );
+                            break 'status_update;
+                        }
 
-                    let mut state = self.state.lock().unwrap();
-                    'status_update: loop {
-                        match state.status {
-                            // let's update the state to config pending
-                            ComputeStatus::ConfigurationPending | ComputeStatus::Running => {
-                                info!("reconfiguring compute due to TLS certificate renewal");
-                                state.set_status(
-                                    ComputeStatus::ConfigurationPending,
-                                    &self.state_changed,
-                                );
-                                break 'status_update;
-                            }
+                        // exit loop
+                        ComputeStatus::Failed
+                        | ComputeStatus::TerminationPendingFast
+                        | ComputeStatus::TerminationPendingImmediate
+                        | ComputeStatus::Terminated => break 'cert_update,
 
-                            // exit loop
-                            ComputeStatus::Failed
-                            | ComputeStatus::TerminationPendingFast
-                            | ComputeStatus::TerminationPendingImmediate
-                            | ComputeStatus::Terminated => break 'cert_update,
-
-                            // wait
-                            ComputeStatus::Init
-                            | ComputeStatus::Configuration
-                            | ComputeStatus::RefreshConfiguration
-                            | ComputeStatus::RefreshConfigurationPending
-                            | ComputeStatus::Empty => {
-                                state = self.state_changed.wait(state).unwrap();
-                            }
+                        // wait
+                        ComputeStatus::Init
+                        | ComputeStatus::Configuration
+                        | ComputeStatus::RefreshConfiguration
+                        | ComputeStatus::RefreshConfigurationPending
+                        | ComputeStatus::Empty => {
+                            state = self.state_changed.wait(state).unwrap();
                         }
                     }
-                    drop(state);
-
-                    // wait for a new certificate update
-                    digest = crate::tls::wait_until_cert_changed(digest, &tls_config.cert_path);
-
-                    info!(
-                        cert_path = tls_config.cert_path,
-                        key_path = tls_config.key_path,
-                        "TLS certificates renewed",
-                    );
                 }
-            });
-        }
+                drop(state);
+
+                // wait for a new certificate update
+                digest = crate::tls::wait_until_cert_changed(digest, &tls_config.cert_path);
+
+                info!(
+                    cert_path = tls_config.cert_path,
+                    key_path = tls_config.key_path,
+                    "TLS certificates renewed",
+                );
+            }
+        });
     }
 
     pub fn tls_config(&self, spec: &ComputeSpec) -> &Option<TlsConfig> {
