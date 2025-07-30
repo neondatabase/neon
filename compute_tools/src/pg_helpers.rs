@@ -523,17 +523,6 @@ pub async fn tune_pgbouncer(
     tls_config: Option<TlsConfig>,
 ) -> Result<()> {
     if let Some(tls_config) = tls_config {
-        // pgbouncer starts in a half-ok state if it cannot find these files.
-        // It will default to client_tls_sslmode=deny, which causes proxy to error.
-        // There is a small window at startup where these files don't yet exist in the VM.
-        // Best to wait until it exists.
-        loop {
-            if let Ok(true) = tokio::fs::try_exists(&tls_config.key_path).await {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await
-        }
-
         pgbouncer_config.insert("client_tls_cert_file".to_string(), tls_config.cert_path);
         pgbouncer_config.insert("client_tls_key_file".to_string(), tls_config.key_path);
         pgbouncer_config.insert("client_tls_sslmode".to_string(), "allow".to_string());

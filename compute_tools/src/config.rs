@@ -16,7 +16,7 @@ use crate::pg_helpers::{
     DatabricksSettingsExt as _, GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize,
     escape_conf_value,
 };
-use crate::tls::{self, SERVER_CRT, SERVER_KEY};
+use crate::tls::{SERVER_CRT, SERVER_KEY};
 
 use utils::shard::{ShardIndex, ShardNumber};
 
@@ -178,14 +178,8 @@ pub fn write_postgres_conf(
     }
 
     // tls
-    if let Some(tls_config) = tls_config {
+    if tls_config.is_some() {
         writeln!(file, "ssl = on")?;
-
-        // postgres requires the keyfile to be in a secure file,
-        // currently too complicated to ensure that at the VM level,
-        // so we just copy them to another file instead. :shrug:
-        let keys = tls::load_certs_blocking(tls_config);
-        tls::update_key_path_blocking(pgdata_path, &keys)?;
 
         // these are the default, but good to be explicit.
         writeln!(file, "ssl_cert_file = '{SERVER_CRT}'")?;

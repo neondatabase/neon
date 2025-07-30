@@ -2198,8 +2198,29 @@ impl ComputeNode {
             "TLS certificates found"
         );
 
+        // ensure the keys are saved before continuing.
+        let key_pair = crate::tls::load_certs_blocking(&tls_config);
+        while let Err(e) =
+            crate::tls::update_key_path_blocking(Path::new(&self.params.pgdata), &key_pair)
+        {
+            error!("could not save TLS certificates: {e}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
         tokio::task::spawn_blocking(move || {
             'cert_update: loop {
+                // wait for a new certificate update
+                digest = crate::tls::wait_until_cert_changed(digest, &tls_config.cert_path);
+
+                // ensure the keys are saved before continuing.
+                let key_pair = crate::tls::load_certs_blocking(&tls_config);
+                while let Err(e) =
+                    crate::tls::update_key_path_blocking(Path::new(&self.params.pgdata), &key_pair)
+                {
+                    error!("could not save TLS certificates: {e}");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+
                 // let postgres/pgbouncer/local_proxy know the new cert/key exists.
                 // we need to wait until it's configurable first.
 
@@ -2233,9 +2254,6 @@ impl ComputeNode {
                     }
                 }
                 drop(state);
-
-                // wait for a new certificate update
-                digest = crate::tls::wait_until_cert_changed(digest, &tls_config.cert_path);
 
                 info!(
                     cert_path = tls_config.cert_path,
