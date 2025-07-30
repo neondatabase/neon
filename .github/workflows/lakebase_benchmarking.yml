@@ -1,6 +1,10 @@
 name: Lakebase Benchmarking
 
 on:
+  # uncomment to run on push for debugging your PR
+  push:
+    branches: [ bodobolero/lakebase_perf_tests ]
+
   workflow_dispatch: # adds ability to run this manually
     inputs:
       postgres_version:
