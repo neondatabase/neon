@@ -79,13 +79,6 @@ jobs:
         prefix: latest
         aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
-    - name: Create Lakebase Bearer Token
-      id: create-bearer-token
-      uses: ./.github/actions/lakebase_create_token
-      with:
-        client_id: ${{ vars.LAKEBASE_OAUTH_CLIENT_ID }}
-        client_secret: ${{ secrets.LAKEBASE_OAUTH_CLIENT_SECRET }}
-
     ## TODO, currently we cannot really specify a small min max CU for lakebase project
     ## and the semantic of a CU is different from Neon, so we need to carefully map
     ## compute sizes before comparing results
@@ -97,7 +90,7 @@ jobs:
         org_id: ${{ vars.LAKEBASE_ORG_ID }}
         postgres_version: ${{ env.PG_VERSION }}
         compute_units: '[1, 1]'
-        curl_authorization_options: "--header 'X-CSRF-Token: ${{ secrets.LAKEBASE_X_CSRF_TOKEN }}' --cookie 'JSESSIONID=${{ secrets.LAKEBASE_JSESSIONID }}; DBAUTH=${{ secrets.LAKEBASE_DBAUTH }}'"
+        access_token: ${{ secrets.LAKEBASE_ACCESS_TOKEN }}
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -151,7 +144,7 @@ jobs:
         api_host: ${{ vars.LAKEBASE_API_HOST }}
         org_id: ${{ vars.LAKEBASE_ORG_ID }}
         project_id: ${{ steps.create-lakebase-project.outputs.project_id }}
-        curl_authorization_options: "--header 'X-CSRF-Token: ${{ secrets.LAKEBASE_X_CSRF_TOKEN }}' --cookie 'JSESSIONID=${{ secrets.LAKEBASE_JSESSIONID }}; DBAUTH=${{ secrets.LAKEBASE_DBAUTH }}'"
+        access_token: ${{ secrets.LAKEBASE_ACCESS_TOKEN }}
 
     - name: Create Allure report
       id: create-allure-report

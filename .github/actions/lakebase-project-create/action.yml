@@ -2,8 +2,8 @@ name: 'Create Lakebase Project'
 description: 'Create Lakebase Project using API'
 
 inputs:
-  curl_authorization_options:
-    description: 'Curl authorization options - e.g. --header "Authorization: Bearer <token>"'
+  access_token:
+    description: 'Lakebase API access token'
     required: true
   org_id:
     description: 'Organization ID, required'
@@ -59,7 +59,7 @@ runs:
           -w "%{http_code}" \
           --header "Accept: application/json" \
           --header "Content-Type: application/json" \
-          ${CURL_AUTH} \
+          --header "Authorization: Bearer ${ACCESS_TOKEN}" \
           --data "{
             \"project\": {
               \"org_id\": \"${ORG_ID}\",
@@ -114,7 +114,7 @@ runs:
 
       env:
         API_HOST: ${{ inputs.api_host }}
-        CURL_AUTH: ${{ inputs.curl_authorization_options }}
+        ACCESS_TOKEN: ${{ inputs.access_token }}
         ORG_ID: ${{ inputs.org_id }}
         REGION_ID: ${{ inputs.region_id }}
         POSTGRES_VERSION: ${{ inputs.postgres_version }}
