@@ -153,7 +153,6 @@ pub fn write_postgres_conf(
             writeln!(file, "# from compute spec's shard_stripe_size field")?;
             writeln!(file, "neon.stripe_size={stripe_size}")?;
         }
-
         if let Some(s) = &spec.pageserver_connstring {
             writeln!(file, "# from compute spec's pageserver_connstring field")?;
             writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;

@@ -183,6 +183,7 @@ typedef struct
 	pg_atomic_uint32 index_corruption_count;
 	pg_atomic_uint32 data_corruption_count;
 	pg_atomic_uint32 internal_error_count;
+	pg_atomic_uint32 ps_corruption_detected;
 } databricks_metrics;
 
 extern databricks_metrics *databricks_metrics_shared;
