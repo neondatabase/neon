@@ -15,15 +15,15 @@ BEGIN
         WHERE schema_name IN ('public')
     LOOP
         FOR grantor IN EXECUTE
-            format(
-                'SELECT DISTINCT rtg.grantor FROM information_schema.role_table_grants AS rtg WHERE grantee = %s',
+            pg_catalog.format(
+                'SELECT DISTINCT rtg.grantor FROM information_schema.role_table_grants AS rtg WHERE grantee OPERATOR(pg_catalog.=) %s',
                 -- N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`
                 quote_literal({role_name})
             )
         LOOP
-            EXECUTE format('SET LOCAL ROLE %I', grantor);
+            EXECUTE pg_catalog.format('SET LOCAL ROLE %I', grantor);
 
-            revoke_query := format(
+            revoke_query := pg_catalog.format(
                 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I GRANTED BY %I',
                 schema,
                 -- N.B. this has to be properly dollar-escaped with `pg_quote_dollar()`

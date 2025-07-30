@@ -82,7 +82,7 @@ impl ComputeNode {
                 info!("Checking if drop subscription operation was already performed for timeline_id: {}", timeline_id);
 
                 drop_subscriptions_done = match
-                    client.query("select 1 from neon.drop_subscriptions_done where timeline_id = $1", &[&timeline_id.to_string()]).await {
+                    client.query("select 1 from neon.drop_subscriptions_done where timeline_id OPERATOR(pg_catalog.=) $1", &[&timeline_id.to_string()]).await {
                     Ok(result) => !result.is_empty(),
                     Err(e) =>
                     {
@@ -1142,7 +1142,9 @@ async fn get_operations<'a>(
             if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
                 if libs.contains("pg_stat_statements") {
                     return Ok(Box::new(once(Operation {
-                        query: String::from("CREATE EXTENSION IF NOT EXISTS pg_stat_statements"),
+                        query: String::from(
+                            "CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA public",
+                        ),
                         comment: Some(String::from("create system extensions")),
                     })));
                 }
@@ -1150,11 +1152,13 @@ async fn get_operations<'a>(
             Ok(Box::new(empty()))
         }
         ApplySpecPhase::CreatePgauditExtension => Ok(Box::new(once(Operation {
-            query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit"),
+            query: String::from("CREATE EXTENSION IF NOT EXISTS pgaudit WITH SCHEMA public"),
             comment: Some(String::from("create pgaudit extensions")),
         }))),
         ApplySpecPhase::CreatePgauditlogtofileExtension => Ok(Box::new(once(Operation {
-            query: String::from("CREATE EXTENSION IF NOT EXISTS pgauditlogtofile"),
+            query: String::from(
+                "CREATE EXTENSION IF NOT EXISTS pgauditlogtofile WITH SCHEMA public",
+            ),
             comment: Some(String::from("create pgauditlogtofile extensions")),
         }))),
         // Disable pgaudit logging for postgres database.
@@ -1178,7 +1182,7 @@ async fn get_operations<'a>(
                 },
                 Operation {
                     query: String::from(
-                        "UPDATE pg_extension SET extrelocatable = true WHERE extname = 'neon'",
+                        "UPDATE pg_catalog.pg_extension SET extrelocatable = true WHERE extname OPERATOR(pg_catalog.=) 'neon'::pg_catalog.name AND extrelocatable OPERATOR(pg_catalog.=) false",
                     ),
                     comment: Some(String::from("compat/fix: make neon relocatable")),
                 },

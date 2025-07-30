@@ -583,7 +583,7 @@ impl ComputeNode {
         // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
         // Unset them via connection string options before connecting to the database.
         // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
-        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0 -c pgaudit.log=none";
+        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path='' -c statement_timeout=0 -c pgaudit.log=none";
         let options = match conn_conf.get_options() {
             // Allow the control plane to override any options set by the
             // compute
@@ -1884,7 +1884,7 @@ impl ComputeNode {
 
                     // It doesn't matter what were the options before, here we just want
                     // to connect and create a new superuser role.
-                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path='' -c statement_timeout=0";
                     zenith_admin_conf.options(ZENITH_OPTIONS);
 
                     let mut client =
@@ -2339,13 +2339,13 @@ impl ComputeNode {
         let result = client
             .simple_query(
                 "SELECT
-    row_to_json(pg_stat_statements)
+    pg_catalog.row_to_json(pss)
 FROM
-    pg_stat_statements
+    public.pg_stat_statements pss
 WHERE
-    userid != 'cloud_admin'::regrole::oid
+    pss.userid != 'cloud_admin'::pg_catalog.regrole::pg_catalog.oid
 ORDER BY
-    (mean_exec_time + mean_plan_time) DESC
+    (pss.mean_exec_time + pss.mean_plan_time) DESC
 LIMIT 100",
             )
             .await;
@@ -2473,11 +2473,11 @@ LIMIT 100",
 
         // check the role grants first - to gracefully handle read-replicas.
         let select = "SELECT privilege_type
-            FROM pg_namespace
-                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) acl ON true
-                JOIN pg_user users ON acl.grantee = users.usesysid
-            WHERE users.usename = $1
-                AND nspname = $2";
+            FROM pg_catalog.pg_namespace
+                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) AS acl ON true
+                JOIN pg_catalog.pg_user users ON acl.grantee = users.usesysid
+            WHERE users.usename OPERATOR(pg_catalog.=) $1::pg_catalog.name
+                AND nspname OPERATOR(pg_catalog.=) $2::pg_catalog.name";
         let rows = db_client
             .query(select, &[role_name, schema_name])
             .await
@@ -2546,8 +2546,9 @@ LIMIT 100",
                 .await
                 .with_context(|| format!("Failed to execute query: {query}"))?;
         } else {
-            let query =
-                format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
+            let query = format!(
+                "CREATE EXTENSION IF NOT EXISTS {ext_name} WITH SCHEMA public VERSION {quoted_version}"
+            );
             db_client
                 .simple_query(&query)
                 .await
