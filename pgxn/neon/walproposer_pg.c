@@ -49,6 +49,7 @@
 
 #include "libpqwalproposer.h"
 #include "neon.h"
+#include "neon_perf_counters.h"
 #include "neon_walreader.h"
 #include "walproposer.h"
 
@@ -740,6 +741,11 @@ record_pageserver_feedback(PageserverFeedback *ps_feedback, shardno_t num_shards
 	Assert(ps_feedback->present);
 	Assert(ps_feedback->shard_number < MAX_SHARDS);
 	Assert(ps_feedback->shard_number < num_shards);
+
+	// Begin Hadron: Record any corruption signal from the pageserver first.
+	if (ps_feedback->corruption_detected) {
+		pg_atomic_write_u32(&databricks_metrics_shared->ps_corruption_detected, 1);
+	}
 
 	SpinLockAcquire(&walprop_shared->mutex);
 
@@ -2255,6 +2261,27 @@ GetNeonCurrentClusterSize(void)
 }
 uint64		GetNeonCurrentClusterSize(void);
 
+/* BEGIN_HADRON */
+static void
+walprop_pg_reset_safekeeper_statuses_for_metrics(WalProposer *wp, uint32 num_safekeepers)
+{
+	WalproposerShmemState* shmem = wp->api.get_shmem_state(wp);
+	SpinLockAcquire(&shmem->mutex);
+	shmem->num_safekeepers = num_safekeepers;
+	memset(shmem->safekeeper_status, 0, sizeof(shmem->safekeeper_status));
+	SpinLockRelease(&shmem->mutex);
+}
+
+static void
+walprop_pg_update_safekeeper_status_for_metrics(WalProposer *wp, uint32 sk_index, uint8 status)
+{
+	WalproposerShmemState* shmem = wp->api.get_shmem_state(wp);
+	Assert(sk_index < MAX_SAFEKEEPERS);
+	SpinLockAcquire(&shmem->mutex);
+	shmem->safekeeper_status[sk_index] = status;
+	SpinLockRelease(&shmem->mutex);
+}
+/* END_HADRON */
 
 static const walproposer_api walprop_pg = {
 	.get_shmem_state = walprop_pg_get_shmem_state,
@@ -2288,4 +2315,6 @@ static const walproposer_api walprop_pg = {
 	.finish_sync_safekeepers = walprop_pg_finish_sync_safekeepers,
 	.process_safekeeper_feedback = walprop_pg_process_safekeeper_feedback,
 	.log_internal = walprop_pg_log_internal,
+	.reset_safekeeper_statuses_for_metrics = walprop_pg_reset_safekeeper_statuses_for_metrics,
+	.update_safekeeper_status_for_metrics = walprop_pg_update_safekeeper_status_for_metrics,
 };

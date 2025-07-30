@@ -135,7 +135,6 @@ lock_api = "0.4.13"
 md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
-memoffset = "0.9"
 moka = { version = "0.12", features = ["sync"] }
 nix = { version = "0.30.1", features = ["dir", "fs", "mman", "process", "socket", "signal", "poll"] }
 # Do not update to >= 7.0.0, at least. The update will have a significant impact
@@ -234,9 +233,10 @@ uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 rustls-native-certs = "0.8"
 whoami = "1.5.1"
-zerocopy = { version = "0.8", features = ["derive", "simd"] }
 json-structural-diff = { version = "0.2.0" }
 x509-cert = { version = "0.2.5" }
+zerocopy = { version = "0.8", features = ["derive", "simd"] }
+zeroize = "1.8"
 
 ## TODO replace this with tracing
 env_logger = "0.11"

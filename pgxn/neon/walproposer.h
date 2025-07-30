@@ -374,6 +374,8 @@ typedef struct PageserverFeedback
 	XLogRecPtr	remote_consistent_lsn;
 	TimestampTz replytime;
 	uint32		shard_number;
+	/* true if the pageserver has detected data corruption in the timeline */
+	bool		corruption_detected;
 } PageserverFeedback;
 
 /* BEGIN_HADRON */
@@ -430,6 +432,10 @@ typedef struct WalproposerShmemState
 	/* BEGIN_HADRON */
 	/* The WAL rate limiter */
 	WalRateLimiter wal_rate_limiter;
+	/* Number of safekeepers in the config */
+	uint32 num_safekeepers;
+	/* Per-safekeeper status flags: 0=inactive, 1=active */
+	uint8 safekeeper_status[MAX_SAFEKEEPERS];
 	/* END_HADRON */
 } WalproposerShmemState;
 
@@ -480,6 +486,11 @@ typedef struct Safekeeper
 
 	char const *host;
 	char const *port;
+
+	/* BEGIN_HADRON */
+	/* index of this safekeeper in the WalProposer array */
+	uint32 index;
+	/* END_HADRON */
 
 	/*
 	 * connection string for connecting/reconnecting.
@@ -729,6 +740,23 @@ typedef struct walproposer_api
 	 * handled by elog().
 	 */
 	void		(*log_internal) (WalProposer *wp, int level, const char *line);
+
+	/*
+	 * BEGIN_HADRON
+	 * APIs manipulating shared memory state used for Safekeeper quorum health metrics.
+	 */
+
+	/*
+	 * Reset the safekeeper statuses in shared memory for metric purposes.
+	 */
+	void		(*reset_safekeeper_statuses_for_metrics) (WalProposer *wp, uint32 num_safekeepers);
+
+	/*
+	 * Update the safekeeper status in shared memory for metric purposes.
+	 */
+	void		(*update_safekeeper_status_for_metrics) (WalProposer *wp, uint32 sk_index, uint8 status);
+
+	/* END_HADRON */
 } walproposer_api;
 
 /*

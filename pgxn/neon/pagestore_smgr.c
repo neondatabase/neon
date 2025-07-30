@@ -72,10 +72,6 @@
 #include "access/xlogrecovery.h"
 #endif
 
-#if PG_VERSION_NUM < 160000
-typedef PGAlignedBlock PGIOAlignedBlock;
-#endif
-
 #include "access/nbtree.h"
 #include "storage/bufpage.h"
 #include "access/xlog_internal.h"

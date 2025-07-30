@@ -5,6 +5,7 @@ use measured::label::{
     FixedCardinalitySet, LabelGroupSet, LabelGroupVisitor, LabelName, LabelSet, LabelValue,
     StaticLabelSet,
 };
+use measured::metric::group::Encoding;
 use measured::metric::histogram::Thresholds;
 use measured::metric::name::MetricName;
 use measured::{
@@ -18,10 +19,10 @@ use crate::control_plane::messages::ColdStartInfo;
 use crate::error::ErrorKind;
 
 #[derive(MetricGroup)]
-#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
+#[metric(new())]
 pub struct Metrics {
     #[metric(namespace = "proxy")]
-    #[metric(init = ProxyMetrics::new(thread_pool))]
+    #[metric(init = ProxyMetrics::new())]
     pub proxy: ProxyMetrics,
 
     #[metric(namespace = "wake_compute_lock")]
@@ -34,34 +35,27 @@ pub struct Metrics {
     pub cache: CacheMetrics,
 }
 
-static SELF: OnceLock<Metrics> = OnceLock::new();
 impl Metrics {
-    pub fn install(thread_pool: Arc<ThreadPoolMetrics>) {
-        let mut metrics = Metrics::new(thread_pool);
-
-        metrics.proxy.errors_total.init_all_dense();
-        metrics.proxy.redis_errors_total.init_all_dense();
-        metrics.proxy.redis_events_count.init_all_dense();
-        metrics.proxy.retries_metric.init_all_dense();
-        metrics.proxy.connection_failures_total.init_all_dense();
-
-        SELF.set(metrics)
-            .ok()
-            .expect("proxy metrics must not be installed more than once");
-    }
-
+    #[track_caller]
     pub fn get() -> &'static Self {
-        #[cfg(test)]
-        return SELF.get_or_init(|| Metrics::new(Arc::new(ThreadPoolMetrics::new(0))));
+        static SELF: OnceLock<Metrics> = OnceLock::new();
 
-        #[cfg(not(test))]
-        SELF.get()
-            .expect("proxy metrics must be installed by the main() function")
+        SELF.get_or_init(|| {
+            let mut metrics = Metrics::new();
+
+            metrics.proxy.errors_total.init_all_dense();
+            metrics.proxy.redis_errors_total.init_all_dense();
+            metrics.proxy.redis_events_count.init_all_dense();
+            metrics.proxy.retries_metric.init_all_dense();
+            metrics.proxy.connection_failures_total.init_all_dense();
+
+            metrics
+        })
     }
 }
 
 #[derive(MetricGroup)]
-#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
+#[metric(new())]
 pub struct ProxyMetrics {
     #[metric(flatten)]
     pub db_connections: CounterPairVec<NumDbConnectionsGauge>,
@@ -134,6 +128,9 @@ pub struct ProxyMetrics {
     /// Number of TLS handshake failures
     pub tls_handshake_failures: Counter,
 
+    /// Number of SHA 256 rounds executed.
+    pub sha_rounds: Counter,
+
     /// HLL approximate cardinality of endpoints that are connecting
     pub connecting_endpoints: HyperLogLogVec<StaticLabelSet<Protocol>, 32>,
 
@@ -151,8 +148,25 @@ pub struct ProxyMetrics {
     pub connect_compute_lock: ApiLockMetrics,
 
     #[metric(namespace = "scram_pool")]
-    #[metric(init = thread_pool)]
-    pub scram_pool: Arc<ThreadPoolMetrics>,
+    pub scram_pool: OnceLockWrapper<Arc<ThreadPoolMetrics>>,
+}
+
+/// A Wrapper over [`OnceLock`] to implement [`MetricGroup`].
+pub struct OnceLockWrapper<T>(pub OnceLock<T>);
+
+impl<T> Default for OnceLockWrapper<T> {
+    fn default() -> Self {
+        Self(OnceLock::new())
+    }
+}
+
+impl<Enc: Encoding, T: MetricGroup<Enc>> MetricGroup<Enc> for OnceLockWrapper<T> {
+    fn collect_group_into(&self, enc: &mut Enc) -> Result<(), Enc::Err> {
+        if let Some(inner) = self.0.get() {
+            inner.collect_group_into(enc)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(MetricGroup)]
@@ -554,14 +568,6 @@ impl From<bool> for Bool {
 }
 
 #[derive(LabelGroup)]
-#[label(set = InvalidEndpointsSet)]
-pub struct InvalidEndpointsGroup {
-    pub protocol: Protocol,
-    pub rejected: Bool,
-    pub outcome: ConnectOutcome,
-}
-
-#[derive(LabelGroup)]
 #[label(set = RetriesMetricSet)]
 pub struct RetriesMetricGroup {
     pub outcome: ConnectOutcome,
@@ -727,6 +733,7 @@ pub enum CacheKind {
     ProjectInfoEndpoints,
     ProjectInfoRoles,
     Schema,
+    Pbkdf2,
 }
 
 #[derive(FixedCardinalityLabel, Clone, Copy, Debug)]

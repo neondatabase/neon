@@ -146,7 +146,9 @@ jobs:
         with:
           file: build-tools/Dockerfile
           context: .
-          provenance: false
+          attests: |
+            type=provenance,mode=max
+            type=sbom,generator=docker.io/docker/buildkit-syft-scanner:1
           push: true
           pull: true
           build-args: |

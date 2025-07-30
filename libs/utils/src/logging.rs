@@ -34,13 +34,16 @@ macro_rules! critical {
 
 #[macro_export]
 macro_rules! critical_timeline {
-    ($tenant_shard_id:expr, $timeline_id:expr, $($arg:tt)*) => {{
+    ($tenant_shard_id:expr, $timeline_id:expr, $corruption_detected:expr, $($arg:tt)*) => {{
         if cfg!(debug_assertions) {
             panic!($($arg)*);
         }
         // Increment both metrics
         $crate::logging::TRACING_EVENT_COUNT_METRIC.inc_critical();
         $crate::logging::HADRON_CRITICAL_STORAGE_EVENT_COUNT_METRIC.inc(&$tenant_shard_id.to_string(), &$timeline_id.to_string());
+        if let Some(c) = $corruption_detected.as_ref() {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let backtrace = std::backtrace::Backtrace::capture();
         tracing::error!("CRITICAL: [tenant_shard_id: {}, timeline_id: {}] {}\n{backtrace}",
                        $tenant_shard_id, $timeline_id, format!($($arg)*));

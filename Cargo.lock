@@ -5077,8 +5077,6 @@ dependencies = [
  "crc32c",
  "criterion",
  "env_logger",
- "log",
- "memoffset 0.9.0",
  "once_cell",
  "postgres",
  "postgres_ffi_types",
@@ -5519,6 +5517,7 @@ dependencies = [
  "workspace_hack",
  "x509-cert",
  "zerocopy 0.8.24",
+ "zeroize",
 ]
 
 [[package]]
