@@ -352,7 +352,7 @@ def test_safekeeper_migration_stale_timeline(neon_env_builder: NeonEnvBuilder):
     # TODO(diko): now it fails because the timeline on other_sk is stale and there is no compute
     # to catch up it with active_sk. It might be fixed in https://databricks.atlassian.net/browse/LKB-946
     # if we delete stale timelines before starting the migration.
-    # But the rest of the test is still valid: we should not loose committed WAL after the migration.
+    # But the rest of the test is still valid: we should not lose committed WAL after the migration.
     with pytest.raises(
         StorageControllerApiException, match="not enough successful .* to reach quorum"
     ):
@@ -372,7 +372,7 @@ def test_safekeeper_migration_stale_timeline(neon_env_builder: NeonEnvBuilder):
         env.initial_tenant, env.initial_timeline, [other_sk.id]
     )
 
-    # Check that we didn't loose committed WAL.
+    # Check that we didn't lose committed WAL.
     assert (
         other_sk.http_client().timeline_status(env.initial_tenant, env.initial_timeline).flush_lsn
         >= commit_lsn
@@ -454,7 +454,7 @@ def test_pull_from_most_advanced_sk(neon_env_builder: NeonEnvBuilder):
 
     commit_lsn_after_migration = get_commit_lsn(new_sk_set2)
 
-    # We should not loose committed WAL.
+    # We should not lose committed WAL.
     # If we have choosen the lagging sk to pull the timeline from, this might fail.
     assert commit_lsn_before_migration <= commit_lsn_after_migration
 
