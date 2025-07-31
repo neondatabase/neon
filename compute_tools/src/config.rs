@@ -131,6 +131,7 @@ pub fn write_postgres_conf(
                 "neon.pageserver_connstring={}",
                 escape_conf_value(&libpq_urls.join(","))
             )?;
+            writeln!(file, "neon.use_communicator_worker=false")?;
         } else {
             writeln!(file, "# no neon.pageserver_connstring")?;
         }
@@ -144,6 +145,7 @@ pub fn write_postgres_conf(
                 "neon.pageserver_grpc_urls={}",
                 escape_conf_value(&grpc_urls.join(","))
             )?;
+            writeln!(file, "neon.use_communicator_worker=true")?;
         } else {
             writeln!(file, "# no neon.pageserver_grpc_urls")?;
         }
