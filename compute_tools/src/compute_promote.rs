@@ -40,7 +40,9 @@ impl ComputeNode {
     }
 
     async fn promote_impl(self: &Arc<Self>, cfg: PromoteConfig) -> anyhow::Result<PromoteState> {
-        let safekeepers_str = cfg.spec.safekeeper_connstrings.join(",");
+        #[allow(unused_mut)]
+        let mut new_pspec = crate::compute::ParsedSpec::try_from(cfg.spec).expect("invalid spec");
+        let safekeepers_str = new_pspec.safekeeper_connstrings.join(",");
         if safekeepers_str.is_empty() {
             bail!("empty safekeepers list");
         }
@@ -131,8 +133,6 @@ impl ComputeNode {
         }
 
         // Already checked validity in http handler
-        #[allow(unused_mut)]
-        let mut new_pspec = crate::compute::ParsedSpec::try_from(cfg.spec).expect("invalid spec");
         {
             let mut state = self.state.lock().unwrap();
 
