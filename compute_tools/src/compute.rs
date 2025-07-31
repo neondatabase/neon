@@ -35,6 +35,9 @@ use tokio::{spawn, sync::watch, task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use url::Url;
+use utils::backoff::{
+    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff_duration,
+};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
@@ -1557,6 +1560,41 @@ impl ComputeNode {
         Ok(lsn)
     }
 
+    fn sync_safekeepers_with_retries(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
+        let max_retries = 5;
+        let mut attempts = 0;
+        loop {
+            let result = self.sync_safekeepers(storage_auth_token.clone());
+            match &result {
+                Ok(_) => {
+                    if attempts > 0 {
+                        tracing::info!("sync_safekeepers succeeded after {attempts} retries");
+                    }
+                    return result;
+                }
+                Err(e) if attempts < max_retries => {
+                    tracing::info!(
+                        "sync_safekeepers failed, will retry (attempt {attempts}): {e:#}"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "sync_safekeepers still failed after {attempts} retries, giving up: {err:?}"
+                    );
+                    return result;
+                }
+            }
+            // sleep and retry
+            let backoff = exponential_backoff_duration(
+                attempts,
+                DEFAULT_BASE_BACKOFF_SECONDS,
+                DEFAULT_MAX_BACKOFF_SECONDS,
+            );
+            std::thread::sleep(backoff);
+            attempts += 1;
+        }
+    }
+
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip_all)]
@@ -1592,7 +1630,7 @@ impl ComputeNode {
                     lsn
                 } else {
                     info!("starting safekeepers syncing");
-                    self.sync_safekeepers(pspec.storage_auth_token.clone())
+                    self.sync_safekeepers_with_retries(pspec.storage_auth_token.clone())
                         .with_context(|| "failed to sync safekeepers")?
                 };
                 info!("safekeepers synced at LSN {}", lsn);
