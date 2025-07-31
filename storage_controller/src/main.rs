@@ -14,6 +14,7 @@ use metrics::BuildInfo;
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::config::PostHogConfig;
 use reqwest::Certificate;
+use storage_controller::hadron_token::HadronTokenGenerator;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
@@ -70,9 +71,25 @@ struct Cli {
     #[arg(long)]
     listen_https: Option<std::net::SocketAddr>,
 
-    /// Public key for JWT authentication of clients
+    /// PEM-encoded public key string for JWT authentication of clients.
     #[arg(long)]
     public_key: Option<String>,
+
+    /// Path to public key certificates used for JWT authentiation of clients.
+    /// Only one of `public_key` and `public_key_cert_path` should be set.
+    /// `public_key` or `public_key_cert_path` can point to either a file or a directory.
+    /// When pointed to a directory, public keys in all files in the first level of
+    /// the directory (i.e., no subdirectories) will be loaded.
+    #[arg(long)]
+    public_key_cert_path: Option<Utf8PathBuf>,
+
+    /// Path to the file containing the private key used to generate JWTs for client
+    /// authentication. The file should contain a single PEM-encoded private key.
+    /// The HCC uses this key to sign JWTs handed out to other components.
+    /// Note that unlike the `public_key` and `public_key_cert_path` args above,
+    /// `private_key_path` must specify a file path, not a directory.
+    #[arg(long)]
+    private_key_path: Option<Utf8PathBuf>,
 
     /// Token for authenticating this service with the pageservers it controls
     #[arg(long)]
@@ -256,6 +273,7 @@ struct Secrets {
     safekeeper_jwt_token: Option<String>,
     control_plane_jwt_token: Option<String>,
     peer_jwt_token: Option<String>,
+    token_generator: Option<HadronTokenGenerator>,
 }
 
 const POSTHOG_CONFIG_ENV: &str = "POSTHOG_CONFIG";
@@ -281,7 +299,16 @@ impl Secrets {
 
         let public_key = match Self::load_secret(&args.public_key, Self::PUBLIC_KEY_ENV) {
             Some(v) => Some(JwtAuth::from_key(v).context("Loading public key")?),
-            None => None,
+            None => {
+                if let Some(path) = args.public_key_cert_path.as_ref() {
+                    Some(
+                        JwtAuth::from_cert_path(path)
+                            .context("Loading public key from certificates")?,
+                    )
+                } else {
+                    None
+                }
+            }
         };
 
         let this = Self {
@@ -300,6 +327,11 @@ impl Secrets {
                 Self::CONTROL_PLANE_JWT_TOKEN_ENV,
             ),
             peer_jwt_token: Self::load_secret(&args.peer_jwt_token, Self::PEER_JWT_TOKEN_ENV),
+            token_generator: args
+                .private_key_path
+                .as_ref()
+                .map(|path| HadronTokenGenerator::new(path))
+                .transpose()?,
         };
 
         Ok(this)
@@ -489,12 +521,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     let persistence = Arc::new(Persistence::new(secrets.database_url).await);
 
-    let service = Service::spawn(config, persistence.clone()).await?;
+    let service = Service::spawn(config, persistence.clone(), secrets.token_generator).await?;
 
-    let auth = secrets
+    let jwt_auth = secrets
         .public_key
         .map(|jwt_auth| Arc::new(SwappableJwtAuth::new(jwt_auth)));
-    let router = make_router(service.clone(), auth, build_info)
+    let router = make_router(service.clone(), jwt_auth, build_info)
         .build()
         .map_err(|err| anyhow!(err))?;
     let http_service =

@@ -4,6 +4,7 @@ pub(crate) mod safekeeper_reconciler;
 mod safekeeper_service;
 mod tenant_shard_iterator;
 
+use crate::hadron_token::HadronTokenGenerator;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -518,6 +519,11 @@ pub struct Service {
     inner: Arc<std::sync::RwLock<ServiceState>>,
     config: Config,
     persistence: Arc<Persistence>,
+
+    // HadronTokenGenerator to generate (sign) JWTs during compute deployment and compute-spec generation.
+    #[allow(unused)]
+    token_generator: Option<HadronTokenGenerator>,
+
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
 
@@ -1668,7 +1674,11 @@ impl Service {
         }
     }
 
-    pub async fn spawn(config: Config, persistence: Arc<Persistence>) -> anyhow::Result<Arc<Self>> {
+    pub async fn spawn(
+        config: Config,
+        persistence: Arc<Persistence>,
+        token_generator: Option<HadronTokenGenerator>,
+    ) -> anyhow::Result<Arc<Self>> {
         let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
         let (abort_tx, abort_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -1925,6 +1935,7 @@ impl Service {
             ))),
             config: config.clone(),
             persistence,
+            token_generator,
             compute_hook: Arc::new(ComputeHook::new(config.clone())?),
             result_tx,
             heartbeater_ps,
