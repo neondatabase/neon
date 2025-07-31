@@ -77,7 +77,7 @@ def test_unlogged_build(neon_env_builder: NeonEnvBuilder):
     for thread in threads:
         thread.join()
 
-    # Sanity check that the indexes were buitl with the "unlogged build"
+    # Sanity check that the indexes were built with the "unlogged build"
     # method. GIN always uses that method currently, but if a different, more
     # efficient, method is invented later, that might invalidate this test.
     assert endpoint.log_contains("starting unlogged build of relation")
