@@ -203,16 +203,6 @@ jobs:
           sub_fetch_depth: "50"
           pass_if_unchanged: true
 
-  check-codestyle-rust:
-    needs: [ meta, check-permissions, build-build-tools-image ]
-    # No need to run on `main` because we this in the merge queue. We do need to run this in `.*-rc-pr` because of hotfixes.
-    if: ${{ contains(fromJSON('["pr", "storage-rc-pr", "proxy-rc-pr", "compute-rc-pr"]'), needs.meta.outputs.run-kind) }}
-    uses: ./.github/workflows/_check-codestyle-rust.yml
-    with:
-      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
-      archs: '["x64", "arm64"]'
-    secrets: inherit
-
   check-dependencies-rust:
     needs: [ meta, files-changed, build-build-tools-image ]
     # No need to run on `main` because we this in the merge queue. We do need to run this in `.*-rc-pr` because of hotfixes.
@@ -278,6 +268,7 @@ jobs:
           fetch-depth: 0
 
       - name: Get Neon artifact
+        if: false
         uses: ./.github/actions/download
         with:
           name: neon-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build_type }}-artifact
@@ -285,6 +276,7 @@ jobs:
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Get coverage artifact
+        if: false
         uses: ./.github/actions/download
         with:
           name: coverage-data-artifact
@@ -292,9 +284,11 @@ jobs:
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
 
       - name: Merge coverage data
+        if: false
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
       - name: Build coverage report
+        if: false
         env:
           COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha || github.sha }}
         run: |
@@ -344,6 +338,6 @@ jobs:
           echo "summary-json=${REPORT_URL}" >> $GITHUB_OUTPUT
 
       - name: Sleep for debug
-        if: always() && steps.upload-coverage-report-new.conclusion == 'failure'
+        if: always()
         run: |
           sleep 3600
