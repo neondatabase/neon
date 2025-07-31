@@ -204,7 +204,7 @@ def test_lfc_prewarm_cancel(neon_simple_env: NeonEnv):
         "shared_buffers=1MB",
         "neon.max_file_cache_size=1GB",
         "neon.file_cache_size_limit=1GB",
-        "neon.file_cache_prewarm_limit=1000",
+        "neon.file_cache_prewarm_limit=2000000",
     ]
     endpoint = env.endpoints.create_start(branch_name="main", config_lines=cfg)
 
