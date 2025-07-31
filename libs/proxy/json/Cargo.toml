@@ -10,3 +10,8 @@ itoa = "1"
 
 [dev-dependencies]
 futures = "0.3"
+criterion.workspace = true
+
+[[bench]]
+name = "escape"
+harness = false

@@ -10,58 +10,98 @@
 
 use std::fmt::{self, Write};
 
-/// Represents a character escape code in a type-safe manner.
-pub enum CharEscape {
-    /// An escaped quote `"`
-    Quote,
-    /// An escaped reverse solidus `\`
-    ReverseSolidus,
-    // /// An escaped solidus `/`
-    // Solidus,
-    /// An escaped backspace character (usually escaped as `\b`)
-    Backspace,
-    /// An escaped form feed character (usually escaped as `\f`)
-    FormFeed,
-    /// An escaped line feed character (usually escaped as `\n`)
-    LineFeed,
-    /// An escaped carriage return character (usually escaped as `\r`)
-    CarriageReturn,
-    /// An escaped tab character (usually escaped as `\t`)
-    Tab,
-    /// An escaped ASCII plane control character (usually escaped as
-    /// `\u00XX` where `XX` are two hex characters)
-    AsciiControl(u8),
-}
+use crate::{KeyEncoder, ValueEncoder, ValueSer};
 
-impl CharEscape {
-    #[inline]
-    fn from_escape_table(escape: u8, byte: u8) -> CharEscape {
-        match escape {
-            self::BB => CharEscape::Backspace,
-            self::TT => CharEscape::Tab,
-            self::NN => CharEscape::LineFeed,
-            self::FF => CharEscape::FormFeed,
-            self::RR => CharEscape::CarriageReturn,
-            self::QU => CharEscape::Quote,
-            self::BS => CharEscape::ReverseSolidus,
-            self::UU => CharEscape::AsciiControl(byte),
-            _ => unreachable!(),
+#[repr(transparent)]
+pub struct EscapedStr([u8]);
+
+impl EscapedStr {
+    /// Assumes the string does not need escaping.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the string does need escaping.
+    #[inline(always)]
+    pub const fn from_static(s: &'static str) -> &'static Self {
+        let bytes = s.as_bytes();
+
+        let mut i = 0;
+        while i < bytes.len() {
+            let byte = bytes[i];
+
+            if byte < 0x20 || byte == b'"' || byte == b'\\' {
+                panic!("the string needs escaping");
+            }
+
+            i += 1;
         }
+
+        // safety: this EscapedStr is transparent over [u8].
+        unsafe { std::mem::transmute::<&[u8], &EscapedStr>(bytes) }
+    }
+
+    /// Escapes the string eagerly.
+    pub fn escape(s: &str) -> Box<Self> {
+        let mut writer = Vec::with_capacity(s.len());
+
+        Collect { buf: &mut writer }
+            .write_str(s)
+            .expect("formatting should not error");
+
+        let bytes = writer.into_boxed_slice();
+
+        // safety: this EscapedStr is transparent over [u8].
+        unsafe { std::mem::transmute::<Box<[u8]>, Box<EscapedStr>>(bytes) }
     }
 }
 
-pub(crate) fn format_escaped_str(writer: &mut Vec<u8>, value: &str) {
+impl KeyEncoder for &EscapedStr {}
+impl ValueEncoder for &EscapedStr {
+    fn encode(self, v: crate::ValueSer<'_>) {
+        let buf = &mut *v.buf;
+        buf.reserve(2 + self.0.len());
+
+        buf.push(b'"');
+        buf.extend_from_slice(&self.0);
+        buf.push(b'"');
+
+        v.finish();
+    }
+}
+
+impl KeyEncoder for &str {}
+impl ValueEncoder for &str {
+    #[inline]
+    fn encode(self, v: ValueSer<'_>) {
+        format_escaped_str(v.buf, self);
+        v.finish();
+    }
+}
+
+impl KeyEncoder for fmt::Arguments<'_> {}
+impl ValueEncoder for fmt::Arguments<'_> {
+    #[inline]
+    fn encode(self, v: ValueSer<'_>) {
+        if let Some(s) = self.as_str() {
+            format_escaped_str(v.buf, s);
+        } else {
+            format_escaped_fmt(v.buf, self);
+        }
+        v.finish();
+    }
+}
+
+fn format_escaped_str(writer: &mut Vec<u8>, value: &str) {
     writer.reserve(2 + value.len());
 
     writer.push(b'"');
 
-    let rest = format_escaped_str_contents(writer, value);
-    writer.extend_from_slice(rest);
+    format_escaped_str_contents(writer, value);
 
     writer.push(b'"');
 }
 
-pub(crate) fn format_escaped_fmt(writer: &mut Vec<u8>, args: fmt::Arguments) {
+fn format_escaped_fmt(writer: &mut Vec<u8>, args: fmt::Arguments) {
     writer.push(b'"');
 
     Collect { buf: writer }
@@ -77,33 +117,36 @@ struct Collect<'buf> {
 
 impl fmt::Write for Collect<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let last = format_escaped_str_contents(self.buf, s);
-        self.buf.extend(last);
+        format_escaped_str_contents(self.buf, s);
         Ok(())
     }
 }
 
 // writes any escape sequences, and returns the suffix still needed to be written.
-fn format_escaped_str_contents<'a>(writer: &mut Vec<u8>, value: &'a str) -> &'a [u8] {
-    let bytes = value.as_bytes();
+fn format_escaped_str_contents(writer: &mut Vec<u8>, value: &str) {
+    let mut bytes = value.as_bytes();
 
-    let mut start = 0;
-
-    for (i, &byte) in bytes.iter().enumerate() {
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
         let escape = ESCAPE[byte as usize];
+
+        i += 1;
         if escape == 0 {
             continue;
         }
 
-        writer.extend_from_slice(&bytes[start..i]);
+        // hitting an escape character is unlikely.
+        cold();
 
-        let char_escape = CharEscape::from_escape_table(escape, byte);
-        write_char_escape(writer, char_escape);
+        let string_run;
+        (string_run, bytes) = bytes.split_at(i);
+        i = 0;
 
-        start = i + 1;
+        write_char_escape(writer, string_run);
     }
 
-    &bytes[start..]
+    writer.extend_from_slice(bytes);
 }
 
 const BB: u8 = b'b'; // \x08
@@ -138,29 +181,38 @@ static ESCAPE: [u8; 256] = [
     __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, __, // F
 ];
 
-fn write_char_escape(writer: &mut Vec<u8>, char_escape: CharEscape) {
-    let s = match char_escape {
-        CharEscape::Quote => b"\\\"",
-        CharEscape::ReverseSolidus => b"\\\\",
-        // CharEscape::Solidus => b"\\/",
-        CharEscape::Backspace => b"\\b",
-        CharEscape::FormFeed => b"\\f",
-        CharEscape::LineFeed => b"\\n",
-        CharEscape::CarriageReturn => b"\\r",
-        CharEscape::Tab => b"\\t",
-        CharEscape::AsciiControl(byte) => {
-            static HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
-            let bytes = &[
-                b'\\',
-                b'u',
-                b'0',
-                b'0',
-                HEX_DIGITS[(byte >> 4) as usize],
-                HEX_DIGITS[(byte & 0xF) as usize],
-            ];
-            return writer.extend_from_slice(bytes);
-        }
-    };
+#[cold]
+fn cold() {}
 
+fn write_char_escape(writer: &mut Vec<u8>, bytes: &[u8]) {
+    debug_assert!(
+        !bytes.is_empty(),
+        "caller guarantees that bytes is non empty"
+    );
+
+    let (&byte, string_run) = bytes.split_last().unwrap_or((&0, b""));
+
+    let escape = ESCAPE[byte as usize];
+    debug_assert_ne!(escape, 0, "caller guarantees that escape will be non-zero");
+
+    // the escape char from the escape table is the correct replacement
+    // character.
+    let mut bytes = [b'\\', escape, b'0', b'0', b'0', b'0'];
+    let mut s = &bytes[0..2];
+
+    // if the replacement character is 'u', then we need
+    // to write the unicode encoding
+    if escape == UU {
+        static HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
+
+        // we rarely encounter characters that must be escaped as unicode.
+        cold();
+
+        bytes[4] = HEX_DIGITS[(byte >> 4) as usize];
+        bytes[5] = HEX_DIGITS[(byte & 0xF) as usize];
+        s = &bytes;
+    }
+
+    writer.extend_from_slice(string_run);
     writer.extend_from_slice(s);
 }
