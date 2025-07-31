@@ -65,14 +65,19 @@ pub fn write_postgres_conf(
         writeln!(file, "{conf}")?;
     }
 
-    // Stripe size GUC should be defined prior to connection string
-    if let Some(stripe_size) = spec.shard_stripe_size {
-        writeln!(file, "neon.stripe_size={stripe_size}")?;
-    }
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
     writeln!(file)?;
     if let Some(conninfo) = &spec.pageserver_connection_info {
+        // Stripe size GUC should be defined prior to connection string
+        if let Some(stripe_size) = conninfo.stripe_size {
+            writeln!(
+                file,
+                "# from compute spec's pageserver_connection_info.stripe_size field"
+            )?;
+            writeln!(file, "neon.stripe_size={stripe_size}")?;
+        }
+
         let mut libpq_urls: Option<Vec<String>> = Some(Vec::new());
         let num_shards = if conninfo.shard_count.0 == 0 {
             1 // unsharded, treat it as a single shard
@@ -110,7 +115,7 @@ pub fn write_postgres_conf(
         if let Some(libpq_urls) = libpq_urls {
             writeln!(
                 file,
-                "# derived from compute spec's pageserver_conninfo field"
+                "# derived from compute spec's pageserver_connection_info field"
             )?;
             writeln!(
                 file,
@@ -120,23 +125,15 @@ pub fn write_postgres_conf(
         } else {
             writeln!(file, "# no neon.pageserver_connstring")?;
         }
-
-        if let Some(stripe_size) = conninfo.stripe_size {
-            writeln!(
-                file,
-                "# from compute spec's pageserver_conninfo.stripe_size field"
-            )?;
-            writeln!(file, "neon.stripe_size={stripe_size}")?;
-        }
     } else {
-        if let Some(s) = &spec.pageserver_connstring {
-            writeln!(file, "# from compute spec's pageserver_connstring field")?;
-            writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
-        }
-
+        // Stripe size GUC should be defined prior to connection string
         if let Some(stripe_size) = spec.shard_stripe_size {
             writeln!(file, "# from compute spec's shard_stripe_size field")?;
             writeln!(file, "neon.stripe_size={stripe_size}")?;
+        }
+        if let Some(s) = &spec.pageserver_connstring {
+            writeln!(file, "# from compute spec's pageserver_connstring field")?;
+            writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
         }
     }
 
