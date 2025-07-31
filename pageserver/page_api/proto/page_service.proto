@@ -17,11 +17,11 @@
 //    grpcurl \
 //      -plaintext \
 //      -H "neon-tenant-id: 7c4a1f9e3bd6470c8f3e21a65bd2e980" \
-//      -H "neon-shard-id: 0b10" \
+//      -H "neon-shard-id: 0000" \
 //      -H "neon-timeline-id: f08c4e9a2d5f76b1e3a7c2d8910f4b3e" \
 //      -H "authorization: Bearer $JWT" \
-//      -d '{"read_lsn": {"request_lsn": 1234567890}, "rel": {"spc_oid": 1663, "db_oid": 1234, "rel_number": 5678, "fork_number": 0}}'
-//      localhost:51051 page_api.PageService/CheckRelExists
+//      -d '{"read_lsn": {"request_lsn": 100000000, "not_modified_since_lsn": 1}, "db_oid": 1}' \
+//      localhost:51051 page_api.PageService/GetDbSize
 //    ```
 //
 // TODO: consider adding neon-compute-mode ("primary", "static", "replica").
@@ -35,9 +35,11 @@
 syntax = "proto3";
 package page_api;
 
+import "google/protobuf/timestamp.proto";
+
 service PageService {
-  // Returns whether a relation exists.
-  rpc CheckRelExists(CheckRelExistsRequest) returns (CheckRelExistsResponse);
+  // NB: unlike libpq, there is no CheckRelExists in gRPC, at the compute team's request. Instead,
+  // use GetRelSize with allow_missing=true to check existence.
 
   // Fetches a base backup.
   rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
@@ -64,6 +66,10 @@ service PageService {
 
   // Fetches an SLRU segment.
   rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
+
+  // Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't garbage
+  // collect the LSN until the lease expires. Must be acquired on all relevant shards.
+  rpc LeaseLsn (LeaseLsnRequest) returns (LeaseLsnResponse);
 }
 
 // The LSN a request should read at.
@@ -91,23 +97,27 @@ message RelTag {
     uint32 fork_number = 4;
 }
 
-// Checks whether a relation exists, at the given LSN. Only valid on shard 0,
-// other shards will error.
-message CheckRelExistsRequest {
-  ReadLsn read_lsn = 1;
-  RelTag rel = 2;
-}
-
-message CheckRelExistsResponse {
-  bool exists = 1;
-}
-
-// Requests a base backup at a given LSN.
+// Requests a base backup.
 message GetBaseBackupRequest {
-  // The LSN to fetch a base backup at.
-  ReadLsn read_lsn = 1;
+  // The LSN to fetch the base backup at. 0 or absent means the latest LSN known to the Pageserver.
+  uint64 lsn = 1;
   // If true, logical replication slots will not be created.
   bool replica = 2;
+  // If true, include relation files in the base backup. Mainly for debugging and tests.
+  bool full = 3;
+  // Compression algorithm to use. Base backups send a compressed payload instead of using gRPC
+  // compression, so that we can cache compressed backups on the server.
+  BaseBackupCompression compression = 4;
+}
+
+// Base backup compression algorithms.
+enum BaseBackupCompression {
+  // Unknown algorithm. Used when clients send an unsupported algorithm.
+  BASE_BACKUP_COMPRESSION_UNKNOWN = 0;
+  // No compression.
+  BASE_BACKUP_COMPRESSION_NONE = 1;
+  // GZIP compression.
+  BASE_BACKUP_COMPRESSION_GZIP = 2;
 }
 
 // Base backup response chunk, returned as an ordered stream.
@@ -132,7 +142,7 @@ message GetDbSizeResponse {
 message GetPageRequest {
   // A request ID. Will be included in the response. Should be unique for
   // in-flight requests on the stream.
-  uint64 request_id = 1;
+  RequestID request_id = 1;
   // The request class.
   GetPageClass request_class = 2;
   // The LSN to read at.
@@ -154,6 +164,14 @@ message GetPageRequest {
   // are always in order. But we can't currenly rely on this on the server, because
   // of compatibility with the libpq protocol handler.
   repeated uint32 block_number = 5;
+}
+
+// A Request ID. Should be unique for in-flight requests on a stream. Included in the response.
+message RequestID {
+  // The base request ID.
+  uint64 id = 1;
+  // The request attempt. Starts at 0, incremented on each retry.
+  uint32 attempt = 2;
 }
 
 // A GetPageRequest class. Primarily intended for observability, but may also be
@@ -178,13 +196,26 @@ enum GetPageClass {
 // the entire batch is ready, so no one can make use of the individual pages.
 message GetPageResponse {
   // The original request's ID.
-  uint64 request_id = 1;
-  // The response status code.
+  RequestID request_id = 1;
+  // The response status code. If not OK, the rel and page fields will be empty.
   GetPageStatusCode status_code = 2;
   // A string describing the status, if any.
   string reason = 3;
-  // The 8KB page images, in the same order as the request. Empty if status_code != OK.
-  repeated bytes page_image = 4;
+  // The relation that the pages belong to.
+  RelTag rel = 4;
+  // The page(s), in the same order as the request.
+  repeated Page page = 5;
+}
+
+// A page.
+//
+// TODO: it would be slightly more efficient (but less convenient) to have separate arrays of block
+// numbers and images, but given the 8KB page size it's probably negligible. Benchmark it anyway.
+message Page {
+  // The page number.
+  uint32 block_number = 1;
+  // The materialized page image, as an 8KB byte vector.
+  bytes image = 2;
 }
 
 // A GetPageResponse status code.
@@ -218,10 +249,15 @@ enum GetPageStatusCode {
 message GetRelSizeRequest {
   ReadLsn read_lsn = 1;
   RelTag rel = 2;
+  // If true, return missing=true for missing relations instead of a NotFound error.
+  bool allow_missing = 3;
 }
 
 message GetRelSizeResponse {
+  // The number of blocks in the relation.
   uint32 num_blocks = 1;
+  // If allow_missing=true, this is true for missing relations.
+  bool missing = 2;
 }
 
 // Requests an SLRU segment. Only valid on shard 0, other shards will error.
@@ -236,4 +272,18 @@ message GetSlruSegmentRequest {
 // These are up 32 pages (256 KB), so we can send them as a single response.
 message GetSlruSegmentResponse {
   bytes segment = 1;
+}
+
+// Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't garbage
+// collect the LSN until the lease expires. Must be acquired on all relevant shards.
+message LeaseLsnRequest {
+  // The LSN to lease. Can't be 0 or below the current GC cutoff.
+  uint64 lsn = 1;
+}
+
+// Lease acquisition response. If the lease could not be granted because the LSN has already been
+// garbage collected, a FailedPrecondition status will be returned instead.
+message LeaseLsnResponse {
+  // The lease expiration time.
+  google.protobuf.Timestamp expires = 1;
 }

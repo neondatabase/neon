@@ -208,7 +208,7 @@ async fn create_azure_client(
         .as_millis();
 
     // because nanos can be the same for two threads so can millis, add randomness
-    let random = rand::thread_rng().r#gen::<u32>();
+    let random = rand::rng().random::<u32>();
 
     let remote_storage_config = RemoteStorageConfig {
         storage: RemoteStorageKind::AzureContainer(AzureConfig {
@@ -219,6 +219,9 @@ async fn create_azure_client(
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
             conn_pool_size: 8,
+            /* BEGIN_HADRON */
+            put_block_size_mb: Some(1),
+            /* END_HADRON */
         }),
         timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
         small_timeout: RemoteStorageConfig::DEFAULT_SMALL_TIMEOUT,

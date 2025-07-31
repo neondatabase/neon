@@ -11,22 +11,23 @@
 //! from data stored in object storage.
 //!
 use std::fmt::Write as FmtWrite;
+use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, anyhow};
+use async_compression::tokio::write::GzipEncoder;
 use bytes::{BufMut, Bytes, BytesMut};
 use fail::fail_point;
 use pageserver_api::key::{Key, rel_block_to_key};
 use pageserver_api::reltag::{RelTag, SlruKind};
-use postgres_ffi::pg_constants::{
-    DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID, PG_HBA, PGDATA_SPECIAL_FILES,
-};
-use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
+use postgres_ffi::pg_constants::{PG_HBA, PGDATA_SPECIAL_FILES};
 use postgres_ffi::{
-    BLCKSZ, PG_TLI, RELSEG_SIZE, WAL_SEGMENT_SIZE, XLogFileName, dispatch_pgversion, pg_constants,
+    BLCKSZ, PG_TLI, PgMajorVersion, RELSEG_SIZE, WAL_SEGMENT_SIZE, XLogFileName,
+    dispatch_pgversion, pg_constants,
 };
-use tokio::io;
-use tokio::io::AsyncWrite;
+use postgres_ffi_types::constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+use postgres_ffi_types::forknum::{INIT_FORKNUM, MAIN_FORKNUM};
+use tokio::io::{self, AsyncWrite, AsyncWriteExt as _};
 use tokio_tar::{Builder, EntryType, Header};
 use tracing::*;
 use utils::lsn::Lsn;
@@ -97,6 +98,7 @@ impl From<BasebackupError> for tonic::Status {
 ///  * When working without safekeepers. In this situation it is important to match the lsn
 ///    we are taking basebackup on with the lsn that is used in pageserver's walreceiver
 ///    to start the replication.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_basebackup_tarball<'a, W>(
     write: &'a mut W,
     timeline: &'a Timeline,
@@ -104,6 +106,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     prev_lsn: Option<Lsn>,
     full_backup: bool,
     replica: bool,
+    gzip_level: Option<async_compression::Level>,
     ctx: &'a RequestContext,
 ) -> Result<(), BasebackupError>
 where
@@ -112,7 +115,7 @@ where
     // Compute postgres doesn't have any previous WAL files, but the first
     // record that it's going to write needs to include the LSN of the
     // previous record (xl_prev). We include prev_record_lsn in the
-    // "zenith.signal" file, so that postgres can read it during startup.
+    // "neon.signal" file, so that postgres can read it during startup.
     //
     // We don't keep full history of record boundaries in the page server,
     // however, only the predecessor of the latest record on each
@@ -122,7 +125,7 @@ where
     // prev_lsn value; that happens if the timeline was just branched from
     // an old LSN and it doesn't have any WAL of its own yet. We will set
     // prev_lsn to Lsn(0) if we cannot provide the correct value.
-    let (backup_prev, backup_lsn) = if let Some(req_lsn) = req_lsn {
+    let (backup_prev, lsn) = if let Some(req_lsn) = req_lsn {
         // Backup was requested at a particular LSN. The caller should've
         // already checked that it's a valid LSN.
 
@@ -143,7 +146,7 @@ where
     };
 
     // Consolidate the derived and the provided prev_lsn values
-    let prev_lsn = if let Some(provided_prev_lsn) = prev_lsn {
+    let prev_record_lsn = if let Some(provided_prev_lsn) = prev_lsn {
         if backup_prev != Lsn(0) && backup_prev != provided_prev_lsn {
             return Err(BasebackupError::Server(anyhow!(
                 "backup_prev {backup_prev} != provided_prev_lsn {provided_prev_lsn}"
@@ -155,30 +158,55 @@ where
     };
 
     info!(
-        "taking basebackup lsn={}, prev_lsn={} (full_backup={}, replica={})",
-        backup_lsn, prev_lsn, full_backup, replica
+        "taking basebackup lsn={lsn}, prev_lsn={prev_record_lsn} \
+        (full_backup={full_backup}, replica={replica}, gzip={gzip_level:?})",
+    );
+    let span = info_span!("send_tarball", backup_lsn=%lsn);
+
+    let io_concurrency = IoConcurrency::spawn_from_conf(
+        timeline.conf.get_vectored_concurrent_io,
+        timeline
+            .gate
+            .enter()
+            .map_err(|_| BasebackupError::Shutdown)?,
     );
 
-    let basebackup = Basebackup {
-        ar: Builder::new_non_terminated(write),
-        timeline,
-        lsn: backup_lsn,
-        prev_record_lsn: prev_lsn,
-        full_backup,
-        replica,
-        ctx,
-        io_concurrency: IoConcurrency::spawn_from_conf(
-            timeline.conf.get_vectored_concurrent_io,
-            timeline
-                .gate
-                .enter()
-                .map_err(|_| BasebackupError::Shutdown)?,
-        ),
-    };
-    basebackup
+    if let Some(gzip_level) = gzip_level {
+        let mut encoder = GzipEncoder::with_quality(write, gzip_level);
+        Basebackup {
+            ar: Builder::new_non_terminated(&mut encoder),
+            timeline,
+            lsn,
+            prev_record_lsn,
+            full_backup,
+            replica,
+            ctx,
+            io_concurrency,
+        }
         .send_tarball()
-        .instrument(info_span!("send_tarball", backup_lsn=%backup_lsn))
-        .await
+        .instrument(span)
+        .await?;
+        encoder
+            .shutdown()
+            .await
+            .map_err(|err| BasebackupError::Client(err, "gzip"))?;
+    } else {
+        Basebackup {
+            ar: Builder::new_non_terminated(write),
+            timeline,
+            lsn,
+            prev_record_lsn,
+            full_backup,
+            replica,
+            ctx,
+            io_concurrency,
+        }
+        .send_tarball()
+        .instrument(span)
+        .await?;
+    }
+
+    Ok(())
 }
 
 /// This is short-living object only for the time of tarball creation,
@@ -372,6 +400,7 @@ where
                 .partition(
                     self.timeline.get_shard_identity(),
                     self.timeline.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
+                    BLCKSZ as u64,
                 );
 
             let mut slru_builder = SlruSegmentsBuilder::new(&mut self.ar);
@@ -392,12 +421,16 @@ where
         }
 
         let mut min_restart_lsn: Lsn = Lsn::MAX;
+
+        let mut dbdir_cnt = 0;
+        let mut rel_cnt = 0;
+
         // Create tablespace directories
         for ((spcnode, dbnode), has_relmap_file) in
             self.timeline.list_dbdirs(self.lsn, self.ctx).await?
         {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
-
+            dbdir_cnt += 1;
             // If full backup is requested, include all relation files.
             // Otherwise only include init forks of unlogged relations.
             let rels = self
@@ -405,6 +438,7 @@ where
                 .list_rels(spcnode, dbnode, Version::at(self.lsn), self.ctx)
                 .await?;
             for &rel in rels.iter() {
+                rel_cnt += 1;
                 // Send init fork as main fork to provide well formed empty
                 // contents of UNLOGGED relations. Postgres copies it in
                 // `reinit.c` during recovery.
@@ -426,6 +460,10 @@ where
                 }
             }
         }
+
+        self.timeline
+            .db_rel_count
+            .store(Some(Arc::new((dbdir_cnt, rel_cnt))));
 
         let start_time = Instant::now();
         let aux_files = self
@@ -619,10 +657,7 @@ where
         };
 
         if spcnode == GLOBALTABLESPACE_OID {
-            let pg_version_str = match self.timeline.pg_version {
-                14 | 15 => self.timeline.pg_version.to_string(),
-                ver => format!("{ver}\x0A"),
-            };
+            let pg_version_str = self.timeline.pg_version.versionfile_string();
             let header = new_tar_header("PG_VERSION", pg_version_str.len() as u64)?;
             self.ar
                 .append(&header, pg_version_str.as_bytes())
@@ -669,7 +704,7 @@ where
             }
 
             // Append dir path for each database
-            let path = format!("base/{}", dbnode);
+            let path = format!("base/{dbnode}");
             let header = new_tar_header_dir(&path)?;
             self.ar
                 .append(&header, io::empty())
@@ -677,19 +712,16 @@ where
                 .map_err(|e| BasebackupError::Client(e, "add_dbdir,base"))?;
 
             if let Some(img) = relmap_img {
-                let dst_path = format!("base/{}/PG_VERSION", dbnode);
+                let dst_path = format!("base/{dbnode}/PG_VERSION");
 
-                let pg_version_str = match self.timeline.pg_version {
-                    14 | 15 => self.timeline.pg_version.to_string(),
-                    ver => format!("{ver}\x0A"),
-                };
+                let pg_version_str = self.timeline.pg_version.versionfile_string();
                 let header = new_tar_header(&dst_path, pg_version_str.len() as u64)?;
                 self.ar
                     .append(&header, pg_version_str.as_bytes())
                     .await
                     .map_err(|e| BasebackupError::Client(e, "add_dbdir,base/PG_VERSION"))?;
 
-                let relmap_path = format!("base/{}/pg_filenode.map", dbnode);
+                let relmap_path = format!("base/{dbnode}/pg_filenode.map");
                 let header = new_tar_header(&relmap_path, img.len() as u64)?;
                 self.ar
                     .append(&header, &img[..])
@@ -713,10 +745,10 @@ where
         buf.extend_from_slice(&img[..]);
         let crc = crc32c::crc32c(&img[..]);
         buf.put_u32_le(crc);
-        let path = if self.timeline.pg_version < 17 {
-            format!("pg_twophase/{:>08X}", xid)
+        let path = if self.timeline.pg_version < PgMajorVersion::PG17 {
+            format!("pg_twophase/{xid:>08X}")
         } else {
-            format!("pg_twophase/{:>016X}", xid)
+            format!("pg_twophase/{xid:>016X}")
         };
         let header = new_tar_header(&path, buf.len() as u64)?;
         self.ar
@@ -729,34 +761,39 @@ where
 
     //
     // Add generated pg_control file and bootstrap WAL segment.
-    // Also send zenith.signal file with extra bootstrap data.
+    // Also send neon.signal and zenith.signal file with extra bootstrap data.
     //
     async fn add_pgcontrol_file(
         &mut self,
         pg_control_bytes: Bytes,
         system_identifier: u64,
     ) -> Result<(), BasebackupError> {
-        // add zenith.signal file
-        let mut zenith_signal = String::new();
+        // add neon.signal file
+        let mut neon_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {
             if self.timeline.is_ancestor_lsn(self.lsn) {
-                write!(zenith_signal, "PREV LSN: none")
+                write!(neon_signal, "PREV LSN: none")
                     .map_err(|e| BasebackupError::Server(e.into()))?;
             } else {
-                write!(zenith_signal, "PREV LSN: invalid")
+                write!(neon_signal, "PREV LSN: invalid")
                     .map_err(|e| BasebackupError::Server(e.into()))?;
             }
         } else {
-            write!(zenith_signal, "PREV LSN: {}", self.prev_record_lsn)
+            write!(neon_signal, "PREV LSN: {}", self.prev_record_lsn)
                 .map_err(|e| BasebackupError::Server(e.into()))?;
         }
-        self.ar
-            .append(
-                &new_tar_header("zenith.signal", zenith_signal.len() as u64)?,
-                zenith_signal.as_bytes(),
-            )
-            .await
-            .map_err(|e| BasebackupError::Client(e, "add_pgcontrol_file,zenith.signal"))?;
+
+        // TODO: Remove zenith.signal once all historical computes have been replaced
+        // ... and thus support the neon.signal file.
+        for signalfilename in ["neon.signal", "zenith.signal"] {
+            self.ar
+                .append(
+                    &new_tar_header(signalfilename, neon_signal.len() as u64)?,
+                    neon_signal.as_bytes(),
+                )
+                .await
+                .map_err(|e| BasebackupError::Client(e, "add_pgcontrol_file,neon.signal"))?;
+        }
 
         //send pg_control
         let header = new_tar_header("global/pg_control", pg_control_bytes.len() as u64)?;
@@ -768,7 +805,7 @@ where
         //send wal segment
         let segno = self.lsn.segment_number(WAL_SEGMENT_SIZE);
         let wal_file_name = XLogFileName(PG_TLI, segno, WAL_SEGMENT_SIZE);
-        let wal_file_path = format!("pg_wal/{}", wal_file_name);
+        let wal_file_path = format!("pg_wal/{wal_file_name}");
         let header = new_tar_header(&wal_file_path, WAL_SEGMENT_SIZE as u64)?;
 
         let wal_seg = postgres_ffi::generate_wal_segment(

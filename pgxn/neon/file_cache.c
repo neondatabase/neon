@@ -49,8 +49,11 @@
 #include "neon.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
+#include "neon_utils.h"
 #include "pagestore_client.h"
 #include "communicator.h"
+
+#include "communicator/communicator_bindings.h"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "LFC: assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
@@ -162,8 +165,34 @@ typedef struct FileCacheControl
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 	dlist_head  holes;          /* double linked list of punched holes */
-	HyperLogLogState wss_estimation; /* estimation of working set size */
+
 	ConditionVariable cv[N_COND_VARS]; /* turnstile of condition variables */
+
+	/*
+	 * Estimation of working set size.
+	 *
+	 * This is not guarded by the lock. No locking is needed because all the
+	 * writes to the "registers" are simple 64-bit stores, to update a
+	 * timestamp. We assume that:
+	 *
+	 * - 64-bit stores are atomic. We could enforce that by using
+	 *   pg_atomic_uint64 instead of TimestampTz as the datatype in hll.h, but
+	 *   for now we just rely on it implicitly.
+	 *
+	 * - Even if they're not, and there is a race between two stores, it
+	 *   doesn't matter much which one wins because they're both updating the
+	 *   register with the current timestamp. Or you have a race between
+	 *   resetting the register and updating it, in which case it also doesn't
+	 *   matter much which one wins.
+	 *
+	 * - If they're not atomic, you might get an occasional "torn write" if
+	 *   you're really unlucky, but we tolerate that too. It just means that
+	 *   the estimate will be a little off, until the register is updated
+	 *   again.
+	 */
+	HyperLogLogState wss_estimation;
+
+	/* Prewarmer state */
 	PrewarmWorkerState prewarm_workers[MAX_PREWARM_WORKERS];
 	size_t n_prewarm_workers;
 	size_t n_prewarm_entries;
@@ -193,10 +222,6 @@ static char *lfc_path;
 static uint64 lfc_generation;
 static FileCacheControl *lfc_ctl;
 static bool lfc_do_prewarm;
-static shmem_startup_hook_type prev_shmem_startup_hook;
-#if PG_VERSION_NUM>=150000
-static shmem_request_hook_type prev_shmem_request_hook;
-#endif
 
 bool lfc_store_prefetch_result;
 bool lfc_prewarm_update_ws_estimation;
@@ -204,6 +229,8 @@ bool lfc_prewarm_update_ws_estimation;
 bool AmPrewarmWorker;
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
+
+PGDLLEXPORT void lfc_prewarm_main(Datum main_arg);
 
 /*
  * Close LFC file if opened.
@@ -314,18 +341,14 @@ lfc_ensure_opened(void)
 	return true;
 }
 
-static void
-lfc_shmem_startup(void)
+void
+LfcShmemInit(void)
 {
 	bool		found;
 	static HASHCTL info;
 
-	if (prev_shmem_startup_hook)
-	{
-		prev_shmem_startup_hook();
-	}
-
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	if (lfc_max_size <= 0)
+		return;
 
 	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
 	if (!found)
@@ -370,19 +393,16 @@ lfc_shmem_startup(void)
 			ConditionVariableInit(&lfc_ctl->cv[i]);
 
 	}
-	LWLockRelease(AddinShmemInitLock);
 }
 
-static void
-lfc_shmem_request(void)
+void
+LfcShmemRequest(void)
 {
-#if PG_VERSION_NUM>=150000
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-#endif
-
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
-	RequestNamedLWLockTranche("lfc_lock", 1);
+	if (lfc_max_size > 0)
+	{
+		RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, FILE_CACHE_ENRTY_SIZE));
+		RequestNamedLWLockTranche("lfc_lock", 1);
+	}
 }
 
 static bool
@@ -614,20 +634,13 @@ lfc_init(void)
 							NULL,
 							NULL,
 							NULL);
-
-	if (lfc_max_size == 0)
-		return;
-
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = lfc_shmem_startup;
-#if PG_VERSION_NUM>=150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = lfc_shmem_request;
-#else
-	lfc_shmem_request();
-#endif
 }
 
+/*
+ * Dump a list of pages that are currently in the LFC
+ *
+ * This is used to get a snapshot that can be used to prewarm the LFC later.
+ */
 FileCacheState*
 lfc_get_state(size_t max_entries)
 {
@@ -661,8 +674,19 @@ lfc_get_state(size_t max_entries)
 			{
 				if (GET_STATE(entry, j) != UNAVAILABLE)
 				{
-					BITMAP_SET(bitmap, i*lfc_blocks_per_chunk + j);
-					n_pages += 1;
+					/* Validate the buffer tag before including it */
+					BufferTag test_tag = entry->key;
+					test_tag.blockNum += j;
+
+					if (BufferTagIsValid(&test_tag))
+					{
+						BITMAP_SET(bitmap, i*lfc_blocks_per_chunk + j);
+						n_pages += 1;
+					}
+					else
+					{
+						elog(ERROR, "LFC: Skipping invalid buffer tag during cache state capture: blockNum=%u", test_tag.blockNum);
+					}
 				}
 			}
 			if (++i == n_entries)
@@ -671,7 +695,7 @@ lfc_get_state(size_t max_entries)
 		Assert(i == n_entries);
 		fcs->n_pages = n_pages;
 		Assert(pg_popcount((char*)bitmap, ((n_entries << lfc_chunk_size_log) + 7)/8) == n_pages);
-		elog(LOG, "LFC: save state of %d chunks %d pages", (int)n_entries, (int)n_pages);
+		elog(LOG, "LFC: save state of %d chunks %d pages (validated)", (int)n_entries, (int)n_pages);
 	}
 
 	LWLockRelease(lfc_lock);
@@ -690,6 +714,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 	size_t n_entries;
 	size_t prewarm_batch = Min(lfc_prewarm_batch, readahead_buffer_size);
 	size_t fcs_size;
+	uint32_t max_prefetch_pages;
 	dsm_segment *seg;
 	BackgroundWorkerHandle* bgw_handle[MAX_PREWARM_WORKERS];
 
@@ -733,6 +758,11 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 
 	n_entries = Min(fcs->n_chunks, lfc_prewarm_limit);
 	Assert(n_entries != 0);
+
+	max_prefetch_pages = n_entries << fcs_chunk_size_log;
+	if (fcs->n_pages > max_prefetch_pages) {
+		elog(ERROR, "LFC: Number of pages in file cache state (%d) is more than the limit (%d)", fcs->n_pages, max_prefetch_pages);
+	}
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
@@ -886,6 +916,11 @@ lfc_prewarm_main(Datum main_arg)
 				{
 					tag = fcs->chunks[snd_idx >> fcs_chunk_size_log];
 					tag.blockNum += snd_idx & ((1 << fcs_chunk_size_log) - 1);
+
+					if (!BufferTagIsValid(&tag)) {
+						elog(ERROR, "LFC: Invalid buffer tag: %u", tag.blockNum);
+					}
+
 					if (!lfc_cache_contains(BufTagGetNRelFileInfo(tag), tag.forkNum, tag.blockNum))
 					{
 						(void)communicator_prefetch_register_bufferv(tag, NULL, 1, NULL);
@@ -1142,6 +1177,13 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
+	/* Update working set size estimate for the blocks */
+	for (int i = 0; i < nblocks; i++)
+	{
+		tag.blockNum = blkno + i;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
+
 	/*
 	 * For every chunk that has blocks we're interested in, we
 	 * 1. get the chunk header
@@ -1220,14 +1262,6 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		}
 
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
-
-		/* Approximate working set for the blocks assumed in this entry */
-		for (int i = 0; i < blocks_in_chunk; i++)
-		{
-			tag.blockNum = blkno + i;
-			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-		}
-
 		if (entry == NULL)
 		{
 			/* Pages are not cached */
@@ -1295,7 +1329,8 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		if (iteration_hits != 0)
 		{
-			/* chunk offset (# of pages) into the LFC file */
+			/* chunk offset (#
+			   of pages) into the LFC file */
 			off_t	first_read_offset = (off_t) entry_offset * lfc_blocks_per_chunk;
 			int		nwrite = iov_last_used - first_block_in_chunk_read;
 			/* offset of first IOV */
@@ -1312,16 +1347,6 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			{
 				lfc_disable("read");
 				return -1;
-			}
-
-			/*
-			 * We successfully read the pages we know were valid when we
-			 * started reading; now mark those pages as read
-			 */
-			for (int i = first_block_in_chunk_read; i < iov_last_used; i++)
-			{
-				if (BITMAP_ISSET(chunk_mask, i))
-					BITMAP_SET(mask, buf_offset + i);
 			}
 		}
 
@@ -1340,6 +1365,15 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			{
 				lfc_ctl->time_read += io_time_us;
 				inc_page_cache_read_wait(io_time_us);
+				/*
+				 * We successfully read the pages we know were valid when we
+				 * started reading; now mark those pages as read
+				 */
+				for (int i = first_block_in_chunk_read; i < iov_last_used; i++)
+				{
+					if (BITMAP_ISSET(chunk_mask, i))
+						BITMAP_SET(mask, buf_offset + i);
+				}
 			}
 
 			CriticalAssert(entry->access_count > 0);
@@ -1504,9 +1538,15 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 		return false;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	tag.forkNum = forknum;
 
-	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	/* Update working set size estimate for the blocks */
+	if (lfc_prewarm_update_ws_estimation)
+	{
+		tag.blockNum = blkno;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
 
 	tag.blockNum = blkno - chunk_offs;
 	hash = get_hash_value(lfc_hash, &tag);
@@ -1524,19 +1564,13 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 
 	if (lwlsn > lsn)
 	{
-		elog(DEBUG1, "Skip LFC write for %d because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",
+		elog(DEBUG1, "Skip LFC write for %u because LwLSN=%X/%X is greater than not_nodified_since LSN %X/%X",
 			 blkno, LSN_FORMAT_ARGS(lwlsn), LSN_FORMAT_ARGS(lsn));
 		LWLockRelease(lfc_lock);
 		return false;
 	}
 
 	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
-
-	if (lfc_prewarm_update_ws_estimation)
-	{
-		tag.blockNum = blkno;
-		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-	}
 	if (found)
 	{
 		state = GET_STATE(entry, chunk_offs);
@@ -1649,9 +1683,15 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		return;
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	tag.forkNum = forkNum;
 
-	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	/* Update working set size estimate for the blocks */
+	for (int i = 0; i < nblocks; i++)
+	{
+		tag.blockNum = blkno + i;
+		addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	}
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
@@ -1692,14 +1732,6 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		cv = &lfc_ctl->cv[hash % N_COND_VARS];
 
 		entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_ENTER, &found);
-
-		/* Approximate working set for the blocks assumed in this entry */
-		for (int i = 0; i < blocks_in_chunk; i++)
-		{
-			tag.blockNum = blkno + i;
-			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
-		}
-
 		if (found)
 		{
 			/*
@@ -1823,125 +1855,46 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	LWLockRelease(lfc_lock);
 }
 
-typedef struct
+/*
+ * Return metrics about the LFC.
+ *
+ * The return format is a palloc'd array of LfcStatsEntrys. The size
+ * of the returned array is returned in *num_entries.
+ */
+LfcStatsEntry *
+lfc_get_stats(size_t *num_entries)
 {
-	TupleDesc	tupdesc;
-} NeonGetStatsCtx;
+	LfcStatsEntry *entries;
+	size_t		n = 0;
 
-#define NUM_NEON_GET_STATS_COLS	2
+#define MAX_ENTRIES 10
+	entries = palloc(sizeof(LfcStatsEntry) * MAX_ENTRIES);
 
-PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
-Datum
-neon_get_lfc_stats(PG_FUNCTION_ARGS)
-{
-	FuncCallContext *funcctx;
-	NeonGetStatsCtx *fctx;
-	MemoryContext oldcontext;
-	TupleDesc	tupledesc;
-	Datum		result;
-	HeapTuple	tuple;
-	char const *key;
-	uint64		value = 0;
-	Datum		values[NUM_NEON_GET_STATS_COLS];
-	bool		nulls[NUM_NEON_GET_STATS_COLS];
+	entries[n++] = (LfcStatsEntry) {"file_cache_chunk_size_pages", lfc_ctl == NULL,
+									lfc_ctl ? lfc_blocks_per_chunk : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_misses", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->misses : 0};
+	entries[n++] = (LfcStatsEntry) {"file_cache_hits", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->hits : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_used", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->used : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_writes", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->writes : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_size", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->size : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_used_pages", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->used_pages : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_evicted_pages", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->evicted_pages : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_limit", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->limit : 0 };
+	entries[n++] = (LfcStatsEntry) {"file_cache_chunks_pinned", lfc_ctl == NULL,
+									lfc_ctl ? lfc_ctl->pinned : 0 };
+	Assert(n <= MAX_ENTRIES);
+#undef MAX_ENTRIES
 
-	if (SRF_IS_FIRSTCALL())
-	{
-		funcctx = SRF_FIRSTCALL_INIT();
-
-		/* Switch context when allocating stuff to be used in later calls */
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-		/* Create a user function context for cross-call persistence */
-		fctx = (NeonGetStatsCtx *) palloc(sizeof(NeonGetStatsCtx));
-
-		/* Construct a tuple descriptor for the result rows. */
-		tupledesc = CreateTemplateTupleDesc(NUM_NEON_GET_STATS_COLS);
-
-		TupleDescInitEntry(tupledesc, (AttrNumber) 1, "lfc_key",
-						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "lfc_value",
-						   INT8OID, -1, 0);
-
-		fctx->tupdesc = BlessTupleDesc(tupledesc);
-		funcctx->user_fctx = fctx;
-
-		/* Return to original context when allocating transient memory */
-		MemoryContextSwitchTo(oldcontext);
-	}
-
-	funcctx = SRF_PERCALL_SETUP();
-
-	/* Get the saved state */
-	fctx = (NeonGetStatsCtx *) funcctx->user_fctx;
-
-	switch (funcctx->call_cntr)
-	{
-		case 0:
-			key = "file_cache_misses";
-			if (lfc_ctl)
-				value = lfc_ctl->misses;
-			break;
-		case 1:
-			key = "file_cache_hits";
-			if (lfc_ctl)
-				value = lfc_ctl->hits;
-			break;
-		case 2:
-			key = "file_cache_used";
-			if (lfc_ctl)
-				value = lfc_ctl->used;
-			break;
-		case 3:
-			key = "file_cache_writes";
-			if (lfc_ctl)
-				value = lfc_ctl->writes;
-			break;
-		case 4:
-			key = "file_cache_size";
-			if (lfc_ctl)
-				value = lfc_ctl->size;
-			break;
-		case 5:
-			key = "file_cache_used_pages";
-			if (lfc_ctl)
-				value = lfc_ctl->used_pages;
-			break;
-		case 6:
-			key = "file_cache_evicted_pages";
-			if (lfc_ctl)
-				value = lfc_ctl->evicted_pages;
-			break;
-		case 7:
-			key = "file_cache_limit";
-			if (lfc_ctl)
-				value = lfc_ctl->limit;
-			break;
-		case 8:
-			key = "file_cache_chunk_size_pages";
-			value = lfc_blocks_per_chunk;
-			break;
-		case 9:
-			key = "file_cache_chunks_pinned";
-			if (lfc_ctl)
-				value = lfc_ctl->pinned;
-			break;
-		default:
-			SRF_RETURN_DONE(funcctx);
-	}
-	values[0] = PointerGetDatum(cstring_to_text(key));
-	nulls[0] = false;
-	if (lfc_ctl)
-	{
-		nulls[1] = false;
-		values[1] = Int64GetDatum(value);
-	}
-	else
-		nulls[1] = true;
-
-	tuple = heap_form_tuple(fctx->tupdesc, values, nulls);
-	result = HeapTupleGetDatum(tuple);
-	SRF_RETURN_NEXT(funcctx, result);
+	*num_entries = n;
+	return entries;
 }
 
 
@@ -1949,227 +1902,135 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
  * Function returning data from the local file cache
  * relation node/tablespace/database/blocknum and access_counter
  */
-PG_FUNCTION_INFO_V1(local_cache_pages);
-
-/*
- * Record structure holding the to be exposed cache data.
- */
-typedef struct
+LocalCachePagesRec *
+lfc_local_cache_pages(size_t *num_entries)
 {
-	uint32		pageoffs;
-	Oid			relfilenode;
-	Oid			reltablespace;
-	Oid			reldatabase;
-	ForkNumber	forknum;
-	BlockNumber blocknum;
-	uint16		accesscount;
-} LocalCachePagesRec;
+	HASH_SEQ_STATUS status;
+	FileCacheEntry *entry;
+	size_t		n_pages;
+	size_t		n;
+	LocalCachePagesRec *result;
 
-/*
- * Function context for data persisting over repeated calls.
- */
-typedef struct
-{
-	TupleDesc	tupdesc;
-	LocalCachePagesRec *record;
-} LocalCachePagesContext;
-
-
-#define NUM_LOCALCACHE_PAGES_ELEM	7
-
-Datum
-local_cache_pages(PG_FUNCTION_ARGS)
-{
-	FuncCallContext *funcctx;
-	Datum		result;
-	MemoryContext oldcontext;
-	LocalCachePagesContext *fctx;	/* User function context. */
-	TupleDesc	tupledesc;
-	TupleDesc	expected_tupledesc;
-	HeapTuple	tuple;
-
-	if (SRF_IS_FIRSTCALL())
+	if (!lfc_ctl)
 	{
-		HASH_SEQ_STATUS status;
-		FileCacheEntry *entry;
-		uint32		n_pages = 0;
+		*num_entries = 0;
+		return NULL;
+	}
 
-		funcctx = SRF_FIRSTCALL_INIT();
+	LWLockAcquire(lfc_lock, LW_SHARED);
+	if (!LFC_ENABLED())
+	{
+		LWLockRelease(lfc_lock);
+		*num_entries = 0;
+		return NULL;
+	}
 
-		/* Switch context when allocating stuff to be used in later calls */
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-		/* Create a user function context for cross-call persistence */
-		fctx = (LocalCachePagesContext *) palloc(sizeof(LocalCachePagesContext));
-
-		/*
-		 * To smoothly support upgrades from version 1.0 of this extension
-		 * transparently handle the (non-)existence of the pinning_backends
-		 * column. We unfortunately have to get the result type for that... -
-		 * we can't use the result type determined by the function definition
-		 * without potentially crashing when somebody uses the old (or even
-		 * wrong) function definition though.
-		 */
-		if (get_call_result_type(fcinfo, NULL, &expected_tupledesc) != TYPEFUNC_COMPOSITE)
-			neon_log(ERROR, "return type must be a row type");
-
-		if (expected_tupledesc->natts != NUM_LOCALCACHE_PAGES_ELEM)
-			neon_log(ERROR, "incorrect number of output arguments");
-
-		/* Construct a tuple descriptor for the result rows. */
-		tupledesc = CreateTemplateTupleDesc(expected_tupledesc->natts);
-		TupleDescInitEntry(tupledesc, (AttrNumber) 1, "pageoffs",
-						   INT8OID, -1, 0);
-#if PG_MAJORVERSION_NUM < 16
-		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "relfilenode",
-						   OIDOID, -1, 0);
-#else
-		TupleDescInitEntry(tupledesc, (AttrNumber) 2, "relfilenumber",
-						   OIDOID, -1, 0);
-#endif
-		TupleDescInitEntry(tupledesc, (AttrNumber) 3, "reltablespace",
-						   OIDOID, -1, 0);
-		TupleDescInitEntry(tupledesc, (AttrNumber) 4, "reldatabase",
-						   OIDOID, -1, 0);
-		TupleDescInitEntry(tupledesc, (AttrNumber) 5, "relforknumber",
-						   INT2OID, -1, 0);
-		TupleDescInitEntry(tupledesc, (AttrNumber) 6, "relblocknumber",
-						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupledesc, (AttrNumber) 7, "accesscount",
-						   INT4OID, -1, 0);
-
-		fctx->tupdesc = BlessTupleDesc(tupledesc);
-
-		if (lfc_ctl)
+	/* Count the pages first */
+	n_pages = 0;
+	hash_seq_init(&status, lfc_hash);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{
+		/* Skip hole tags */
+		if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
 		{
-			LWLockAcquire(lfc_lock, LW_SHARED);
+			for (int i = 0; i < lfc_blocks_per_chunk; i++)
+				n_pages += GET_STATE(entry, i) == AVAILABLE;
+		}
+	}
 
-			if (LFC_ENABLED())
+	if (n_pages == 0)
+	{
+		LWLockRelease(lfc_lock);
+		*num_entries = 0;
+		return NULL;
+	}
+
+	result = (LocalCachePagesRec *)
+		MemoryContextAllocHuge(CurrentMemoryContext,
+							   sizeof(LocalCachePagesRec) * n_pages);
+
+	/*
+	 * Scan through all the cache entries, saving the relevant fields
+	 * in the result structure.
+	 */
+	n = 0;
+	hash_seq_init(&status, lfc_hash);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{
+		for (int i = 0; i < lfc_blocks_per_chunk; i++)
+		{
+			if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
 			{
-				hash_seq_init(&status, lfc_hash);
-				while ((entry = hash_seq_search(&status)) != NULL)
+				if (GET_STATE(entry, i) == AVAILABLE)
 				{
-					/* Skip hole tags */
-					if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
-					{
-						for (int i = 0; i < lfc_blocks_per_chunk; i++)
-							n_pages += GET_STATE(entry, i) == AVAILABLE;
-					}
+					result[n].pageoffs = entry->offset * lfc_blocks_per_chunk + i;
+					result[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
+					result[n].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
+					result[n].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
+					result[n].forknum = entry->key.forkNum;
+					result[n].blocknum = entry->key.blockNum + i;
+					result[n].accesscount = entry->access_count;
+					n += 1;
 				}
 			}
 		}
-		fctx->record = (LocalCachePagesRec *)
-			MemoryContextAllocHuge(CurrentMemoryContext,
-								   sizeof(LocalCachePagesRec) * n_pages);
+	}
+	Assert(n_pages == n);
+	LWLockRelease(lfc_lock);
 
-		/* Set max calls and remember the user function context. */
-		funcctx->max_calls = n_pages;
-		funcctx->user_fctx = fctx;
+	*num_entries = n_pages;
+	return result;
+}
 
-		/* Return to original context when allocating transient memory */
-		MemoryContextSwitchTo(oldcontext);
+/*
+ * Internal implementation of the approximate_working_set_size_seconds()
+ * function.
+ */
+int32
+lfc_approximate_working_set_size_seconds(time_t duration, bool reset)
+{
+	int32		dc;
 
-		if (n_pages != 0)
+	if (lfc_size_limit == 0)
+		return -1;
+
+	dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration);
+	if (reset)
+		memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
+	return dc;
+}
+
+/*
+ * Get metrics, for the built-in metrics exporter that's part of the communicator
+ * process.
+ *
+ * NB: This is called from a Rust tokio task inside the communicator process.
+ * Acquiring lwlocks, elog(), allocating memory or anything else non-trivial
+ * is strictly prohibited here!
+ */
+struct LfcMetrics
+callback_get_lfc_metrics_unsafe(void)
+{
+	struct LfcMetrics result = {
+		.lfc_cache_size_limit = (int64) lfc_size_limit * 1024 * 1024,
+		.lfc_hits = lfc_ctl ? lfc_ctl->hits : 0,
+		.lfc_misses = lfc_ctl ? lfc_ctl->misses : 0,
+		.lfc_used = lfc_ctl ? lfc_ctl->used : 0,
+		.lfc_writes = lfc_ctl ? lfc_ctl->writes : 0,
+	};
+
+	if (lfc_ctl)
+	{
+		for (int minutes = 1; minutes <= 60; minutes++)
 		{
-			/*
-			 * Scan through all the cache entries, saving the relevant fields
-			 * in the fctx->record structure.
-			 */
-			uint32		n = 0;
-
-			hash_seq_init(&status, lfc_hash);
-			while ((entry = hash_seq_search(&status)) != NULL)
-			{
-				for (int i = 0; i < lfc_blocks_per_chunk; i++)
-				{
-					if (NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key)) != 0)
-					{
-						if (GET_STATE(entry, i) == AVAILABLE)
-						{
-							fctx->record[n].pageoffs = entry->offset * lfc_blocks_per_chunk + i;
-							fctx->record[n].relfilenode = NInfoGetRelNumber(BufTagGetNRelFileInfo(entry->key));
-							fctx->record[n].reltablespace = NInfoGetSpcOid(BufTagGetNRelFileInfo(entry->key));
-							fctx->record[n].reldatabase = NInfoGetDbOid(BufTagGetNRelFileInfo(entry->key));
-							fctx->record[n].forknum = entry->key.forkNum;
-							fctx->record[n].blocknum = entry->key.blockNum + i;
-							fctx->record[n].accesscount = entry->access_count;
-							n += 1;
-						}
-					}
-				}
-			}
-			Assert(n_pages == n);
+			result.lfc_approximate_working_set_size_windows[minutes - 1] =
+				lfc_approximate_working_set_size_seconds(minutes * 60, false);
 		}
-		if (lfc_ctl)
-			LWLockRelease(lfc_lock);
 	}
 
-	funcctx = SRF_PERCALL_SETUP();
-
-	/* Get the saved state */
-	fctx = funcctx->user_fctx;
-
-	if (funcctx->call_cntr < funcctx->max_calls)
-	{
-		uint32		i = funcctx->call_cntr;
-		Datum		values[NUM_LOCALCACHE_PAGES_ELEM];
-		bool		nulls[NUM_LOCALCACHE_PAGES_ELEM] = {
-			false, false, false, false, false, false, false
-		};
-
-		values[0] = Int64GetDatum((int64) fctx->record[i].pageoffs);
-		values[1] = ObjectIdGetDatum(fctx->record[i].relfilenode);
-		values[2] = ObjectIdGetDatum(fctx->record[i].reltablespace);
-		values[3] = ObjectIdGetDatum(fctx->record[i].reldatabase);
-		values[4] = ObjectIdGetDatum(fctx->record[i].forknum);
-		values[5] = Int64GetDatum((int64) fctx->record[i].blocknum);
-		values[6] = Int32GetDatum(fctx->record[i].accesscount);
-
-		/* Build and return the tuple. */
-		tuple = heap_form_tuple(fctx->tupdesc, values, nulls);
-		result = HeapTupleGetDatum(tuple);
-
-		SRF_RETURN_NEXT(funcctx, result);
-	}
-	else
-		SRF_RETURN_DONE(funcctx);
+	return result;
 }
 
-PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
-
-Datum
-approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
-{
-	if (lfc_size_limit != 0)
-	{
-		int32 dc;
-		time_t duration = PG_ARGISNULL(0) ? (time_t)-1 : PG_GETARG_INT32(0);
-		LWLockAcquire(lfc_lock, LW_SHARED);
-		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration);
-		LWLockRelease(lfc_lock);
-		PG_RETURN_INT32(dc);
-	}
-	PG_RETURN_NULL();
-}
-
-PG_FUNCTION_INFO_V1(approximate_working_set_size);
-
-Datum
-approximate_working_set_size(PG_FUNCTION_ARGS)
-{
-	if (lfc_size_limit != 0)
-	{
-		int32 dc;
-		bool reset = PG_GETARG_BOOL(0);
-		LWLockAcquire(lfc_lock, reset ? LW_EXCLUSIVE : LW_SHARED);
-		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, (time_t)-1);
-		if (reset)
-			memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
-		LWLockRelease(lfc_lock);
-		PG_RETURN_INT32(dc);
-	}
-	PG_RETURN_NULL();
-}
 
 PG_FUNCTION_INFO_V1(get_local_cache_state);
 
@@ -2248,4 +2109,3 @@ get_prewarm_info(PG_FUNCTION_ARGS)
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
-

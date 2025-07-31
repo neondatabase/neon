@@ -12,11 +12,12 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, str};
 
-use anyhow::{Context as _, anyhow, bail};
-use async_compression::tokio::write::GzipEncoder;
-use bytes::{Buf, BytesMut};
+use anyhow::{Context as _, bail};
+use bytes::{Buf as _, BufMut as _, BytesMut};
+use chrono::Utc;
 use futures::future::BoxFuture;
-use futures::{FutureExt, Stream};
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, Stream, StreamExt as _};
 use itertools::Itertools;
 use jsonwebtoken::TokenData;
 use once_cell::sync::OnceCell;
@@ -25,22 +26,23 @@ use pageserver_api::config::{
     PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
 };
 use pageserver_api::key::rel_block_to_key;
-use pageserver_api::models::{
-    self, PageTraceEvent, PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
+use pageserver_api::models::{PageTraceEvent, TenantState};
+use pageserver_api::pagestream_api::{
+    self, PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetSlruSegmentRequest,
     PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
-    PagestreamProtocolVersion, PagestreamRequest, TenantState,
+    PagestreamProtocolVersion, PagestreamRequest,
 };
 use pageserver_api::reltag::SlruKind;
 use pageserver_api::shard::TenantShardId;
-use pageserver_page_api as page_api;
 use pageserver_page_api::proto;
+use pageserver_page_api::{self as page_api, GetPageSplitter};
 use postgres_backend::{
     AuthType, PostgresBackend, PostgresBackendReader, QueryError, is_expected_io_error,
 };
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi_types::constants::DEFAULTTABLESPACE_OID;
 use pq_proto::framed::ConnectionError;
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, RowDescriptor};
 use smallvec::{SmallVec, smallvec};
@@ -49,6 +51,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Interceptor as _;
+use tonic::transport::server::TcpConnectInfo;
 use tracing::*;
 use utils::auth::{Claims, Scope, SwappableJwtAuth};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
@@ -62,14 +65,14 @@ use utils::{failpoint_support, span_record};
 
 use crate::auth::check_permission;
 use crate::basebackup::{self, BasebackupError};
-use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context::{
     DownloadBehavior, PerfInstrumentFutureExt, RequestContext, RequestContextBuilder,
 };
+use crate::feature_resolver::FeatureResolver;
 use crate::metrics::{
     self, COMPUTE_COMMANDS_COUNTERS, ComputeCommandKind, GetPageBatchBreakReason, LIVE_CONNECTIONS,
-    SmgrOpTimer, TimelineMetrics,
+    MISROUTED_PAGESTREAM_REQUESTS, PAGESTREAM_HANDLER_RESULTS_TOTAL, SmgrOpTimer, TimelineMetrics,
 };
 use crate::pgdatadir_mapping::{LsnRange, Version};
 use crate::span::{
@@ -90,7 +93,8 @@ use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 /// is not yet in state [`TenantState::Active`].
 ///
 /// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
+/// HADRON: reduced timeout and we will retry in Cache::get().
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Threshold at which to log slow GetPage requests.
 const LOG_SLOW_GETPAGE_THRESHOLD: Duration = Duration::from_secs(30);
@@ -137,7 +141,7 @@ pub fn spawn(
     perf_trace_dispatch: Option<Dispatch>,
     tcp_listener: tokio::net::TcpListener,
     tls_config: Option<Arc<rustls::ServerConfig>>,
-    basebackup_cache: Arc<BasebackupCache>,
+    feature_resolver: FeatureResolver,
 ) -> Listener {
     let cancel = CancellationToken::new();
     let libpq_ctx = RequestContext::todo_child(
@@ -159,7 +163,7 @@ pub fn spawn(
             conf.pg_auth_type,
             tls_config,
             conf.page_service_pipelining.clone(),
-            basebackup_cache,
+            feature_resolver,
             libpq_ctx,
             cancel.clone(),
         )
@@ -218,7 +222,7 @@ pub async fn libpq_listener_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
-    basebackup_cache: Arc<BasebackupCache>,
+    feature_resolver: FeatureResolver,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -262,7 +266,7 @@ pub async fn libpq_listener_main(
                     auth_type,
                     tls_config.clone(),
                     pipelining_config.clone(),
-                    Arc::clone(&basebackup_cache),
+                    feature_resolver.clone(),
                     connection_ctx,
                     connections_cancel.child_token(),
                     gate_guard,
@@ -305,7 +309,7 @@ async fn page_service_conn_main(
     auth_type: AuthType,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     pipelining_config: PageServicePipeliningConfig,
-    basebackup_cache: Arc<BasebackupCache>,
+    feature_resolver: FeatureResolver,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
     gate_guard: GateGuard,
@@ -371,9 +375,9 @@ async fn page_service_conn_main(
         pipelining_config,
         conf.get_vectored_concurrent_io,
         perf_span_fields,
-        basebackup_cache,
         connection_ctx,
         cancel.clone(),
+        feature_resolver.clone(),
         gate_guard,
     );
     let pgbackend =
@@ -391,16 +395,14 @@ async fn page_service_conn_main(
             } else {
                 let tenant_id = conn_handler.timeline_handles.as_ref().unwrap().tenant_id();
                 Err(io_error).context(format!(
-                    "Postgres connection error for tenant_id={:?} client at peer_addr={}",
-                    tenant_id, peer_addr
+                    "Postgres connection error for tenant_id={tenant_id:?} client at peer_addr={peer_addr}"
                 ))
             }
         }
         other => {
             let tenant_id = conn_handler.timeline_handles.as_ref().unwrap().tenant_id();
             other.context(format!(
-                "Postgres query error for tenant_id={:?} client peer_addr={}",
-                tenant_id, peer_addr
+                "Postgres query error for tenant_id={tenant_id:?} client peer_addr={peer_addr}"
             ))
         }
     }
@@ -427,7 +429,7 @@ struct PageServerHandler {
     pipelining_config: PageServicePipeliningConfig,
     get_vectored_concurrent_io: GetVectoredConcurrentIo,
 
-    basebackup_cache: Arc<BasebackupCache>,
+    feature_resolver: FeatureResolver,
 
     gate_guard: GateGuard,
 }
@@ -465,13 +467,6 @@ impl TimelineHandles {
         self.handles
             .get(timeline_id, shard_selector, &self.wrapper)
             .await
-            .map_err(|e| match e {
-                timeline::handle::GetError::TenantManager(e) => e,
-                timeline::handle::GetError::PerTimelineStateShutDown => {
-                    trace!("per-timeline state shut down");
-                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
-                }
-            })
     }
 
     fn tenant_id(&self) -> Option<TenantId> {
@@ -487,11 +482,9 @@ pub(crate) struct TenantManagerWrapper {
     tenant_id: once_cell::sync::OnceCell<TenantId>,
 }
 
-#[derive(Debug)]
 pub(crate) struct TenantManagerTypes;
 
 impl timeline::handle::Types for TenantManagerTypes {
-    type TenantManagerError = GetActiveTimelineError;
     type TenantManager = TenantManagerWrapper;
     type Timeline = TenantManagerCacheItem;
 }
@@ -543,6 +536,7 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
             match resolved {
                 ShardResolveResult::Found(tenant_shard) => break tenant_shard,
                 ShardResolveResult::NotFound => {
+                    MISROUTED_PAGESTREAM_REQUESTS.inc();
                     return Err(GetActiveTimelineError::Tenant(
                         GetActiveTenantError::NotFound(GetTenantError::NotFound(*tenant_id)),
                     ));
@@ -594,6 +588,15 @@ impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrappe
     }
 }
 
+/// Whether to hold the applied GC cutoff guard when processing GetPage requests.
+/// This is determined once at the start of pagestream subprotocol handling based on
+/// feature flags, configuration, and test conditions.
+#[derive(Debug, Clone, Copy)]
+enum HoldAppliedGcCutoffGuard {
+    Yes,
+    No,
+}
+
 #[derive(thiserror::Error, Debug)]
 enum PageStreamError {
     /// We encountered an error that should prompt the client to reconnect:
@@ -621,60 +624,6 @@ enum PageStreamError {
     /// Request asked for something that doesn't make sense, like an invalid LSN
     #[error("Bad request: {0}")]
     BadRequest(Cow<'static, str>),
-}
-
-impl PageStreamError {
-    /// Converts a PageStreamError into a proto::GetPageResponse with the appropriate status
-    /// code, or a gRPC status if it should terminate the stream (e.g. shutdown). This is a
-    /// convenience method for use from a get_pages gRPC stream.
-    #[allow(clippy::result_large_err)]
-    fn into_get_page_response(
-        self,
-        request_id: page_api::RequestID,
-    ) -> Result<proto::GetPageResponse, tonic::Status> {
-        use page_api::GetPageStatusCode;
-        use tonic::Code;
-
-        // We dispatch to Into<tonic::Status> first, and then map it to a GetPageResponse.
-        let status: tonic::Status = self.into();
-        let status_code = match status.code() {
-            // We shouldn't see an OK status here, because we're emitting an error.
-            Code::Ok => {
-                debug_assert_ne!(status.code(), Code::Ok);
-                return Err(tonic::Status::internal(format!(
-                    "unexpected OK status: {status:?}",
-                )));
-            }
-
-            // These are per-request errors, returned as GetPageResponses.
-            Code::AlreadyExists => GetPageStatusCode::InvalidRequest,
-            Code::DataLoss => GetPageStatusCode::InternalError,
-            Code::FailedPrecondition => GetPageStatusCode::InvalidRequest,
-            Code::InvalidArgument => GetPageStatusCode::InvalidRequest,
-            Code::Internal => GetPageStatusCode::InternalError,
-            Code::NotFound => GetPageStatusCode::NotFound,
-            Code::OutOfRange => GetPageStatusCode::InvalidRequest,
-            Code::ResourceExhausted => GetPageStatusCode::SlowDown,
-
-            // These should terminate the stream.
-            Code::Aborted => return Err(status),
-            Code::Cancelled => return Err(status),
-            Code::DeadlineExceeded => return Err(status),
-            Code::PermissionDenied => return Err(status),
-            Code::Unauthenticated => return Err(status),
-            Code::Unavailable => return Err(status),
-            Code::Unimplemented => return Err(status),
-            Code::Unknown => return Err(status),
-        };
-
-        Ok(page_api::GetPageResponse {
-            request_id,
-            status_code,
-            reason: Some(status.message().to_string()),
-            page_images: Vec::new(),
-        }
-        .into())
-    }
 }
 
 impl From<PageStreamError> for tonic::Status {
@@ -766,7 +715,7 @@ struct BatchedGetPageRequest {
 
 #[cfg(feature = "testing")]
 struct BatchedTestRequest {
-    req: models::PagestreamTestRequest,
+    req: pagestream_api::PagestreamTestRequest,
     timer: SmgrOpTimer,
 }
 
@@ -780,17 +729,18 @@ enum BatchedFeMessage {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamExistsRequest,
+        req: PagestreamExistsRequest,
     },
     Nblocks {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamNblocksRequest,
+        req: PagestreamNblocksRequest,
     },
     GetPage {
         span: Span,
         shard: WeakHandle<TenantManagerTypes>,
+        applied_gc_cutoff_guard: Option<RcuReadGuard<Lsn>>,
         pages: SmallVec<[BatchedGetPageRequest; 1]>,
         batch_break_reason: GetPageBatchBreakReason,
     },
@@ -798,13 +748,13 @@ enum BatchedFeMessage {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamDbSizeRequest,
+        req: PagestreamDbSizeRequest,
     },
     GetSlruSegment {
         span: Span,
         timer: SmgrOpTimer,
         shard: WeakHandle<TenantManagerTypes>,
-        req: models::PagestreamGetSlruSegmentRequest,
+        req: PagestreamGetSlruSegmentRequest,
     },
     #[cfg(feature = "testing")]
     Test {
@@ -968,9 +918,9 @@ impl PageServerHandler {
         pipelining_config: PageServicePipeliningConfig,
         get_vectored_concurrent_io: GetVectoredConcurrentIo,
         perf_span_fields: ConnectionPerfSpanFields,
-        basebackup_cache: Arc<BasebackupCache>,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
+        feature_resolver: FeatureResolver,
         gate_guard: GateGuard,
     ) -> Self {
         PageServerHandler {
@@ -982,7 +932,7 @@ impl PageServerHandler {
             cancel,
             pipelining_config,
             get_vectored_concurrent_io,
-            basebackup_cache,
+            feature_resolver,
             gate_guard,
         }
     }
@@ -1022,6 +972,7 @@ impl PageServerHandler {
         ctx: &RequestContext,
         protocol_version: PagestreamProtocolVersion,
         parent_span: Span,
+        hold_gc_cutoff_guard: HoldAppliedGcCutoffGuard,
     ) -> Result<Option<BatchedFeMessage>, QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
@@ -1193,6 +1144,7 @@ impl PageServerHandler {
                                 // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
                                 // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
                                 // and talk to a different pageserver.
+                                MISROUTED_PAGESTREAM_REQUESTS.inc();
                                 return respond_error!(
                                     span,
                                     PageStreamError::Reconnect(
@@ -1258,17 +1210,25 @@ impl PageServerHandler {
                 })
                 .await?;
 
+                let applied_gc_cutoff_guard = shard.get_applied_gc_cutoff_lsn(); // hold guard
                 // We're holding the Handle
                 let effective_lsn = match Self::effective_request_lsn(
                     &shard,
                     shard.get_last_record_lsn(),
                     req.hdr.request_lsn,
                     req.hdr.not_modified_since,
-                    &shard.get_applied_gc_cutoff_lsn(),
+                    &applied_gc_cutoff_guard,
                 ) {
                     Ok(lsn) => lsn,
                     Err(e) => {
                         return respond_error!(span, e);
+                    }
+                };
+                let applied_gc_cutoff_guard = match hold_gc_cutoff_guard {
+                    HoldAppliedGcCutoffGuard::Yes => Some(applied_gc_cutoff_guard),
+                    HoldAppliedGcCutoffGuard::No => {
+                        drop(applied_gc_cutoff_guard);
+                        None
                     }
                 };
 
@@ -1291,6 +1251,7 @@ impl PageServerHandler {
                 BatchedFeMessage::GetPage {
                     span,
                     shard: shard.downgrade(),
+                    applied_gc_cutoff_guard,
                     pages: smallvec![BatchedGetPageRequest {
                         req,
                         timer,
@@ -1391,13 +1352,28 @@ impl PageServerHandler {
                 match (eligible_batch, this_msg) {
                     (
                         BatchedFeMessage::GetPage {
-                            pages: accum_pages, ..
+                            pages: accum_pages,
+                            applied_gc_cutoff_guard: accum_applied_gc_cutoff_guard,
+                            ..
                         },
                         BatchedFeMessage::GetPage {
-                            pages: this_pages, ..
+                            pages: this_pages,
+                            applied_gc_cutoff_guard: this_applied_gc_cutoff_guard,
+                            ..
                         },
                     ) => {
                         accum_pages.extend(this_pages);
+                        // the minimum of the two guards will keep data for both alive
+                        match (&accum_applied_gc_cutoff_guard, this_applied_gc_cutoff_guard) {
+                            (None, None) => (),
+                            (None, Some(this)) => *accum_applied_gc_cutoff_guard = Some(this),
+                            (Some(_), None) => (),
+                            (Some(accum), Some(this)) => {
+                                if **accum > *this {
+                                    *accum_applied_gc_cutoff_guard = Some(this);
+                                }
+                            }
+                        };
                         Ok(())
                     }
                     #[cfg(feature = "testing")]
@@ -1504,20 +1480,57 @@ impl PageServerHandler {
             let (response_msg, ctx) = match handler_result {
                 Err(e) => match &e.err {
                     PageStreamError::Shutdown => {
+                        // BEGIN HADRON
+                        PAGESTREAM_HANDLER_RESULTS_TOTAL
+                            .with_label_values(&[metrics::PAGESTREAM_HANDLER_OUTCOME_OTHER_ERROR])
+                            .inc();
+                        // END HADRON
+
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
                         // shutdown, then do not send the error to the client.  Instead just drop the
                         // connection.
                         span.in_scope(|| info!("dropping connection due to shutdown"));
                         return Err(QueryError::Shutdown);
                     }
-                    PageStreamError::Reconnect(reason) => {
-                        span.in_scope(|| info!("handler requested reconnect: {reason}"));
+                    PageStreamError::Reconnect(_reason) => {
+                        span.in_scope(|| {
+                            // BEGIN HADRON
+                            // We can get here because the compute node is pointing at the wrong PS. We
+                            // already have a metric to keep track of this so suppressing this log to
+                            // reduce log spam. The information in this log message is not going to be that
+                            // helpful given the volume of logs that can be generated.
+                            // info!("handler requested reconnect: {reason}")
+                            // END HADRON
+                        });
+                        // BEGIN HADRON
+                        PAGESTREAM_HANDLER_RESULTS_TOTAL
+                            .with_label_values(&[
+                                metrics::PAGESTREAM_HANDLER_OUTCOME_INTERNAL_ERROR,
+                            ])
+                            .inc();
+                        // END HADRON
                         return Err(QueryError::Reconnect);
                     }
                     PageStreamError::Read(_)
                     | PageStreamError::LsnTimeout(_)
                     | PageStreamError::NotFound(_)
                     | PageStreamError::BadRequest(_) => {
+                        // BEGIN HADRON
+                        if let PageStreamError::Read(_) | PageStreamError::LsnTimeout(_) = &e.err {
+                            PAGESTREAM_HANDLER_RESULTS_TOTAL
+                                .with_label_values(&[
+                                    metrics::PAGESTREAM_HANDLER_OUTCOME_INTERNAL_ERROR,
+                                ])
+                                .inc();
+                        } else {
+                            PAGESTREAM_HANDLER_RESULTS_TOTAL
+                                .with_label_values(&[
+                                    metrics::PAGESTREAM_HANDLER_OUTCOME_OTHER_ERROR,
+                                ])
+                                .inc();
+                        }
+                        // END HADRON
+
                         // print the all details to the log with {:#}, but for the client the
                         // error message is enough.  Do not log if shutting down, as the anyhow::Error
                         // here includes cancellation which is not an error.
@@ -1535,7 +1548,15 @@ impl PageServerHandler {
                         )
                     }
                 },
-                Ok((response_msg, _op_timer_already_observed, ctx)) => (response_msg, Some(ctx)),
+                Ok((response_msg, _op_timer_already_observed, ctx)) => {
+                    // BEGIN HADRON
+                    PAGESTREAM_HANDLER_RESULTS_TOTAL
+                        .with_label_values(&[metrics::PAGESTREAM_HANDLER_OUTCOME_SUCCESS])
+                        .inc();
+                    // END HADRON
+
+                    (response_msg, Some(ctx))
+                }
             };
 
             let ctx = ctx.map(|req_ctx| {
@@ -1654,9 +1675,10 @@ impl PageServerHandler {
                 let (shard, ctx) = upgrade_handle_and_set_context!(shard);
                 (
                     vec![
-                        Self::handle_get_nblocks_request(&shard, &req, &ctx)
+                        Self::handle_get_nblocks_request(&shard, &req, false, &ctx)
                             .instrument(span.clone())
                             .await
+                            .map(|msg| msg.expect("allow_missing=false"))
                             .map(|msg| (PagestreamBeMessage::Nblocks(msg), timer, ctx))
                             .map_err(|err| BatchedPageStreamError { err, req: req.hdr }),
                     ],
@@ -1666,6 +1688,7 @@ impl PageServerHandler {
             BatchedFeMessage::GetPage {
                 span,
                 shard,
+                applied_gc_cutoff_guard,
                 pages,
                 batch_break_reason,
             } => {
@@ -1685,6 +1708,7 @@ impl PageServerHandler {
                         .instrument(span.clone())
                         .await;
                         assert_eq!(res.len(), npages);
+                        drop(applied_gc_cutoff_guard);
                         res
                     },
                     span,
@@ -1766,7 +1790,7 @@ impl PageServerHandler {
     /// Coding discipline within this function: all interaction with the `pgb` connection
     /// needs to be sensitive to connection shutdown, currently signalled via [`Self::cancel`].
     /// This is so that we can shutdown page_service quickly.
-    #[instrument(skip_all)]
+    #[instrument(skip_all, fields(hold_gc_cutoff_guard))]
     async fn handle_pagerequests<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -1812,6 +1836,30 @@ impl PageServerHandler {
             .take()
             .expect("implementation error: timeline_handles should not be locked");
 
+        // Evaluate the expensive feature resolver check once per pagestream subprotocol handling
+        // instead of once per GetPage request. This is shared between pipelined and serial paths.
+        let hold_gc_cutoff_guard = if cfg!(test) || cfg!(feature = "testing") {
+            HoldAppliedGcCutoffGuard::Yes
+        } else {
+            // Use the global feature resolver with the tenant ID directly, avoiding the need
+            // to get a timeline/shard which might not be available on this pageserver node.
+            let empty_properties = std::collections::HashMap::new();
+            match self.feature_resolver.evaluate_boolean(
+                "page-service-getpage-hold-applied-gc-cutoff-guard",
+                tenant_id,
+                &empty_properties,
+            ) {
+                Ok(()) => HoldAppliedGcCutoffGuard::Yes,
+                Err(_) => HoldAppliedGcCutoffGuard::No,
+            }
+        };
+        // record it in the span of handle_pagerequests so that both the request_span
+        // and the pipeline implementation spans contains the field.
+        Span::current().record(
+            "hold_gc_cutoff_guard",
+            tracing::field::debug(&hold_gc_cutoff_guard),
+        );
+
         let request_span = info_span!("request");
         let ((pgb_reader, timeline_handles), result) = match self.pipelining_config.clone() {
             PageServicePipeliningConfig::Pipelined(pipelining_config) => {
@@ -1825,6 +1873,7 @@ impl PageServerHandler {
                     pipelining_config,
                     protocol_version,
                     io_concurrency,
+                    hold_gc_cutoff_guard,
                     &ctx,
                 )
                 .await
@@ -1839,6 +1888,7 @@ impl PageServerHandler {
                     request_span,
                     protocol_version,
                     io_concurrency,
+                    hold_gc_cutoff_guard,
                     &ctx,
                 )
                 .await
@@ -1867,6 +1917,7 @@ impl PageServerHandler {
         request_span: Span,
         protocol_version: PagestreamProtocolVersion,
         io_concurrency: IoConcurrency,
+        hold_gc_cutoff_guard: HoldAppliedGcCutoffGuard,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1888,6 +1939,7 @@ impl PageServerHandler {
                 ctx,
                 protocol_version,
                 request_span.clone(),
+                hold_gc_cutoff_guard,
             )
             .await;
             let msg = match msg {
@@ -1935,6 +1987,7 @@ impl PageServerHandler {
         pipelining_config: PageServicePipeliningConfigPipelined,
         protocol_version: PagestreamProtocolVersion,
         io_concurrency: IoConcurrency,
+        hold_gc_cutoff_guard: HoldAppliedGcCutoffGuard,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -2038,6 +2091,7 @@ impl PageServerHandler {
                         &ctx,
                         protocol_version,
                         request_span.clone(),
+                        hold_gc_cutoff_guard,
                     )
                     .await;
                     let Some(read_res) = read_res.transpose() else {
@@ -2084,6 +2138,7 @@ impl PageServerHandler {
                         pages,
                         span: _,
                         shard: _,
+                        applied_gc_cutoff_guard: _,
                         batch_break_reason: _,
                     } = &mut batch
                     {
@@ -2193,8 +2248,7 @@ impl PageServerHandler {
         if request_lsn < not_modified_since {
             return Err(PageStreamError::BadRequest(
                 format!(
-                    "invalid request with request LSN {} and not_modified_since {}",
-                    request_lsn, not_modified_since,
+                    "invalid request with request LSN {request_lsn} and not_modified_since {not_modified_since}",
                 )
                 .into(),
             ));
@@ -2322,12 +2376,16 @@ impl PageServerHandler {
         Ok(PagestreamExistsResponse { req: *req, exists })
     }
 
+    /// If `allow_missing` is true, returns None instead of Err on missing relations. Otherwise,
+    /// never returns None. It is only supported by the gRPC protocol, so we pass it separately to
+    /// avoid changing the libpq protocol types.
     #[instrument(skip_all, fields(shard_id))]
     async fn handle_get_nblocks_request(
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
+        allow_missing: bool,
         ctx: &RequestContext,
-    ) -> Result<PagestreamNblocksResponse, PageStreamError> {
+    ) -> Result<Option<PagestreamNblocksResponse>, PageStreamError> {
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
             timeline,
@@ -2339,20 +2397,25 @@ impl PageServerHandler {
         .await?;
 
         let n_blocks = timeline
-            .get_rel_size(
+            .get_rel_size_in_reldir(
                 req.rel,
                 Version::LsnRange(LsnRange {
                     effective_lsn: lsn,
                     request_lsn: req.hdr.request_lsn,
                 }),
+                None,
+                allow_missing,
                 ctx,
             )
             .await?;
+        let Some(n_blocks) = n_blocks else {
+            return Ok(None);
+        };
 
-        Ok(PagestreamNblocksResponse {
+        Ok(Some(PagestreamNblocksResponse {
             req: *req,
             n_blocks,
-        })
+        }))
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -2497,10 +2560,9 @@ impl PageServerHandler {
                 .map(|(req, res)| {
                     res.map(|page| {
                         (
-                            PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse {
-                                req: req.req,
-                                page,
-                            }),
+                            PagestreamBeMessage::GetPage(
+                                pagestream_api::PagestreamGetPageResponse { req: req.req, page },
+                            ),
                             req.timer,
                             req.ctx,
                         )
@@ -2567,7 +2629,7 @@ impl PageServerHandler {
                 .map(|(req, res)| {
                     res.map(|()| {
                         (
-                            PagestreamBeMessage::Test(models::PagestreamTestResponse {
+                            PagestreamBeMessage::Test(pagestream_api::PagestreamTestResponse {
                                 req: req.req.clone(),
                             }),
                             req.timer,
@@ -2670,26 +2732,16 @@ impl PageServerHandler {
                 prev_lsn,
                 full_backup,
                 replica,
+                None,
                 &ctx,
             )
             .await?;
         } else {
             let mut writer = BufWriter::new(pgb.copyout_writer());
 
-            let cached = {
-                // Basebackup is cached only for this combination of parameters.
-                if timeline.is_basebackup_cache_enabled()
-                    && gzip
-                    && lsn.is_some()
-                    && prev_lsn.is_none()
-                {
-                    self.basebackup_cache
-                        .get(tenant_id, timeline_id, lsn.unwrap())
-                        .await
-                } else {
-                    None
-                }
-            };
+            let cached = timeline
+                .get_cached_basebackup_if_enabled(lsn, prev_lsn, full_backup, replica, gzip)
+                .await;
 
             if let Some(mut cached) = cached {
                 from_cache = true;
@@ -2698,31 +2750,6 @@ impl PageServerHandler {
                     .map_err(|err| {
                         BasebackupError::Client(err, "handle_basebackup_request,cached,copy")
                     })?;
-            } else if gzip {
-                let mut encoder = GzipEncoder::with_quality(
-                    &mut writer,
-                    // NOTE using fast compression because it's on the critical path
-                    //      for compute startup. For an empty database, we get
-                    //      <100KB with this method. The Level::Best compression method
-                    //      gives us <20KB, but maybe we should add basebackup caching
-                    //      on compute shutdown first.
-                    async_compression::Level::Fastest,
-                );
-                basebackup::send_basebackup_tarball(
-                    &mut encoder,
-                    &timeline,
-                    lsn,
-                    prev_lsn,
-                    full_backup,
-                    replica,
-                    &ctx,
-                )
-                .await?;
-                // shutdown the encoder to ensure the gzip footer is written
-                encoder
-                    .shutdown()
-                    .await
-                    .map_err(|e| QueryError::Disconnected(ConnectionError::Io(e)))?;
             } else {
                 basebackup::send_basebackup_tarball(
                     &mut writer,
@@ -2731,6 +2758,11 @@ impl PageServerHandler {
                     prev_lsn,
                     full_backup,
                     replica,
+                    // NB: using fast compression because it's on the critical path for compute
+                    // startup. For an empty database, we get <100KB with this method. The
+                    // Level::Best compression method gives us <20KB, but maybe we should add
+                    // basebackup caching on compute shutdown first.
+                    gzip.then_some(async_compression::Level::Fastest),
                     &ctx,
                 )
                 .await?;
@@ -3268,12 +3300,24 @@ where
 pub struct GrpcPageServiceHandler {
     tenant_manager: Arc<TenantManager>,
     ctx: RequestContext,
+
+    /// Cancelled to shut down the server. Tonic will shut down in response to this, but wait for
+    /// in-flight requests to complete. Any tasks we spawn ourselves must respect this token.
+    cancel: CancellationToken,
+
+    /// Any tasks we spawn ourselves should clone this gate guard, so that we can wait for them to
+    /// complete during shutdown. Request handlers implicitly hold this guard already.
     gate_guard: GateGuard,
+
+    /// `get_vectored` concurrency setting.
     get_vectored_concurrent_io: GetVectoredConcurrentIo,
 }
 
 impl GrpcPageServiceHandler {
     /// Spawns a gRPC server for the page service.
+    ///
+    /// Returns a `CancellableTask` handle that can be used to shut down the server. It waits for
+    /// any in-flight requests and tasks to complete first.
     ///
     /// TODO: this doesn't support TLS. We need TLS reloading via ReloadingCertificateResolver, so we
     /// need to reimplement the TCP+TLS accept loop ourselves.
@@ -3284,12 +3328,15 @@ impl GrpcPageServiceHandler {
         get_vectored_concurrent_io: GetVectoredConcurrentIo,
         listener: std::net::TcpListener,
     ) -> anyhow::Result<CancellableTask> {
+        // Set up a cancellation token for shutting down the server, and a gate to wait for all
+        // requests and spawned tasks to complete.
         let cancel = CancellationToken::new();
+        let gate = Gate::default();
+
         let ctx = RequestContextBuilder::new(TaskKind::PageRequestHandler)
             .download_behavior(DownloadBehavior::Download)
             .perf_span_dispatch(perf_trace_dispatch)
             .detached_child();
-        let gate = Gate::default();
 
         // Set up the TCP socket. We take a preconfigured TcpListener to bind the
         // port early during startup.
@@ -3320,6 +3367,7 @@ impl GrpcPageServiceHandler {
         let page_service_handler = GrpcPageServiceHandler {
             tenant_manager,
             ctx,
+            cancel: cancel.clone(),
             gate_guard: gate.enter().expect("gate was just created"),
             get_vectored_concurrent_io,
         };
@@ -3340,7 +3388,14 @@ impl GrpcPageServiceHandler {
                 Ok(req)
             }))
             // Run the page service.
-            .service(proto::PageServiceServer::new(page_service_handler));
+            .service(
+                proto::PageServiceServer::new(page_service_handler)
+                    // Support both gzip and zstd compression. The client decides what to use.
+                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                    .accept_compressed(tonic::codec::CompressionEncoding::Zstd)
+                    .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+                    .send_compressed(tonic::codec::CompressionEncoding::Zstd),
+            );
         let server = server.add_service(page_service);
 
         // Reflection service for use with e.g. grpcurl.
@@ -3349,41 +3404,33 @@ impl GrpcPageServiceHandler {
             .build_v1()?;
         let server = server.add_service(reflection_service);
 
-        // Spawn server task.
+        // Spawn server task. It runs until the cancellation token fires and in-flight requests and
+        // tasks complete. The `CancellableTask` will wait for the task's join handle, which
+        // implicitly waits for the gate to close.
         let task_cancel = cancel.clone();
         let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-            "grpc listener",
+            "grpc pageservice listener",
             async move {
-                let result = server
+                server
                     .serve_with_incoming_shutdown(incoming, task_cancel.cancelled())
-                    .await;
-                if result.is_ok() {
-                    // TODO: revisit shutdown logic once page service is implemented.
-                    gate.close().await;
-                }
-                result
+                    .await?;
+                // Server exited cleanly. All requests should have completed by now. Wait for any
+                // spawned tasks to complete as well (e.g. IoConcurrency sidecars) via the gate.
+                gate.close().await;
+                anyhow::Ok(())
             },
         ));
 
         Ok(CancellableTask { task, cancel })
     }
 
-    /// Errors if the request is executed on a non-zero shard. Only shard 0 has a complete view of
-    /// relations and their sizes, as well as SLRU segments and similar data.
-    #[allow(clippy::result_large_err)]
-    fn ensure_shard_zero(timeline: &Handle<TenantManagerTypes>) -> Result<(), tonic::Status> {
-        match timeline.get_shard_index().shard_number.0 {
-            0 => Ok(()),
-            shard => Err(tonic::Status::invalid_argument(format!(
-                "request must execute on shard zero (is shard {shard})",
-            ))),
-        }
-    }
-
     /// Generates a PagestreamRequest header from a ReadLsn and request ID.
-    fn make_hdr(read_lsn: page_api::ReadLsn, req_id: u64) -> PagestreamRequest {
+    fn make_hdr(
+        read_lsn: page_api::ReadLsn,
+        req_id: Option<page_api::RequestID>,
+    ) -> PagestreamRequest {
         PagestreamRequest {
-            reqid: req_id,
+            reqid: req_id.map(|r| r.id).unwrap_or_default(),
             request_lsn: read_lsn.request_lsn,
             not_modified_since: read_lsn
                 .not_modified_since_lsn
@@ -3391,28 +3438,70 @@ impl GrpcPageServiceHandler {
         }
     }
 
-    /// Acquires a timeline handle for the given request.
+    /// Acquires a timeline handle for the given request. The shard index must match a local shard.
     ///
-    /// TODO: during shard splits, the compute may still be sending requests to the parent shard
-    /// until the entire split is committed and the compute is notified. Consider installing a
-    /// temporary shard router from the parent to the children while the split is in progress.
-    ///
-    /// TODO: consider moving this to a middleware layer; all requests need it. Needs to manage
-    /// the TimelineHandles lifecycle.
-    ///
-    /// TODO: untangle acquisition from TenantManagerWrapper::resolve() and Cache::get(), to avoid
-    /// the unnecessary overhead.
+    /// NB: this will fail during shard splits, see comment on [`Self::maybe_split_get_page`].
     async fn get_request_timeline(
         &self,
         req: &tonic::Request<impl Any>,
     ) -> Result<Handle<TenantManagerTypes>, GetActiveTimelineError> {
-        let ttid = *extract::<TenantTimelineId>(req);
+        let TenantTimelineId {
+            tenant_id,
+            timeline_id,
+        } = *extract::<TenantTimelineId>(req);
         let shard_index = *extract::<ShardIndex>(req);
-        let shard_selector = ShardSelector::Known(shard_index);
 
+        // TODO: untangle acquisition from TenantManagerWrapper::resolve() and Cache::get(), to
+        // avoid the unnecessary overhead.
         TimelineHandles::new(self.tenant_manager.clone())
-            .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
+            .get(tenant_id, timeline_id, ShardSelector::Known(shard_index))
             .await
+    }
+
+    /// Acquires a timeline handle for the given request, which must be for shard zero. Most
+    /// metadata requests are only valid on shard zero.
+    ///
+    /// NB: during an ongoing shard split, the compute will keep talking to the parent shard until
+    /// the split is committed, but the parent shard may have been removed in the meanwhile. In that
+    /// case, we reroute the request to the new child shard. See [`Self::maybe_split_get_page`].
+    ///
+    /// TODO: revamp the split protocol to avoid this child routing.
+    async fn get_request_timeline_shard_zero(
+        &self,
+        req: &tonic::Request<impl Any>,
+    ) -> Result<Handle<TenantManagerTypes>, tonic::Status> {
+        let TenantTimelineId {
+            tenant_id,
+            timeline_id,
+        } = *extract::<TenantTimelineId>(req);
+        let shard_index = *extract::<ShardIndex>(req);
+
+        if shard_index.shard_number.0 != 0 {
+            return Err(tonic::Status::invalid_argument(format!(
+                "request only valid on shard zero (requested shard {shard_index})",
+            )));
+        }
+
+        // TODO: untangle acquisition from TenantManagerWrapper::resolve() and Cache::get(), to
+        // avoid the unnecessary overhead.
+        let mut handles = TimelineHandles::new(self.tenant_manager.clone());
+        match handles
+            .get(tenant_id, timeline_id, ShardSelector::Known(shard_index))
+            .await
+        {
+            Ok(timeline) => Ok(timeline),
+            Err(err) => {
+                // We may be in the middle of a shard split. Try to find a child shard 0.
+                if let Ok(timeline) = handles
+                    .get(tenant_id, timeline_id, ShardSelector::Zero)
+                    .await
+                    && timeline.get_shard_index().shard_count > shard_index.shard_count
+                {
+                    return Ok(timeline);
+                }
+                Err(err.into())
+            }
+        }
     }
 
     /// Starts a SmgrOpTimer at received_at, throttles the request, and records execution start.
@@ -3438,36 +3527,43 @@ impl GrpcPageServiceHandler {
 
     /// Processes a GetPage batch request, via the GetPages bidirectional streaming RPC.
     ///
-    /// NB: errors will terminate the stream. Per-request errors should return a GetPageResponse
-    /// with an appropriate status code instead.
+    /// NB: errors returned from here are intercepted in get_pages(), and may be converted to a
+    /// GetPageResponse with an appropriate status code to avoid terminating the stream.
     ///
     /// TODO: get_vectored() currently enforces a batch limit of 32. Postgres will typically send
     /// batches up to effective_io_concurrency = 100. Either we have to accept large batches, or
     /// split them up in the client or server.
-    #[instrument(skip_all, fields(req_id, rel, blkno, blks, req_lsn, mod_lsn))]
+    #[instrument(skip_all, fields(
+        req_id = %req.request_id,
+        rel = %req.rel,
+        blkno = %req.block_numbers[0],
+        blks = %req.block_numbers.len(),
+        lsn = %req.read_lsn,
+    ))]
     async fn get_page(
         ctx: &RequestContext,
-        timeline: &WeakHandle<TenantManagerTypes>,
-        req: proto::GetPageRequest,
+        timeline: Handle<TenantManagerTypes>,
+        req: page_api::GetPageRequest,
         io_concurrency: IoConcurrency,
-    ) -> Result<proto::GetPageResponse, tonic::Status> {
-        let received_at = Instant::now();
-        let timeline = timeline.upgrade()?;
+        received_at: Instant,
+    ) -> Result<page_api::GetPageResponse, tonic::Status> {
         let ctx = ctx.with_scope_page_service_pagestream(&timeline);
 
-        // Validate the request, decorate the span, and convert it to a Pagestream request.
-        let req: page_api::GetPageRequest = req.try_into()?;
-
-        span_record!(
-            req_id = %req.request_id,
-            rel = %req.rel,
-            blkno = %req.block_numbers[0],
-            blks = %req.block_numbers.len(),
-            lsn = %req.read_lsn,
-        );
+        for &blkno in &req.block_numbers {
+            let shard = timeline.get_shard_identity();
+            let key = rel_block_to_key(req.rel, blkno);
+            if !shard.is_key_local(&key) {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "block {blkno} of relation {} requested on wrong shard {} (is on {})",
+                    req.rel,
+                    timeline.get_shard_index(),
+                    ShardIndex::new(shard.get_shard_number(&key), shard.count),
+                )));
+            }
+        }
 
         let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn(); // hold guard
-        let effective_lsn = match PageServerHandler::effective_request_lsn(
+        let effective_lsn = PageServerHandler::effective_request_lsn(
             &timeline,
             timeline.get_last_record_lsn(),
             req.read_lsn.request_lsn,
@@ -3475,10 +3571,7 @@ impl GrpcPageServiceHandler {
                 .not_modified_since_lsn
                 .unwrap_or(req.read_lsn.request_lsn),
             &latest_gc_cutoff_lsn,
-        ) {
-            Ok(lsn) => lsn,
-            Err(err) => return err.into_get_page_response(req.request_id),
-        };
+        )?;
 
         let mut batch = SmallVec::with_capacity(req.block_numbers.len());
         for blkno in req.block_numbers {
@@ -3494,7 +3587,7 @@ impl GrpcPageServiceHandler {
 
             batch.push(BatchedGetPageRequest {
                 req: PagestreamGetPageRequest {
-                    hdr: Self::make_hdr(req.read_lsn, req.request_id),
+                    hdr: Self::make_hdr(req.read_lsn, Some(req.request_id)),
                     rel: req.rel,
                     blkno,
                 },
@@ -3524,28 +3617,117 @@ impl GrpcPageServiceHandler {
             request_id: req.request_id,
             status_code: page_api::GetPageStatusCode::Ok,
             reason: None,
-            page_images: Vec::with_capacity(results.len()),
+            rel: req.rel,
+            pages: Vec::with_capacity(results.len()),
         };
 
         for result in results {
             match result {
-                Ok((PagestreamBeMessage::GetPage(r), _, _)) => resp.page_images.push(r.page),
+                Ok((PagestreamBeMessage::GetPage(r), _, _)) => resp.pages.push(page_api::Page {
+                    block_number: r.req.blkno,
+                    image: r.page,
+                }),
                 Ok((resp, _, _)) => {
                     return Err(tonic::Status::internal(format!(
                         "unexpected response: {resp:?}"
                     )));
                 }
-                Err(err) => return err.err.into_get_page_response(req.request_id),
+                Err(err) => return Err(err.err.into()),
             };
         }
 
-        Ok(resp.into())
+        Ok(resp)
+    }
+
+    /// Processes a GetPage request when there is a potential shard split in progress. We have to
+    /// reroute the request to any local child shards, and split batch requests that straddle
+    /// multiple child shards.
+    ///
+    /// Parent shards are split and removed incrementally (there may be many parent shards when
+    /// splitting an already-sharded tenant), but the compute is only notified once the overall
+    /// split commits, which can take several minutes. In the meanwhile, the compute will be sending
+    /// requests to the parent shards.
+    ///
+    /// TODO: add test infrastructure to provoke this situation frequently and for long periods of
+    /// time, to properly exercise it.
+    ///
+    /// TODO: revamp the split protocol to avoid this, e.g.:
+    /// * Keep the parent shard until the split commits and the compute is notified.
+    /// * Notify the compute about each subsplit.
+    /// * Return an error that updates the compute's shard map.
+    #[instrument(skip_all)]
+    #[allow(clippy::too_many_arguments)]
+    async fn maybe_split_get_page(
+        ctx: &RequestContext,
+        handles: &mut TimelineHandles,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        parent: ShardIndex,
+        req: page_api::GetPageRequest,
+        io_concurrency: IoConcurrency,
+        received_at: Instant,
+    ) -> Result<page_api::GetPageResponse, tonic::Status> {
+        // Check the first page to see if we have any child shards at all. Otherwise, the compute is
+        // just talking to the wrong Pageserver. If the parent has been split, the shard now owning
+        // the page must have a higher shard count.
+        let timeline = handles
+            .get(
+                tenant_id,
+                timeline_id,
+                ShardSelector::Page(rel_block_to_key(req.rel, req.block_numbers[0])),
+            )
+            .await?;
+
+        let shard_id = timeline.get_shard_identity();
+        if shard_id.count <= parent.shard_count {
+            return Err(HandleUpgradeError::ShutDown.into()); // emulate original error
+        }
+
+        // Fast path: the request fits in a single shard.
+        if let Some(shard_index) =
+            GetPageSplitter::for_single_shard(&req, shard_id.count, Some(shard_id.stripe_size))?
+        {
+            // We got the shard ID from the first page, so these must be equal.
+            assert_eq!(shard_index.shard_number, shard_id.number);
+            assert_eq!(shard_index.shard_count, shard_id.count);
+            return Self::get_page(ctx, timeline, req, io_concurrency, received_at).await;
+        }
+
+        // The request spans multiple shards; split it and dispatch parallel requests. All pages
+        // were originally in the parent shard, and during a split all children are local, so we
+        // expect to find local shards for all pages.
+        let mut splitter = GetPageSplitter::split(req, shard_id.count, Some(shard_id.stripe_size))?;
+
+        let mut shard_requests = FuturesUnordered::new();
+        for (shard_index, shard_req) in splitter.drain_requests() {
+            let timeline = handles
+                .get(tenant_id, timeline_id, ShardSelector::Known(shard_index))
+                .await?;
+            let future = Self::get_page(
+                ctx,
+                timeline,
+                shard_req,
+                io_concurrency.clone(),
+                received_at,
+            )
+            .map(move |result| result.map(|resp| (shard_index, resp)));
+            shard_requests.push(future);
+        }
+
+        while let Some((shard_index, shard_response)) = shard_requests.next().await.transpose()? {
+            splitter.add_response(shard_index, shard_response)?;
+        }
+
+        Ok(splitter.collect_response()?)
     }
 }
 
 /// Implements the gRPC page service.
 ///
-/// TODO: cancellation.
+/// On client disconnect (e.g. timeout or client shutdown), Tonic will drop the request handler
+/// futures, so the read path must be cancellation-safe. On server shutdown, Tonic will wait for
+/// in-flight requests to complete.
+///
 /// TODO: when the libpq impl is removed, remove the Pagestream types and inline the handler code.
 #[tonic::async_trait]
 impl proto::PageService for GrpcPageServiceHandler {
@@ -3556,116 +3738,118 @@ impl proto::PageService for GrpcPageServiceHandler {
     type GetPagesStream =
         Pin<Box<dyn Stream<Item = Result<proto::GetPageResponse, tonic::Status>> + Send>>;
 
-    #[instrument(skip_all, fields(rel, lsn))]
-    async fn check_rel_exists(
-        &self,
-        req: tonic::Request<proto::CheckRelExistsRequest>,
-    ) -> Result<tonic::Response<proto::CheckRelExistsResponse>, tonic::Status> {
-        let received_at = extract::<ReceivedAt>(&req).0;
-        let timeline = self.get_request_timeline(&req).await?;
-        let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
-
-        // Validate the request, decorate the span, and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&timeline)?;
-        let req: page_api::CheckRelExistsRequest = req.into_inner().try_into()?;
-
-        span_record!(rel=%req.rel, lsn=%req.read_lsn);
-
-        let req = PagestreamExistsRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
-            rel: req.rel,
-        };
-
-        // Execute the request and convert the response.
-        let _timer = Self::record_op_start_and_throttle(
-            &timeline,
-            metrics::SmgrQueryType::GetRelExists,
-            received_at,
-        )
-        .await?;
-
-        let resp = PageServerHandler::handle_get_rel_exists_request(&timeline, &req, &ctx).await?;
-        let resp: page_api::CheckRelExistsResponse = resp.exists;
-        Ok(tonic::Response::new(resp.into()))
-    }
-
-    // TODO: ensure clients use gzip compression for the stream.
     #[instrument(skip_all, fields(lsn))]
     async fn get_base_backup(
         &self,
         req: tonic::Request<proto::GetBaseBackupRequest>,
     ) -> Result<tonic::Response<Self::GetBaseBackupStream>, tonic::Status> {
-        // Send 64 KB chunks to avoid large memory allocations.
-        const CHUNK_SIZE: usize = 64 * 1024;
+        // Send chunks of 256 KB to avoid large memory allocations. pagebench basebackup shows this
+        // to be the sweet spot where throughput is saturated.
+        const CHUNK_SIZE: usize = 256 * 1024;
 
-        let timeline = self.get_request_timeline(&req).await?;
+        let timeline = self.get_request_timeline_shard_zero(&req).await?;
         let ctx = self.ctx.with_scope_timeline(&timeline);
 
-        // Validate the request, decorate the span, and wait for the LSN to arrive.
-        //
-        // TODO: this requires a read LSN, is that ok?
-        Self::ensure_shard_zero(&timeline)?;
+        // Validate the request and decorate the span.
         if timeline.is_archived() == Some(true) {
             return Err(tonic::Status::failed_precondition("timeline is archived"));
         }
         let req: page_api::GetBaseBackupRequest = req.into_inner().try_into()?;
 
-        span_record!(lsn=%req.read_lsn);
+        span_record!(lsn=?req.lsn);
 
-        let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
-        timeline
-            .wait_lsn(
-                req.read_lsn.request_lsn,
-                WaitLsnWaiter::PageService,
-                WaitLsnTimeout::Default,
-                &ctx,
-            )
-            .await?;
-        timeline
-            .check_lsn_is_in_scope(req.read_lsn.request_lsn, &latest_gc_cutoff_lsn)
-            .map_err(|err| {
-                tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
-            })?;
+        // Wait for the LSN to arrive, if given.
+        if let Some(lsn) = req.lsn {
+            let latest_gc_cutoff_lsn = timeline.get_applied_gc_cutoff_lsn();
+            timeline
+                .wait_lsn(
+                    lsn,
+                    WaitLsnWaiter::PageService,
+                    WaitLsnTimeout::Default,
+                    &ctx,
+                )
+                .await?;
+            timeline
+                .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
+                .map_err(|err| {
+                    tonic::Status::invalid_argument(format!("invalid basebackup LSN: {err}"))
+                })?;
+        }
 
         // Spawn a task to run the basebackup.
-        //
-        // TODO: do we need to support full base backups, for debugging?
         let span = Span::current();
+        let gate_guard = self
+            .gate_guard
+            .try_clone()
+            .map_err(|_| tonic::Status::unavailable("shutting down"))?;
         let (mut simplex_read, mut simplex_write) = tokio::io::simplex(CHUNK_SIZE);
         let jh = tokio::spawn(async move {
-            let result = basebackup::send_basebackup_tarball(
-                &mut simplex_write,
-                &timeline,
-                Some(req.read_lsn.request_lsn),
-                None,
-                false,
-                req.replica,
-                &ctx,
-            )
-            .instrument(span) // propagate request span
-            .await;
-            simplex_write.shutdown().await.map_err(|err| {
-                BasebackupError::Server(anyhow!("simplex shutdown failed: {err}"))
-            })?;
+            let _gate_guard = gate_guard; // keep gate open until task completes
+
+            let gzip_level = match req.compression {
+                page_api::BaseBackupCompression::None => None,
+                // NB: using fast compression because it's on the critical path for compute
+                // startup. For an empty database, we get <100KB with this method. The
+                // Level::Best compression method gives us <20KB, but maybe we should add
+                // basebackup caching on compute shutdown first.
+                page_api::BaseBackupCompression::Gzip => Some(async_compression::Level::Fastest),
+            };
+
+            // Check for a cached basebackup.
+            let cached = timeline
+                .get_cached_basebackup_if_enabled(
+                    req.lsn,
+                    None,
+                    req.full,
+                    req.replica,
+                    gzip_level.is_some(),
+                )
+                .await;
+
+            let result = if let Some(mut cached) = cached {
+                // If we have a cached basebackup, send it.
+                tokio::io::copy(&mut cached, &mut simplex_write)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| BasebackupError::Client(err, "cached,copy"))
+            } else {
+                basebackup::send_basebackup_tarball(
+                    &mut simplex_write,
+                    &timeline,
+                    req.lsn,
+                    None,
+                    req.full,
+                    req.replica,
+                    gzip_level,
+                    &ctx,
+                )
+                .instrument(span) // propagate request span
+                .await
+            };
+            simplex_write
+                .shutdown()
+                .await
+                .map_err(|err| BasebackupError::Client(err, "simplex_write"))?;
             result
         });
 
         // Emit chunks of size CHUNK_SIZE.
         let chunks = async_stream::try_stream! {
-            let mut chunk = BytesMut::with_capacity(CHUNK_SIZE);
             loop {
-                let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
-                    tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
-                })?;
-
-                // If we read 0 bytes, either the chunk is full or the stream is closed.
-                if n == 0 {
-                    if chunk.is_empty() {
-                        break;
+                let mut chunk = BytesMut::with_capacity(CHUNK_SIZE).limit(CHUNK_SIZE);
+                loop {
+                    let n = simplex_read.read_buf(&mut chunk).await.map_err(|err| {
+                        tonic::Status::internal(format!("failed to read basebackup chunk: {err}"))
+                    })?;
+                    if n == 0 {
+                        break; // full chunk or closed stream
                     }
-                    yield proto::GetBaseBackupResponseChunk::from(chunk.clone().freeze());
-                    chunk.clear();
                 }
+                let chunk = chunk.into_inner().freeze();
+                if chunk.is_empty() {
+                    break;
+                }
+                yield proto::GetBaseBackupResponseChunk::from(chunk);
             }
             // Wait for the basebackup task to exit and check for errors.
             jh.await.map_err(|err| {
@@ -3682,17 +3866,16 @@ impl proto::PageService for GrpcPageServiceHandler {
         req: tonic::Request<proto::GetDbSizeRequest>,
     ) -> Result<tonic::Response<proto::GetDbSizeResponse>, tonic::Status> {
         let received_at = extract::<ReceivedAt>(&req).0;
-        let timeline = self.get_request_timeline(&req).await?;
+        let timeline = self.get_request_timeline_shard_zero(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetDbSizeRequest = req.into_inner().try_into()?;
 
         span_record!(db_oid=%req.db_oid, lsn=%req.read_lsn);
 
         let req = PagestreamDbSizeRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             dbnode: req.db_oid,
         };
 
@@ -3715,59 +3898,128 @@ impl proto::PageService for GrpcPageServiceHandler {
         req: tonic::Request<tonic::Streaming<proto::GetPageRequest>>,
     ) -> Result<tonic::Response<Self::GetPagesStream>, tonic::Status> {
         // Extract the timeline from the request and check that it exists.
-        let ttid = *extract::<TenantTimelineId>(&req);
+        //
+        // NB: during shard splits, the compute may still send requests to the parent shard. We'll
+        // reroute requests to the child shards below, but we also detect the common cases here
+        // where either the shard exists or no shards exist at all. If we have a child shard, we
+        // can't acquire a weak handle because we don't know which child shard to use yet.
+        let TenantTimelineId {
+            tenant_id,
+            timeline_id,
+        } = *extract::<TenantTimelineId>(&req);
         let shard_index = *extract::<ShardIndex>(&req);
-        let shard_selector = ShardSelector::Known(shard_index);
 
         let mut handles = TimelineHandles::new(self.tenant_manager.clone());
-        handles
-            .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
-            .await?;
+        let timeline = match handles
+            .get(tenant_id, timeline_id, ShardSelector::Known(shard_index))
+            .await
+        {
+            // The timeline shard exists. Keep a weak handle to reuse for each request.
+            Ok(timeline) => Some(timeline.downgrade()),
+            // The shard doesn't exist, but a child shard does. We'll reroute requests later.
+            Err(_) if self.tenant_manager.has_child_shard(tenant_id, shard_index) => None,
+            // Failed to fetch the timeline, and no child shard exists. Error out.
+            Err(err) => return Err(err.into()),
+        };
 
         // Spawn an IoConcurrency sidecar, if enabled.
-        let Ok(gate_guard) = self.gate_guard.try_clone() else {
-            return Err(tonic::Status::unavailable("shutting down"));
-        };
+        let gate_guard = self
+            .gate_guard
+            .try_clone()
+            .map_err(|_| tonic::Status::unavailable("shutting down"))?;
         let io_concurrency =
             IoConcurrency::spawn_from_conf(self.get_vectored_concurrent_io, gate_guard);
 
-        // Spawn a task to handle the GetPageRequest stream.
+        // Construct the GetPageRequest stream handler.
         let span = Span::current();
         let ctx = self.ctx.attached_child();
+        let cancel = self.cancel.clone();
         let mut reqs = req.into_inner();
 
         let resps = async_stream::try_stream! {
-            let timeline = handles
-                .get(ttid.tenant_id, ttid.timeline_id, shard_selector)
-                .await?
-                .downgrade();
-            while let Some(req) = reqs.message().await? {
-                yield Self::get_page(&ctx, &timeline, req, io_concurrency.clone())
+            loop {
+                // Wait for the next client request.
+                //
+                // NB: Tonic considers the entire stream to be an in-flight request and will wait
+                // for it to complete before shutting down. React to cancellation between requests.
+                let req = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(tonic::Status::unavailable("shutting down")),
+
+                    result = reqs.message() => match result {
+                        Ok(Some(req)) => Ok(req),
+                        Ok(None) => break, // client closed the stream
+                        Err(err) => Err(err),
+                    },
+                }?;
+
+                let received_at = Instant::now();
+                let req_id = req.request_id.map(page_api::RequestID::from).unwrap_or_default();
+
+                // Process the request, using a closure to capture errors.
+                let process_request = async || {
+                    let req = page_api::GetPageRequest::try_from(req)?;
+
+                    // Fast path: use the pre-acquired timeline handle.
+                    if let Some(Ok(timeline)) = timeline.as_ref().map(|t| t.upgrade()) {
+                        return Self::get_page(&ctx, timeline, req, io_concurrency.clone(), received_at)
+                            .instrument(span.clone()) // propagate request span
+                            .await
+                    }
+
+                    // The timeline handle is stale. During shard splits, the compute may still be
+                    // sending requests to the parent shard. Try to re-route requests to the child
+                    // shards, and split any batch requests that straddle multiple child shards.
+                    Self::maybe_split_get_page(
+                        &ctx,
+                        &mut handles,
+                        tenant_id,
+                        timeline_id,
+                        shard_index,
+                        req,
+                        io_concurrency.clone(),
+                        received_at,
+                    )
                     .instrument(span.clone()) // propagate request span
-                    .await?
+                    .await
+                };
+
+                // Return the response. Convert per-request errors to GetPageResponses if
+                // appropriate, or terminate the stream with a tonic::Status.
+                yield match process_request().await {
+                    Ok(resp) => resp.into(),
+                    Err(status) => {
+                        // Log the error, since ObservabilityLayer won't see stream errors.
+                        // TODO: it would be nice if we could propagate the get_page() fields here.
+                        span.in_scope(|| {
+                            warn!("request failed with {:?}: {}", status.code(), status.message());
+                        });
+                        page_api::GetPageResponse::try_from_status(status, req_id)?.into()
+                    }
+                }
             }
         };
 
         Ok(tonic::Response::new(Box::pin(resps)))
     }
 
-    #[instrument(skip_all, fields(rel, lsn))]
+    #[instrument(skip_all, fields(rel, lsn, allow_missing))]
     async fn get_rel_size(
         &self,
         req: tonic::Request<proto::GetRelSizeRequest>,
     ) -> Result<tonic::Response<proto::GetRelSizeResponse>, tonic::Status> {
         let received_at = extract::<ReceivedAt>(&req).0;
-        let timeline = self.get_request_timeline(&req).await?;
+        let timeline = self.get_request_timeline_shard_zero(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetRelSizeRequest = req.into_inner().try_into()?;
+        let allow_missing = req.allow_missing;
 
-        span_record!(rel=%req.rel, lsn=%req.read_lsn);
+        span_record!(rel=%req.rel, lsn=%req.read_lsn, allow_missing=%req.allow_missing);
 
         let req = PagestreamNblocksRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             rel: req.rel,
         };
 
@@ -3779,8 +4031,11 @@ impl proto::PageService for GrpcPageServiceHandler {
         )
         .await?;
 
-        let resp = PageServerHandler::handle_get_nblocks_request(&timeline, &req, &ctx).await?;
-        let resp: page_api::GetRelSizeResponse = resp.n_blocks;
+        let resp =
+            PageServerHandler::handle_get_nblocks_request(&timeline, &req, allow_missing, &ctx)
+                .await?;
+        let resp: page_api::GetRelSizeResponse = resp.map(|resp| resp.n_blocks);
+
         Ok(tonic::Response::new(resp.into()))
     }
 
@@ -3790,17 +4045,16 @@ impl proto::PageService for GrpcPageServiceHandler {
         req: tonic::Request<proto::GetSlruSegmentRequest>,
     ) -> Result<tonic::Response<proto::GetSlruSegmentResponse>, tonic::Status> {
         let received_at = extract::<ReceivedAt>(&req).0;
-        let timeline = self.get_request_timeline(&req).await?;
+        let timeline = self.get_request_timeline_shard_zero(&req).await?;
         let ctx = self.ctx.with_scope_page_service_pagestream(&timeline);
 
         // Validate the request, decorate the span, and convert it to a Pagestream request.
-        Self::ensure_shard_zero(&timeline)?;
         let req: page_api::GetSlruSegmentRequest = req.into_inner().try_into()?;
 
         span_record!(kind=%req.kind, segno=%req.segno, lsn=%req.read_lsn);
 
         let req = PagestreamGetSlruSegmentRequest {
-            hdr: Self::make_hdr(req.read_lsn, 0),
+            hdr: Self::make_hdr(req.read_lsn, None),
             kind: req.kind as u8,
             segno: req.segno,
         };
@@ -3817,6 +4071,40 @@ impl proto::PageService for GrpcPageServiceHandler {
             PageServerHandler::handle_get_slru_segment_request(&timeline, &req, &ctx).await?;
         let resp: page_api::GetSlruSegmentResponse = resp.segment;
         Ok(tonic::Response::new(resp.into()))
+    }
+
+    #[instrument(skip_all, fields(lsn))]
+    async fn lease_lsn(
+        &self,
+        req: tonic::Request<proto::LeaseLsnRequest>,
+    ) -> Result<tonic::Response<proto::LeaseLsnResponse>, tonic::Status> {
+        // TODO: this won't work during shard splits, as the request is directed at a specific shard
+        // but the parent shard is removed before the split commits and the compute is notified
+        // (which can take several minutes for large tenants). That's also the case for the libpq
+        // implementation, so we keep the behavior for now.
+        let timeline = self.get_request_timeline(&req).await?;
+        let ctx = self.ctx.with_scope_timeline(&timeline);
+
+        // Validate and convert the request, and decorate the span.
+        let req: page_api::LeaseLsnRequest = req.into_inner().try_into()?;
+
+        span_record!(lsn=%req.lsn);
+
+        // Attempt to acquire a lease. Return FailedPrecondition if the lease could not be granted.
+        let lease_length = timeline.get_lsn_lease_length();
+        let expires = match timeline.renew_lsn_lease(req.lsn, lease_length, &ctx) {
+            Ok(lease) => lease.valid_until,
+            Err(err) => return Err(tonic::Status::failed_precondition(format!("{err}"))),
+        };
+
+        // TODO: is this spammy? Move it compute-side?
+        info!(
+            "acquired lease for {} until {}",
+            req.lsn,
+            chrono::DateTime::<Utc>::from(expires).to_rfc3339()
+        );
+
+        Ok(tonic::Response::new(expires.into()))
     }
 }
 
@@ -3851,40 +4139,85 @@ impl<S: tonic::server::NamedService> tonic::server::NamedService for Observabili
     const NAME: &'static str = S::NAME; // propagate inner service name
 }
 
-impl<S, B> tower::Service<http::Request<B>> for ObservabilityLayerService<S>
+impl<S, Req, Resp> tower::Service<http::Request<Req>> for ObservabilityLayerService<S>
 where
-    S: tower::Service<http::Request<B>>,
+    S: tower::Service<http::Request<Req>, Response = http::Response<Resp>> + Send,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    fn call(&mut self, mut req: http::Request<B>) -> Self::Future {
+    fn call(&mut self, mut req: http::Request<Req>) -> Self::Future {
         // Record the request start time as a request extension.
         //
         // TODO: we should start a timer here instead, but it currently requires a timeline handle
         // and SmgrQueryType, which we don't have yet. Refactor it to provide it later.
         req.extensions_mut().insert(ReceivedAt(Instant::now()));
 
-        // Create a basic tracing span. Enter the span for the current thread (to use it for inner
-        // sync code like interceptors), and instrument the future (to use it for inner async code
-        // like the page service itself).
+        // Extract the peer address and gRPC method.
+        let peer = req
+            .extensions()
+            .get::<TcpConnectInfo>()
+            .and_then(|info| info.remote_addr())
+            .map(|addr| addr.to_string())
+            .unwrap_or_default();
+
+        let method = req
+            .uri()
+            .path()
+            .split('/')
+            .nth(2)
+            .unwrap_or(req.uri().path())
+            .to_string();
+
+        // Create a basic tracing span.
         //
-        // The instrument() call below is not sufficient. It only affects the returned future, and
-        // only takes effect when the caller polls it. Any sync code executed when we call
-        // self.inner.call() below (such as interceptors) runs outside of the returned future, and
-        // is not affected by it. We therefore have to enter the span on the current thread too.
+        // Enter the span for the current thread and instrument the future. It is not sufficient to
+        // only instrument the future, since it only takes effect after the future is returned and
+        // polled, not when the inner service is called below (e.g. during interceptor execution).
         let span = info_span!(
             "grpc:pageservice",
-            // Set by TenantMetadataInterceptor.
+            // These will be populated by TenantMetadataInterceptor.
             tenant_id = field::Empty,
             timeline_id = field::Empty,
             shard_id = field::Empty,
+            // NB: empty fields must be listed first above. Otherwise, the field names will be
+            // clobbered when the empty fields are populated. They will be output last regardless.
+            %peer,
+            %method,
         );
         let _guard = span.enter();
 
-        Box::pin(self.inner.call(req).instrument(span.clone()))
+        // Construct a future for calling the inner service, but don't await it. This avoids having
+        // to clone the inner service into the future below.
+        let call = self.inner.call(req);
+
+        async move {
+            // Await the inner service call.
+            let result = call.await;
+
+            // Log gRPC error statuses. This won't include request info from handler spans, but it
+            // will catch all errors (even those emitted before handler spans are constructed). Only
+            // unary request errors are logged here, not streaming response errors.
+            if let Ok(ref resp) = result
+                && let Some(status) = tonic::Status::from_header_map(resp.headers())
+                && status.code() != tonic::Code::Ok
+            {
+                // TODO: it would be nice if we could propagate the handler span's request fields
+                // here. This could e.g. be done by attaching the request fields to
+                // tonic::Status::metadata via a proc macro.
+                warn!(
+                    "request failed with {:?}: {}",
+                    status.code(),
+                    status.message()
+                );
+            }
+
+            result
+        }
+        .instrument(span.clone())
+        .boxed()
     }
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

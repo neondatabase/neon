@@ -1,16 +1,26 @@
 use std::io;
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use postgres_protocol2::message::backend;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::codec::{Decoder, Encoder};
 
 pub enum FrontendMessage {
-    Raw(Bytes),
+    Raw(BytesMut),
+    RecordNotices(RecordNotices),
+}
+
+pub struct RecordNotices {
+    pub sender: UnboundedSender<Box<str>>,
+    pub limit: usize,
 }
 
 pub enum BackendMessage {
-    Normal { messages: BackendMessages },
+    Normal {
+        messages: BackendMessages,
+        ready: bool,
+    },
     Async(backend::Message),
 }
 
@@ -33,14 +43,11 @@ impl FallibleIterator for BackendMessages {
 
 pub struct PostgresCodec;
 
-impl Encoder<FrontendMessage> for PostgresCodec {
+impl Encoder<BytesMut> for PostgresCodec {
     type Error = io::Error;
 
-    fn encode(&mut self, item: FrontendMessage, dst: &mut BytesMut) -> io::Result<()> {
-        match item {
-            FrontendMessage::Raw(buf) => dst.extend_from_slice(&buf),
-        }
-
+    fn encode(&mut self, item: BytesMut, dst: &mut BytesMut) -> io::Result<()> {
+        dst.unsplit(item);
         Ok(())
     }
 }
@@ -52,6 +59,7 @@ impl Decoder for PostgresCodec {
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<BackendMessage>, io::Error> {
         let mut idx = 0;
 
+        let mut ready = false;
         while let Some(header) = backend::Header::parse(&src[idx..])? {
             let len = header.len() as usize + 1;
             if src[idx..].len() < len {
@@ -75,6 +83,7 @@ impl Decoder for PostgresCodec {
             idx += len;
 
             if header.tag() == backend::READY_FOR_QUERY_TAG {
+                ready = true;
                 break;
             }
         }
@@ -84,6 +93,7 @@ impl Decoder for PostgresCodec {
         } else {
             Ok(Some(BackendMessage::Normal {
                 messages: BackendMessages(src.split_to(idx)),
+                ready,
             }))
         }
     }

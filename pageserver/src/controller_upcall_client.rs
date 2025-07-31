@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use futures::Future;
 use pageserver_api::config::NodeMetadata;
@@ -16,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
-use utils::{backoff, failpoint_support};
+use utils::{backoff, failpoint_support, ip_address};
 
 use crate::config::PageServerConf;
 use crate::virtual_file::on_fatal_io_error;
@@ -27,6 +28,7 @@ pub struct StorageControllerUpcallClient {
     http_client: reqwest::Client,
     base_url: Url,
     node_id: NodeId,
+    node_ip_addr: Option<IpAddr>,
     cancel: CancellationToken,
 }
 
@@ -40,6 +42,7 @@ pub trait StorageControllerUpcallApi {
     fn re_attach(
         &self,
         conf: &PageServerConf,
+        empty_local_disk: bool,
     ) -> impl Future<
         Output = Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError>,
     > + Send;
@@ -91,11 +94,18 @@ impl StorageControllerUpcallClient {
             );
         }
 
+        // Intentionally panics if we encountered any errors parsing or reading the IP address.
+        // Note that if the required environment variable is not set, `read_node_ip_addr_from_env` returns `Ok(None)`
+        // instead of an error.
+        let node_ip_addr =
+            ip_address::read_node_ip_addr_from_env().expect("Error reading node IP address.");
+
         Self {
             http_client: client.build().expect("Failed to construct HTTP client"),
             base_url: url,
             node_id: conf.id,
             cancel: cancel.clone(),
+            node_ip_addr,
         }
     }
 
@@ -146,6 +156,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
     async fn re_attach(
         &self,
         conf: &PageServerConf,
+        empty_local_disk: bool,
     ) -> Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError> {
         let url = self
             .base_url
@@ -159,14 +170,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
                 Ok(m) => {
                     // Since we run one time at startup, be generous in our logging and
                     // dump all metadata.
-                    tracing::info!(
-                        "Loaded node metadata: postgres {}:{}, http {}:{}, other fields: {:?}",
-                        m.postgres_host,
-                        m.postgres_port,
-                        m.http_host,
-                        m.http_port,
-                        m.other
-                    );
+                    tracing::info!("Loaded node metadata: {m}");
 
                     let az_id = {
                         let az_id_from_metadata = m
@@ -195,9 +199,12 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
                         node_id: conf.id,
                         listen_pg_addr: m.postgres_host,
                         listen_pg_port: m.postgres_port,
+                        listen_grpc_addr: m.grpc_host,
+                        listen_grpc_port: m.grpc_port,
                         listen_http_addr: m.http_host,
                         listen_http_port: m.http_port,
                         listen_https_port: m.https_port,
+                        node_ip_addr: self.node_ip_addr,
                         availability_zone_id: az_id.expect("Checked above"),
                     })
                 }
@@ -221,6 +228,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         let request = ReAttachRequest {
             node_id: self.node_id,
             register: register.clone(),
+            empty_local_disk: Some(empty_local_disk),
         };
 
         let response: ReAttachResponse = self

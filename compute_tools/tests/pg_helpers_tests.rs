@@ -31,6 +31,7 @@ mod pg_helpers_tests {
 wal_level = logical
 hot_standby = on
 autoprewarm = off
+offload_lfc_interval_seconds = 20
 neon.safekeepers = '127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501'
 wal_log_hints = on
 log_connections = on

@@ -26,7 +26,11 @@ use utils::id::{NodeId, TenantId, TenantTimelineId};
 use utils::lsn::Lsn;
 use utils::sync::gate::Gate;
 
-use crate::metrics::{FullTimelineInfo, MISC_OPERATION_SECONDS, WalStorageMetrics};
+use crate::metrics::{
+    FullTimelineInfo, MISC_OPERATION_SECONDS, WAL_STORAGE_LIMIT_ERRORS, WalStorageMetrics,
+};
+
+use crate::hadron::GLOBAL_DISK_LIMIT_EXCEEDED;
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage, SafeKeeper, TermLsn};
@@ -190,7 +194,14 @@ impl StateSK {
         &mut self,
         to: Configuration,
     ) -> Result<TimelineMembershipSwitchResponse> {
-        self.state_mut().membership_switch(to).await
+        let result = self.state_mut().membership_switch(to).await?;
+
+        Ok(TimelineMembershipSwitchResponse {
+            previous_conf: result.previous_conf,
+            current_conf: result.current_conf,
+            last_log_term: self.state().acceptor_state.term,
+            flush_lsn: self.flush_lsn(),
+        })
     }
 
     /// Close open WAL files to release FDs.
@@ -416,6 +427,9 @@ impl From<TimelineError> for ApiError {
             TimelineError::NotFound(ttid) => {
                 ApiError::NotFound(anyhow!("timeline {} not found", ttid).into())
             }
+            TimelineError::Deleted(ttid) => {
+                ApiError::NotFound(anyhow!("timeline {} deleted", ttid).into())
+            }
             _ => ApiError::InternalServerError(anyhow!("{}", te)),
         }
     }
@@ -580,7 +594,7 @@ impl Timeline {
 
     /// Cancel the timeline, requesting background activity to stop. Closing
     /// the `self.gate` waits for that.
-    pub async fn cancel(&self) {
+    pub fn cancel(&self) {
         info!("timeline {} shutting down", self.ttid);
         self.cancel.cancel();
     }
@@ -825,6 +839,7 @@ impl Timeline {
 
         let WalSendersTimelineMetricValues {
             ps_feedback_counter,
+            ps_corruption_detected,
             last_ps_feedback,
             interpreted_wal_reader_tasks,
         } = self.walsenders.info_for_metrics();
@@ -833,6 +848,7 @@ impl Timeline {
         Some(FullTimelineInfo {
             ttid: self.ttid,
             ps_feedback_count: ps_feedback_counter,
+            ps_corruption_detected,
             last_ps_feedback,
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),
@@ -900,6 +916,13 @@ impl Timeline {
         to: Configuration,
     ) -> Result<TimelineMembershipSwitchResponse> {
         let mut state = self.write_shared_state().await;
+        // Ensure we don't race with exclude/delete requests by checking the cancellation
+        // token under the write_shared_state lock.
+        // Exclude/delete cancel the timeline under the shared state lock,
+        // so the timeline cannot be deleted in the middle of the membership switch.
+        if self.is_cancelled() {
+            bail!(TimelineError::Cancelled(self.ttid));
+        }
         state.sk.membership_switch(to).await
     }
 
@@ -1043,6 +1066,44 @@ impl WalResidentTimeline {
         Ok(ss)
     }
 
+    // BEGIN HADRON
+    // Check if disk usage by WAL segment files for this timeline exceeds the configured limit.
+    fn hadron_check_disk_usage(
+        &self,
+        shared_state_locked: &mut WriteGuardSharedState<'_>,
+    ) -> Result<()> {
+        // The disk usage is calculated based on the number of segments between `last_removed_segno`
+        // and the current flush LSN segment number. `last_removed_segno` is advanced after
+        // unneeded WAL files are physically removed from disk (see `update_wal_removal_end()`
+        // in `timeline_manager.rs`).
+        let max_timeline_disk_usage_bytes = self.conf.max_timeline_disk_usage_bytes;
+        if max_timeline_disk_usage_bytes > 0 {
+            let last_removed_segno = self.last_removed_segno.load(Ordering::Relaxed);
+            let flush_lsn = shared_state_locked.sk.flush_lsn();
+            let wal_seg_size = shared_state_locked.sk.state().server.wal_seg_size as u64;
+            let current_segno = flush_lsn.segment_number(wal_seg_size as usize);
+
+            let segno_count = current_segno - last_removed_segno;
+            let disk_usage_bytes = segno_count * wal_seg_size;
+
+            if disk_usage_bytes > max_timeline_disk_usage_bytes {
+                WAL_STORAGE_LIMIT_ERRORS.inc();
+                bail!(
+                    "WAL storage utilization exceeds configured limit of {} bytes: current disk usage: {} bytes",
+                    max_timeline_disk_usage_bytes,
+                    disk_usage_bytes
+                );
+            }
+        }
+
+        if GLOBAL_DISK_LIMIT_EXCEEDED.load(Ordering::Relaxed) {
+            bail!("Global disk usage exceeded limit");
+        }
+
+        Ok(())
+    }
+    // END HADRON
+
     /// Pass arrived message to the safekeeper.
     pub async fn process_msg(
         &self,
@@ -1055,6 +1116,13 @@ impl WalResidentTimeline {
         let mut rmsg: Option<AcceptorProposerMessage>;
         {
             let mut shared_state = self.write_shared_state().await;
+            // BEGIN HADRON
+            // Errors from the `hadron_check_disk_usage()` function fail the process_msg() function, which
+            // gets propagated upward and terminates the entire WalAcceptor. This will cause postgres to
+            // disconnect from the safekeeper and reestablish another connection. Postgres will keep retrying
+            // safekeeper connections every second until it can successfully propose WAL to the SK again.
+            self.hadron_check_disk_usage(&mut shared_state)?;
+            // END HADRON
             rmsg = shared_state.sk.safekeeper().process_msg(msg).await?;
 
             // if this is AppendResponse, fill in proper hot standby feedback.

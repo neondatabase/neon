@@ -333,6 +333,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(f"http://localhost:{self.port}/v1/reload_auth_validation_keys")
         self.verbose_error(res)
 
+    def list_tenant_visible_size(self) -> dict[TenantShardId, int]:
+        res = self.get(f"http://localhost:{self.port}/v1/list_tenant_visible_size")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def tenant_list(self) -> list[dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         self.verbose_error(res)
@@ -840,7 +847,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def timeline_lsn_lease(
-        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn
+        self, tenant_id: TenantId | TenantShardId, timeline_id: TimelineId, lsn: Lsn, **kwargs
     ):
         data = {
             "lsn": str(lsn),
@@ -850,6 +857,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/lsn_lease",
             json=data,
+            **kwargs,
         )
         self.verbose_error(res)
         res_json = res.json()
@@ -1002,7 +1010,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def get_metrics_str(self) -> str:
         """You probably want to use get_metrics() instead."""
-        res = self.get(f"http://localhost:{self.port}/metrics")
+        res = self.get(f"http://localhost:{self.port}/metrics?use_latest=true")
         self.verbose_error(res)
         return res.text
 
@@ -1216,6 +1224,41 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/list_aux_files",
             json={"lsn": str(lsn)},
+        )
+        self.verbose_error(res)
+        return res.json()
+
+    def force_override_feature_flag(self, flag: str, value: str | None = None):
+        if value is None:
+            res = self.delete(
+                f"http://localhost:{self.port}/v1/feature_flag/{flag}",
+            )
+        else:
+            res = self.put(
+                f"http://localhost:{self.port}/v1/feature_flag/{flag}",
+                params={"value": value},
+            )
+        self.verbose_error(res)
+
+    def evaluate_feature_flag_boolean(self, tenant_id: TenantId, flag: str) -> Any:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/feature_flag/{flag}",
+            params={"as": "boolean"},
+        )
+        self.verbose_error(res)
+        return res.json()
+
+    def evaluate_feature_flag_multivariate(self, tenant_id: TenantId, flag: str) -> Any:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/feature_flag/{flag}",
+            params={"as": "multivariate"},
+        )
+        self.verbose_error(res)
+        return res.json()
+
+    def force_refresh_feature_flag(self, tenant_id: TenantId | TenantShardId):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/force_refresh_feature_flag",
         )
         self.verbose_error(res)
         return res.json()

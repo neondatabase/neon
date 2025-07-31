@@ -76,7 +76,6 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
 
     env = neon_env_builder.init_start()
-    """Tests tenants with and without wal acceptors"""
     tenant_1, _ = env.create_tenant()
     tenant_2, _ = env.create_tenant()
 
@@ -299,15 +298,26 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
         assert post_detach_samples == set()
 
 
-def test_pageserver_metrics_removed_after_offload(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("compaction", ["compaction_enabled", "compaction_disabled"])
+def test_pageserver_metrics_removed_after_offload(
+    neon_env_builder: NeonEnvBuilder, compaction: str
+):
     """Tests that when a timeline is offloaded, the tenant specific metrics are not left behind"""
 
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
-
     neon_env_builder.num_safekeepers = 3
 
     env = neon_env_builder.init_start()
-    tenant_1, _ = env.create_tenant()
+    tenant_1, _ = env.create_tenant(
+        conf={
+            # disable background compaction and GC so that we don't have leftover tasks
+            # after offloading.
+            "gc_period": "0s",
+            "compaction_period": "0s",
+        }
+        if compaction == "compaction_disabled"
+        else None
+    )
 
     timeline_1 = env.create_timeline("test_metrics_removed_after_offload_1", tenant_id=tenant_1)
     timeline_2 = env.create_timeline("test_metrics_removed_after_offload_2", tenant_id=tenant_1)
@@ -352,6 +362,23 @@ def test_pageserver_metrics_removed_after_offload(neon_env_builder: NeonEnvBuild
             state=TimelineArchivalState.ARCHIVED,
         )
         env.pageserver.http_client().timeline_offload(tenant_1, timeline)
+        # We need to wait until all background jobs are finished before we can check the metrics.
+        # There're many of them: compaction, GC, etc.
+        wait_until(
+            lambda: all(
+                sample.value == 0
+                for sample in env.pageserver.http_client()
+                .get_metrics()
+                .query_all("pageserver_background_loop_semaphore_waiting_tasks")
+            )
+            and all(
+                sample.value == 0
+                for sample in env.pageserver.http_client()
+                .get_metrics()
+                .query_all("pageserver_background_loop_semaphore_running_tasks")
+            )
+        )
+
         post_offload_samples = set(
             [x.name for x in get_ps_metric_samples_for_timeline(tenant_1, timeline)]
         )

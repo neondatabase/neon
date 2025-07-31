@@ -217,7 +217,7 @@ if SQL_EXPORTER is None:
             self, logs_dir: Path, config_file: Path, collector_file: Path, port: int
         ) -> None:
             # NOTE: Keep the version the same as in
-            # compute/compute-node.Dockerfile and build-tools.Dockerfile.
+            # compute/compute-node.Dockerfile and build-tools/Dockerfile.
             #
             # The "host" network mode allows sql_exporter to talk to the
             # endpoint which is running on the host.
@@ -418,7 +418,7 @@ def test_sql_exporter_metrics_e2e(
     pg_user = conn_options["user"]
     pg_dbname = conn_options["dbname"]
     pg_application_name = f"sql_exporter{stem_suffix}"
-    connstr = f"postgresql://{pg_user}@{pg_host}:{pg_port}/{pg_dbname}?sslmode=disable&application_name={pg_application_name}"
+    connstr = f"postgresql://{pg_user}@{pg_host}:{pg_port}/{pg_dbname}?sslmode=disable&application_name={pg_application_name}&pgaudit.log=none"
 
     def escape_go_filepath_match_characters(s: str) -> str:
         """

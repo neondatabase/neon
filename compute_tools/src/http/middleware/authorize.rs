@@ -16,13 +16,29 @@ use crate::http::JsonResponse;
 #[derive(Clone, Debug)]
 pub(in crate::http) struct Authorize {
     compute_id: String,
+    // BEGIN HADRON
+    // Hadron instance ID. Only set if it's a Lakebase V1 a.k.a. Hadron instance.
+    instance_id: Option<String>,
+    // END HADRON
     jwks: JwkSet,
     validation: Validation,
 }
 
 impl Authorize {
-    pub fn new(compute_id: String, jwks: JwkSet) -> Self {
+    pub fn new(compute_id: String, instance_id: Option<String>, jwks: JwkSet) -> Self {
         let mut validation = Validation::new(Algorithm::EdDSA);
+
+        // BEGIN HADRON
+        let use_rsa = jwks.keys.iter().any(|jwk| {
+            jwk.common
+                .key_algorithm
+                .is_some_and(|alg| alg == jsonwebtoken::jwk::KeyAlgorithm::RS256)
+        });
+        if use_rsa {
+            validation = Validation::new(Algorithm::RS256);
+        }
+        // END HADRON
+
         validation.validate_exp = true;
         // Unused by the control plane
         validation.validate_nbf = false;
@@ -34,6 +50,7 @@ impl Authorize {
 
         Self {
             compute_id,
+            instance_id,
             jwks,
             validation,
         }
@@ -47,10 +64,20 @@ impl AsyncAuthorizeRequest<Body> for Authorize {
 
     fn authorize(&mut self, mut request: Request<Body>) -> Self::Future {
         let compute_id = self.compute_id.clone();
+        let is_hadron_instance = self.instance_id.is_some();
         let jwks = self.jwks.clone();
         let validation = self.validation.clone();
 
         Box::pin(async move {
+            // BEGIN HADRON
+            // In Hadron deployments the "external" HTTP endpoint on compute_ctl can only be
+            // accessed by trusted components (enforced by dblet network policy), so we can bypass
+            // all auth here.
+            if is_hadron_instance {
+                return Ok(request);
+            }
+            // END HADRON
+
             let TypedHeader(Authorization(bearer)) = request
                 .extract_parts::<TypedHeader<Authorization<Bearer>>>()
                 .await

@@ -4,19 +4,21 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
+use std::cmp::min;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::layer_manager::{LayerManagerLockHolder, LayerManagerReadGuard};
+use super::layer_manager::LayerManagerLockHolder;
 use super::{
     CompactFlags, CompactOptions, CompactionError, CreateImageLayersError, DurationRecorder,
     GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
     Timeline,
 };
 
-use crate::tenant::timeline::DeltaEntry;
+use crate::pgdatadir_mapping::CollectKeySpaceError;
+use crate::tenant::timeline::{DeltaEntry, RepartitionError};
 use crate::walredo::RedoAttemptType;
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
@@ -29,18 +31,18 @@ use pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE;
 use pageserver_api::key::{KEY_SIZE, Key};
 use pageserver_api::keyspace::{KeySpace, ShardedRange};
 use pageserver_api::models::{CompactInfoResponse, CompactKeyRange};
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
-use pageserver_api::value::Value;
 use pageserver_compaction::helpers::{fully_contains, overlaps_with};
 use pageserver_compaction::interface::*;
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, trace, warn};
-use utils::critical;
+use utils::critical_timeline;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
+use wal_decoder::models::record::NeonWalRecord;
+use wal_decoder::models::value::Value;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
@@ -64,7 +66,7 @@ use crate::tenant::timeline::{
     DeltaLayerWriter, ImageLayerCreationOutcome, ImageLayerWriter, IoConcurrency, Layer,
     ResidentLayer, drop_layer_manager_rlock,
 };
-use crate::tenant::{DeltaLayer, MaybeOffloaded};
+use crate::tenant::{DeltaLayer, MaybeOffloaded, PageReconstructError};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 /// Maximum number of deltas before generating an image layer in bottom-most compaction.
@@ -101,7 +103,11 @@ pub enum GcCompactionQueueItem {
         /// Whether the compaction is triggered automatically (determines whether we need to update L2 LSN)
         auto: bool,
     },
-    SubCompactionJob(CompactOptions),
+    SubCompactionJob {
+        i: usize,
+        total: usize,
+        options: CompactOptions,
+    },
     Notify(GcCompactionJobId, Option<Lsn>),
 }
 
@@ -163,7 +169,7 @@ impl GcCompactionQueueItem {
                 running,
                 job_id: id.0,
             }),
-            GcCompactionQueueItem::SubCompactionJob(options) => Some(CompactInfoResponse {
+            GcCompactionQueueItem::SubCompactionJob { options, .. } => Some(CompactInfoResponse {
                 compact_key_range: options.compact_key_range,
                 compact_lsn_range: options.compact_lsn_range,
                 sub_compaction: options.sub_compaction,
@@ -390,6 +396,7 @@ impl GcCompactionQueue {
                     }),
                     compact_lsn_range: None,
                     sub_compaction_max_job_size_mb: None,
+                    gc_compaction_do_metadata_compaction: false,
                 },
                 permit,
             );
@@ -489,7 +496,7 @@ impl GcCompactionQueue {
                 .map(|job| job.compact_lsn_range.end)
                 .max()
                 .unwrap();
-            for job in jobs {
+            for (i, job) in jobs.into_iter().enumerate() {
                 // Unfortunately we need to convert the `GcCompactJob` back to `CompactionOptions`
                 // until we do further refactors to allow directly call `compact_with_gc`.
                 let mut flags: EnumSet<CompactFlags> = EnumSet::default();
@@ -506,8 +513,13 @@ impl GcCompactionQueue {
                     compact_key_range: Some(job.compact_key_range.into()),
                     compact_lsn_range: Some(job.compact_lsn_range.into()),
                     sub_compaction_max_job_size_mb: None,
+                    gc_compaction_do_metadata_compaction: false,
                 };
-                pending_tasks.push(GcCompactionQueueItem::SubCompactionJob(options));
+                pending_tasks.push(GcCompactionQueueItem::SubCompactionJob {
+                    options,
+                    i,
+                    total: jobs_len,
+                });
             }
 
             if !auto {
@@ -563,7 +575,7 @@ impl GcCompactionQueue {
         }
         match res {
             Ok(res) => Ok(res),
-            Err(CompactionError::ShuttingDown) => Err(CompactionError::ShuttingDown),
+            Err(e) if e.is_cancel() => Err(e),
             Err(_) => {
                 // There are some cases where traditional gc might collect some layer
                 // files causing gc-compaction cannot read the full history of the key.
@@ -583,9 +595,9 @@ impl GcCompactionQueue {
         timeline: &Arc<Timeline>,
     ) -> Result<CompactionOutcome, CompactionError> {
         let Ok(_one_op_at_a_time_guard) = self.consumer_lock.try_lock() else {
-            return Err(CompactionError::AlreadyRunning(
-                "cannot run gc-compaction because another gc-compaction is running. This should not happen because we only call this function from the gc-compaction queue.",
-            ));
+            return Err(CompactionError::Other(anyhow::anyhow!(
+                "cannot run gc-compaction because another gc-compaction is running. This should not happen because we only call this function from the gc-compaction queue."
+            )));
         };
         let has_pending_tasks;
         let mut yield_for_l0 = false;
@@ -651,7 +663,7 @@ impl GcCompactionQueue {
                     }
                 }
             }
-            GcCompactionQueueItem::SubCompactionJob(options) => {
+            GcCompactionQueueItem::SubCompactionJob { options, i, total } => {
                 // TODO: error handling, clear the queue if any task fails?
                 let _gc_guard = match gc_block.start().await {
                     Ok(guard) => guard,
@@ -663,6 +675,7 @@ impl GcCompactionQueue {
                         )));
                     }
                 };
+                info!("running gc-compaction subcompaction job {}/{}", i, total);
                 let res = timeline.compact_with_options(cancel, options, ctx).await;
                 let compaction_result = match res {
                     Ok(res) => res,
@@ -774,6 +787,8 @@ pub(crate) struct GcCompactJob {
     /// as specified here. The true range being compacted is `min_lsn/max_lsn` in [`GcCompactionJobDescription`].
     /// min_lsn will always <= the lower bound specified here, and max_lsn will always >= the upper bound specified here.
     pub compact_lsn_range: Range<Lsn>,
+    /// See [`CompactOptions::gc_compaction_do_metadata_compaction`].
+    pub do_metadata_compaction: bool,
 }
 
 impl GcCompactJob {
@@ -788,6 +803,7 @@ impl GcCompactJob {
                 .compact_lsn_range
                 .map(|x| x.into())
                 .unwrap_or(Lsn::INVALID..Lsn::MAX),
+            do_metadata_compaction: options.gc_compaction_do_metadata_compaction,
         }
     }
 }
@@ -977,7 +993,7 @@ impl KeyHistoryRetention {
             tline
                 .reconstruct_value(key, lsn, data, RedoAttemptType::GcCompaction)
                 .await
-                .with_context(|| format!("verification failed for key {} at lsn {}", key, lsn))?;
+                .with_context(|| format!("verification failed for key {key} at lsn {lsn}"))?;
 
             Ok(())
         }
@@ -1250,12 +1266,15 @@ impl Timeline {
         // Is the timeline being deleted?
         if self.is_stopping() {
             trace!("Dropping out of compaction on timeline shutdown");
-            return Err(CompactionError::ShuttingDown);
+            return Err(CompactionError::new_cancelled());
         }
 
         let target_file_size = self.get_checkpoint_distance();
 
         // Define partitioning schema if needed
+
+        // HADRON
+        let force_image_creation_lsn = self.get_force_image_creation_lsn();
 
         // 1. L0 Compact
         let l0_outcome = {
@@ -1264,6 +1283,7 @@ impl Timeline {
                 .compact_level0(
                     target_file_size,
                     options.flags.contains(CompactFlags::ForceL0Compaction),
+                    force_image_creation_lsn,
                     ctx,
                 )
                 .await?;
@@ -1306,13 +1326,7 @@ impl Timeline {
                 .max()
         };
 
-        let (partition_mode, partition_lsn) = if cfg!(test)
-            || cfg!(feature = "testing")
-            || self
-                .feature_resolver
-                .evaluate_boolean("image-compaction-boundary", self.tenant_shard_id.tenant_id)
-                .is_ok()
-        {
+        let (partition_mode, partition_lsn) = {
             let last_repartition_lsn = self.partitioning.read().1;
             let lsn = match l0_l1_boundary_lsn {
                 Some(boundary) => gc_cutoff
@@ -1328,8 +1342,6 @@ impl Timeline {
             } else {
                 ("l0_l1_boundary", lsn)
             }
-        } else {
-            ("latest_record", self.get_last_record_lsn())
         };
 
         // 2. Repartition and create image layers if necessary
@@ -1366,6 +1378,7 @@ impl Timeline {
                     .create_image_layers(
                         &partitioning,
                         lsn,
+                        force_image_creation_lsn,
                         mode,
                         &image_ctx,
                         self.last_image_layer_creation_status
@@ -1381,7 +1394,12 @@ impl Timeline {
                             GetVectoredError::MissingKey(_),
                         ) = err
                         {
-                            critical!("missing key during compaction: {err:?}");
+                            critical_timeline!(
+                                self.tenant_shard_id,
+                                self.timeline_id,
+                                Some(&self.corruption_detected),
+                                "missing key during compaction: {err:?}"
+                            );
                         }
                     })?;
 
@@ -1404,18 +1422,34 @@ impl Timeline {
             }
 
             // Suppress errors when cancelled.
-            Err(_) if self.cancel.is_cancelled() => {}
-            Err(err) if err.is_cancel() => {}
-
-            // Alert on critical errors that indicate data corruption.
-            Err(err) if err.is_critical() => {
-                critical!("could not compact, repartitioning keyspace failed: {err:?}");
-            }
-
-            // Log other errors. No partitioning? This is normal, if the timeline was just created
+            //
+            // Log other errors but continue. Failure to repartition is normal, if the timeline was just created
             // as an empty timeline. Also in unit tests, when we use the timeline as a simple
             // key-value store, ignoring the datadir layout. Log the error but continue.
-            Err(err) => error!("could not compact, repartitioning keyspace failed: {err:?}"),
+            //
+            // TODO:
+            // 1. shouldn't we return early here if we observe cancellation
+            // 2. Experiment: can we stop checking self.cancel here?
+            Err(_) if self.cancel.is_cancelled() => {} // TODO: try how we fare removing this branch
+            Err(err) if err.is_cancel() => {}
+            Err(RepartitionError::CollectKeyspace(
+                e @ CollectKeySpaceError::Decode(_)
+                | e @ CollectKeySpaceError::PageRead(
+                    PageReconstructError::MissingKey(_) | PageReconstructError::WalRedo(_),
+                ),
+            )) => {
+                // Alert on critical errors that indicate data corruption.
+                critical_timeline!(
+                    self.tenant_shard_id,
+                    self.timeline_id,
+                    Some(&self.corruption_detected),
+                    "could not compact, repartitioning keyspace failed: {e:?}"
+                );
+            }
+            Err(e) => error!(
+                "could not compact, repartitioning keyspace failed: {:?}",
+                e.into_anyhow()
+            ),
         };
 
         let partition_count = self.partitioning.read().0.0.parts.len();
@@ -1442,6 +1476,41 @@ impl Timeline {
 
         Ok(CompactionOutcome::Done)
     }
+
+    /* BEGIN_HADRON */
+    // Get the force image creation LSN based on gc_cutoff_lsn.
+    // Note that this is an estimation and the workload rate may suddenly change. When that happens,
+    // the force image creation may be too early or too late, but eventually it should be able to catch up.
+    pub(crate) fn get_force_image_creation_lsn(self: &Arc<Self>) -> Option<Lsn> {
+        let image_creation_period = self.get_image_layer_force_creation_period()?;
+        let current_lsn = self.get_last_record_lsn();
+        let pitr_lsn = self.gc_info.read().unwrap().cutoffs.time?;
+        let pitr_interval = self.get_pitr_interval();
+        if pitr_lsn == Lsn::INVALID || pitr_interval.is_zero() {
+            tracing::warn!(
+                "pitr LSN/interval not found, skipping force image creation LSN calculation"
+            );
+            return None;
+        }
+
+        let delta_lsn = current_lsn.checked_sub(pitr_lsn).unwrap().0
+            * image_creation_period.as_secs()
+            / pitr_interval.as_secs();
+        let force_image_creation_lsn = current_lsn.checked_sub(delta_lsn).unwrap_or(Lsn(0));
+
+        tracing::info!(
+            "Tenant shard {} computed force_image_creation_lsn: {}. Current lsn: {}, image_layer_force_creation_period: {:?}, GC cutoff: {}, PITR interval: {:?}",
+            self.tenant_shard_id,
+            force_image_creation_lsn,
+            current_lsn,
+            image_creation_period,
+            pitr_lsn,
+            pitr_interval
+        );
+
+        Some(force_image_creation_lsn)
+    }
+    /* END_HADRON */
 
     /// Check for layers that are elegible to be rewritten:
     /// - Shard splitting: After a shard split, ancestor layers beyond pitr_interval, so that
@@ -1591,13 +1660,15 @@ impl Timeline {
         let started = Instant::now();
 
         let mut replace_image_layers = Vec::new();
+        let total = layers_to_rewrite.len();
 
-        for layer in layers_to_rewrite {
+        for (i, layer) in layers_to_rewrite.into_iter().enumerate() {
             if self.cancel.is_cancelled() {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
 
-            info!(layer=%layer, "rewriting layer after shard split");
+            info!(layer=%layer, "rewriting layer after shard split: {}/{}", i, total);
+
             let mut image_layer_writer = ImageLayerWriter::new(
                 self.conf,
                 self.timeline_id,
@@ -1691,7 +1762,7 @@ impl Timeline {
                     Ok(()) => {},
                     Err(WaitCompletionError::NotInitialized(ni)) => return Err(CompactionError::from(ni)),
                     Err(WaitCompletionError::UploadQueueShutDownOrStopped) => {
-                        return Err(CompactionError::ShuttingDown);
+                        return Err(CompactionError::new_cancelled());
                     }
                 },
                 // Don't wait if there's L0 compaction to do. We don't need to update the outcome
@@ -1770,6 +1841,7 @@ impl Timeline {
         self: &Arc<Self>,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
+        force_compaction_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<CompactionOutcome, CompactionError> {
         let CompactLevel0Phase1Result {
@@ -1779,23 +1851,18 @@ impl Timeline {
         } = {
             let phase1_span = info_span!("compact_level0_phase1");
             let ctx = ctx.attached_child();
-            let mut stats = CompactLevel0Phase1StatsBuilder {
+            let stats = CompactLevel0Phase1StatsBuilder {
                 version: Some(2),
                 tenant_id: Some(self.tenant_shard_id),
                 timeline_id: Some(self.timeline_id),
                 ..Default::default()
             };
 
-            let begin = tokio::time::Instant::now();
-            let phase1_layers_locked = self.layers.read(LayerManagerLockHolder::Compaction).await;
-            let now = tokio::time::Instant::now();
-            stats.read_lock_acquisition_micros =
-                DurationRecorder::Recorded(RecordedDuration(now - begin), now);
             self.compact_level0_phase1(
-                phase1_layers_locked,
                 stats,
                 target_file_size,
                 force_compaction_ignore_threshold,
+                force_compaction_lsn,
                 &ctx,
             )
             .instrument(phase1_span)
@@ -1813,16 +1880,20 @@ impl Timeline {
     }
 
     /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
-    async fn compact_level0_phase1<'a>(
-        self: &'a Arc<Self>,
-        guard: LayerManagerReadGuard<'a>,
+    async fn compact_level0_phase1(
+        self: &Arc<Self>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         force_compaction_ignore_threshold: bool,
+        force_compaction_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
-        stats.read_lock_held_spawn_blocking_startup_micros =
-            stats.read_lock_acquisition_micros.till_now(); // set by caller
+        let begin = tokio::time::Instant::now();
+        let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
+        let now = tokio::time::Instant::now();
+        stats.read_lock_acquisition_micros =
+            DurationRecorder::Recorded(RecordedDuration(now - begin), now);
+
         let layers = guard.layer_map()?;
         let level0_deltas = layers.level0_deltas();
         stats.level0_deltas_count = Some(level0_deltas.len());
@@ -1844,11 +1915,28 @@ impl Timeline {
                     return Ok(CompactLevel0Phase1Result::default());
                 }
             } else {
-                debug!(
-                    level0_deltas = level0_deltas.len(),
-                    threshold, "too few deltas to compact"
-                );
-                return Ok(CompactLevel0Phase1Result::default());
+                // HADRON
+                let min_lsn = level0_deltas
+                    .iter()
+                    .map(|a| a.get_lsn_range().start)
+                    .reduce(min);
+                if force_compaction_lsn.is_some()
+                    && min_lsn.is_some()
+                    && min_lsn.unwrap() < force_compaction_lsn.unwrap()
+                {
+                    info!(
+                        "forcing L0 compaction of {} L0 deltas. Min lsn: {}, force compaction lsn: {}",
+                        level0_deltas.len(),
+                        min_lsn.unwrap(),
+                        force_compaction_lsn.unwrap()
+                    );
+                } else {
+                    debug!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact"
+                    );
+                    return Ok(CompactLevel0Phase1Result::default());
+                }
             }
         }
 
@@ -1856,6 +1944,12 @@ impl Timeline {
             .iter()
             .map(|x| guard.get_from_desc(x))
             .collect::<Vec<_>>();
+
+        drop_layer_manager_rlock(guard);
+
+        // The is the last LSN that we have seen for L0 compaction in the timeline. This LSN might be updated
+        // by the time we finish the compaction. So we need to get it here.
+        let l0_last_record_lsn = self.get_last_record_lsn();
 
         // Gather the files to compact in this iteration.
         //
@@ -1944,16 +2038,14 @@ impl Timeline {
         // we don't accidentally use it later in the function.
         drop(level0_deltas);
 
-        stats.read_lock_held_prerequisites_micros = stats
-            .read_lock_held_spawn_blocking_startup_micros
-            .till_now();
+        stats.compaction_prerequisites_micros = stats.read_lock_acquisition_micros.till_now();
 
         // TODO: replace with streaming k-merge
         let all_keys = {
             let mut all_keys = Vec::new();
             for l in deltas_to_compact.iter() {
                 if self.cancel.is_cancelled() {
-                    return Err(CompactionError::ShuttingDown);
+                    return Err(CompactionError::new_cancelled());
                 }
                 let delta = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
                 let keys = delta
@@ -1968,7 +2060,7 @@ impl Timeline {
             all_keys
         };
 
-        stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
+        stats.read_lock_held_key_sort_micros = stats.compaction_prerequisites_micros.till_now();
 
         // Determine N largest holes where N is number of compacted layers. The vec is sorted by key range start.
         //
@@ -2002,7 +2094,6 @@ impl Timeline {
                 }
             }
             let max_holes = deltas_to_compact.len();
-            let last_record_lsn = self.get_last_record_lsn();
             let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
             let min_hole_coverage_size = 3; // TODO: something more flexible?
             // min-heap (reserve space for one more element added before eviction)
@@ -2021,8 +2112,12 @@ impl Timeline {
                         // has not so much sense, because largest holes will corresponds field1/field2 changes.
                         // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
                         // That is why it is better to measure size of hole as number of covering image layers.
-                        let coverage_size =
-                            layers.image_coverage(&key_range, last_record_lsn).len();
+                        let coverage_size = {
+                            // TODO: optimize this with copy-on-write layer map.
+                            let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
+                            let layers = guard.layer_map()?;
+                            layers.image_coverage(&key_range, l0_last_record_lsn).len()
+                        };
                         if coverage_size >= min_hole_coverage_size {
                             heap.push(Hole {
                                 key_range,
@@ -2041,10 +2136,9 @@ impl Timeline {
             holes
         };
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
-        drop_layer_manager_rlock(guard);
 
         if self.cancel.is_cancelled() {
-            return Err(CompactionError::ShuttingDown);
+            return Err(CompactionError::new_cancelled());
         }
 
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
@@ -2152,7 +2246,7 @@ impl Timeline {
                 // avoid hitting the cancellation token on every key. in benches, we end up
                 // shuffling an order of million keys per layer, this means we'll check it
                 // around tens of times per layer.
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
 
             let same_key = prev_key == Some(key);
@@ -2237,7 +2331,7 @@ impl Timeline {
                 if writer.is_none() {
                     if self.cancel.is_cancelled() {
                         // to be somewhat responsive to cancellation, check for each new layer
-                        return Err(CompactionError::ShuttingDown);
+                        return Err(CompactionError::new_cancelled());
                     }
                     // Create writer if not initiaized yet
                     writer = Some(
@@ -2382,9 +2476,8 @@ struct CompactLevel0Phase1StatsBuilder {
     tenant_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
     read_lock_acquisition_micros: DurationRecorder,
-    read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
     read_lock_held_key_sort_micros: DurationRecorder,
-    read_lock_held_prerequisites_micros: DurationRecorder,
+    compaction_prerequisites_micros: DurationRecorder,
     read_lock_held_compute_holes_micros: DurationRecorder,
     read_lock_drop_micros: DurationRecorder,
     write_layer_files_micros: DurationRecorder,
@@ -2399,9 +2492,8 @@ struct CompactLevel0Phase1Stats {
     tenant_id: TenantShardId,
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
-    read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
     read_lock_held_key_sort_micros: RecordedDuration,
-    read_lock_held_prerequisites_micros: RecordedDuration,
+    compaction_prerequisites_micros: RecordedDuration,
     read_lock_held_compute_holes_micros: RecordedDuration,
     read_lock_drop_micros: RecordedDuration,
     write_layer_files_micros: RecordedDuration,
@@ -2426,16 +2518,12 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .read_lock_acquisition_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_acquisition_micros not set"))?,
-            read_lock_held_spawn_blocking_startup_micros: value
-                .read_lock_held_spawn_blocking_startup_micros
-                .into_recorded()
-                .ok_or_else(|| anyhow!("read_lock_held_spawn_blocking_startup_micros not set"))?,
             read_lock_held_key_sort_micros: value
                 .read_lock_held_key_sort_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_key_sort_micros not set"))?,
-            read_lock_held_prerequisites_micros: value
-                .read_lock_held_prerequisites_micros
+            compaction_prerequisites_micros: value
+                .compaction_prerequisites_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_prerequisites_micros not set"))?,
             read_lock_held_compute_holes_micros: value
@@ -2499,10 +2587,13 @@ impl Timeline {
         // Is the timeline being deleted?
         if self.is_stopping() {
             trace!("Dropping out of compaction on timeline shutdown");
-            return Err(CompactionError::ShuttingDown);
+            return Err(CompactionError::new_cancelled());
         }
 
-        let (dense_ks, _sparse_ks) = self.collect_keyspace(end_lsn, ctx).await?;
+        let (dense_ks, _sparse_ks) = self
+            .collect_keyspace(end_lsn, ctx)
+            .await
+            .map_err(CompactionError::from_collect_keyspace)?;
         // TODO(chi): ignore sparse_keyspace for now, compact it in the future.
         let mut adaptor = TimelineAdaptor::new(self, (end_lsn, dense_ks));
 
@@ -2647,15 +2738,15 @@ impl Timeline {
             use std::fmt::Write;
             let mut output = String::new();
             if let Some((key, _, _)) = replay_history.first() {
-                write!(output, "key={} ", key).unwrap();
+                write!(output, "key={key} ").unwrap();
                 let mut cnt = 0;
                 for (_, lsn, val) in replay_history {
                     if val.is_image() {
-                        write!(output, "i@{} ", lsn).unwrap();
+                        write!(output, "i@{lsn} ").unwrap();
                     } else if val.will_init() {
-                        write!(output, "di@{} ", lsn).unwrap();
+                        write!(output, "di@{lsn} ").unwrap();
                     } else {
-                        write!(output, "d@{} ", lsn).unwrap();
+                        write!(output, "d@{lsn} ").unwrap();
                     }
                     cnt += 1;
                     if cnt >= 128 {
@@ -3082,6 +3173,7 @@ impl Timeline {
                         dry_run: job.dry_run,
                         compact_key_range: start..end,
                         compact_lsn_range: job.compact_lsn_range.start..compact_below_lsn,
+                        do_metadata_compaction: false,
                     });
                     current_start = Some(end);
                 }
@@ -3144,7 +3236,7 @@ impl Timeline {
     async fn compact_with_gc_inner(
         self: &Arc<Self>,
         cancel: &CancellationToken,
-        job: GcCompactJob,
+        mut job: GcCompactJob,
         ctx: &RequestContext,
         yield_for_l0: bool,
     ) -> Result<CompactionOutcome, CompactionError> {
@@ -3152,13 +3244,35 @@ impl Timeline {
         // with legacy compaction tasks in the future. Always ensure the lock order is compaction -> gc.
         // Note that we already acquired the compaction lock when the outer `compact` function gets called.
 
+        // If the job is not configured to compact the metadata key range, shrink the key range
+        // to exclude the metadata key range. The check is done by checking if the end of the key range
+        // is larger than the start of the metadata key range. Note that metadata keys cover the entire
+        // second half of the keyspace, so it's enough to only check the end of the key range.
+        if !job.do_metadata_compaction
+            && job.compact_key_range.end > Key::metadata_key_range().start
+        {
+            tracing::info!(
+                "compaction for metadata key range is not supported yet, overriding compact_key_range from {} to {}",
+                job.compact_key_range.end,
+                Key::metadata_key_range().start
+            );
+            // Shrink the key range to exclude the metadata key range.
+            job.compact_key_range.end = Key::metadata_key_range().start;
+
+            // Skip the job if the key range completely lies within the metadata key range.
+            if job.compact_key_range.start >= job.compact_key_range.end {
+                tracing::info!("compact_key_range is empty, skipping compaction");
+                return Ok(CompactionOutcome::Done);
+            }
+        }
+
         let timer = Instant::now();
         let begin_timer = timer;
 
         let gc_lock = async {
             tokio::select! {
                 guard = self.gc_lock.lock() => Ok(guard),
-                _ = cancel.cancelled() => Err(CompactionError::ShuttingDown),
+                _ = cancel.cancelled() => Err(CompactionError::new_cancelled()),
             }
         };
 
@@ -3431,7 +3545,7 @@ impl Timeline {
             }
             total_layer_size += layer.layer_desc().file_size;
             if cancel.is_cancelled() {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
             let should_yield = yield_for_l0
                 && self
@@ -3503,22 +3617,16 @@ impl Timeline {
         // Only create image layers when there is no ancestor branches. TODO: create covering image layer
         // when some condition meet.
         let mut image_layer_writer = if !has_data_below {
-            Some(
-                SplitImageLayerWriter::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_shard_id,
-                    job_desc.compaction_key_range.start,
-                    lowest_retain_lsn,
-                    self.get_compaction_target_size(),
-                    &self.gate,
-                    self.cancel.clone(),
-                    ctx,
-                )
-                .await
-                .context("failed to create image layer writer")
-                .map_err(CompactionError::Other)?,
-            )
+            Some(SplitImageLayerWriter::new(
+                self.conf,
+                self.timeline_id,
+                self.tenant_shard_id,
+                job_desc.compaction_key_range.start,
+                lowest_retain_lsn,
+                self.get_compaction_target_size(),
+                &self.gate,
+                self.cancel.clone(),
+            ))
         } else {
             None
         };
@@ -3531,10 +3639,7 @@ impl Timeline {
             self.get_compaction_target_size(),
             &self.gate,
             self.cancel.clone(),
-        )
-        .await
-        .context("failed to create delta layer writer")
-        .map_err(CompactionError::Other)?;
+        );
 
         #[derive(Default)]
         struct RewritingLayers {
@@ -3587,7 +3692,7 @@ impl Timeline {
             }
 
             if cancel.is_cancelled() {
-                return Err(CompactionError::ShuttingDown);
+                return Err(CompactionError::new_cancelled());
             }
 
             let should_yield = yield_for_l0
@@ -4330,7 +4435,8 @@ impl TimelineAdaptor {
             self.timeline.cancel.clone(),
             ctx,
         )
-        .await?;
+        .await
+        .map_err(CreateImageLayersError::Other)?;
 
         fail_point!("image-layer-writer-fail-before-finish", |_| {
             Err(CreateImageLayersError::Other(anyhow::anyhow!(
@@ -4339,7 +4445,10 @@ impl TimelineAdaptor {
         });
 
         let keyspace = KeySpace {
-            ranges: self.get_keyspace(key_range, lsn, ctx).await?,
+            ranges: self
+                .get_keyspace(key_range, lsn, ctx)
+                .await
+                .map_err(CreateImageLayersError::Other)?,
         };
         // TODO set proper (stateful) start. The create_image_layer_for_rel_blocks function mostly
         let outcome = self
@@ -4351,6 +4460,7 @@ impl TimelineAdaptor {
                 ctx,
                 key_range.clone(),
                 IoConcurrency::sequential(),
+                None,
             )
             .await?;
 
@@ -4358,9 +4468,13 @@ impl TimelineAdaptor {
             unfinished_image_layer,
         } = outcome
         {
-            let (desc, path) = unfinished_image_layer.finish(ctx).await?;
+            let (desc, path) = unfinished_image_layer
+                .finish(ctx)
+                .await
+                .map_err(CreateImageLayersError::Other)?;
             let image_layer =
-                Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?;
+                Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)
+                    .map_err(CreateImageLayersError::Other)?;
             self.new_images.push(image_layer);
         }
 

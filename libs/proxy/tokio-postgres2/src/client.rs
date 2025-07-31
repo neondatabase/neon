@@ -12,8 +12,10 @@ use postgres_protocol2::message::frontend;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::codec::{BackendMessages, FrontendMessage};
+use crate::cancel_token::RawCancelToken;
+use crate::codec::{BackendMessages, FrontendMessage, RecordNotices};
 use crate::config::{Host, SslMode};
+use crate::connection::gc_bytesmut;
 use crate::query::RowStream;
 use crate::simple_query::SimpleQueryStream;
 use crate::types::{Oid, Type};
@@ -89,17 +91,10 @@ pub struct InnerClient {
 }
 
 impl InnerClient {
-    pub fn start(&mut self) -> Result<PartialQuery, Error> {
+    pub fn start(&mut self) -> Result<PartialQuery<'_>, Error> {
         self.responses.waiting += 1;
         Ok(PartialQuery(Some(self)))
     }
-
-    // pub fn send_with_sync<F>(&mut self, f: F) -> Result<&mut Responses, Error>
-    // where
-    //     F: FnOnce(&mut BytesMut) -> Result<(), Error>,
-    // {
-    //     self.start()?.send_with_sync(f)
-    // }
 
     pub fn send_simple_query(&mut self, query: &str) -> Result<&mut Responses, Error> {
         self.responses.waiting += 1;
@@ -107,7 +102,7 @@ impl InnerClient {
         self.buffer.clear();
         // simple queries do not need sync.
         frontend::query(query, &mut self.buffer).map_err(Error::encode)?;
-        let buf = self.buffer.split().freeze();
+        let buf = self.buffer.split();
         self.send_message(FrontendMessage::Raw(buf))
     }
 
@@ -124,7 +119,7 @@ impl Drop for PartialQuery<'_> {
         if let Some(client) = self.0.take() {
             client.buffer.clear();
             frontend::sync(&mut client.buffer);
-            let buf = client.buffer.split().freeze();
+            let buf = client.buffer.split();
             let _ = client.send_message(FrontendMessage::Raw(buf));
         }
     }
@@ -140,7 +135,7 @@ impl<'a> PartialQuery<'a> {
         client.buffer.clear();
         f(&mut client.buffer)?;
         frontend::flush(&mut client.buffer);
-        let buf = client.buffer.split().freeze();
+        let buf = client.buffer.split();
         client.send_message(FrontendMessage::Raw(buf))
     }
 
@@ -153,7 +148,7 @@ impl<'a> PartialQuery<'a> {
         client.buffer.clear();
         f(&mut client.buffer)?;
         frontend::sync(&mut client.buffer);
-        let buf = client.buffer.split().freeze();
+        let buf = client.buffer.split();
         let _ = client.send_message(FrontendMessage::Raw(buf));
 
         Ok(&mut self.0.take().unwrap().responses)
@@ -190,6 +185,7 @@ impl Client {
         ssl_mode: SslMode,
         process_id: i32,
         secret_key: i32,
+        write_buf: BytesMut,
     ) -> Client {
         Client {
             inner: InnerClient {
@@ -200,7 +196,7 @@ impl Client {
                     waiting: 0,
                     received: 0,
                 },
-                buffer: Default::default(),
+                buffer: write_buf,
             },
             cached_typeinfo: Default::default(),
 
@@ -220,13 +216,25 @@ impl Client {
         &mut self.inner
     }
 
+    pub fn record_notices(&mut self, limit: usize) -> mpsc::UnboundedReceiver<Box<str>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let notices = RecordNotices { sender: tx, limit };
+        self.inner
+            .sender
+            .send(FrontendMessage::RecordNotices(notices))
+            .ok();
+
+        rx
+    }
+
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
     /// to save a roundtrip
     pub async fn query_raw_txt<S, I>(
         &mut self,
         statement: &str,
         params: I,
-    ) -> Result<RowStream, Error>
+    ) -> Result<RowStream<'_>, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,
@@ -261,7 +269,7 @@ impl Client {
     pub(crate) async fn simple_query_raw(
         &mut self,
         query: &str,
-    ) -> Result<SimpleQueryStream, Error> {
+    ) -> Result<SimpleQueryStream<'_>, Error> {
         simple_query::simple_query(self.inner_mut(), query).await
     }
 
@@ -279,8 +287,35 @@ impl Client {
         simple_query::batch_execute(self.inner_mut(), query).await
     }
 
-    pub async fn discard_all(&mut self) -> Result<ReadyForQueryStatus, Error> {
-        self.batch_execute("discard all").await
+    /// Similar to `discard_all`, but it does not clear any query plans
+    ///
+    /// This runs in the background, so it can be executed without `await`ing.
+    pub fn reset_session_background(&mut self) -> Result<(), Error> {
+        // "CLOSE ALL": closes any cursors
+        // "SET SESSION AUTHORIZATION DEFAULT": resets the current_user back to the session_user
+        // "RESET ALL": resets any GUCs back to their session defaults.
+        // "DEALLOCATE ALL": deallocates any prepared statements
+        // "UNLISTEN *": stops listening on all channels
+        // "SELECT pg_advisory_unlock_all();": unlocks all advisory locks
+        // "DISCARD TEMP;": drops all temporary tables
+        // "DISCARD SEQUENCES;": deallocates all cached sequence state
+
+        let _responses = self.inner_mut().send_simple_query(
+            "ROLLBACK;
+            CLOSE ALL;
+            SET SESSION AUTHORIZATION DEFAULT;
+            RESET ALL;
+            DEALLOCATE ALL;
+            UNLISTEN *;
+            SELECT pg_advisory_unlock_all();
+            DISCARD TEMP;
+            DISCARD SEQUENCES;",
+        )?;
+
+        // Clean up memory usage.
+        gc_bytesmut(&mut self.inner_mut().buffer);
+
+        Ok(())
     }
 
     /// Begins a new database transaction.
@@ -331,10 +366,12 @@ impl Client {
     /// connection associated with this client.
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken {
-            socket_config: Some(self.socket_config.clone()),
-            ssl_mode: self.ssl_mode,
-            process_id: self.process_id,
-            secret_key: self.secret_key,
+            socket_config: self.socket_config.clone(),
+            raw: RawCancelToken {
+                ssl_mode: self.ssl_mode,
+                process_id: self.process_id,
+                secret_key: self.secret_key,
+            },
         }
     }
 

@@ -11,6 +11,7 @@ use tracing::{Level, error, info, instrument, span};
 use crate::compute::ComputeNode;
 use crate::metrics::{PG_CURR_DOWNTIME_MS, PG_TOTAL_DOWNTIME_MS};
 
+const PG_DEFAULT_INIT_TIMEOUIT: Duration = Duration::from_secs(60);
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Struct to store runtime state of the compute monitor thread.
@@ -83,7 +84,10 @@ impl ComputeMonitor {
         let compute_status = self.compute.get_status();
         if matches!(
             compute_status,
-            ComputeStatus::Terminated | ComputeStatus::TerminationPending | ComputeStatus::Failed
+            ComputeStatus::Terminated
+                | ComputeStatus::TerminationPendingFast
+                | ComputeStatus::TerminationPendingImmediate
+                | ComputeStatus::Failed
         ) {
             info!(
                 "compute is in {} status, stopping compute monitor",
@@ -349,13 +353,47 @@ impl ComputeMonitor {
 // Hang on condition variable waiting until the compute status is `Running`.
 fn wait_for_postgres_start(compute: &ComputeNode) {
     let mut state = compute.state.lock().unwrap();
+    let pg_init_timeout = compute
+        .params
+        .pg_init_timeout
+        .unwrap_or(PG_DEFAULT_INIT_TIMEOUIT);
+
     while state.status != ComputeStatus::Running {
         info!("compute is not running, waiting before monitoring activity");
-        state = compute.state_changed.wait(state).unwrap();
+        if !compute.params.lakebase_mode {
+            state = compute.state_changed.wait(state).unwrap();
 
-        if state.status == ComputeStatus::Running {
-            break;
+            if state.status == ComputeStatus::Running {
+                break;
+            }
+            continue;
         }
+
+        if state.pg_start_time.is_some()
+            && Utc::now()
+                .signed_duration_since(state.pg_start_time.unwrap())
+                .to_std()
+                .unwrap_or_default()
+                > pg_init_timeout
+        {
+            // If Postgres isn't up and running with working PS/SK connections within POSTGRES_STARTUP_TIMEOUT, it is
+            // possible that we started Postgres with a wrong spec (so it is talking to the wrong PS/SK nodes). To prevent
+            // deadends we simply exit (panic) the compute node so it can restart with the latest spec.
+            //
+            // NB: We skip this check if we have not attempted to start PG yet (indicated by state.pg_start_up == None).
+            // This is to make sure the more appropriate errors are surfaced if we encounter issues before we even attempt
+            // to start PG (e.g., if we can't pull the spec, can't sync safekeepers, or can't get the basebackup).
+            error!(
+                "compute did not enter Running state in {} seconds, exiting",
+                pg_init_timeout.as_secs()
+            );
+            std::process::exit(1);
+        }
+        state = compute
+            .state_changed
+            .wait_timeout(state, Duration::from_secs(5))
+            .unwrap()
+            .0;
     }
 }
 
@@ -369,9 +407,9 @@ fn get_database_stats(cli: &mut Client) -> anyhow::Result<(f64, i64)> {
     // like `postgres_exporter` use it to query Postgres statistics.
     // Use explicit 8 bytes type casts to match Rust types.
     let stats = cli.query_one(
-        "SELECT coalesce(sum(active_time), 0.0)::float8 AS total_active_time,
-            coalesce(sum(sessions), 0)::bigint AS total_sessions
-        FROM pg_stat_database
+        "SELECT pg_catalog.coalesce(pg_catalog.sum(active_time), 0.0)::pg_catalog.float8 AS total_active_time,
+            pg_catalog.coalesce(pg_catalog.sum(sessions), 0)::pg_catalog.bigint AS total_sessions
+        FROM pg_catalog.pg_stat_database
         WHERE datname NOT IN (
                 'postgres',
                 'template0',
@@ -407,11 +445,11 @@ fn get_backends_state_change(cli: &mut Client) -> anyhow::Result<Option<DateTime
     let mut last_active: Option<DateTime<Utc>> = None;
     // Get all running client backends except ourself, use RFC3339 DateTime format.
     let backends = cli.query(
-        "SELECT state, to_char(state_change, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS state_change
+        "SELECT state, pg_catalog.to_char(state_change, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'::pg_catalog.text) AS state_change
                 FROM pg_stat_activity
-                    WHERE backend_type = 'client backend'
-                    AND pid != pg_backend_pid()
-                    AND usename != 'cloud_admin';", // XXX: find a better way to filter other monitors?
+                    WHERE backend_type OPERATOR(pg_catalog.=) 'client backend'::pg_catalog.text
+                    AND pid OPERATOR(pg_catalog.!=) pg_catalog.pg_backend_pid()
+                    AND usename OPERATOR(pg_catalog.!=) 'cloud_admin'::pg_catalog.name;", // XXX: find a better way to filter other monitors?
         &[],
     );
 

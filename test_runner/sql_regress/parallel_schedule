@@ -9,3 +9,6 @@ test: neon-rel-truncate
 test: neon-clog
 test: neon-test-utils
 test: neon-vacuum-full
+test: neon-subxacts
+test: neon-spgist
+test: neon-event-triggers

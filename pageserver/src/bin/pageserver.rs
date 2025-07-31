@@ -29,8 +29,8 @@ use pageserver::task_mgr::{
 };
 use pageserver::tenant::{TenantSharedResources, mgr, secondary};
 use pageserver::{
-    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, HttpsEndpointListener, http,
-    page_cache, page_service, task_mgr, virtual_file,
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, HttpsEndpointListener,
+    MetricsCollectionTask, http, page_cache, page_service, task_mgr, virtual_file,
 };
 use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
@@ -41,6 +41,7 @@ use tracing_utils::OtelGuard;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::crashsafe::syncfs;
 use utils::logging::TracingErrorLayerEnablement;
+use utils::metrics_collector::{METRICS_COLLECTION_INTERVAL, METRICS_COLLECTOR};
 use utils::sentry_init::init_sentry;
 use utils::{failpoint_support, logging, project_build_tag, project_git_version, tcp_listener};
 
@@ -125,7 +126,6 @@ fn main() -> anyhow::Result<()> {
         Some(cfg) => tracing_utils::OtelEnablement::Enabled {
             service_name: "pageserver".to_string(),
             export_config: (&cfg.export_config).into(),
-            runtime: *COMPUTE_REQUEST_RUNTIME,
         },
         None => tracing_utils::OtelEnablement::Disabled,
     };
@@ -569,8 +569,10 @@ fn start_pageserver(
         pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    let (basebackup_prepare_sender, basebackup_prepare_receiver) =
-        tokio::sync::mpsc::unbounded_channel();
+    let (basebackup_cache, basebackup_prepare_receiver) = BasebackupCache::new(
+        conf.basebackup_cache_dir(),
+        conf.basebackup_cache_config.clone(),
+    );
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
 
@@ -582,18 +584,16 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
-            feature_resolver,
+            basebackup_cache: Arc::clone(&basebackup_cache),
+            feature_resolver: feature_resolver.clone(),
         },
         shutdown_pageserver.clone(),
     );
     let tenant_manager = Arc::new(tenant_manager);
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(tenant_manager.clone(), order))?;
 
-    let basebackup_cache = BasebackupCache::spawn(
+    basebackup_cache.spawn_background_task(
         BACKGROUND_RUNTIME.handle(),
-        conf.basebackup_cache_dir(),
-        conf.basebackup_cache_config.clone(),
         basebackup_prepare_receiver,
         Arc::clone(&tenant_manager),
         shutdown_pageserver.child_token(),
@@ -715,6 +715,7 @@ fn start_pageserver(
                 disk_usage_eviction_state,
                 deletion_queue.new_client(),
                 secondary_controller,
+                feature_resolver.clone(),
             )
             .context("Failed to initialize router state")?,
         );
@@ -762,6 +763,41 @@ fn start_pageserver(
         (http_task, https_task)
     };
 
+    /* BEGIN_HADRON */
+    let metrics_collection_task = {
+        let cancel = shutdown_pageserver.child_token();
+        let task = crate::BACKGROUND_RUNTIME.spawn({
+            let cancel = cancel.clone();
+            let background_jobs_barrier = background_jobs_barrier.clone();
+            async move {
+                if conf.force_metric_collection_on_scrape {
+                    return;
+                }
+
+                // first wait until background jobs are cleared to launch.
+                tokio::select! {
+                    _ = cancel.cancelled() => { return; },
+                    _ = background_jobs_barrier.wait() => {}
+                };
+                let mut interval = tokio::time::interval(METRICS_COLLECTION_INTERVAL);
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            tracing::info!("cancelled metrics collection task, exiting...");
+                             break;
+                        },
+                        _ = interval.tick() => {}
+                    }
+                    tokio::task::spawn_blocking(|| {
+                        METRICS_COLLECTOR.run_once(true);
+                    });
+                }
+            }
+        });
+        MetricsCollectionTask(CancellableTask { task, cancel })
+    };
+    /* END_HADRON */
+
     let consumption_metrics_tasks = {
         let cancel = shutdown_pageserver.child_token();
         let task = crate::BACKGROUND_RUNTIME.spawn({
@@ -805,15 +841,14 @@ fn start_pageserver(
         } else {
             None
         },
-        basebackup_cache,
+        feature_resolver.clone(),
     );
 
-    // Spawn a Pageserver gRPC server task. It will spawn separate tasks for
-    // each stream/request.
+    // Spawn a Pageserver gRPC server task. It will spawn separate tasks for each request/stream.
+    // It uses a separate compute request Tokio runtime (COMPUTE_REQUEST_RUNTIME).
     //
-    // TODO: this uses a separate Tokio runtime for the page service. If we want
-    // other gRPC services, they will need their own port and runtime. Is this
-    // necessary?
+    // NB: this port is exposed to computes. It should only provide services that we're okay with
+    // computes accessing. Internal services should use a separate port.
     let mut page_service_grpc = None;
     if let Some(grpc_listener) = grpc_listener {
         page_service_grpc = Some(GrpcPageServiceHandler::spawn(
@@ -844,6 +879,7 @@ fn start_pageserver(
             https_endpoint_listener,
             page_service,
             page_service_grpc,
+            metrics_collection_task,
             consumption_metrics_tasks,
             disk_usage_eviction_task,
             &tenant_manager,
@@ -880,17 +916,15 @@ async fn create_remote_storage_client(
     // If `test_remote_failures` is non-zero, wrap the client with a
     // wrapper that simulates failures.
     if conf.test_remote_failures > 0 {
-        if !cfg!(feature = "testing") {
-            anyhow::bail!(
-                "test_remote_failures option is not available because pageserver was compiled without the 'testing' feature"
-            );
-        }
         info!(
             "Simulating remote failures for first {} attempts of each op",
             conf.test_remote_failures
         );
-        remote_storage =
-            GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
+        remote_storage = GenericRemoteStorage::unreliable_wrapper(
+            remote_storage,
+            conf.test_remote_failures,
+            conf.test_remote_failures_probability,
+        );
     }
 
     Ok(remote_storage)

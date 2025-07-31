@@ -11,6 +11,8 @@ mod http_conn_pool;
 mod http_util;
 mod json;
 mod local_conn_pool;
+#[cfg(feature = "rest_broker")]
+pub mod rest;
 mod sql_over_http;
 mod websocket;
 
@@ -29,13 +31,13 @@ use futures::future::{Either, select};
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
+use http_util::{NEON_REQUEST_ID, uuid_to_header_value};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use sql_over_http::{NEON_REQUEST_ID, uuid_to_header_value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -75,7 +77,7 @@ pub async fn task_main(
     {
         let conn_pool = Arc::clone(&conn_pool);
         tokio::spawn(async move {
-            conn_pool.gc_worker(StdRng::from_entropy()).await;
+            conn_pool.gc_worker(StdRng::from_os_rng()).await;
         });
     }
 
@@ -95,7 +97,7 @@ pub async fn task_main(
     {
         let http_conn_pool = Arc::clone(&http_conn_pool);
         tokio::spawn(async move {
-            http_conn_pool.gc_worker(StdRng::from_entropy()).await;
+            http_conn_pool.gc_worker(StdRng::from_os_rng()).await;
         });
     }
 
@@ -417,12 +419,7 @@ async fn request_handler(
     if config.http_config.accept_websockets
         && framed_websockets::upgrade::is_upgrade_request(&request)
     {
-        let ctx = RequestContext::new(
-            session_id,
-            conn_info,
-            crate::metrics::Protocol::Ws,
-            &config.region,
-        );
+        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Ws);
 
         ctx.set_user_agent(
             request
@@ -462,12 +459,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response.map(|b| b.map_err(|x| match x {}).boxed()))
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
-        let ctx = RequestContext::new(
-            session_id,
-            conn_info,
-            crate::metrics::Protocol::Http,
-            &config.region,
-        );
+        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
         let span = ctx.span();
 
         let testodrome_id = request
@@ -497,6 +489,42 @@ async fn request_handler(
             .body(Empty::new().map_err(|x| match x {}).boxed())
             .map_err(|e| ApiError::InternalServerError(e.into()))
     } else {
-        json_response(StatusCode::BAD_REQUEST, "query is not supported")
+        #[cfg(feature = "rest_broker")]
+        {
+            if config.rest_config.is_rest_broker
+            // we are testing for the path to be /database_name/rest/...
+                && request
+                    .uri()
+                    .path()
+                    .split('/')
+                    .nth(2)
+                    .is_some_and(|part| part.starts_with("rest"))
+            {
+                let ctx =
+                    RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
+                let span = ctx.span();
+
+                let testodrome_id = request
+                    .headers()
+                    .get("X-Neon-Query-ID")
+                    .and_then(|value| value.to_str().ok())
+                    .map(|s| s.to_string());
+
+                if let Some(query_id) = testodrome_id {
+                    info!(parent: &span, "testodrome query ID: {query_id}");
+                    ctx.set_testodrome_id(query_id.into());
+                }
+
+                rest::handle(config, ctx, request, backend, http_cancellation_token)
+                    .instrument(span)
+                    .await
+            } else {
+                json_response(StatusCode::BAD_REQUEST, "query is not supported")
+            }
+        }
+        #[cfg(not(feature = "rest_broker"))]
+        {
+            json_response(StatusCode::BAD_REQUEST, "query is not supported")
+        }
     }
 }

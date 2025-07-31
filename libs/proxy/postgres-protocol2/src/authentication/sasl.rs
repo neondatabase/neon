@@ -52,7 +52,7 @@ pub(crate) async fn hi(str: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
         }
         // yield every ~250us
         // hopefully reduces tail latencies
-        if i % 1024 == 0 {
+        if i.is_multiple_of(1024) {
             yield_now().await
         }
     }
@@ -155,10 +155,10 @@ pub struct ScramSha256 {
 
 fn nonce() -> String {
     // rand 0.5's ThreadRng is cryptographically secure
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..NONCE_LENGTH)
         .map(|_| {
-            let mut v = rng.gen_range(0x21u8..0x7e);
+            let mut v = rng.random_range(0x21u8..0x7e);
             if v == 0x2c {
                 v = 0x7e
             }
@@ -308,7 +308,7 @@ impl ScramSha256 {
 
         let verifier = match parsed {
             ServerFinalMessage::Error(e) => {
-                return Err(io::Error::other(format!("SCRAM error: {}", e)));
+                return Err(io::Error::other(format!("SCRAM error: {e}")));
             }
             ServerFinalMessage::Verifier(verifier) => verifier,
         };
@@ -343,10 +343,8 @@ impl<'a> Parser<'a> {
         match self.it.next() {
             Some((_, c)) if c == target => Ok(()),
             Some((i, c)) => {
-                let m = format!(
-                    "unexpected character at byte {}: expected `{}` but got `{}",
-                    i, target, c
-                );
+                let m =
+                    format!("unexpected character at byte {i}: expected `{target}` but got `{c}");
                 Err(io::Error::new(io::ErrorKind::InvalidInput, m))
             }
             None => Err(io::Error::new(
@@ -412,7 +410,7 @@ impl<'a> Parser<'a> {
         match self.it.peek() {
             Some(&(i, _)) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unexpected trailing data at byte {}", i),
+                format!("unexpected trailing data at byte {i}"),
             )),
             None => Ok(()),
         }

@@ -11,7 +11,7 @@ use pageserver_api::controller_api::{
     PlacementPolicy, SafekeeperDescribeResponse, SafekeeperSchedulingPolicyRequest,
     ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
     SkSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
-    TenantShardMigrateRequest, TenantShardMigrateResponse,
+    TenantShardMigrateRequest, TenantShardMigrateResponse, TimelineSafekeeperMigrateRequest,
 };
 use pageserver_api::models::{
     EvictionPolicy, EvictionPolicyLayerAccessThreshold, ShardParameters, TenantConfig,
@@ -21,6 +21,7 @@ use pageserver_api::models::{
 use pageserver_api::shard::{ShardStripeSize, TenantShardId};
 use pageserver_client::mgmt_api::{self};
 use reqwest::{Certificate, Method, StatusCode, Url};
+use safekeeper_api::models::TimelineLocateResponse;
 use storage_controller_client::control_api::Client;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -36,6 +37,10 @@ enum Command {
         listen_pg_addr: String,
         #[arg(long)]
         listen_pg_port: u16,
+        #[arg(long)]
+        listen_grpc_addr: Option<String>,
+        #[arg(long)]
+        listen_grpc_port: Option<u16>,
 
         #[arg(long)]
         listen_http_addr: String,
@@ -61,12 +66,33 @@ enum Command {
         #[arg(long)]
         scheduling: Option<NodeSchedulingPolicy>,
     },
-    // Set a node status as deleted.
+    /// Exists for backup usage and will be removed in future.
+    /// Use [`Command::NodeStartDelete`] instead, if possible.
     NodeDelete {
         #[arg(long)]
         node_id: NodeId,
     },
+    /// Start deletion of the specified pageserver.
+    NodeStartDelete {
+        #[arg(long)]
+        node_id: NodeId,
+        /// When `force` is true, skip waiting for shards to prewarm during migration.
+        /// This can significantly speed up node deletion since prewarming all shards
+        /// can take considerable time, but may result in slower initial access to
+        /// migrated shards until they warm up naturally.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Cancel deletion of the specified pageserver and wait for `timeout`
+    /// for the operation to be canceled. May be retried.
+    NodeCancelDelete {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        timeout: humantime::Duration,
+    },
     /// Delete a tombstone of node from the storage controller.
+    /// This is used when we want to allow the node to be re-registered.
     NodeDeleteTombstone {
         #[arg(long)]
         node_id: NodeId,
@@ -260,6 +286,23 @@ enum Command {
         #[arg(long)]
         concurrency: Option<usize>,
     },
+    /// Locate safekeepers for a timeline from the storcon DB.
+    TimelineLocate {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        timeline_id: TimelineId,
+    },
+    /// Migrate a timeline to a new set of safekeepers
+    TimelineSafekeeperMigrate {
+        #[arg(long)]
+        tenant_id: TenantId,
+        #[arg(long)]
+        timeline_id: TimelineId,
+        /// Example: --new-sk-set 1,2,3
+        #[arg(long, required = true, value_delimiter = ',')]
+        new_sk_set: Vec<NodeId>,
+    },
 }
 
 #[derive(Parser)]
@@ -418,6 +461,8 @@ async fn main() -> anyhow::Result<()> {
             node_id,
             listen_pg_addr,
             listen_pg_port,
+            listen_grpc_addr,
+            listen_grpc_port,
             listen_http_addr,
             listen_http_port,
             listen_https_port,
@@ -431,10 +476,13 @@ async fn main() -> anyhow::Result<()> {
                         node_id,
                         listen_pg_addr,
                         listen_pg_port,
+                        listen_grpc_addr,
+                        listen_grpc_port,
                         listen_http_addr,
                         listen_http_port,
                         listen_https_port,
                         availability_zone_id: AvailabilityZone(availability_zone_id),
+                        node_ip_addr: None,
                     }),
                 )
                 .await?;
@@ -641,7 +689,7 @@ async fn main() -> anyhow::Result<()> {
                 response
                     .new_shards
                     .iter()
-                    .map(|s| format!("{:?}", s))
+                    .map(|s| format!("{s:?}"))
                     .collect::<Vec<_>>()
                     .join(",")
             );
@@ -763,8 +811,8 @@ async fn main() -> anyhow::Result<()> {
 
             println!("Tenant {tenant_id}");
             let mut table = comfy_table::Table::new();
-            table.add_row(["Policy", &format!("{:?}", policy)]);
-            table.add_row(["Stripe size", &format!("{:?}", stripe_size)]);
+            table.add_row(["Policy", &format!("{policy:?}")]);
+            table.add_row(["Stripe size", &format!("{stripe_size:?}")]);
             table.add_row(["Config", &serde_json::to_string_pretty(&config).unwrap()]);
             println!("{table}");
             println!("Shards:");
@@ -781,7 +829,7 @@ async fn main() -> anyhow::Result<()> {
                 let secondary = shard
                     .node_secondary
                     .iter()
-                    .map(|n| format!("{}", n))
+                    .map(|n| format!("{n}"))
                     .collect::<Vec<_>>()
                     .join(",");
 
@@ -855,7 +903,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             } else {
                 // Make it obvious to the user that since they've omitted an AZ, we're clearing it
-                eprintln!("Clearing preferred AZ for tenant {}", tenant_id);
+                eprintln!("Clearing preferred AZ for tenant {tenant_id}");
             }
 
             // Construct a request that modifies all the tenant's shards
@@ -904,9 +952,43 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         Command::NodeDelete { node_id } => {
+            eprintln!("Warning: This command is obsolete and will be removed in a future version");
+            eprintln!("Use `NodeStartDelete` instead, if possible");
             storcon_client
                 .dispatch::<(), ()>(Method::DELETE, format!("control/v1/node/{node_id}"), None)
                 .await?;
+        }
+        Command::NodeStartDelete { node_id, force } => {
+            let query = if force {
+                format!("control/v1/node/{node_id}/delete?force=true")
+            } else {
+                format!("control/v1/node/{node_id}/delete")
+            };
+            storcon_client
+                .dispatch::<(), ()>(Method::PUT, query, None)
+                .await?;
+            println!("Delete started for {node_id}");
+        }
+        Command::NodeCancelDelete { node_id, timeout } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("control/v1/node/{node_id}/delete"),
+                    None,
+                )
+                .await?;
+
+            println!("Waiting for node {node_id} to quiesce on scheduling policy ...");
+
+            let final_policy =
+                wait_for_scheduling_policy(storcon_client, node_id, *timeout, |sched| {
+                    !matches!(sched, NodeSchedulingPolicy::Deleting)
+                })
+                .await?;
+
+            println!(
+                "Delete was cancelled for node {node_id}. Schedulling policy is now {final_policy:?}"
+            );
         }
         Command::NodeDeleteTombstone { node_id } => {
             storcon_client
@@ -1126,8 +1208,7 @@ async fn main() -> anyhow::Result<()> {
                     Err((tenant_shard_id, from, to, error)) => {
                         failure += 1;
                         println!(
-                            "Failed to migrate {} from node {} to node {}: {}",
-                            tenant_shard_id, from, to, error
+                            "Failed to migrate {tenant_shard_id} from node {from} to node {to}: {error}"
                         );
                     }
                 }
@@ -1269,8 +1350,7 @@ async fn main() -> anyhow::Result<()> {
             concurrency,
         } => {
             let mut path = format!(
-                "/v1/tenant/{}/timeline/{}/download_heatmap_layers",
-                tenant_shard_id, timeline_id,
+                "v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/download_heatmap_layers",
             );
 
             if let Some(c) = concurrency {
@@ -1279,6 +1359,41 @@ async fn main() -> anyhow::Result<()> {
 
             storcon_client
                 .dispatch::<(), ()>(Method::POST, path, None)
+                .await?;
+        }
+        Command::TimelineLocate {
+            tenant_id,
+            timeline_id,
+        } => {
+            let path = format!("debug/v1/tenant/{tenant_id}/timeline/{timeline_id}/locate");
+
+            let resp = storcon_client
+                .dispatch::<(), TimelineLocateResponse>(Method::GET, path, None)
+                .await?;
+
+            let sk_set = resp.sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>();
+            let new_sk_set = resp
+                .new_sk_set
+                .as_ref()
+                .map(|ids| ids.iter().map(|id| id.0 as i64).collect::<Vec<_>>());
+
+            println!("generation = {}", resp.generation);
+            println!("sk_set = {sk_set:?}");
+            println!("new_sk_set = {new_sk_set:?}");
+        }
+        Command::TimelineSafekeeperMigrate {
+            tenant_id,
+            timeline_id,
+            new_sk_set,
+        } => {
+            let path = format!("v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate");
+
+            storcon_client
+                .dispatch::<_, ()>(
+                    Method::POST,
+                    path,
+                    Some(TimelineSafekeeperMigrateRequest { new_sk_set }),
+                )
                 .await?;
         }
     }
@@ -1295,8 +1410,7 @@ async fn watch_tenant_shard(
 ) -> anyhow::Result<()> {
     if let Some(until_migrated_to) = until_migrated_to {
         println!(
-            "Waiting for tenant shard {} to be migrated to node {}",
-            tenant_shard_id, until_migrated_to
+            "Waiting for tenant shard {tenant_shard_id} to be migrated to node {until_migrated_to}"
         );
     }
 
@@ -1319,7 +1433,7 @@ async fn watch_tenant_shard(
             "attached: {} secondary: {} {}",
             shard
                 .node_attached
-                .map(|n| format!("{}", n))
+                .map(|n| format!("{n}"))
                 .unwrap_or("none".to_string()),
             shard
                 .node_secondary
@@ -1333,15 +1447,12 @@ async fn watch_tenant_shard(
                 "(reconciler idle)"
             }
         );
-        println!("{}", summary);
+        println!("{summary}");
 
         // Maybe drop out if we finished migration
         if let Some(until_migrated_to) = until_migrated_to {
             if shard.node_attached == Some(until_migrated_to) && !shard.is_reconciling {
-                println!(
-                    "Tenant shard {} is now on node {}",
-                    tenant_shard_id, until_migrated_to
-                );
+                println!("Tenant shard {tenant_shard_id} is now on node {until_migrated_to}");
                 break;
             }
         }

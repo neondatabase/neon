@@ -18,6 +18,10 @@ pub mod proto {
     pub use page_service_server::{PageService, PageServiceServer};
 }
 
+mod client;
 mod model;
+mod split;
 
+pub use client::Client;
 pub use model::*;
+pub use split::{GetPageSplitter, SplitError};

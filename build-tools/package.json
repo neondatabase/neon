@@ -1,0 +1,8 @@
+{
+  "name": "build-tools",
+  "private": true,
+  "devDependencies": {
+    "@redocly/cli": "1.34.5",
+    "@sourcemeta/jsonschema": "10.0.0"
+  }
+}

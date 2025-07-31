@@ -16,9 +16,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use compute_api::requests::ComputeClaimsScope;
-use compute_api::spec::ComputeMode;
+use compute_api::spec::{ComputeMode, PageserverProtocol};
 use control_plane::broker::StorageBroker;
-use control_plane::endpoint::ComputeControlPlane;
+use control_plane::endpoint::{ComputeControlPlane, EndpointTerminateMode};
+use control_plane::endpoint::{
+    local_pageserver_conf_to_conn_info, tenant_locate_response_to_conn_info,
+};
 use control_plane::endpoint_storage::{ENDPOINT_STORAGE_DEFAULT_ADDR, EndpointStorage};
 use control_plane::local_env;
 use control_plane::local_env::{
@@ -44,15 +47,13 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
-use postgres_connection::parse_host_port;
 use safekeeper_api::membership::{SafekeeperGeneration, SafekeeperId};
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
-    DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
+    DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT, PgMajorVersion, PgVersionId,
 };
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use tokio::task::JoinSet;
-use url::Host;
 use utils::auth::{Claims, Scope};
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
@@ -64,7 +65,9 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_PG_VERSION: u32 = 17;
+#[allow(dead_code)]
+const DEFAULT_PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
+const DEFAULT_PG_VERSION_NUM: &str = "17";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
@@ -166,9 +169,9 @@ struct TenantCreateCmdArgs {
     config: Vec<String>,
 
     /// Postgres version to use for the initial timeline.
-    #[arg(default_value_t = DEFAULT_PG_VERSION)]
+    #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
     #[clap(long)]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 
     /// Use this tenant in future CLI commands where tenant_id is needed, but not specified.
     #[clap(long)]
@@ -269,10 +272,11 @@ struct TimelineCreateCmdArgs {
     /// Human-readable alias for the new timeline.
     #[clap(long)]
     branch_name: String,
+
     /// Postgres version.
-    #[arg(default_value_t = DEFAULT_PG_VERSION)]
+    #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
     #[clap(long)]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 }
 
 /// Import a timeline from a basebackup directory.
@@ -299,10 +303,11 @@ struct TimelineImportCmdArgs {
     /// LSN the basebackup ends at.
     #[clap(long)]
     end_lsn: Option<Lsn>,
+
     /// Postgres version of the basebackup being imported.
-    #[arg(default_value_t = DEFAULT_PG_VERSION)]
+    #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
     #[clap(long)]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 }
 
 /// Manage pageservers.
@@ -380,6 +385,10 @@ struct StorageControllerStartCmdArgs {
     /// pageserver cplane api).
     #[clap(long)]
     base_port: Option<u16>,
+
+    /// Whether the storage controller should handle pageserver-reported local disk loss events.
+    #[clap(long)]
+    handle_ps_local_disk_loss: Option<bool>,
 }
 
 /// Stop storage controller.
@@ -511,7 +520,9 @@ enum EndpointCmd {
     Create(EndpointCreateCmdArgs),
     Start(EndpointStartCmdArgs),
     Reconfigure(EndpointReconfigureCmdArgs),
+    RefreshConfiguration(EndpointRefreshConfigurationArgs),
     Stop(EndpointStopCmdArgs),
+    UpdatePageservers(EndpointUpdatePageserversCmdArgs),
     GenerateJwt(EndpointGenerateJwtCmdArgs),
 }
 
@@ -549,9 +560,20 @@ struct EndpointCreateCmdArgs {
     /// Don't do basebackup, create endpoint directory with only config files.
     #[clap(long, action = clap::ArgAction::Set, default_value_t = false)]
     config_only: bool,
+
     /// Postgres version.
+    #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
     #[clap(long)]
-    pg_version: u32,
+    pg_version: PgMajorVersion,
+
+    /// Use gRPC to communicate with Pageservers, by generating grpc:// connstrings.
+    ///
+    /// Specified on creation such that it's retained across reconfiguration and restarts.
+    ///
+    /// NB: not yet supported by computes.
+    #[clap(long)]
+    grpc: bool,
+
     /// If set, the node will be a hot replica on the specified timeline.
     #[clap(long, action = clap::ArgAction::Set, default_value_t = false)]
     hot_standby: bool,
@@ -562,6 +584,11 @@ struct EndpointCreateCmdArgs {
     /// useful for tests.
     #[clap(long)]
     allow_multiple: bool,
+
+    /// Name of the privileged role for the endpoint.
+    // Only allow changing it on creation.
+    #[clap(long)]
+    privileged_role_name: Option<String>,
 }
 
 /// Start Postgres. If the endpoint doesn't exist yet, it is created.
@@ -592,6 +619,18 @@ struct EndpointStartCmdArgs {
     #[clap(short = 't', long, value_parser= humantime::parse_duration)]
     #[arg(default_value = "90s")]
     start_timeout: Duration,
+
+    /// Download LFC cache from endpoint storage on endpoint startup
+    #[clap(long, default_value = "false")]
+    autoprewarm: bool,
+
+    /// Upload LFC cache to endpoint storage periodically
+    #[clap(long)]
+    offload_lfc_interval_seconds: Option<std::num::NonZeroU64>,
+
+    /// Run in development mode, skipping VM-specific operations like process termination
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    dev: bool,
 }
 
 /// Reconfigure an endpoint.
@@ -609,6 +648,13 @@ struct EndpointReconfigureCmdArgs {
     safekeepers: Option<String>,
 }
 
+/// Refresh the endpoint's configuration by forcing it reload it's spec
+#[derive(clap::Args)]
+struct EndpointRefreshConfigurationArgs {
+    /// Postgres endpoint id
+    endpoint_id: String,
+}
+
 /// Stop an endpoint.
 #[derive(clap::Args)]
 struct EndpointStopCmdArgs {
@@ -617,10 +663,22 @@ struct EndpointStopCmdArgs {
     /// Also delete data directory (now optional, should be default in future).
     #[clap(long)]
     destroy: bool,
+
     /// Postgres shutdown mode, passed to `pg_ctl -m <mode>`.
-    #[clap(long, value_parser(["smart", "fast", "immediate"]))]
-    #[arg(default_value = "fast")]
-    mode: String,
+    #[clap(long)]
+    #[clap(default_value = "fast")]
+    mode: EndpointTerminateMode,
+}
+
+/// Update the pageservers in the spec file of the compute endpoint
+#[derive(clap::Args)]
+struct EndpointUpdatePageserversCmdArgs {
+    /// Postgres endpoint id
+    endpoint_id: String,
+
+    /// Specified pageserver id
+    #[clap(short = 'p', long)]
+    pageserver_id: Option<NodeId>,
 }
 
 /// Generate a JWT for an endpoint.
@@ -823,7 +881,7 @@ fn print_timeline(
             br_sym = "┗━";
         }
 
-        print!("{} @{}: ", br_sym, ancestor_lsn);
+        print!("{br_sym} @{ancestor_lsn}: ");
     }
 
     // Finally print a timeline id and name with new line
@@ -1199,7 +1257,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                     },
                     new_members: None,
                 };
-                let pg_version = args.pg_version * 10000;
+                let pg_version = PgVersionId::from(args.pg_version);
                 let req = safekeeper_api::models::TimelineCreateRequest {
                     tenant_id,
                     timeline_id,
@@ -1369,8 +1427,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 args.internal_http_port,
                 args.pg_version,
                 mode,
+                args.grpc,
                 !args.update_catalog,
                 false,
+                args.privileged_role_name.clone(),
             )?;
         }
         EndpointCmd::Start(args) => {
@@ -1397,7 +1457,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             let endpoint = cplane
                 .endpoints
                 .get(endpoint_id.as_str())
-                .ok_or_else(|| anyhow::anyhow!("endpoint {endpoint_id} not found"))?;
+                .ok_or_else(|| anyhow!("endpoint {endpoint_id} not found"))?;
 
             if !args.allow_multiple {
                 cplane.check_conflicting_endpoints(
@@ -1407,46 +1467,41 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 )?;
             }
 
-            let (pageservers, stripe_size) = if let Some(pageserver_id) = pageserver_id {
-                let conf = env.get_pageserver_conf(pageserver_id).unwrap();
-                let parsed = parse_host_port(&conf.listen_pg_addr).expect("Bad config");
-                (
-                    vec![(parsed.0, parsed.1.unwrap_or(5432))],
-                    // If caller is telling us what pageserver to use, this is not a tenant which is
-                    // full managed by storage controller, therefore not sharded.
-                    DEFAULT_STRIPE_SIZE,
-                )
+            let prefer_protocol = if endpoint.grpc {
+                PageserverProtocol::Grpc
+            } else {
+                PageserverProtocol::Libpq
+            };
+
+            let mut pageserver_conninfo = if let Some(ps_id) = pageserver_id {
+                let conf = env.get_pageserver_conf(ps_id).unwrap();
+                local_pageserver_conf_to_conn_info(conf)?
             } else {
                 // Look up the currently attached location of the tenant, and its striping metadata,
                 // to pass these on to postgres.
                 let storage_controller = StorageController::from_env(env);
                 let locate_result = storage_controller.tenant_locate(endpoint.tenant_id).await?;
-                let pageservers = futures::future::try_join_all(
-                    locate_result.shards.into_iter().map(|shard| async move {
-                        if let ComputeMode::Static(lsn) = endpoint.mode {
-                            // Initialize LSN leases for static computes.
+                assert!(!locate_result.shards.is_empty());
+
+                // Initialize LSN leases for static computes.
+                if let ComputeMode::Static(lsn) = endpoint.mode {
+                    futures::future::try_join_all(locate_result.shards.iter().map(
+                        |shard| async move {
                             let conf = env.get_pageserver_conf(shard.node_id).unwrap();
                             let pageserver = PageServerNode::from_env(env, conf);
 
                             pageserver
                                 .http_client
                                 .timeline_init_lsn_lease(shard.shard_id, endpoint.timeline_id, lsn)
-                                .await?;
-                        }
+                                .await
+                        },
+                    ))
+                    .await?;
+                }
 
-                        anyhow::Ok((
-                            Host::parse(&shard.listen_pg_addr)
-                                .expect("Storage controller reported bad hostname"),
-                            shard.listen_pg_port,
-                        ))
-                    }),
-                )
-                .await?;
-                let stripe_size = locate_result.shard_params.stripe_size;
-
-                (pageservers, stripe_size)
+                tenant_locate_response_to_conn_info(&locate_result)?
             };
-            assert!(!pageservers.is_empty());
+            pageserver_conninfo.prefer_protocol = prefer_protocol;
 
             let ps_conf = env.get_pageserver_conf(DEFAULT_PAGESERVER_ID)?;
             let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
@@ -1470,20 +1525,52 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             let endpoint_storage_token = env.generate_auth_token(&claims)?;
             let endpoint_storage_addr = env.endpoint_storage.listen_addr.to_string();
 
+            let args = control_plane::endpoint::EndpointStartArgs {
+                auth_token,
+                endpoint_storage_token,
+                endpoint_storage_addr,
+                safekeepers_generation,
+                safekeepers,
+                pageserver_conninfo,
+                remote_ext_base_url: remote_ext_base_url.clone(),
+                create_test_user: args.create_test_user,
+                start_timeout: args.start_timeout,
+                autoprewarm: args.autoprewarm,
+                offload_lfc_interval_seconds: args.offload_lfc_interval_seconds,
+                dev: args.dev,
+            };
+
             println!("Starting existing endpoint {endpoint_id}...");
+            endpoint.start(args).await?;
+        }
+        EndpointCmd::UpdatePageservers(args) => {
+            let endpoint_id = &args.endpoint_id;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id.as_str())
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            let prefer_protocol = if endpoint.grpc {
+                PageserverProtocol::Grpc
+            } else {
+                PageserverProtocol::Libpq
+            };
+            let mut pageserver_conninfo = match args.pageserver_id {
+                Some(pageserver_id) => {
+                    let conf = env.get_pageserver_conf(pageserver_id)?;
+                    local_pageserver_conf_to_conn_info(conf)?
+                }
+                None => {
+                    let storage_controller = StorageController::from_env(env);
+                    let locate_result =
+                        storage_controller.tenant_locate(endpoint.tenant_id).await?;
+
+                    tenant_locate_response_to_conn_info(&locate_result)?
+                }
+            };
+            pageserver_conninfo.prefer_protocol = prefer_protocol;
+
             endpoint
-                .start(
-                    &auth_token,
-                    endpoint_storage_token,
-                    endpoint_storage_addr,
-                    safekeepers_generation,
-                    safekeepers,
-                    pageservers,
-                    remote_ext_base_url.as_ref(),
-                    stripe_size.0 as usize,
-                    args.create_test_user,
-                    args.start_timeout,
-                )
+                .update_pageservers_in_config(&pageserver_conninfo)
                 .await?;
         }
         EndpointCmd::Reconfigure(args) => {
@@ -1492,32 +1579,39 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .endpoints
                 .get(endpoint_id.as_str())
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            let pageservers = if let Some(ps_id) = args.endpoint_pageserver_id {
-                let pageserver = PageServerNode::from_env(env, env.get_pageserver_conf(ps_id)?);
-                vec![(
-                    pageserver.pg_connection_config.host().clone(),
-                    pageserver.pg_connection_config.port(),
-                )]
+
+            let prefer_protocol = if endpoint.grpc {
+                PageserverProtocol::Grpc
             } else {
-                let storage_controller = StorageController::from_env(env);
-                storage_controller
-                    .tenant_locate(endpoint.tenant_id)
-                    .await?
-                    .shards
-                    .into_iter()
-                    .map(|shard| {
-                        (
-                            Host::parse(&shard.listen_pg_addr)
-                                .expect("Storage controller reported malformed host"),
-                            shard.listen_pg_port,
-                        )
-                    })
-                    .collect::<Vec<_>>()
+                PageserverProtocol::Libpq
             };
+            let mut pageserver_conninfo = if let Some(ps_id) = args.endpoint_pageserver_id {
+                let conf = env.get_pageserver_conf(ps_id)?;
+                local_pageserver_conf_to_conn_info(conf)?
+            } else {
+                // Look up the currently attached location of the tenant, and its striping metadata,
+                // to pass these on to postgres.
+                let storage_controller = StorageController::from_env(env);
+                let locate_result = storage_controller.tenant_locate(endpoint.tenant_id).await?;
+
+                tenant_locate_response_to_conn_info(&locate_result)?
+            };
+            pageserver_conninfo.prefer_protocol = prefer_protocol;
+
             // If --safekeepers argument is given, use only the listed
             // safekeeper nodes; otherwise all from the env.
             let safekeepers = parse_safekeepers(&args.safekeepers)?;
-            endpoint.reconfigure(pageservers, None, safekeepers).await?;
+            endpoint
+                .reconfigure(Some(&pageserver_conninfo), safekeepers, None)
+                .await?;
+        }
+        EndpointCmd::RefreshConfiguration(args) => {
+            let endpoint_id = &args.endpoint_id;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id.as_str())
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            endpoint.refresh_configuration().await?;
         }
         EndpointCmd::Stop(args) => {
             let endpoint_id = &args.endpoint_id;
@@ -1525,7 +1619,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 .endpoints
                 .get(endpoint_id)
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
-            endpoint.stop(&args.mode, args.destroy)?;
+            match endpoint.stop(args.mode, args.destroy).await?.lsn {
+                Some(lsn) => println!("{lsn}"),
+                None => println!("null"),
+            }
         }
         EndpointCmd::GenerateJwt(args) => {
             let endpoint = {
@@ -1607,7 +1704,7 @@ async fn handle_pageserver(subcmd: &PageserverCmd, env: &local_env::LocalEnv) ->
                 StopMode::Immediate => true,
             };
             if let Err(e) = get_pageserver(env, args.pageserver_id)?.stop(immediate) {
-                eprintln!("pageserver stop failed: {}", e);
+                eprintln!("pageserver stop failed: {e}");
                 exit(1);
             }
         }
@@ -1616,7 +1713,7 @@ async fn handle_pageserver(subcmd: &PageserverCmd, env: &local_env::LocalEnv) ->
             let pageserver = get_pageserver(env, args.pageserver_id)?;
             //TODO what shutdown strategy should we use here?
             if let Err(e) = pageserver.stop(false) {
-                eprintln!("pageserver stop failed: {}", e);
+                eprintln!("pageserver stop failed: {e}");
                 exit(1);
             }
 
@@ -1633,7 +1730,7 @@ async fn handle_pageserver(subcmd: &PageserverCmd, env: &local_env::LocalEnv) ->
             {
                 Ok(_) => println!("Page server is up and running"),
                 Err(err) => {
-                    eprintln!("Page server is not available: {}", err);
+                    eprintln!("Page server is not available: {err}");
                     exit(1);
                 }
             }
@@ -1653,6 +1750,7 @@ async fn handle_storage_controller(
                 instance_id: args.instance_id,
                 base_port: args.base_port,
                 start_timeout: args.start_timeout,
+                handle_ps_local_disk_loss: args.handle_ps_local_disk_loss,
             };
 
             if let Err(e) = svc.start(start_args).await {
@@ -1670,7 +1768,7 @@ async fn handle_storage_controller(
                 },
             };
             if let Err(e) = svc.stop(stop_args).await {
-                eprintln!("stop failed: {}", e);
+                eprintln!("stop failed: {e}");
                 exit(1);
             }
         }
@@ -1692,7 +1790,7 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
             let safekeeper = get_safekeeper(env, args.id)?;
 
             if let Err(e) = safekeeper.start(&args.extra_opt, &args.start_timeout).await {
-                eprintln!("safekeeper start failed: {}", e);
+                eprintln!("safekeeper start failed: {e}");
                 exit(1);
             }
         }
@@ -1704,7 +1802,7 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
                 StopMode::Immediate => true,
             };
             if let Err(e) = safekeeper.stop(immediate) {
-                eprintln!("safekeeper stop failed: {}", e);
+                eprintln!("safekeeper stop failed: {e}");
                 exit(1);
             }
         }
@@ -1717,12 +1815,12 @@ async fn handle_safekeeper(subcmd: &SafekeeperCmd, env: &local_env::LocalEnv) ->
             };
 
             if let Err(e) = safekeeper.stop(immediate) {
-                eprintln!("safekeeper stop failed: {}", e);
+                eprintln!("safekeeper stop failed: {e}");
                 exit(1);
             }
 
             if let Err(e) = safekeeper.start(&args.extra_opt, &args.start_timeout).await {
-                eprintln!("safekeeper start failed: {}", e);
+                eprintln!("safekeeper start failed: {e}");
                 exit(1);
             }
         }
@@ -1957,11 +2055,16 @@ async fn handle_stop_all(args: &StopCmdArgs, env: &local_env::LocalEnv) -> Resul
 }
 
 async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
+    let mode = if immediate {
+        EndpointTerminateMode::Immediate
+    } else {
+        EndpointTerminateMode::Fast
+    };
     // Stop all endpoints
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
-                if let Err(e) = node.stop(if immediate { "immediate" } else { "fast" }, false) {
+                if let Err(e) = node.stop(mode, false).await {
                     eprintln!("postgres stop failed: {e:#}");
                 }
             }
@@ -1973,7 +2076,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 
     let storage = EndpointStorage::from_env(env);
     if let Err(e) = storage.stop(immediate) {
-        eprintln!("endpoint_storage stop failed: {:#}", e);
+        eprintln!("endpoint_storage stop failed: {e:#}");
     }
 
     for ps_conf in &env.pageservers {

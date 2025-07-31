@@ -144,7 +144,7 @@ pub trait ApiImpl {
         todo!()
     }
 
-    fn finish_sync_safekeepers(&self, _lsn: u64) {
+    fn finish_sync_safekeepers(&self, _lsn: u64) -> ! {
         todo!()
     }
 
@@ -159,6 +159,21 @@ pub trait ApiImpl {
     fn after_election(&self, _wp: &mut WalProposer) {
         todo!()
     }
+
+    /* BEGIN_HADRON */
+    fn reset_safekeeper_statuses_for_metrics(&self, _wp: &mut WalProposer, _num_safekeepers: u32) {
+        // Do nothing for testing purposes.
+    }
+
+    fn update_safekeeper_status_for_metrics(
+        &self,
+        _wp: &mut WalProposer,
+        _sk_index: u32,
+        _status: u8,
+    ) {
+        // Do nothing for testing purposes.
+    }
+    /* END_HADRON */
 }
 
 #[derive(Debug)]
@@ -380,7 +395,7 @@ mod tests {
         }
 
         fn conn_send_query(&self, _: &mut crate::bindings::Safekeeper, query: &str) -> bool {
-            println!("conn_send_query: {}", query);
+            println!("conn_send_query: {query}");
             true
         }
 
@@ -399,13 +414,13 @@ mod tests {
         ) -> crate::bindings::PGAsyncReadResult {
             println!("conn_async_read");
             let reply = self.next_safekeeper_reply();
-            println!("conn_async_read result: {:?}", reply);
+            println!("conn_async_read result: {reply:?}");
             vec.extend_from_slice(reply);
             crate::bindings::PGAsyncReadResult_PG_ASYNC_READ_SUCCESS
         }
 
         fn conn_blocking_write(&self, _: &mut crate::bindings::Safekeeper, buf: &[u8]) -> bool {
-            println!("conn_blocking_write: {:?}", buf);
+            println!("conn_blocking_write: {buf:?}");
             self.check_walproposer_msg(buf);
             true
         }
@@ -456,10 +471,7 @@ mod tests {
             timeout_millis: i64,
         ) -> super::WaitResult {
             let data = self.wait_events.get();
-            println!(
-                "wait_event_set, timeout_millis={}, res={:?}",
-                timeout_millis, data
-            );
+            println!("wait_event_set, timeout_millis={timeout_millis}, res={data:?}");
             super::WaitResult::Network(data.sk, data.event_mask)
         }
 
@@ -469,13 +481,13 @@ mod tests {
             true
         }
 
-        fn finish_sync_safekeepers(&self, lsn: u64) {
+        fn finish_sync_safekeepers(&self, lsn: u64) -> ! {
             self.sync_channel.send(lsn).unwrap();
             panic!("sync safekeepers finished at lsn={}", lsn);
         }
 
         fn log_internal(&self, _wp: &mut crate::bindings::WalProposer, level: Level, msg: &str) {
-            println!("wp_log[{}] {}", level, msg);
+            println!("wp_log[{level}] {msg}");
         }
 
         fn after_election(&self, _wp: &mut crate::bindings::WalProposer) {

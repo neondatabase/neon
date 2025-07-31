@@ -58,6 +58,8 @@ metrics.workspace = true
 pem.workspace = true
 postgres_backend.workspace = true
 postgres_ffi.workspace = true
+postgres_ffi_types.workspace = true
+postgres_versioninfo.workspace = true
 pq_proto.workspace = true
 remote_storage.workspace = true
 safekeeper_api.workspace = true
@@ -70,6 +72,7 @@ http-utils.workspace = true
 utils.workspace = true
 wal_decoder.workspace = true
 env_logger.workspace = true
+nix.workspace = true
 
 workspace_hack.workspace = true
 

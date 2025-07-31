@@ -19,7 +19,7 @@ use pageserver_api::shard::{
 };
 use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::Rng;
-use rand::distributions::Alphanumeric;
+use rand::distr::Alphanumeric;
 use remote_storage::TimeoutOrCancel;
 use sysinfo::SystemExt;
 use tokio::fs;
@@ -43,7 +43,7 @@ use crate::controller_upcall_client::{
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
-use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
+use crate::metrics::{LOCAL_DATA_LOSS_SUSPECTED, TENANT, TENANT_MANAGER as METRICS};
 use crate::task_mgr::{BACKGROUND_RUNTIME, TaskKind};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
@@ -218,7 +218,7 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
             std::io::ErrorKind::InvalidInput,
             "Path must be absolute",
         ))?;
-    let rand_suffix = rand::thread_rng()
+    let rand_suffix = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(8)
         .map(char::from)
@@ -328,7 +328,7 @@ fn emergency_generations(
                     LocationMode::Attached(alc) => TenantStartupMode::Attached((
                         alc.attach_mode,
                         alc.generation,
-                        ShardStripeSize::default(),
+                        lc.shard.stripe_size,
                     )),
                     LocationMode::Secondary(_) => TenantStartupMode::Secondary,
                 },
@@ -352,7 +352,8 @@ async fn init_load_generations(
         let client = StorageControllerUpcallClient::new(conf, cancel);
         info!("Calling {} API to re-attach tenants", client.base_url());
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-        match client.re_attach(conf).await {
+        let empty_local_disk = tenant_confs.is_empty();
+        match client.re_attach(conf, empty_local_disk).await {
             Ok(tenants) => tenants
                 .into_iter()
                 .flat_map(|(id, rart)| {
@@ -538,6 +539,21 @@ pub async fn init_tenant_mgr(
     // Determine which tenants are to be secondary or attached, and in which generation
     let tenant_modes = init_load_generations(conf, &tenant_configs, resources, cancel).await?;
 
+    // Hadron local SSD check: Raise an alert if our local filesystem does not contain any tenants but the re-attach request returned tenants.
+    // This can happen if the PS suffered a Kubernetes node failure resulting in loss of all local data, but recovered quickly on another node
+    // so the Storage Controller has not had the time to move tenants out.
+    let data_loss_suspected = if let Some(tenant_modes) = &tenant_modes {
+        tenant_configs.is_empty() && !tenant_modes.is_empty()
+    } else {
+        false
+    };
+    if data_loss_suspected {
+        tracing::error!(
+            "Local data loss suspected: no tenants found on local filesystem, but re-attach request returned tenants"
+        );
+    }
+    LOCAL_DATA_LOSS_SUSPECTED.set(if data_loss_suspected { 1 } else { 0 });
+
     tracing::info!(
         "Attaching {} tenants at startup, warming up {} at a time",
         tenant_configs.len(),
@@ -664,7 +680,7 @@ pub async fn init_tenant_mgr(
                     tenant_shard_id,
                     &tenant_dir_path,
                     resources.clone(),
-                    AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
+                    AttachedTenantConf::new(conf, location_conf.tenant_conf, attached_conf),
                     shard_identity,
                     Some(init_order.clone()),
                     SpawnMode::Lazy,
@@ -810,6 +826,18 @@ impl TenantManager {
         peek_slot.is_some()
     }
 
+    /// Returns whether a local shard exists that's a child of the given tenant shard. Note that
+    /// this just checks for any shard with a larger shard count, and it may not be a direct child
+    /// of the given shard (their keyspace may not overlap).
+    pub(crate) fn has_child_shard(&self, tenant_id: TenantId, shard_index: ShardIndex) -> bool {
+        match &*self.tenants.read().unwrap() {
+            TenantsMap::Initializing => false,
+            TenantsMap::Open(slots) | TenantsMap::ShuttingDown(slots) => slots
+                .range(TenantShardId::tenant_range(tenant_id))
+                .any(|(tsid, _)| tsid.shard_count > shard_index.shard_count),
+        }
+    }
+
     #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(crate) async fn upsert_location(
         &self,
@@ -842,8 +870,11 @@ impl TenantManager {
                             // take our fast path and just provide the updated configuration
                             // to the tenant.
                             tenant.set_new_location_config(
-                                AttachedTenantConf::try_from(new_location_config.clone())
-                                    .map_err(UpsertLocationError::BadRequest)?,
+                                AttachedTenantConf::try_from(
+                                    self.conf,
+                                    new_location_config.clone(),
+                                )
+                                .map_err(UpsertLocationError::BadRequest)?,
                             );
 
                             Some(FastPathModified::Attached(tenant.clone()))
@@ -880,6 +911,9 @@ impl TenantManager {
         // phase of writing config and/or waiting for flush, before returning.
         match fast_path_taken {
             Some(FastPathModified::Attached(tenant)) => {
+                tenant
+                    .shard_identity
+                    .assert_equal(new_location_config.shard);
                 TenantShard::persist_tenant_config(
                     self.conf,
                     &tenant_shard_id,
@@ -914,7 +948,10 @@ impl TenantManager {
 
                 return Ok(Some(tenant));
             }
-            Some(FastPathModified::Secondary(_secondary_tenant)) => {
+            Some(FastPathModified::Secondary(secondary_tenant)) => {
+                secondary_tenant
+                    .shard_identity
+                    .assert_equal(new_location_config.shard);
                 TenantShard::persist_tenant_config(
                     self.conf,
                     &tenant_shard_id,
@@ -948,6 +985,10 @@ impl TenantManager {
 
         match slot_guard.get_old_value() {
             Some(TenantSlot::Attached(tenant)) => {
+                tenant
+                    .shard_identity
+                    .assert_equal(new_location_config.shard);
+
                 // The case where we keep a Tenant alive was covered above in the special case
                 // for Attached->Attached transitions in the same generation.  By this point,
                 // if we see an attached tenant we know it will be discarded and should be
@@ -981,9 +1022,13 @@ impl TenantManager {
                 // rather than assuming it to be empty.
                 spawn_mode = SpawnMode::Eager;
             }
-            Some(TenantSlot::Secondary(state)) => {
+            Some(TenantSlot::Secondary(secondary_tenant)) => {
+                secondary_tenant
+                    .shard_identity
+                    .assert_equal(new_location_config.shard);
+
                 info!("Shutting down secondary tenant");
-                state.shutdown().await;
+                secondary_tenant.shutdown().await;
             }
             Some(TenantSlot::InProgress(_)) => {
                 // This should never happen: acquire_slot should error out
@@ -1032,7 +1077,7 @@ impl TenantManager {
                 // Testing hack: if we are configured with no control plane, then drop the generation
                 // from upserts.  This enables creating generation-less tenants even though neon_local
                 // always uses generations when calling the location conf API.
-                let attached_conf = AttachedTenantConf::try_from(new_location_config)
+                let attached_conf = AttachedTenantConf::try_from(self.conf, new_location_config)
                     .map_err(UpsertLocationError::BadRequest)?;
 
                 let tenant = tenant_spawn(
@@ -1236,7 +1281,7 @@ impl TenantManager {
             tenant_shard_id,
             &tenant_path,
             self.resources.clone(),
-            AttachedTenantConf::try_from(config)?,
+            AttachedTenantConf::try_from(self.conf, config)?,
             shard_identity,
             None,
             SpawnMode::Eager,
@@ -1489,6 +1534,13 @@ impl TenantManager {
         self.resources.deletion_queue_client.flush_advisory();
 
         // Phase 2: Put the parent shard to InProgress and grab a reference to the parent Tenant
+        //
+        // TODO: keeping the parent as InProgress while spawning the children causes read
+        // unavailability, as we can't acquire a new timeline handle for it (existing handles appear
+        // to still work though, even downgraded ones). The parent should be available for reads
+        // until the children are ready -- potentially until *all* subsplits across all parent
+        // shards are complete and the compute has been notified. See:
+        // <https://databricks.atlassian.net/browse/LKB-672>.
         drop(tenant);
         let mut parent_slot_guard =
             self.tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
@@ -1645,6 +1697,8 @@ impl TenantManager {
 
         // Phase 6: Release the InProgress on the parent shard
         drop(parent_slot_guard);
+
+        utils::pausable_failpoint!("shard-split-post-finish-pause");
 
         Ok(child_shards)
     }
@@ -2117,7 +2171,7 @@ impl TenantManager {
                 tenant_shard_id,
                 &tenant_path,
                 self.resources.clone(),
-                AttachedTenantConf::try_from(config).map_err(Error::DetachReparent)?,
+                AttachedTenantConf::try_from(self.conf, config).map_err(Error::DetachReparent)?,
                 shard_identity,
                 None,
                 SpawnMode::Eager,
@@ -2200,7 +2254,7 @@ impl TenantManager {
         selector: ShardSelector,
     ) -> ShardResolveResult {
         let tenants = self.tenants.read().unwrap();
-        let mut want_shard = None;
+        let mut want_shard: Option<ShardIndex> = None;
         let mut any_in_progress = None;
 
         match &*tenants {
@@ -2225,14 +2279,23 @@ impl TenantManager {
                             return ShardResolveResult::Found(tenant.clone());
                         }
                         ShardSelector::Page(key) => {
-                            // First slot we see for this tenant, calculate the expected shard number
-                            // for the key: we will use this for checking if this and subsequent
-                            // slots contain the key, rather than recalculating the hash each time.
-                            if want_shard.is_none() {
-                                want_shard = Some(tenant.shard_identity.get_shard_number(&key));
+                            // Each time we find an attached slot with a different shard count,
+                            // recompute the expected shard number: during shard splits we might
+                            // have multiple shards with the old shard count.
+                            if want_shard.is_none()
+                                || want_shard.unwrap().shard_count != tenant.shard_identity.count
+                            {
+                                want_shard = Some(ShardIndex {
+                                    shard_number: tenant.shard_identity.get_shard_number(&key),
+                                    shard_count: tenant.shard_identity.count,
+                                });
                             }
 
-                            if Some(tenant.shard_identity.number) == want_shard {
+                            if Some(ShardIndex {
+                                shard_number: tenant.shard_identity.number,
+                                shard_count: tenant.shard_identity.count,
+                            }) == want_shard
+                            {
                                 return ShardResolveResult::Found(tenant.clone());
                             }
                         }
@@ -2891,14 +2954,18 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use camino::Utf8PathBuf;
     use storage_broker::BrokerClientChannel;
     use tracing::Instrument;
 
     use super::super::harness::TenantHarness;
     use super::TenantsMap;
-    use crate::tenant::{
-        TenantSharedResources,
-        mgr::{BackgroundPurges, TenantManager, TenantSlot},
+    use crate::{
+        basebackup_cache::BasebackupCache,
+        tenant::{
+            TenantSharedResources,
+            mgr::{BackgroundPurges, TenantManager, TenantSlot},
+        },
     };
 
     #[tokio::test(start_paused = true)]
@@ -2924,9 +2991,7 @@ mod tests {
         // Invoke remove_tenant_from_memory with a cleanup hook that blocks until we manually
         // permit it to proceed: that will stick the tenant in InProgress
 
-        let (basebackup_prepare_sender, _) = tokio::sync::mpsc::unbounded_channel::<
-            crate::basebackup_cache::BasebackupPrepareRequest,
-        >();
+        let (basebackup_cache, _) = BasebackupCache::new(Utf8PathBuf::new(), None);
 
         let tenant_manager = TenantManager {
             tenants: std::sync::RwLock::new(TenantsMap::Open(tenants)),
@@ -2940,7 +3005,7 @@ mod tests {
                 l0_flush_global_state: crate::l0_flush::L0FlushGlobalState::new(
                     h.conf.l0_flush.clone(),
                 ),
-                basebackup_prepare_sender,
+                basebackup_cache,
                 feature_resolver: crate::feature_resolver::FeatureResolver::new_disabled(),
             },
             cancel: tokio_util::sync::CancellationToken::new(),

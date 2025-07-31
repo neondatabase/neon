@@ -212,19 +212,23 @@
 //! to the parent shard during a shard split. Eventually, the shard split task will
 //! shut down the parent => case (1).
 
-use std::collections::{HashMap, hash_map};
-use std::sync::{Arc, Mutex, Weak};
+use std::collections::HashMap;
+use std::collections::hash_map;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
+use std::time::Duration;
 
 use pageserver_api::shard::ShardIdentity;
 use tracing::{instrument, trace};
 use utils::id::TimelineId;
 use utils::shard::{ShardIndex, ShardNumber};
 
-use crate::tenant::mgr::ShardSelector;
+use crate::page_service::GetActiveTimelineError;
+use crate::tenant::GetTimelineError;
+use crate::tenant::mgr::{GetActiveTenantError, ShardSelector};
 
-/// The requirement for Debug is so that #[derive(Debug)] works in some places.
-pub(crate) trait Types: Sized + std::fmt::Debug {
-    type TenantManagerError: Sized + std::fmt::Debug;
+pub(crate) trait Types: Sized {
     type TenantManager: TenantManager<Self> + Sized;
     type Timeline: Timeline<Self> + Sized;
 }
@@ -303,12 +307,11 @@ impl<T: Types> Default for PerTimelineState<T> {
 /// Abstract view of [`crate::tenant::mgr`], for testability.
 pub(crate) trait TenantManager<T: Types> {
     /// Invoked by [`Cache::get`] to resolve a [`ShardTimelineId`] to a [`Types::Timeline`].
-    /// Errors are returned as [`GetError::TenantManager`].
     async fn resolve(
         &self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<T::Timeline, T::TenantManagerError>;
+    ) -> Result<T::Timeline, GetActiveTimelineError>;
 }
 
 /// Abstract view of an [`Arc<Timeline>`], for testability.
@@ -316,13 +319,6 @@ pub(crate) trait Timeline<T: Types> {
     fn shard_timeline_id(&self) -> ShardTimelineId;
     fn get_shard_identity(&self) -> &ShardIdentity;
     fn per_timeline_state(&self) -> &PerTimelineState<T>;
-}
-
-/// Errors returned by [`Cache::get`].
-#[derive(Debug)]
-pub(crate) enum GetError<T: Types> {
-    TenantManager(T::TenantManagerError),
-    PerTimelineStateShutDown,
 }
 
 /// Internal type used in [`Cache::get`].
@@ -333,6 +329,49 @@ enum RoutingResult<T: Types> {
 }
 
 impl<T: Types> Cache<T> {
+    /* BEGIN_HADRON */
+    /// A wrapper of do_get to resolve the tenant shard for a get page request.
+    #[instrument(level = "trace", skip_all)]
+    pub(crate) async fn get(
+        &mut self,
+        timeline_id: TimelineId,
+        shard_selector: ShardSelector,
+        tenant_manager: &T::TenantManager,
+    ) -> Result<Handle<T>, GetActiveTimelineError> {
+        const GET_MAX_RETRIES: usize = 10;
+        const RETRY_BACKOFF: Duration = Duration::from_millis(100);
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self
+                .do_get(timeline_id, shard_selector, tenant_manager)
+                .await
+            {
+                Ok(handle) => return Ok(handle),
+                Err(
+                    e @ GetActiveTimelineError::Tenant(GetActiveTenantError::WaitForActiveTimeout {
+                        ..
+                    }),
+                ) => {
+                    // Retry on tenant manager error to handle tenant split more gracefully
+                    if attempt < GET_MAX_RETRIES {
+                        tokio::time::sleep(RETRY_BACKOFF).await;
+                        continue;
+                    } else {
+                        tracing::info!(
+                            "Failed to resolve tenant shard after {} attempts: {:?}",
+                            GET_MAX_RETRIES,
+                            e
+                        );
+                        return Err(e);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    /* END_HADRON */
+
     /// See module-level comment for details.
     ///
     /// Does NOT check for the shutdown state of [`Types::Timeline`].
@@ -341,12 +380,12 @@ impl<T: Types> Cache<T> {
     /// and if so, return an error that causes the page service to
     /// close the connection.
     #[instrument(level = "trace", skip_all)]
-    pub(crate) async fn get(
+    async fn do_get(
         &mut self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
         tenant_manager: &T::TenantManager,
-    ) -> Result<Handle<T>, GetError<T>> {
+    ) -> Result<Handle<T>, GetActiveTimelineError> {
         // terminates because when every iteration we remove an element from the map
         let miss: ShardSelector = loop {
             let routing_state = self.shard_routing(timeline_id, shard_selector);
@@ -426,60 +465,50 @@ impl<T: Types> Cache<T> {
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
         tenant_manager: &T::TenantManager,
-    ) -> Result<Handle<T>, GetError<T>> {
-        match tenant_manager.resolve(timeline_id, shard_selector).await {
-            Ok(timeline) => {
-                let key = timeline.shard_timeline_id();
-                match &shard_selector {
-                    ShardSelector::Zero => assert_eq!(key.shard_index.shard_number, ShardNumber(0)),
-                    ShardSelector::Page(_) => (), // gotta trust tenant_manager
-                    ShardSelector::Known(idx) => assert_eq!(idx, &key.shard_index),
-                }
-
-                trace!("creating new HandleInner");
-                let timeline = Arc::new(timeline);
-                let handle_inner_arc =
-                    Arc::new(Mutex::new(HandleInner::Open(Arc::clone(&timeline))));
-                let handle_weak = WeakHandle {
-                    inner: Arc::downgrade(&handle_inner_arc),
-                };
-                let handle = handle_weak
-                    .upgrade()
-                    .ok()
-                    .expect("we just created it and it's not linked anywhere yet");
-                {
-                    let mut lock_guard = timeline
-                        .per_timeline_state()
-                        .handles
-                        .lock()
-                        .expect("mutex poisoned");
-                    match &mut *lock_guard {
-                        Some(per_timeline_state) => {
-                            let replaced =
-                                per_timeline_state.insert(self.id, Arc::clone(&handle_inner_arc));
-                            assert!(replaced.is_none(), "some earlier code left a stale handle");
-                            match self.map.entry(key) {
-                                hash_map::Entry::Occupied(_o) => {
-                                    // This cannot not happen because
-                                    // 1. we're the _miss_ handle, i.e., `self.map` didn't contain an entry and
-                                    // 2. we were holding &mut self during .resolve().await above, so, no other thread can have inserted a handle
-                                    //    while we were waiting for the tenant manager.
-                                    unreachable!()
-                                }
-                                hash_map::Entry::Vacant(v) => {
-                                    v.insert(handle_weak);
-                                }
-                            }
-                        }
-                        None => {
-                            return Err(GetError::PerTimelineStateShutDown);
-                        }
-                    }
-                }
-                Ok(handle)
-            }
-            Err(e) => Err(GetError::TenantManager(e)),
+    ) -> Result<Handle<T>, GetActiveTimelineError> {
+        let timeline = tenant_manager.resolve(timeline_id, shard_selector).await?;
+        let key = timeline.shard_timeline_id();
+        match &shard_selector {
+            ShardSelector::Zero => assert_eq!(key.shard_index.shard_number, ShardNumber(0)),
+            ShardSelector::Page(_) => (), // gotta trust tenant_manager
+            ShardSelector::Known(idx) => assert_eq!(idx, &key.shard_index),
         }
+
+        trace!("creating new HandleInner");
+        let timeline = Arc::new(timeline);
+        let handle_inner_arc = Arc::new(Mutex::new(HandleInner::Open(Arc::clone(&timeline))));
+        let handle_weak = WeakHandle {
+            inner: Arc::downgrade(&handle_inner_arc),
+        };
+        let handle = handle_weak
+            .upgrade()
+            .ok()
+            .expect("we just created it and it's not linked anywhere yet");
+        let mut lock_guard = timeline
+            .per_timeline_state()
+            .handles
+            .lock()
+            .expect("mutex poisoned");
+        let Some(per_timeline_state) = &mut *lock_guard else {
+            return Err(GetActiveTimelineError::Timeline(
+                GetTimelineError::ShuttingDown,
+            ));
+        };
+        let replaced = per_timeline_state.insert(self.id, Arc::clone(&handle_inner_arc));
+        assert!(replaced.is_none(), "some earlier code left a stale handle");
+        match self.map.entry(key) {
+            hash_map::Entry::Occupied(_o) => {
+                // This cannot not happen because
+                // 1. we're the _miss_ handle, i.e., `self.map` didn't contain an entry and
+                // 2. we were holding &mut self during .resolve().await above, so, no other thread can have inserted a handle
+                //    while we were waiting for the tenant manager.
+                unreachable!()
+            }
+            hash_map::Entry::Vacant(v) => {
+                v.insert(handle_weak);
+            }
+        }
+        Ok(handle)
     }
 }
 
@@ -612,8 +641,9 @@ mod tests {
     use pageserver_api::key::{DBDIR_KEY, Key, rel_block_to_key};
     use pageserver_api::models::ShardParameters;
     use pageserver_api::reltag::RelTag;
-    use pageserver_api::shard::ShardStripeSize;
-    use utils::shard::ShardCount;
+    use pageserver_api::shard::DEFAULT_STRIPE_SIZE;
+    use utils::id::TenantId;
+    use utils::shard::{ShardCount, TenantShardId};
     use utils::sync::gate::GateGuard;
 
     use super::*;
@@ -623,7 +653,6 @@ mod tests {
     #[derive(Debug)]
     struct TestTypes;
     impl Types for TestTypes {
-        type TenantManagerError = anyhow::Error;
         type TenantManager = StubManager;
         type Timeline = Entered;
     }
@@ -674,40 +703,48 @@ mod tests {
             &self,
             timeline_id: TimelineId,
             shard_selector: ShardSelector,
-        ) -> anyhow::Result<Entered> {
+        ) -> Result<Entered, GetActiveTimelineError> {
+            fn enter_gate(
+                timeline: &StubTimeline,
+            ) -> Result<Arc<GateGuard>, GetActiveTimelineError> {
+                Ok(Arc::new(timeline.gate.enter().map_err(|_| {
+                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
+                })?))
+            }
+
             for timeline in &self.shards {
                 if timeline.id == timeline_id {
-                    let enter_gate = || {
-                        let gate_guard = timeline.gate.enter()?;
-                        let gate_guard = Arc::new(gate_guard);
-                        anyhow::Ok(gate_guard)
-                    };
                     match &shard_selector {
                         ShardSelector::Zero if timeline.shard.is_shard_zero() => {
                             return Ok(Entered {
                                 timeline: Arc::clone(timeline),
-                                gate_guard: enter_gate()?,
+                                gate_guard: enter_gate(timeline)?,
                             });
                         }
                         ShardSelector::Zero => continue,
                         ShardSelector::Page(key) if timeline.shard.is_key_local(key) => {
                             return Ok(Entered {
                                 timeline: Arc::clone(timeline),
-                                gate_guard: enter_gate()?,
+                                gate_guard: enter_gate(timeline)?,
                             });
                         }
                         ShardSelector::Page(_) => continue,
                         ShardSelector::Known(idx) if idx == &timeline.shard.shard_index() => {
                             return Ok(Entered {
                                 timeline: Arc::clone(timeline),
-                                gate_guard: enter_gate()?,
+                                gate_guard: enter_gate(timeline)?,
                             });
                         }
                         ShardSelector::Known(_) => continue,
                     }
                 }
             }
-            anyhow::bail!("not found")
+            Err(GetActiveTimelineError::Timeline(
+                GetTimelineError::NotFound {
+                    tenant_id: TenantShardId::unsharded(TenantId::from([0; 16])),
+                    timeline_id,
+                },
+            ))
         }
     }
 
@@ -879,6 +916,7 @@ mod tests {
             .await
             .err()
             .expect("documented behavior: can't get new handle after shutdown");
+
         assert_eq!(cache.map.len(), 1, "next access cleans up the cache");
 
         cache
@@ -887,7 +925,7 @@ mod tests {
             .expect("we still have it");
     }
 
-    fn make_relation_key_for_shard(shard: ShardNumber, params: &ShardParameters) -> Key {
+    fn make_relation_key_for_shard(shard: ShardNumber, params: ShardParameters) -> Key {
         rel_block_to_key(
             RelTag {
                 spcnode: 1663,
@@ -912,19 +950,19 @@ mod tests {
         });
         let child_params = ShardParameters {
             count: ShardCount(2),
-            stripe_size: ShardStripeSize::default(),
+            stripe_size: DEFAULT_STRIPE_SIZE,
         };
         let child0 = Arc::new_cyclic(|myself| StubTimeline {
             gate: Default::default(),
             id: timeline_id,
-            shard: ShardIdentity::from_params(ShardNumber(0), &child_params),
+            shard: ShardIdentity::from_params(ShardNumber(0), child_params),
             per_timeline_state: PerTimelineState::default(),
             myself: myself.clone(),
         });
         let child1 = Arc::new_cyclic(|myself| StubTimeline {
             gate: Default::default(),
             id: timeline_id,
-            shard: ShardIdentity::from_params(ShardNumber(1), &child_params),
+            shard: ShardIdentity::from_params(ShardNumber(1), child_params),
             per_timeline_state: PerTimelineState::default(),
             myself: myself.clone(),
         });
@@ -937,7 +975,7 @@ mod tests {
             let handle = cache
                 .get(
                     timeline_id,
-                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), &child_params)),
+                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), child_params)),
                     &StubManager {
                         shards: vec![parent.clone()],
                     },
@@ -961,7 +999,7 @@ mod tests {
             let handle = cache
                 .get(
                     timeline_id,
-                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), &child_params)),
+                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), child_params)),
                     &StubManager {
                         shards: vec![], // doesn't matter what's in here, the cache is fully loaded
                     },
@@ -978,7 +1016,7 @@ mod tests {
         let parent_handle = cache
             .get(
                 timeline_id,
-                ShardSelector::Page(make_relation_key_for_shard(ShardNumber(0), &child_params)),
+                ShardSelector::Page(make_relation_key_for_shard(ShardNumber(0), child_params)),
                 &StubManager {
                     shards: vec![parent.clone()],
                 },
@@ -995,7 +1033,7 @@ mod tests {
             let handle = cache
                 .get(
                     timeline_id,
-                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), &child_params)),
+                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), child_params)),
                     &StubManager {
                         shards: vec![child0.clone(), child1.clone()], // <====== this changed compared to previous loop
                     },

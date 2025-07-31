@@ -43,7 +43,12 @@ pub(in crate::http) async fn configure(
         // configure request for tracing purposes.
         state.startup_span = Some(tracing::Span::current());
 
-        state.pspec = Some(pspec);
+        if compute.params.lakebase_mode {
+            ComputeNode::set_spec(&compute.params, &mut state, pspec);
+        } else {
+            state.pspec = Some(pspec);
+        }
+
         state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
         drop(state);
     }
@@ -65,7 +70,7 @@ pub(in crate::http) async fn configure(
 
             if state.status == ComputeStatus::Failed {
                 let err = state.error.as_ref().map_or("unknown error", |x| x);
-                let msg = format!("compute configuration failed: {:?}", err);
+                let msg = format!("compute configuration failed: {err:?}");
                 return Err(msg);
             }
         }

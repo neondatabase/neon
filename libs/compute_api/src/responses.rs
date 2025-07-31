@@ -46,19 +46,53 @@ pub struct ExtensionInstallResponse {
     pub version: ExtVersion,
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+/// Status of the LFC prewarm process. The same state machine is reused for
+/// both autoprewarm (prewarm after compute/Postgres start using the previously
+/// stored LFC state) and explicit prewarming via API.
+#[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcPrewarmState {
+    /// Default value when compute boots up.
     #[default]
     NotPrewarmed,
+    /// Prewarming thread is active and loading pages into LFC.
     Prewarming,
+    /// We found requested LFC state in the endpoint storage and
+    /// completed prewarming successfully.
     Completed,
-    Failed {
-        error: String,
-    },
+    /// Unexpected error happened during prewarming. Note, `Not Found 404`
+    /// response from the endpoint storage is explicitly excluded here
+    /// because it can normally happen on the first compute start,
+    /// since LFC state is not available yet.
+    Failed { error: String },
+    /// We tried to fetch the corresponding LFC state from the endpoint storage,
+    /// but received `Not Found 404`. This should normally happen only during the
+    /// first endpoint start after creation with `autoprewarm: true`.
+    /// This may also happen if LFC is turned off or not initialized
+    ///
+    /// During the orchestrated prewarm via API, when a caller explicitly
+    /// provides the LFC state key to prewarm from, it's the caller responsibility
+    /// to handle this status as an error state in this case.
+    Skipped,
+    /// LFC prewarm was cancelled. Some pages in LFC cache may be prewarmed if query
+    /// has started working before cancellation
+    Cancelled,
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+impl Display for LfcPrewarmState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LfcPrewarmState::NotPrewarmed => f.write_str("NotPrewarmed"),
+            LfcPrewarmState::Prewarming => f.write_str("Prewarming"),
+            LfcPrewarmState::Completed => f.write_str("Completed"),
+            LfcPrewarmState::Skipped => f.write_str("Skipped"),
+            LfcPrewarmState::Failed { error } => write!(f, "Error({error})"),
+            LfcPrewarmState::Cancelled => f.write_str("Cancelled"),
+        }
+    }
+}
+
+#[derive(Serialize, Default, Debug, Clone, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcOffloadState {
     #[default]
@@ -68,6 +102,23 @@ pub enum LfcOffloadState {
     Failed {
         error: String,
     },
+    Skipped,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+/// Response of /promote
+pub enum PromoteState {
+    NotPromoted,
+    Completed,
+    Failed { error: String },
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct PromoteConfig {
+    pub spec: ComputeSpec,
+    pub wal_flush_lsn: utils::lsn::Lsn,
 }
 
 /// Response of the /status API
@@ -81,6 +132,25 @@ pub struct ComputeStatusResponse {
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminateMode {
+    #[default]
+    /// wait 30s till returning from /terminate to allow control plane to get the error
+    Fast,
+    /// return from /terminate immediately as soon as all components are terminated
+    Immediate,
+}
+
+impl From<TerminateMode> for ComputeStatus {
+    fn from(mode: TerminateMode) -> Self {
+        match mode {
+            TerminateMode::Fast => ComputeStatus::TerminationPendingFast,
+            TerminateMode::Immediate => ComputeStatus::TerminationPendingImmediate,
+        }
+    }
 }
 
 #[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -103,9 +173,21 @@ pub enum ComputeStatus {
     // control-plane to terminate it.
     Failed,
     // Termination requested
-    TerminationPending,
+    TerminationPendingFast,
+    // Termination requested, without waiting 30s before returning from /terminate
+    TerminationPendingImmediate,
     // Terminated Postgres
     Terminated,
+    // A spec refresh is being requested
+    RefreshConfigurationPending,
+    // A spec refresh is being applied. We cannot refresh configuration again until the current
+    // refresh is done, i.e., signal_refresh_configuration() will return 500 error.
+    RefreshConfiguration,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct TerminateResponse {
+    pub lsn: Option<utils::lsn::Lsn>,
 }
 
 impl Display for ComputeStatus {
@@ -113,11 +195,18 @@ impl Display for ComputeStatus {
         match self {
             ComputeStatus::Empty => f.write_str("empty"),
             ComputeStatus::ConfigurationPending => f.write_str("configuration-pending"),
+            ComputeStatus::RefreshConfiguration => f.write_str("refresh-configuration"),
+            ComputeStatus::RefreshConfigurationPending => {
+                f.write_str("refresh-configuration-pending")
+            }
             ComputeStatus::Init => f.write_str("init"),
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),
             ComputeStatus::Failed => f.write_str("failed"),
-            ComputeStatus::TerminationPending => f.write_str("termination-pending"),
+            ComputeStatus::TerminationPendingFast => f.write_str("termination-pending-fast"),
+            ComputeStatus::TerminationPendingImmediate => {
+                f.write_str("termination-pending-immediate")
+            }
             ComputeStatus::Terminated => f.write_str("terminated"),
         }
     }

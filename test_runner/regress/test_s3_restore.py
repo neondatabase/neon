@@ -74,7 +74,7 @@ def test_tenant_s3_restore(
             last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
             last_flush_lsns.append(last_flush_lsn)
         ps_http.timeline_checkpoint(tenant_id, timeline_id)
-        wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
+        wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn, timeout=60)
         log.info(f"{timeline} timeline {timeline_id} {last_flush_lsn=}")
         parent = timeline
 

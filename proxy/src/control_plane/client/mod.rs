@@ -13,11 +13,11 @@ use tracing::{debug, info};
 use super::{EndpointAccessControl, RoleAccessControl};
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
-use crate::cache::endpoints::EndpointsCache;
-use crate::cache::project_info::ProjectInfoCacheImpl;
-use crate::config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions};
+use crate::cache::node_info::{CachedNodeInfo, NodeInfoCache};
+use crate::cache::project_info::ProjectInfoCache;
+use crate::config::{CacheOptions, ProjectInfoCacheOptions};
 use crate::context::RequestContext;
-use crate::control_plane::{CachedNodeInfo, ControlPlaneApi, NodeInfoCache, errors};
+use crate::control_plane::{ControlPlaneApi, errors};
 use crate::error::ReportableError;
 use crate::metrics::ApiLockMetrics;
 use crate::rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token};
@@ -120,26 +120,17 @@ pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub(crate) node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
-    pub project_info: Arc<ProjectInfoCacheImpl>,
-    /// List of all valid endpoints.
-    pub endpoints_cache: Arc<EndpointsCache>,
+    pub project_info: Arc<ProjectInfoCache>,
 }
 
 impl ApiCaches {
     pub fn new(
         wake_compute_cache_config: CacheOptions,
         project_info_cache_config: ProjectInfoCacheOptions,
-        endpoint_cache_config: EndpointCacheConfig,
     ) -> Self {
         Self {
-            node_info: NodeInfoCache::new(
-                "node_info_cache",
-                wake_compute_cache_config.size,
-                wake_compute_cache_config.ttl,
-                true,
-            ),
-            project_info: Arc::new(ProjectInfoCacheImpl::new(project_info_cache_config)),
-            endpoints_cache: Arc::new(EndpointsCache::new(endpoint_cache_config)),
+            node_info: NodeInfoCache::new(wake_compute_cache_config),
+            project_info: Arc::new(ProjectInfoCache::new(project_info_cache_config)),
         }
     }
 }
@@ -213,7 +204,12 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         self.metrics
             .semaphore_acquire_seconds
             .observe(now.elapsed().as_secs_f64());
-        debug!("acquired permit {:?}", now.elapsed().as_secs_f64());
+
+        if permit.is_ok() {
+            debug!(elapsed = ?now.elapsed(), "acquired permit");
+        } else {
+            debug!(elapsed = ?now.elapsed(), "timed out acquiring permit");
+        }
         Ok(WakeComputePermit { permit: permit? })
     }
 

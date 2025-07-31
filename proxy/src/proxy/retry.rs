@@ -3,7 +3,7 @@ use std::io;
 
 use tokio::time;
 
-use crate::compute;
+use crate::compute::{self, PostgresError};
 use crate::config::RetryConfig;
 
 pub(crate) trait CouldRetry {
@@ -31,18 +31,6 @@ impl CouldRetry for io::Error {
     }
 }
 
-impl CouldRetry for postgres_client::error::DbError {
-    fn could_retry(&self) -> bool {
-        use postgres_client::error::SqlState;
-        matches!(
-            self.code(),
-            &SqlState::CONNECTION_FAILURE
-                | &SqlState::CONNECTION_EXCEPTION
-                | &SqlState::CONNECTION_DOES_NOT_EXIST
-                | &SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
-        )
-    }
-}
 impl ShouldRetryWakeCompute for postgres_client::error::DbError {
     fn should_retry_wake_compute(&self) -> bool {
         use postgres_client::error::SqlState;
@@ -73,17 +61,6 @@ impl ShouldRetryWakeCompute for postgres_client::error::DbError {
     }
 }
 
-impl CouldRetry for postgres_client::Error {
-    fn could_retry(&self) -> bool {
-        if let Some(io_err) = self.source().and_then(|x| x.downcast_ref()) {
-            io::Error::could_retry(io_err)
-        } else if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
-            postgres_client::error::DbError::could_retry(db_err)
-        } else {
-            false
-        }
-    }
-}
 impl ShouldRetryWakeCompute for postgres_client::Error {
     fn should_retry_wake_compute(&self) -> bool {
         if let Some(db_err) = self.source().and_then(|x| x.downcast_ref()) {
@@ -99,20 +76,30 @@ impl ShouldRetryWakeCompute for postgres_client::Error {
 impl CouldRetry for compute::ConnectionError {
     fn could_retry(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.could_retry(),
             compute::ConnectionError::TlsError(err) => err.could_retry(),
             compute::ConnectionError::WakeComputeError(err) => err.could_retry(),
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
+            #[cfg(test)]
+            compute::ConnectionError::TestError { retryable, .. } => *retryable,
         }
     }
 }
 impl ShouldRetryWakeCompute for compute::ConnectionError {
     fn should_retry_wake_compute(&self) -> bool {
         match self {
-            compute::ConnectionError::Postgres(err) => err.should_retry_wake_compute(),
             // the cache entry was not checked for validity
             compute::ConnectionError::TooManyConnectionAttempts(_) => false,
+            #[cfg(test)]
+            compute::ConnectionError::TestError { wakeable, .. } => *wakeable,
             _ => true,
+        }
+    }
+}
+
+impl ShouldRetryWakeCompute for PostgresError {
+    fn should_retry_wake_compute(&self) -> bool {
+        match self {
+            PostgresError::Postgres(error) => error.should_retry_wake_compute(),
         }
     }
 }

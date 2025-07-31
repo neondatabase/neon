@@ -4,13 +4,17 @@
 //! provide it by calling the compute_ctl's `/compute_ctl` endpoint, or
 //! compute_ctl can fetch it by calling the control plane's API.
 use std::collections::HashMap;
+use std::fmt::Display;
 
+use anyhow::anyhow;
 use indexmap::IndexMap;
 use regex::Regex;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
-use utils::id::{TenantId, TimelineId};
+use url::Url;
+use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
+use utils::shard::{ShardCount, ShardIndex, ShardNumber, ShardStripeSize};
 
 use crate::responses::TlsConfig;
 
@@ -102,7 +106,26 @@ pub struct ComputeSpec {
     // updated to fill these fields, we can make these non optional.
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
+
+    /// Pageserver information can be passed in three different ways:
+    /// 1. Here in `pageserver_connection_info`
+    /// 2. In the `pageserver_connstring` field.
+    /// 3. in `cluster.settings`.
+    ///
+    /// The goal is to use method 1. everywhere. But for backwards-compatibility with old
+    /// versions of the control plane, `compute_ctl` will check 2. and 3. if the
+    /// `pageserver_connection_info` field is missing.
+    ///
+    /// If both `pageserver_connection_info` and `pageserver_connstring`+`shard_stripe_size` are
+    /// given, they must contain the same information.
+    pub pageserver_connection_info: Option<PageserverConnectionInfo>,
+
     pub pageserver_connstring: Option<String>,
+
+    /// Stripe size for pageserver sharding, in pages. This is set together with the legacy
+    /// `pageserver_connstring` field. When the modern `pageserver_connection_info` field is used,
+    /// the stripe size is stored in `pageserver_connection_info.stripe_size` instead.
+    pub shard_stripe_size: Option<ShardStripeSize>,
 
     // More neon ids that we expose to the compute_ctl
     // and to postgres as neon extension GUCs.
@@ -135,10 +158,6 @@ pub struct ComputeSpec {
     pub remote_extensions: Option<RemoteExtSpec>,
 
     pub pgbouncer_settings: Option<IndexMap<String, String>>,
-
-    // Stripe size for pageserver sharding, in pages
-    #[serde(default)]
-    pub shard_stripe_size: Option<usize>,
 
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
@@ -178,9 +197,21 @@ pub struct ComputeSpec {
     /// JWT for authorizing requests to endpoint storage service
     pub endpoint_storage_token: Option<String>,
 
-    /// Download LFC state from endpoint_storage and pass it to Postgres on startup
     #[serde(default)]
+    /// Download LFC state from endpoint storage and pass it to Postgres on compute startup
     pub autoprewarm: bool,
+
+    #[serde(default)]
+    /// Upload LFC state to endpoint storage periodically. Default value (None) means "don't upload"
+    pub offload_lfc_interval_seconds: Option<std::num::NonZeroU64>,
+
+    /// Suspend timeout in seconds.
+    ///
+    /// We use this value to derive other values, such as the installed extensions metric.
+    pub suspend_timeout_seconds: i64,
+
+    // Databricks specific options for compute instance.
+    pub databricks_settings: Option<DatabricksSettings>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -200,6 +231,140 @@ pub enum ComputeFeature {
     /// `parse_unknown_features()` for more details.
     #[serde(other)]
     UnknownFeature,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverConnectionInfo {
+    /// NB: 0 for unsharded tenants, 1 for sharded tenants with 1 shard, following storage
+    pub shard_count: ShardCount,
+
+    /// INVARIANT: null if shard_count is 0, otherwise non-null and immutable
+    pub stripe_size: Option<ShardStripeSize>,
+
+    pub shards: HashMap<ShardIndex, PageserverShardInfo>,
+
+    /// If the compute supports both protocols, this indicates which one it should use.  The compute
+    /// may use other available protocols too, if it doesn't support the preferred one. The URL's
+    /// for the protocol specified here must be present for all shards, i.e. do not mark a protocol
+    /// as preferred if it cannot actually be used with all the pageservers.
+    #[serde(default)]
+    pub prefer_protocol: PageserverProtocol,
+}
+
+/// Extract PageserverConnectionInfo from a comma-separated list of libpq connection strings.
+///
+/// This is used for backwards-compatibility, to parse the legacy
+/// [ComputeSpec::pageserver_connstring] field, or the 'neon.pageserver_connstring' GUC. Nowadays,
+/// the 'pageserver_connection_info' field should be used instead.
+impl PageserverConnectionInfo {
+    pub fn from_connstr(
+        connstr: &str,
+        stripe_size: Option<ShardStripeSize>,
+    ) -> Result<PageserverConnectionInfo, anyhow::Error> {
+        let shard_infos: Vec<_> = connstr
+            .split(',')
+            .map(|connstr| PageserverShardInfo {
+                pageservers: vec![PageserverShardConnectionInfo {
+                    id: None,
+                    libpq_url: Some(connstr.to_string()),
+                    grpc_url: None,
+                }],
+            })
+            .collect();
+
+        match shard_infos.len() {
+            0 => anyhow::bail!("empty connection string"),
+            1 => {
+                // We assume that if there's only connection string, it means "unsharded",
+                // rather than a sharded system with just a single shard. The latter is
+                // possible in principle, but we never do it.
+                let shard_count = ShardCount::unsharded();
+                let only_shard = shard_infos.first().unwrap().clone();
+                let shards = vec![(ShardIndex::unsharded(), only_shard)];
+                Ok(PageserverConnectionInfo {
+                    shard_count,
+                    stripe_size: None,
+                    shards: shards.into_iter().collect(),
+                    prefer_protocol: PageserverProtocol::Libpq,
+                })
+            }
+            n => {
+                if stripe_size.is_none() {
+                    anyhow::bail!("{n} shards but no stripe_size");
+                }
+                let shard_count = ShardCount(n.try_into()?);
+                let shards = shard_infos
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, shard_info)| {
+                        (
+                            ShardIndex {
+                                shard_count,
+                                shard_number: ShardNumber(
+                                    idx.try_into().expect("shard number fits in u8"),
+                                ),
+                            },
+                            shard_info,
+                        )
+                    })
+                    .collect();
+                Ok(PageserverConnectionInfo {
+                    shard_count,
+                    stripe_size,
+                    shards,
+                    prefer_protocol: PageserverProtocol::Libpq,
+                })
+            }
+        }
+    }
+
+    /// Convenience routine to get the connection string for a shard.
+    pub fn shard_url(
+        &self,
+        shard_number: ShardNumber,
+        protocol: PageserverProtocol,
+    ) -> anyhow::Result<&str> {
+        let shard_index = ShardIndex {
+            shard_number,
+            shard_count: self.shard_count,
+        };
+        let shard = self.shards.get(&shard_index).ok_or_else(|| {
+            anyhow::anyhow!("shard connection info missing for shard {}", shard_index)
+        })?;
+
+        // Just use the first pageserver in the list. That's good enough for this
+        // convenience routine; if you need more control, like round robin policy or
+        // failover support, roll your own. (As of this writing, we never have more than
+        // one pageserver per shard anyway, but that will change in the future.)
+        let pageserver = shard
+            .pageservers
+            .first()
+            .ok_or(anyhow::anyhow!("must have at least one pageserver"))?;
+
+        let result = match protocol {
+            PageserverProtocol::Grpc => pageserver
+                .grpc_url
+                .as_ref()
+                .ok_or(anyhow::anyhow!("no grpc_url for shard {shard_index}"))?,
+            PageserverProtocol::Libpq => pageserver
+                .libpq_url
+                .as_ref()
+                .ok_or(anyhow::anyhow!("no libpq_url for shard {shard_index}"))?,
+        };
+        Ok(result)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverShardInfo {
+    pub pageservers: Vec<PageserverShardConnectionInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct PageserverShardConnectionInfo {
+    pub id: Option<NodeId>,
+    pub libpq_url: Option<String>,
+    pub grpc_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -319,6 +484,12 @@ impl ComputeMode {
     }
 }
 
+impl Display for ComputeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_type_str())
+    }
+}
+
 /// Log level for audit logging
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ComputeAudit {
@@ -404,6 +575,32 @@ pub struct GenericOption {
     pub vartype: String,
 }
 
+/// Postgres compute TLS settings.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PgComputeTlsSettings {
+    // Absolute path to the certificate file for server-side TLS.
+    pub cert_file: String,
+    // Absolute path to the private key file for server-side TLS.
+    pub key_file: String,
+    // Absolute path to the certificate authority file for verifying client certificates.
+    pub ca_file: String,
+}
+
+/// Databricks specific options for compute instance.
+/// This is used to store any other settings that needs to be propagate to Compute
+/// but should not be persisted to ComputeSpec in the database.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DatabricksSettings {
+    pub pg_compute_tls_settings: PgComputeTlsSettings,
+    // Absolute file path to databricks_pg_hba.conf file.
+    pub databricks_pg_hba: String,
+    // Absolute file path to databricks_pg_ident.conf file.
+    pub databricks_pg_ident: String,
+    // Hostname portion of the Databricks workspace URL of the endpoint, or empty string if not known.
+    // A valid hostname is required for the compute instance to support PAT logins.
+    pub databricks_workspace_host: String,
+}
+
 /// Optional collection of `GenericOption`'s. Type alias allows us to
 /// declare a `trait` on it.
 pub type GenericOptions = Option<Vec<GenericOption>>;
@@ -427,6 +624,49 @@ pub struct JwksSettings {
     pub jwks_url: String,
     pub provider_name: String,
     pub jwt_audience: Option<String>,
+}
+
+/// Protocol used to connect to a Pageserver.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum PageserverProtocol {
+    /// The original protocol based on libpq and COPY. Uses postgresql:// or postgres:// scheme.
+    #[default]
+    #[serde(rename = "libpq")]
+    Libpq,
+    /// A newer, gRPC-based protocol. Uses grpc:// scheme.
+    #[serde(rename = "grpc")]
+    Grpc,
+}
+
+impl PageserverProtocol {
+    /// Parses the protocol from a connstring scheme. Defaults to Libpq if no scheme is given.
+    /// Errors if the connstring is an invalid URL.
+    pub fn from_connstring(connstring: &str) -> anyhow::Result<Self> {
+        let scheme = match Url::parse(connstring) {
+            Ok(url) => url.scheme().to_lowercase(),
+            Err(url::ParseError::RelativeUrlWithoutBase) => return Ok(Self::default()),
+            Err(err) => return Err(anyhow!("invalid connstring URL: {err}")),
+        };
+        match scheme.as_str() {
+            "postgresql" | "postgres" => Ok(Self::Libpq),
+            "grpc" => Ok(Self::Grpc),
+            scheme => Err(anyhow!("invalid protocol scheme: {scheme}")),
+        }
+    }
+
+    /// Returns the URL scheme for the protocol, for use in connstrings.
+    pub fn scheme(&self) -> &'static str {
+        match self {
+            Self::Libpq => "postgresql",
+            Self::Grpc => "grpc",
+        }
+    }
+}
+
+impl Display for PageserverProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.scheme())
+    }
 }
 
 #[cfg(test)]

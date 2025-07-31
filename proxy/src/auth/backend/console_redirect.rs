@@ -8,11 +8,12 @@ use tracing::{info, info_span};
 
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
+use crate::cache::node_info::CachedNodeInfo;
 use crate::compute::AuthInfo;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::cplane_proxy_v1;
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
+use crate::control_plane::{self, NodeInfo};
 use crate::error::{ReportableError, UserFacingError};
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
@@ -164,24 +165,21 @@ async fn authenticate(
         })?
         .map_err(ConsoleRedirectError::from)?;
 
-    if auth_config.ip_allowlist_check_enabled {
-        if let Some(allowed_ips) = &db_info.allowed_ips {
-            if !auth::check_peer_addr_is_in_list(&ctx.peer_addr(), allowed_ips) {
-                return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
-            }
-        }
+    if auth_config.ip_allowlist_check_enabled
+        && let Some(allowed_ips) = &db_info.allowed_ips
+        && !auth::check_peer_addr_is_in_list(&ctx.peer_addr(), allowed_ips)
+    {
+        return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
     }
 
     // Check if the access over the public internet is allowed, otherwise block. Note that
     // the console redirect is not behind the VPC service endpoint, so we don't need to check
     // the VPC endpoint ID.
-    if let Some(public_access_allowed) = db_info.public_access_allowed {
-        if !public_access_allowed {
-            return Err(auth::AuthError::NetworkNotAllowed);
-        }
+    if let Some(public_access_allowed) = db_info.public_access_allowed
+        && !public_access_allowed
+    {
+        return Err(auth::AuthError::NetworkNotAllowed);
     }
-
-    client.write_message(BeMessage::NoticeResponse("Connecting to database."));
 
     // Backwards compatibility. pg_sni_proxy uses "--" in domain names
     // while direct connections do not. Once we migrate to pg_sni_proxy

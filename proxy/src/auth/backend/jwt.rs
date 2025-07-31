@@ -399,36 +399,36 @@ impl JwkCacheEntryLock {
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 
-        if let Some(aud) = expected_audience {
-            if payload.audience.0.iter().all(|s| s != aud) {
-                return Err(JwtError::InvalidClaims(
-                    JwtClaimsError::InvalidJwtTokenAudience,
-                ));
-            }
+        if let Some(aud) = expected_audience
+            && payload.audience.0.iter().all(|s| s != aud)
+        {
+            return Err(JwtError::InvalidClaims(
+                JwtClaimsError::InvalidJwtTokenAudience,
+            ));
         }
 
         let now = SystemTime::now();
 
-        if let Some(exp) = payload.expiration {
-            if now >= exp + CLOCK_SKEW_LEEWAY {
-                return Err(JwtError::InvalidClaims(JwtClaimsError::JwtTokenHasExpired(
-                    exp.duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                )));
-            }
+        if let Some(exp) = payload.expiration
+            && now >= exp + CLOCK_SKEW_LEEWAY
+        {
+            return Err(JwtError::InvalidClaims(JwtClaimsError::JwtTokenHasExpired(
+                exp.duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            )));
         }
 
-        if let Some(nbf) = payload.not_before {
-            if nbf >= now + CLOCK_SKEW_LEEWAY {
-                return Err(JwtError::InvalidClaims(
-                    JwtClaimsError::JwtTokenNotYetReadyToUse(
-                        nbf.duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    ),
-                ));
-            }
+        if let Some(nbf) = payload.not_before
+            && nbf >= now + CLOCK_SKEW_LEEWAY
+        {
+            return Err(JwtError::InvalidClaims(
+                JwtClaimsError::JwtTokenNotYetReadyToUse(
+                    nbf.duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                ),
+            ));
         }
 
         Ok(ComputeCredentialKeys::JwtPayload(payloadb))
@@ -803,7 +803,7 @@ mod tests {
     use http_body_util::Full;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
-    use rand::rngs::OsRng;
+    use rand_core::OsRng;
     use rsa::pkcs8::DecodePrivateKey;
     use serde::Serialize;
     use serde_json::json;

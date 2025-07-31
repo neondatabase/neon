@@ -12,6 +12,7 @@
 use pageserver_api::models;
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::{Deserialize, Serialize};
+use utils::critical;
 use utils::generation::Generation;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,8 +62,10 @@ pub(crate) struct LocationConf {
     /// The detailed shard identity.  This structure is already scoped within
     /// a TenantShardId, but we need the full ShardIdentity to enable calculating
     /// key->shard mappings.
-    // TODO(vlad): Remove this default once all configs have a shard identity on disk.
-    #[serde(default = "ShardIdentity::unsharded")]
+    ///
+    /// NB: we store this even for unsharded tenants, so that we agree with storcon on the intended
+    /// stripe size. Otherwise, a split request that does not specify a stripe size may use a
+    /// different default than storcon, which can lead to incorrect stripe sizes and corruption.
     pub(crate) shard: ShardIdentity,
 
     /// The pan-cluster tenant configuration, the same on all locations
@@ -134,7 +137,7 @@ impl LocationConf {
     pub(crate) fn attached_single(
         tenant_conf: pageserver_api::models::TenantConfig,
         generation: Generation,
-        shard_params: &models::ShardParameters,
+        shard_params: models::ShardParameters,
     ) -> Self {
         Self {
             mode: LocationMode::Attached(AttachedLocationConfig {
@@ -167,6 +170,16 @@ impl LocationConf {
                     attach_mode: mode,
                 })
             }
+        }
+
+        // This should never happen.
+        // TODO: turn this into a proper assertion.
+        if stripe_size != self.shard.stripe_size {
+            critical!(
+                "stripe size mismatch: {} != {}",
+                self.shard.stripe_size,
+                stripe_size,
+            );
         }
 
         self.shard.stripe_size = stripe_size;

@@ -3,14 +3,15 @@
 use std::net::SocketAddr;
 
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::TimestampTz;
+use postgres_ffi_types::TimestampTz;
+use postgres_versioninfo::PgVersionId;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
 
-use crate::membership::Configuration;
+use crate::membership::{Configuration, SafekeeperGeneration};
 use crate::{ServerInfo, Term};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -23,8 +24,7 @@ pub struct TimelineCreateRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub mconf: Configuration,
-    /// In the PG_VERSION_NUM macro format, like 140017.
-    pub pg_version: u32,
+    pub pg_version: PgVersionId,
     pub system_id: Option<u64>,
     // By default WAL_SEGMENT_SIZE
     pub wal_seg_size: Option<u32>,
@@ -210,7 +210,7 @@ pub struct TimelineStatus {
 }
 
 /// Request to switch membership configuration.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TimelineMembershipSwitchRequest {
     pub mconf: Configuration,
@@ -221,6 +221,8 @@ pub struct TimelineMembershipSwitchRequest {
 pub struct TimelineMembershipSwitchResponse {
     pub previous_conf: Configuration,
     pub current_conf: Configuration,
+    pub last_log_term: Term,
+    pub flush_lsn: Lsn,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -299,7 +301,12 @@ pub struct PullTimelineRequest {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     pub http_hosts: Vec<String>,
-    pub ignore_tombstone: Option<bool>,
+    /// Membership configuration to switch to after pull.
+    /// It guarantees that if pull_timeline returns successfully, the timeline will
+    /// not be deleted by request with an older generation.
+    /// Storage controller always sets this field.
+    /// None is only allowed for manual pull_timeline requests.
+    pub mconf: Option<Configuration>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -308,4 +315,13 @@ pub struct PullTimelineResponse {
     /// None if no pull happened because the timeline already exists.
     pub safekeeper_host: Option<String>,
     // TODO: add more fields?
+}
+
+/// Response to a timeline locate request.
+/// Storcon-only API.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TimelineLocateResponse {
+    pub generation: SafekeeperGeneration,
+    pub sk_set: Vec<NodeId>,
+    pub new_sk_set: Option<Vec<NodeId>>,
 }

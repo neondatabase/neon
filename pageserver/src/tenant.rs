@@ -34,10 +34,11 @@ use once_cell::sync::Lazy;
 pub use pageserver_api::models::TenantState;
 use pageserver_api::models::{self, RelSizeMigration};
 use pageserver_api::models::{
-    CompactInfoResponse, LsnLease, TimelineArchivalState, TimelineState, TopTenantShardItem,
+    CompactInfoResponse, TimelineArchivalState, TimelineState, TopTenantShardItem,
     WalRedoManagerStatus,
 };
 use pageserver_api::shard::{ShardIdentity, ShardStripeSize, TenantShardId};
+use postgres_ffi::PgMajorVersion;
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeoutOrCancel};
 use remote_timeline_client::index::GcCompactionState;
 use remote_timeline_client::manifest::{
@@ -79,13 +80,13 @@ use self::timeline::uninit::{TimelineCreateGuard, TimelineExclusionError, Uninit
 use self::timeline::{
     EvictionTaskTenantState, GcCutoffs, TimelineDeleteProgress, TimelineResources, WaitLsnError,
 };
-use crate::basebackup_cache::BasebackupPrepareSender;
+use crate::basebackup_cache::BasebackupCache;
 use crate::config::PageServerConf;
 use crate::context;
 use crate::context::RequestContextBuilder;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::{DeletionQueueClient, DeletionQueueError};
-use crate::feature_resolver::FeatureResolver;
+use crate::feature_resolver::{FeatureResolver, TenantFeatureResolver};
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::{
     BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN, CONCURRENT_INITDBS,
@@ -141,6 +142,9 @@ mod gc_block;
 mod gc_result;
 pub(crate) mod throttle;
 
+#[cfg(test)]
+pub mod debug;
+
 pub(crate) use timeline::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -161,7 +165,7 @@ pub struct TenantSharedResources {
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
     pub l0_flush_global_state: L0FlushGlobalState,
-    pub basebackup_prepare_sender: BasebackupPrepareSender,
+    pub basebackup_cache: Arc<BasebackupCache>,
     pub feature_resolver: FeatureResolver,
 }
 
@@ -179,6 +183,7 @@ pub(super) struct AttachedTenantConf {
 
 impl AttachedTenantConf {
     fn new(
+        conf: &'static PageServerConf,
         tenant_conf: pageserver_api::models::TenantConfig,
         location: AttachedLocationConfig,
     ) -> Self {
@@ -190,9 +195,7 @@ impl AttachedTenantConf {
         let lsn_lease_deadline = if location.attach_mode == AttachmentMode::Single {
             Some(
                 tokio::time::Instant::now()
-                    + tenant_conf
-                        .lsn_lease_length
-                        .unwrap_or(LsnLease::DEFAULT_LENGTH),
+                    + TenantShard::get_lsn_lease_length_impl(conf, &tenant_conf),
             )
         } else {
             // We don't use `lsn_lease_deadline` to delay GC in AttachedMulti and AttachedStale
@@ -207,10 +210,13 @@ impl AttachedTenantConf {
         }
     }
 
-    fn try_from(location_conf: LocationConf) -> anyhow::Result<Self> {
+    fn try_from(
+        conf: &'static PageServerConf,
+        location_conf: LocationConf,
+    ) -> anyhow::Result<Self> {
         match &location_conf.mode {
             LocationMode::Attached(attach_conf) => {
-                Ok(Self::new(location_conf.tenant_conf, *attach_conf))
+                Ok(Self::new(conf, location_conf.tenant_conf, *attach_conf))
             }
             LocationMode::Secondary(_) => {
                 anyhow::bail!(
@@ -330,7 +336,7 @@ pub struct TenantShard {
     deletion_queue_client: DeletionQueueClient,
 
     /// A channel to send async requests to prepare a basebackup for the basebackup cache.
-    basebackup_prepare_sender: BasebackupPrepareSender,
+    basebackup_cache: Arc<BasebackupCache>,
 
     /// Cached logical sizes updated updated on each [`TenantShard::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
@@ -385,7 +391,7 @@ pub struct TenantShard {
 
     l0_flush_global_state: L0FlushGlobalState,
 
-    pub(crate) feature_resolver: FeatureResolver,
+    pub(crate) feature_resolver: Arc<TenantFeatureResolver>,
 }
 impl std::fmt::Debug for TenantShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -496,8 +502,8 @@ impl WalRedoManager {
         key: pageserver_api::key::Key,
         lsn: Lsn,
         base_img: Option<(Lsn, bytes::Bytes)>,
-        records: Vec<(Lsn, pageserver_api::record::NeonWalRecord)>,
-        pg_version: u32,
+        records: Vec<(Lsn, wal_decoder::models::record::NeonWalRecord)>,
+        pg_version: PgMajorVersion,
         redo_attempt_type: RedoAttemptType,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
@@ -933,7 +939,7 @@ pub(crate) enum CreateTimelineParams {
 pub(crate) struct CreateTimelineParamsBootstrap {
     pub(crate) new_timeline_id: TimelineId,
     pub(crate) existing_initdb_timeline_id: Option<TimelineId>,
-    pub(crate) pg_version: u32,
+    pub(crate) pg_version: PgMajorVersion,
 }
 
 /// NB: See comment on [`CreateTimelineIdempotency::Branch`] for why there's no `pg_version` here.
@@ -971,7 +977,7 @@ pub(crate) enum CreateTimelineIdempotency {
     /// NB: special treatment, see comment in [`Self`].
     FailWithConflict,
     Bootstrap {
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     },
     /// NB: branches always have the same `pg_version` as their ancestor.
     /// While [`pageserver_api::models::TimelineCreateRequestMode::Branch::pg_version`]
@@ -1199,6 +1205,7 @@ impl TenantShard {
             idempotency.clone(),
             index_part.gc_compaction.clone(),
             index_part.rel_size_migration.clone(),
+            index_part.rel_size_migrated_at,
             ctx,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
@@ -1362,7 +1369,7 @@ impl TenantShard {
             remote_storage,
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         } = resources;
 
@@ -1379,7 +1386,7 @@ impl TenantShard {
             remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
-            basebackup_prepare_sender,
+            basebackup_cache,
             feature_resolver,
         ));
 
@@ -1859,6 +1866,29 @@ impl TenantShard {
             }
         }
 
+        // At this point we've initialized all timelines and are tracking them.
+        // Now compute the layer visibility for all (not offloaded) timelines.
+        let compute_visiblity_for = {
+            let timelines_accessor = self.timelines.lock().unwrap();
+            let mut timelines_offloaded_accessor = self.timelines_offloaded.lock().unwrap();
+
+            timelines_offloaded_accessor.extend(offloaded_timelines_list.into_iter());
+
+            // Before activation, populate each Timeline's GcInfo with information about its children
+            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
+
+            timelines_accessor.values().cloned().collect::<Vec<_>>()
+        };
+
+        for tl in compute_visiblity_for {
+            tl.update_layer_visibility().await.with_context(|| {
+                format!(
+                    "failed initial timeline visibility computation {} for tenant {}",
+                    tl.timeline_id, self.tenant_shard_id
+                )
+            })?;
+        }
+
         // Walk through deleted timelines, resume deletion
         for (timeline_id, index_part, remote_timeline_client) in timelines_to_resume_deletions {
             remote_timeline_client
@@ -1877,10 +1907,6 @@ impl TenantShard {
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
-        }
-        {
-            let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
-            offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
 
         // Stash the preloaded tenant manifest, and upload a new manifest if changed.
@@ -2522,7 +2548,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
     ) -> anyhow::Result<(UninitializedTimeline, RequestContext)> {
         anyhow::ensure!(
@@ -2559,6 +2585,7 @@ impl TenantShard {
             initdb_lsn,
             None,
             None,
+            None,
             ctx,
         )
         .await
@@ -2574,7 +2601,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let (uninit_tl, ctx) = self
@@ -2613,7 +2640,7 @@ impl TenantShard {
         self: &Arc<Self>,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         ctx: &RequestContext,
         in_memory_layer_desc: Vec<timeline::InMemoryLayerTestDesc>,
         delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
@@ -2879,13 +2906,14 @@ impl TenantShard {
                     Lsn(0),
                     initdb_lsn,
                     initdb_lsn,
-                    15,
+                    PgMajorVersion::PG15,
                 );
                 this.prepare_new_timeline(
                     new_timeline_id,
                     &new_metadata,
                     timeline_create_guard,
                     initdb_lsn,
+                    None,
                     None,
                     None,
                     ctx,
@@ -3243,7 +3271,7 @@ impl TenantShard {
                 };
                 let gc_compaction_strategy = self
                     .feature_resolver
-                    .evaluate_multivariate("gc-comapction-strategy", self.tenant_shard_id.tenant_id)
+                    .evaluate_multivariate("gc-comapction-strategy")
                     .ok();
                 let span = if let Some(gc_compaction_strategy) = gc_compaction_strategy {
                     info_span!("gc_compact_timeline", timeline_id = %timeline.timeline_id, strategy = %gc_compaction_strategy)
@@ -3265,7 +3293,10 @@ impl TenantShard {
                     .or_else(|err| match err {
                         // Ignore this, we likely raced with unarchival.
                         OffloadError::NotArchived => Ok(()),
-                        err => Err(err),
+                        OffloadError::AlreadyInProgress => Ok(()),
+                        OffloadError::Cancelled => Err(CompactionError::new_cancelled()),
+                        // don't break the anyhow chain
+                        OffloadError::Other(err) => Err(CompactionError::Other(err)),
                     })?;
             }
 
@@ -3293,27 +3324,13 @@ impl TenantShard {
 
     /// Trips the compaction circuit breaker if appropriate.
     pub(crate) fn maybe_trip_compaction_breaker(&self, err: &CompactionError) {
-        match err {
-            err if err.is_cancel() => {}
-            CompactionError::ShuttingDown => (),
-            // Offload failures don't trip the circuit breaker, since they're cheap to retry and
-            // shouldn't block compaction.
-            CompactionError::Offload(_) => {}
-            CompactionError::CollectKeySpaceError(err) => {
-                // CollectKeySpaceError::Cancelled and PageRead::Cancelled are handled in `err.is_cancel` branch.
-                self.compaction_circuit_breaker
-                    .lock()
-                    .unwrap()
-                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
-            }
-            CompactionError::Other(err) => {
-                self.compaction_circuit_breaker
-                    .lock()
-                    .unwrap()
-                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
-            }
-            CompactionError::AlreadyRunning(_) => {}
+        if err.is_cancel() {
+            return;
         }
+        self.compaction_circuit_breaker
+            .lock()
+            .unwrap()
+            .fail(&CIRCUIT_BREAKERS_BROKEN, err);
     }
 
     /// Cancel scheduled compaction tasks
@@ -3379,7 +3396,13 @@ impl TenantShard {
                 .collect_vec();
 
             for timeline in timelines {
-                timeline.maybe_freeze_ephemeral_layer().await;
+                // Include a span with the timeline ID. The parent span already has the tenant ID.
+                let span =
+                    info_span!("maybe_freeze_ephemeral_layer", timeline_id = %timeline.timeline_id);
+                timeline
+                    .maybe_freeze_ephemeral_layer()
+                    .instrument(span)
+                    .await;
             }
         }
 
@@ -3388,6 +3411,9 @@ impl TenantShard {
         if let Some(ref walredo_mgr) = self.walredo_mgr {
             walredo_mgr.maybe_quiesce(WALREDO_IDLE_TIMEOUT);
         }
+
+        // Update the feature resolver with the latest tenant-spcific data.
+        self.feature_resolver.refresh_properties_and_flags(self);
     }
 
     pub fn timeline_has_no_attached_children(&self, timeline_id: TimelineId) -> bool {
@@ -3430,7 +3456,7 @@ impl TenantShard {
             use pageserver_api::models::ActivatingFrom;
             match &*current_state {
                 TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => {
-                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
+                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {current_state:?}");
                 }
                 TenantState::Attaching => {
                     *current_state = TenantState::Activating(ActivatingFrom::Attaching);
@@ -3448,9 +3474,6 @@ impl TenantShard {
             let timelines_to_activate = timelines_accessor
                 .values()
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
-
-            // Before activation, populate each Timeline's GcInfo with information about its children
-            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -3855,6 +3878,10 @@ impl TenantShard {
         &self.tenant_shard_id
     }
 
+    pub(crate) fn get_shard_identity(&self) -> ShardIdentity {
+        self.shard_identity
+    }
+
     pub(crate) fn get_shard_stripe_size(&self) -> ShardStripeSize {
         self.shard_identity.stripe_size
     }
@@ -4153,6 +4180,15 @@ impl TenantShard {
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
+    // HADRON
+    pub fn get_image_creation_timeout(&self) -> Option<Duration> {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf.image_layer_force_creation_period.or(self
+            .conf
+            .default_tenant_conf
+            .image_layer_force_creation_period)
+    }
+
     pub fn get_pitr_interval(&self) -> Duration {
         let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
         tenant_conf
@@ -4180,10 +4216,16 @@ impl TenantShard {
     }
 
     pub fn get_lsn_lease_length(&self) -> Duration {
-        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        Self::get_lsn_lease_length_impl(self.conf, &self.tenant_conf.load().tenant_conf)
+    }
+
+    pub fn get_lsn_lease_length_impl(
+        conf: &'static PageServerConf,
+        tenant_conf: &pageserver_api::models::TenantConfig,
+    ) -> Duration {
         tenant_conf
             .lsn_lease_length
-            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+            .unwrap_or(conf.default_tenant_conf.lsn_lease_length)
     }
 
     pub fn get_timeline_offloading_enabled(&self) -> bool {
@@ -4303,6 +4345,7 @@ impl TenantShard {
         create_idempotency: CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
         rel_size_v2_status: Option<RelSizeMigration>,
+        rel_size_migrated_at: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<(Arc<Timeline>, RequestContext)> {
         let state = match cause {
@@ -4337,6 +4380,7 @@ impl TenantShard {
             create_idempotency,
             gc_compaction_state,
             rel_size_v2_status,
+            rel_size_migrated_at,
             self.cancel.child_token(),
         );
 
@@ -4363,7 +4407,7 @@ impl TenantShard {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
-        basebackup_prepare_sender: BasebackupPrepareSender,
+        basebackup_cache: Arc<BasebackupCache>,
         feature_resolver: FeatureResolver,
     ) -> TenantShard {
         assert!(!attached_conf.location.generation.is_none());
@@ -4468,8 +4512,11 @@ impl TenantShard {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
-            basebackup_prepare_sender,
-            feature_resolver,
+            basebackup_cache,
+            feature_resolver: Arc::new(TenantFeatureResolver::new(
+                feature_resolver,
+                tenant_shard_id.tenant_id,
+            )),
         }
     }
 
@@ -4508,6 +4555,10 @@ impl TenantShard {
         Ok(toml_edit::de::from_str::<LocationConf>(&config)?)
     }
 
+    /// Stores a tenant location config to disk.
+    ///
+    /// NB: make sure to call `ShardIdentity::assert_equal` before persisting a new config, to avoid
+    /// changes to shard parameters that may result in data corruption.
     #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(super) async fn persist_tenant_config(
         conf: &'static PageServerConf,
@@ -5039,6 +5090,7 @@ impl TenantShard {
             src_timeline.pg_version,
         );
 
+        let (rel_size_v2_status, rel_size_migrated_at) = src_timeline.get_rel_size_v2_status();
         let (uninitialized_timeline, _timeline_ctx) = self
             .prepare_new_timeline(
                 dst_id,
@@ -5046,7 +5098,8 @@ impl TenantShard {
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
-                Some(src_timeline.get_rel_size_v2_status()),
+                Some(rel_size_v2_status),
+                rel_size_migrated_at,
                 ctx,
             )
             .await?;
@@ -5074,7 +5127,7 @@ impl TenantShard {
     pub(crate) async fn bootstrap_timeline_test(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -5216,7 +5269,7 @@ impl TenantShard {
     async fn bootstrap_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> Result<CreateTimelineResult, CreateTimelineError> {
@@ -5333,6 +5386,7 @@ impl TenantShard {
                 pgdata_lsn,
                 None,
                 None,
+                None,
                 ctx,
             )
             .await?;
@@ -5397,7 +5451,7 @@ impl TenantShard {
             pagestream_throttle_metrics: self.pagestream_throttle_metrics.clone(),
             l0_compaction_trigger: self.l0_compaction_trigger.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
-            basebackup_prepare_sender: self.basebackup_prepare_sender.clone(),
+            basebackup_cache: self.basebackup_cache.clone(),
             feature_resolver: self.feature_resolver.clone(),
         }
     }
@@ -5416,14 +5470,17 @@ impl TenantShard {
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
         rel_size_v2_status: Option<RelSizeMigration>,
+        rel_size_migrated_at: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<(UninitializedTimeline<'a>, RequestContext)> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);
-        resources
-            .remote_client
-            .init_upload_queue_for_empty_remote(new_metadata, rel_size_v2_status.clone())?;
+        resources.remote_client.init_upload_queue_for_empty_remote(
+            new_metadata,
+            rel_size_v2_status.clone(),
+            rel_size_migrated_at,
+        )?;
 
         let (timeline_struct, timeline_ctx) = self
             .create_timeline_struct(
@@ -5436,6 +5493,7 @@ impl TenantShard {
                 create_guard.idempotency.clone(),
                 None,
                 rel_size_v2_status,
+                rel_size_migrated_at,
                 ctx,
             )
             .context("Failed to create timeline data structure")?;
@@ -5679,6 +5737,16 @@ impl TenantShard {
             .unwrap_or(0)
     }
 
+    /// HADRON
+    /// Return the visible size of all timelines in this tenant.
+    pub(crate) fn get_visible_size(&self) -> u64 {
+        let timelines = self.timelines.lock().unwrap();
+        timelines
+            .values()
+            .map(|t| t.metrics.visible_physical_size_gauge.get())
+            .sum()
+    }
+
     /// Builds a new tenant manifest, and uploads it if it differs from the last-known tenant
     /// manifest in `Self::remote_tenant_manifest`.
     ///
@@ -5754,7 +5822,7 @@ impl TenantShard {
 async fn run_initdb(
     conf: &'static PageServerConf,
     initdb_target_dir: &Utf8Path,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
     cancel: &CancellationToken,
 ) -> Result<(), InitdbError> {
     let initdb_bin_path = conf
@@ -5836,10 +5904,10 @@ pub(crate) mod harness {
     use once_cell::sync::OnceCell;
     use pageserver_api::key::Key;
     use pageserver_api::models::ShardParameters;
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::ShardIndex;
     use utils::id::TenantId;
     use utils::logging;
+    use wal_decoder::models::record::NeonWalRecord;
 
     use super::*;
     use crate::deletion_queue::mock::MockDeletionQueue;
@@ -5977,22 +6045,24 @@ pub(crate) mod harness {
         }
 
         #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
-        pub(crate) async fn do_try_load(
+        pub(crate) async fn do_try_load_with_redo(
             &self,
+            walredo_mgr: Arc<WalRedoManager>,
             ctx: &RequestContext,
         ) -> anyhow::Result<Arc<TenantShard>> {
-            let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
-
-            let (basebackup_requst_sender, _) = tokio::sync::mpsc::unbounded_channel();
+            let (basebackup_cache, _) = BasebackupCache::new(Utf8PathBuf::new(), None);
 
             let tenant = Arc::new(TenantShard::new(
                 TenantState::Attaching,
                 self.conf,
-                AttachedTenantConf::try_from(LocationConf::attached_single(
-                    self.tenant_conf.clone(),
-                    self.generation,
-                    &ShardParameters::default(),
-                ))
+                AttachedTenantConf::try_from(
+                    self.conf,
+                    LocationConf::attached_single(
+                        self.tenant_conf.clone(),
+                        self.generation,
+                        ShardParameters::default(),
+                    ),
+                )
                 .unwrap(),
                 self.shard_identity,
                 Some(walredo_mgr),
@@ -6001,7 +6071,7 @@ pub(crate) mod harness {
                 self.deletion_queue.new_client(),
                 // TODO: ideally we should run all unit tests with both configs
                 L0FlushGlobalState::new(L0FlushConfig::default()),
-                basebackup_requst_sender,
+                basebackup_cache,
                 FeatureResolver::new_disabled(),
             ));
 
@@ -6015,6 +6085,14 @@ pub(crate) mod harness {
                 timeline.set_state(TimelineState::Active);
             }
             Ok(tenant)
+        }
+
+        pub(crate) async fn do_try_load(
+            &self,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<Arc<TenantShard>> {
+            let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
+            self.do_try_load_with_redo(walredo_mgr, ctx).await
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> Utf8PathBuf {
@@ -6035,7 +6113,7 @@ pub(crate) mod harness {
             lsn: Lsn,
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
-            _pg_version: u32,
+            _pg_version: PgMajorVersion,
             _redo_attempt_type: RedoAttemptType,
         ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
@@ -6093,16 +6171,13 @@ mod tests {
     use pageserver_api::keyspace::KeySpace;
     #[cfg(feature = "testing")]
     use pageserver_api::keyspace::KeySpaceRandomAccum;
-    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
-    #[cfg(feature = "testing")]
-    use pageserver_api::record::NeonWalRecord;
-    use pageserver_api::value::Value;
+    use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings, LsnLease};
     use pageserver_compaction::helpers::overlaps_with;
+    use rand::Rng;
     #[cfg(feature = "testing")]
     use rand::SeedableRng;
     #[cfg(feature = "testing")]
     use rand::rngs::StdRng;
-    use rand::{Rng, thread_rng};
     #[cfg(feature = "testing")]
     use std::ops::Range;
     use storage_layer::{IoConcurrency, PersistentLayerKey};
@@ -6117,6 +6192,9 @@ mod tests {
     use timeline::{CompactOptions, DeltaLayerTestDesc, VersionedKeySpaceQuery};
     use utils::id::TenantId;
     use utils::shard::{ShardCount, ShardNumber};
+    #[cfg(feature = "testing")]
+    use wal_decoder::models::record::NeonWalRecord;
+    use wal_decoder::models::value::Value;
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -6207,7 +6285,7 @@ mod tests {
     async fn randomize_timeline(
         tenant: &Arc<TenantShard>,
         new_timeline_id: TimelineId,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         spec: TestTimelineSpecification,
         random: &mut rand::rngs::StdRng,
         ctx: &RequestContext,
@@ -6220,8 +6298,8 @@ mod tests {
             while lsn < lsn_range.end {
                 let mut key = key_range.start;
                 while key < key_range.end {
-                    let gap = random.gen_range(1..=100) <= spec.gap_chance;
-                    let will_init = random.gen_range(1..=100) <= spec.will_init_chance;
+                    let gap = random.random_range(1..=100) <= spec.gap_chance;
+                    let will_init = random.random_range(1..=100) <= spec.will_init_chance;
 
                     if gap {
                         continue;
@@ -6264,8 +6342,8 @@ mod tests {
             while lsn < lsn_range.end {
                 let mut key = key_range.start;
                 while key < key_range.end {
-                    let gap = random.gen_range(1..=100) <= spec.gap_chance;
-                    let will_init = random.gen_range(1..=100) <= spec.will_init_chance;
+                    let gap = random.random_range(1..=100) <= spec.gap_chance;
+                    let will_init = random.random_range(1..=100) <= spec.will_init_chance;
 
                     if gap {
                         continue;
@@ -6600,7 +6678,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6610,7 +6688,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6624,7 +6702,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6634,7 +6712,7 @@ mod tests {
                 .put(
                     *TEST_KEY,
                     lsn,
-                    &Value::Image(test_img(&format!("foo at {}", lsn))),
+                    &Value::Image(test_img(&format!("foo at {lsn}"))),
                     ctx,
                 )
                 .await?;
@@ -6643,17 +6721,13 @@ mod tests {
         tline.freeze_and_flush().await.map_err(|e| e.into())
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
         let (tenant, ctx) =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")
                 .await?
                 .load()
                 .await;
-        // Advance to the lsn lease deadline so that GC is not blocked by
-        // initial transition into AttachedSingle.
-        tokio::time::advance(tenant.get_lsn_lease_length()).await;
-        tokio::time::resume();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -7133,7 +7207,7 @@ mod tests {
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         ctx,
                     )
                     .await?;
@@ -7421,7 +7495,7 @@ mod tests {
             .put(
                 gap_at_key,
                 current_lsn,
-                &Value::Image(test_img(&format!("{} at {}", gap_at_key, current_lsn))),
+                &Value::Image(test_img(&format!("{gap_at_key} at {current_lsn}"))),
                 &ctx,
             )
             .await?;
@@ -7460,7 +7534,7 @@ mod tests {
                 .put(
                     current_key,
                     current_lsn,
-                    &Value::Image(test_img(&format!("{} at {}", current_key, current_lsn))),
+                    &Value::Image(test_img(&format!("{current_key} at {current_lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7568,7 +7642,7 @@ mod tests {
             while key < end_key {
                 current_lsn += 0x10;
 
-                let image_value = format!("{} at {}", child_gap_at_key, current_lsn);
+                let image_value = format!("{child_gap_at_key} at {current_lsn}");
 
                 let mut writer = parent_timeline.writer().await;
                 writer
@@ -7611,7 +7685,7 @@ mod tests {
                 .put(
                     key,
                     current_lsn,
-                    &Value::Image(test_img(&format!("{} at {}", key, current_lsn))),
+                    &Value::Image(test_img(&format!("{key} at {current_lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7732,7 +7806,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7746,14 +7820,14 @@ mod tests {
         for _ in 0..50 {
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -7767,7 +7841,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -7813,7 +7887,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -7835,18 +7909,18 @@ mod tests {
 
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
-                println!("updating {} at {}", blknum, lsn);
+                println!("updating {blknum} at {lsn}");
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -7857,7 +7931,7 @@ mod tests {
                 test_key.field6 = blknum as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -7903,18 +7977,18 @@ mod tests {
 
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} {} at {}", idx, blknum, lsn))),
+                        &Value::Image(test_img(&format!("{idx} {blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
-                println!("updating [{}][{}] at {}", idx, blknum, lsn);
+                println!("updating [{idx}][{blknum}] at {lsn}");
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[idx][blknum] = lsn;
@@ -8120,7 +8194,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -8137,7 +8211,7 @@ mod tests {
                 test_key.field6 = (blknum * STEP) as u32;
                 assert_eq!(
                     tline.get(test_key, lsn, &ctx).await?,
-                    test_img(&format!("{} at {}", blknum, last_lsn))
+                    test_img(&format!("{blknum} at {last_lsn}"))
                 );
             }
 
@@ -8167,14 +8241,14 @@ mod tests {
 
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = (blknum * STEP) as u32;
                 let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -8427,7 +8501,7 @@ mod tests {
                 .put(
                     test_key,
                     lsn,
-                    &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                    &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                     &ctx,
                 )
                 .await?;
@@ -8440,14 +8514,14 @@ mod tests {
         for iter in 1..=10 {
             for _ in 0..NUM_KEYS {
                 lsn = Lsn(lsn.0 + 0x10);
-                let blknum = thread_rng().gen_range(0..NUM_KEYS);
+                let blknum = rand::rng().random_range(0..NUM_KEYS);
                 test_key.field6 = (blknum * STEP) as u32;
                 let mut writer = tline.writer().await;
                 writer
                     .put(
                         test_key,
                         lsn,
-                        &Value::Image(test_img(&format!("{} at {}", blknum, lsn))),
+                        &Value::Image(test_img(&format!("{blknum} at {lsn}"))),
                         &ctx,
                     )
                     .await?;
@@ -9154,7 +9228,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -9237,7 +9315,11 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -9352,28 +9434,27 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_lsn_lease() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_lsn_lease")
             .await
             .unwrap()
             .load()
             .await;
-        // Advance to the lsn lease deadline so that GC is not blocked by
-        // initial transition into AttachedSingle.
-        tokio::time::advance(tenant.get_lsn_lease_length()).await;
-        tokio::time::resume();
+        // set a non-zero lease length to test the feature
+        tenant
+            .update_tenant_config(|mut conf| {
+                conf.lsn_lease_length = Some(LsnLease::DEFAULT_LENGTH);
+                Ok(conf)
+            })
+            .unwrap();
+
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);
         let image_layers = (0x20..=0x90)
             .step_by(0x10)
-            .map(|n| {
-                (
-                    Lsn(n),
-                    vec![(key, test_img(&format!("data key at {:x}", n)))],
-                )
-            })
+            .map(|n| (Lsn(n), vec![(key, test_img(&format!("data key at {n:x}")))]))
             .collect();
 
         let timeline = tenant
@@ -9775,7 +9856,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -9810,7 +9895,11 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -10385,7 +10474,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     flags: dryrun_flags,
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -10396,14 +10485,22 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -10422,14 +10519,22 @@ mod tests {
             guard.cutoffs.space = Lsn(0x38);
         }
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await; // no wals between 0x30 and 0x38, so we should obtain the same result
 
         // not increasing the GC horizon and compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -10634,7 +10739,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     flags: dryrun_flags,
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -10645,14 +10750,22 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -10852,7 +10965,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         branch_tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -10865,7 +10982,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     compact_lsn_range: Some(CompactLsnRange::above(Lsn(0x40))),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11186,10 +11303,10 @@ mod tests {
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_read_path() -> anyhow::Result<()> {
-        use rand::seq::SliceRandom;
+        use rand::seq::IndexedRandom;
 
         let seed = if cfg!(feature = "fuzz-read-path") {
-            let seed: u64 = thread_rng().r#gen();
+            let seed: u64 = rand::rng().random();
             seed
         } else {
             // Use a hard-coded seed when not in fuzzing mode.
@@ -11203,8 +11320,8 @@ mod tests {
 
         let (queries, will_init_chance, gap_chance) = if cfg!(feature = "fuzz-read-path") {
             const QUERIES: u64 = 5000;
-            let will_init_chance: u8 = random.gen_range(0..=10);
-            let gap_chance: u8 = random.gen_range(0..=50);
+            let will_init_chance: u8 = random.random_range(0..=10);
+            let gap_chance: u8 = random.random_range(0..=50);
 
             (QUERIES, will_init_chance, gap_chance)
         } else {
@@ -11305,7 +11422,8 @@ mod tests {
 
                 while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                     let selected_lsn = interesting_lsns.choose(&mut random).expect("not empty");
-                    let mut selected_key = start_key.add(random.gen_range(0..KEY_DIMENSION_SIZE));
+                    let mut selected_key =
+                        start_key.add(random.random_range(0..KEY_DIMENSION_SIZE));
 
                     while used_keys.len() < tenant.conf.max_get_vectored_keys.get() {
                         if used_keys.contains(&selected_key)
@@ -11320,7 +11438,7 @@ mod tests {
                             .add_key(selected_key);
                         used_keys.insert(selected_key);
 
-                        let pick_next = random.gen_range(0..=100) <= PICK_NEXT_CHANCE;
+                        let pick_next = random.random_range(0..=100) <= PICK_NEXT_CHANCE;
                         if pick_next {
                             selected_key = selected_key.next();
                         } else {
@@ -11417,11 +11535,11 @@ mod tests {
         if left != right {
             eprintln!("---LEFT---");
             for left in left.iter() {
-                eprintln!("{}", left);
+                eprintln!("{left}");
             }
             eprintln!("---RIGHT---");
             for right in right.iter() {
-                eprintln!("{}", right);
+                eprintln!("{right}");
             }
             assert_eq!(left, right);
         }
@@ -11533,7 +11651,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(0)..get_key(2)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11580,7 +11698,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(2)..get_key(4)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11632,7 +11750,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(4)..get_key(9)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11683,7 +11801,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(9)..get_key(10)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11739,7 +11857,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(0)..get_key(10)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12010,7 +12128,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     compact_lsn_range: Some(CompactLsnRange::above(Lsn(0x28))),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12045,7 +12163,11 @@ mod tests {
 
         // compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -12264,7 +12386,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: Some((get_key(0)..get_key(2)).into()),
                     compact_lsn_range: Some((Lsn(0x20)..Lsn(0x28)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12310,7 +12432,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: Some((get_key(3)..get_key(8)).into()),
                     compact_lsn_range: Some((Lsn(0x28)..Lsn(0x40)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12358,7 +12480,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: Some((get_key(0)..get_key(5)).into()),
                     compact_lsn_range: Some((Lsn(0x20)..Lsn(0x50)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12393,7 +12515,11 @@ mod tests {
 
         // final full compaction
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -12503,7 +12629,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: None,
                     compact_lsn_range: None,
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12761,6 +12887,40 @@ mod tests {
                 },
             ]
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_force_image_creation_lsn() -> anyhow::Result<()> {
+        let tenant_conf = pageserver_api::models::TenantConfig {
+            pitr_interval: Some(Duration::from_secs(7 * 3600)),
+            image_layer_force_creation_period: Some(Duration::from_secs(3600)),
+            ..Default::default()
+        };
+
+        let tenant_id = TenantId::generate();
+
+        let harness = TenantHarness::create_custom(
+            "test_get_force_image_creation_lsn",
+            tenant_conf,
+            tenant_id,
+            ShardIdentity::unsharded(),
+            Generation::new(1),
+        )
+        .await?;
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        timeline.gc_info.write().unwrap().cutoffs.time = Some(Lsn(100));
+        {
+            let writer = timeline.writer().await;
+            writer.finish_write(Lsn(5000));
+        }
+
+        let image_creation_lsn = timeline.get_force_image_creation_lsn().unwrap();
+        assert_eq!(image_creation_lsn, Lsn(4300));
         Ok(())
     }
 }

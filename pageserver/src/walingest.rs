@@ -23,25 +23,27 @@
 
 use std::backtrace::Backtrace;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::{Buf, Bytes};
 use pageserver_api::key::{Key, rel_block_to_key};
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::walrecord::*;
 use postgres_ffi::{
-    TimestampTz, TransactionId, dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch,
+    PgMajorVersion, TransactionId, dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch,
     fsm_logical_to_physical, pg_constants,
 };
+use postgres_ffi_types::TimestampTz;
+use postgres_ffi_types::forknum::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use tracing::*;
 use utils::bin_ser::{DeserializeError, SerializeError};
 use utils::lsn::Lsn;
 use utils::rate_limit::RateLimit;
-use utils::{critical, failpoint_support};
+use utils::{critical_timeline, failpoint_support};
+use wal_decoder::models::record::NeonWalRecord;
 use wal_decoder::models::*;
 
 use crate::ZERO_PAGE;
@@ -418,18 +420,36 @@ impl WalIngest {
         // as there has historically been cases where PostgreSQL has cleared spurious VM pages. See:
         // https://github.com/neondatabase/neon/pull/10634.
         let Some(vm_size) = get_relsize(modification, vm_rel, ctx).await? else {
-            critical!("clear_vm_bits for unknown VM relation {vm_rel}");
+            critical_timeline!(
+                modification.tline.tenant_shard_id,
+                modification.tline.timeline_id,
+                // Hadron: No need to raise the corruption flag here; the caller of `ingest_record()` will do it.
+                None::<&AtomicBool>,
+                "clear_vm_bits for unknown VM relation {vm_rel}"
+            );
             return Ok(());
         };
         if let Some(blknum) = new_vm_blk {
             if blknum >= vm_size {
-                critical!("new_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
+                critical_timeline!(
+                    modification.tline.tenant_shard_id,
+                    modification.tline.timeline_id,
+                    // Hadron: No need to raise the corruption flag here; the caller of `ingest_record()` will do it.
+                    None::<&AtomicBool>,
+                    "new_vm_blk {blknum} not in {vm_rel} of size {vm_size}"
+                );
                 new_vm_blk = None;
             }
         }
         if let Some(blknum) = old_vm_blk {
             if blknum >= vm_size {
-                critical!("old_vm_blk {blknum} not in {vm_rel} of size {vm_size}");
+                critical_timeline!(
+                    modification.tline.tenant_shard_id,
+                    modification.tline.timeline_id,
+                    // Hadron: No need to raise the corruption flag here; the caller of `ingest_record()` will do it.
+                    None::<&AtomicBool>,
+                    "old_vm_blk {blknum} not in {vm_rel} of size {vm_size}"
+                );
                 old_vm_blk = None;
             }
         }
@@ -781,7 +801,7 @@ impl WalIngest {
     ) -> Result<(), WalIngestError> {
         let (xact_common, is_commit, is_prepared) = match record {
             XactRecord::Prepare(XactPrepare { xl_xid, data }) => {
-                let xid: u64 = if modification.tline.pg_version >= 17 {
+                let xid: u64 = if modification.tline.pg_version >= PgMajorVersion::PG17 {
                     self.adjust_to_full_transaction_id(xl_xid)?
                 } else {
                     xl_xid as u64
@@ -886,7 +906,7 @@ impl WalIngest {
                 xl_xid, parsed.xid, lsn,
             );
 
-            let xid: u64 = if modification.tline.pg_version >= 17 {
+            let xid: u64 = if modification.tline.pg_version >= PgMajorVersion::PG17 {
                 self.adjust_to_full_transaction_id(parsed.xid)?
             } else {
                 parsed.xid as u64
@@ -1057,7 +1077,7 @@ impl WalIngest {
         // NB: In PostgreSQL, the next-multi-xid stored in the control file is allowed to
         // go to 0, and it's fixed up by skipping to FirstMultiXactId in functions that
         // read it, like GetNewMultiXactId(). This is different from how nextXid is
-        // incremented! nextXid skips over < FirstNormalTransactionId when the the value
+        // incremented! nextXid skips over < FirstNormalTransactionId when the value
         // is stored, so it's never 0 in a checkpoint.
         //
         // I don't know why it's done that way, it seems less error-prone to skip over 0
@@ -1241,7 +1261,7 @@ impl WalIngest {
                 if xlog_checkpoint.oldestActiveXid == pg_constants::INVALID_TRANSACTION_ID
                     && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
                 {
-                    let oldest_active_xid = if pg_version >= 17 {
+                    let oldest_active_xid = if pg_version >= PgMajorVersion::PG17 {
                         let mut oldest_active_full_xid = cp.nextXid.value;
                         for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
                             if xid < oldest_active_full_xid {
@@ -1475,10 +1495,11 @@ impl WalIngest {
 
                     const fn rate_limiter(
                         &self,
-                        pg_version: u32,
+                        pg_version: PgMajorVersion,
                     ) -> Option<&Lazy<Mutex<RateLimit>>> {
-                        const MIN_PG_VERSION: u32 = 14;
-                        const MAX_PG_VERSION: u32 = 17;
+                        const MIN_PG_VERSION: u32 = PgMajorVersion::PG14.major_version_num();
+                        const MAX_PG_VERSION: u32 = PgMajorVersion::PG17.major_version_num();
+                        let pg_version = pg_version.major_version_num();
 
                         if pg_version < MIN_PG_VERSION || pg_version > MAX_PG_VERSION {
                             return None;
@@ -1603,6 +1624,7 @@ async fn get_relsize(
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
+    use postgres_ffi::PgMajorVersion;
     use postgres_ffi::RELSEG_SIZE;
 
     use super::*;
@@ -1625,7 +1647,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_zeroed_checkpoint_decodes_correctly() -> Result<(), anyhow::Error> {
-        for i in 14..=16 {
+        for i in PgMajorVersion::ALL {
             dispatch_pgversion!(i, {
                 pgv::CheckPoint::decode(&pgv::ZERO_CHECKPOINT)?;
             });
@@ -2108,7 +2130,7 @@ mod tests {
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(
@@ -2142,7 +2164,7 @@ mod tests {
 
         for blkno in 0..1 {
             let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(
@@ -2167,7 +2189,7 @@ mod tests {
         );
         for blkno in 0..relsize {
             let lsn = Lsn(0x20);
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(
@@ -2188,7 +2210,7 @@ mod tests {
         let lsn = Lsn(0x80);
         let mut m = tline.begin_modification(lsn);
         for blkno in 0..relsize {
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             walingest
                 .put_rel_page_image(&mut m, TESTREL_A, blkno, test_img(&data), &ctx)
                 .await?;
@@ -2210,7 +2232,7 @@ mod tests {
         // Check relation content
         for blkno in 0..relsize {
             let lsn = Lsn(0x80);
-            let data = format!("foo blk {} at {}", blkno, lsn);
+            let data = format!("foo blk {blkno} at {lsn}");
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(
@@ -2335,7 +2357,7 @@ mod tests {
         // 5. Grep sk logs for "restart decoder" to get startpoint
         // 6. Run just the decoder from this test to get the endpoint.
         //    It's the last LSN the decoder will output.
-        let pg_version = 15; // The test data was generated by pg15
+        let pg_version = PgMajorVersion::PG15; // The test data was generated by pg15
         let path = "test_data/sk_wal_segment_from_pgbench";
         let wal_segment_path = format!("{path}/000000010000000000000001.zst");
         let source_initdb_path = format!("{path}/{INITDB_PATH}");
@@ -2414,6 +2436,6 @@ mod tests {
         }
 
         let duration = started_at.elapsed();
-        println!("done in {:?}", duration);
+        println!("done in {duration:?}");
     }
 }

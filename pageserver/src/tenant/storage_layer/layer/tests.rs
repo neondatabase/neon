@@ -1,6 +1,7 @@
 use std::time::UNIX_EPOCH;
 
 use pageserver_api::key::{CONTROLFILE_KEY, Key};
+use postgres_ffi::PgMajorVersion;
 use tokio::task::JoinSet;
 use utils::completion::{self, Completion};
 use utils::id::TimelineId;
@@ -45,7 +46,7 @@ async fn smoke_test() {
         .create_test_timeline_with_layers(
             TimelineId::generate(),
             Lsn(0x10),
-            14,
+            PgMajorVersion::PG14,
             &ctx,
             Default::default(), // in-memory layers
             Default::default(),
@@ -256,7 +257,12 @@ async fn evict_and_wait_on_wanted_deleted() {
     let (tenant, ctx) = h.load().await;
 
     let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .create_test_timeline(
+            TimelineId::generate(),
+            Lsn(0x10),
+            PgMajorVersion::PG14,
+            &ctx,
+        )
         .await
         .unwrap();
 
@@ -341,7 +347,12 @@ fn read_wins_pending_eviction() {
         let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
 
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .create_test_timeline(
+                TimelineId::generate(),
+                Lsn(0x10),
+                PgMajorVersion::PG14,
+                &ctx,
+            )
             .await
             .unwrap();
         let ctx = ctx.with_scope_timeline(&timeline);
@@ -474,7 +485,12 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
 
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+            .create_test_timeline(
+                TimelineId::generate(),
+                Lsn(0x10),
+                PgMajorVersion::PG14,
+                &ctx,
+            )
             .await
             .unwrap();
         let ctx = ctx.with_scope_timeline(&timeline);
@@ -644,7 +660,12 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     let (tenant, ctx) = h.load().await;
 
     let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .create_test_timeline(
+            TimelineId::generate(),
+            Lsn(0x10),
+            PgMajorVersion::PG14,
+            &ctx,
+        )
         .await
         .unwrap();
     let ctx = ctx.with_scope_timeline(&timeline);
@@ -730,7 +751,12 @@ async fn evict_and_wait_does_not_wait_for_download() {
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
 
     let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .create_test_timeline(
+            TimelineId::generate(),
+            Lsn(0x10),
+            PgMajorVersion::PG14,
+            &ctx,
+        )
         .await
         .unwrap();
     let ctx = ctx.with_scope_timeline(&timeline);
@@ -824,7 +850,7 @@ async fn evict_and_wait_does_not_wait_for_download() {
 #[tokio::test(start_paused = true)]
 async fn eviction_cancellation_on_drop() {
     use bytes::Bytes;
-    use pageserver_api::value::Value;
+    use wal_decoder::models::value::Value;
 
     // this is the runtime on which Layer spawns the blocking tasks on
     let handle = tokio::runtime::Handle::current();
@@ -836,7 +862,12 @@ async fn eviction_cancellation_on_drop() {
     let (tenant, ctx) = h.load().await;
 
     let timeline = tenant
-        .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, &ctx)
+        .create_test_timeline(
+            TimelineId::generate(),
+            Lsn(0x10),
+            PgMajorVersion::PG14,
+            &ctx,
+        )
         .await
         .unwrap();
 

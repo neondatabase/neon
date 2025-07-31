@@ -2,12 +2,15 @@
 //! Management HTTP API
 //!
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BTreeMap;
+use std::collections::BinaryHeap;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use bytes::Bytes;
 use enumset::EnumSet;
 use futures::future::join_all;
 use futures::{StreamExt, TryFutureExt};
@@ -41,8 +44,10 @@ use pageserver_api::models::{
     TopTenantShardItem, TopTenantShardsRequest, TopTenantShardsResponse,
 };
 use pageserver_api::shard::{ShardCount, TenantShardId};
+use postgres_ffi::PgMajorVersion;
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
 use scopeguard::defer;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tenant_size_model::svg::SvgBranchKind;
 use tenant_size_model::{SizeResult, StorageModel};
@@ -54,11 +59,14 @@ use utils::auth::SwappableJwtAuth;
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use wal_decoder::models::record::NeonWalRecord;
 
 use crate::config::PageServerConf;
 use crate::context;
 use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::deletion_queue::DeletionQueueClient;
+use crate::feature_resolver::FeatureResolver;
+use crate::metrics::LOCAL_DATA_LOSS_SUSPECTED;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationConf;
@@ -72,12 +80,13 @@ use crate::tenant::remote_timeline_client::{
 };
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
+use crate::tenant::storage_layer::ValuesReconstructState;
 use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
 use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
-    CompactFlags, CompactOptions, CompactRequest, CompactionError, MarkInvisibleRequest, Timeline,
-    WaitLsnTimeout, WaitLsnWaiter, import_pgdata,
+    CompactFlags, CompactOptions, CompactRequest, MarkInvisibleRequest, Timeline, WaitLsnTimeout,
+    WaitLsnWaiter, import_pgdata,
 };
 use crate::tenant::{
     GetTimelineError, LogicalSizeCalculationCause, OffloadedTimeline, PageReconstructError,
@@ -107,6 +116,7 @@ pub struct State {
     deletion_queue_client: DeletionQueueClient,
     secondary_controller: SecondaryController,
     latest_utilization: tokio::sync::Mutex<Option<(std::time::Instant, bytes::Bytes)>>,
+    feature_resolver: FeatureResolver,
 }
 
 impl State {
@@ -120,6 +130,7 @@ impl State {
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
         secondary_controller: SecondaryController,
+        feature_resolver: FeatureResolver,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = &[
             "/v1/status",
@@ -140,6 +151,7 @@ impl State {
             deletion_queue_client,
             secondary_controller,
             latest_utilization: Default::default(),
+            feature_resolver,
         })
     }
 }
@@ -283,11 +295,11 @@ impl From<GetActiveTenantError> for ApiError {
             GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
                 ApiError::ShuttingDown
             }
-            GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{}", e)),
+            GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{e}")),
             GetActiveTenantError::Cancelled => ApiError::ShuttingDown,
             GetActiveTenantError::NotFound(gte) => gte.into(),
             GetActiveTenantError::WaitForActiveTimeout { .. } => {
-                ApiError::ResourceUnavailable(format!("{}", e).into())
+                ApiError::ResourceUnavailable(format!("{e}").into())
             }
             GetActiveTenantError::SwitchedTenant => {
                 // in our HTTP handlers, this error doesn't happen
@@ -389,6 +401,7 @@ async fn build_timeline_info(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
     force_await_initial_logical_size: bool,
+    include_image_consistent_lsn: bool,
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
@@ -412,6 +425,10 @@ async fn build_timeline_info(
                 .get_current_logical_size_non_incremental(info.last_record_lsn, ctx)
                 .await?,
         );
+    }
+    // HADRON
+    if include_image_consistent_lsn {
+        info.image_consistent_lsn = Some(timeline.compute_image_consistent_lsn().await?);
     }
     Ok(info)
 }
@@ -467,6 +484,8 @@ async fn build_timeline_info_common(
         *timeline.get_applied_gc_cutoff_lsn(),
     );
 
+    let (rel_size_migration, rel_size_migrated_at) = timeline.get_rel_size_v2_status();
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,
         timeline_id: timeline.timeline_id,
@@ -498,10 +517,13 @@ async fn build_timeline_info_common(
 
         state,
         is_archived: Some(is_archived),
-        rel_size_migration: Some(timeline.get_rel_size_v2_status()),
+        rel_size_migration: Some(rel_size_migration),
+        rel_size_migrated_at,
         is_invisible: Some(is_invisible),
 
         walreceiver_status,
+        // HADRON
+        image_consistent_lsn: None,
     };
     Ok(info)
 }
@@ -704,6 +726,8 @@ async fn timeline_list_handler(
         parse_query_param(&request, "include-non-incremental-logical-size")?;
     let force_await_initial_logical_size: Option<bool> =
         parse_query_param(&request, "force-await-initial-logical-size")?;
+    let include_image_consistent_lsn: Option<bool> =
+        parse_query_param(&request, "include-image-consistent-lsn")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let state = get_state(&request);
@@ -724,6 +748,7 @@ async fn timeline_list_handler(
                 &timeline,
                 include_non_incremental_logical_size.unwrap_or(false),
                 force_await_initial_logical_size.unwrap_or(false),
+                include_image_consistent_lsn.unwrap_or(false),
                 &ctx,
             )
             .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
@@ -752,6 +777,9 @@ async fn timeline_and_offloaded_list_handler(
         parse_query_param(&request, "include-non-incremental-logical-size")?;
     let force_await_initial_logical_size: Option<bool> =
         parse_query_param(&request, "force-await-initial-logical-size")?;
+    let include_image_consistent_lsn: Option<bool> =
+        parse_query_param(&request, "include-image-consistent-lsn")?;
+
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let state = get_state(&request);
@@ -772,6 +800,7 @@ async fn timeline_and_offloaded_list_handler(
                 &timeline,
                 include_non_incremental_logical_size.unwrap_or(false),
                 force_await_initial_logical_size.unwrap_or(false),
+                include_image_consistent_lsn.unwrap_or(false),
                 &ctx,
             )
             .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
@@ -904,9 +933,16 @@ async fn timeline_patch_index_part_handler(
             active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
                 .await?;
 
+        if request_data.rel_size_migration.is_none() && request_data.rel_size_migrated_at.is_some()
+        {
+            return Err(ApiError::BadRequest(anyhow!(
+                "updating rel_size_migrated_at without rel_size_migration is not allowed"
+            )));
+        }
+
         if let Some(rel_size_migration) = request_data.rel_size_migration {
             timeline
-                .update_rel_size_v2_status(rel_size_migration)
+                .update_rel_size_v2_status(rel_size_migration, request_data.rel_size_migrated_at)
                 .map_err(ApiError::InternalServerError)?;
         }
 
@@ -956,6 +992,9 @@ async fn timeline_detail_handler(
         parse_query_param(&request, "include-non-incremental-logical-size")?;
     let force_await_initial_logical_size: Option<bool> =
         parse_query_param(&request, "force-await-initial-logical-size")?;
+    // HADRON
+    let include_image_consistent_lsn: Option<bool> =
+        parse_query_param(&request, "include-image-consistent-lsn")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     // Logical size calculation needs downloading.
@@ -976,6 +1015,7 @@ async fn timeline_detail_handler(
             &timeline,
             include_non_incremental_logical_size.unwrap_or(false),
             force_await_initial_logical_size.unwrap_or(false),
+            include_image_consistent_lsn.unwrap_or(false),
             ctx,
         )
         .await
@@ -1011,7 +1051,7 @@ async fn get_lsn_by_timestamp_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let timestamp_raw = must_get_query_param(&request, "timestamp")?;
     let timestamp = humantime::parse_rfc3339(&timestamp_raw)
-        .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
+        .with_context(|| format!("Invalid time: {timestamp_raw:?}"))
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
@@ -1106,7 +1146,7 @@ async fn get_timestamp_of_lsn_handler(
             json_response(StatusCode::OK, time)
         }
         None => Err(ApiError::PreconditionFailed(
-            format!("Timestamp for lsn {} not found", lsn).into(),
+            format!("Timestamp for lsn {lsn} not found").into(),
         )),
     }
 }
@@ -1888,8 +1928,12 @@ async fn update_tenant_config_handler(
     let location_conf = LocationConf::attached_single(
         new_tenant_conf.clone(),
         tenant.get_generation(),
-        &ShardParameters::default(),
+        ShardParameters::from(tenant.get_shard_identity()),
     );
+
+    tenant
+        .get_shard_identity()
+        .assert_equal(location_conf.shard); // not strictly necessary since we construct it above
 
     crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
@@ -1932,8 +1976,12 @@ async fn patch_tenant_config_handler(
     let location_conf = LocationConf::attached_single(
         updated,
         tenant.get_generation(),
-        &ShardParameters::default(),
+        ShardParameters::from(tenant.get_shard_identity()),
     );
+
+    tenant
+        .get_shard_identity()
+        .assert_equal(location_conf.shard); // not strictly necessary since we construct it above
 
     crate::tenant::TenantShard::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
@@ -1956,6 +2004,10 @@ async fn put_tenant_location_config_handler(
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
     let state = get_state(&request);
     let conf = state.conf;
+
+    fail::fail_point!("put-location-conf-handler", |_| {
+        Err(ApiError::ResourceUnavailable("failpoint".into()))
+    });
 
     // The `Detached` state is special, it doesn't upsert a tenant, it removes
     // its local disk content and drops it from memory.
@@ -2319,6 +2371,7 @@ async fn timeline_compact_handler(
         flags,
         sub_compaction,
         sub_compaction_max_job_size_mb,
+        gc_compaction_do_metadata_compaction: false,
     };
 
     let scheduled = compact_request
@@ -2417,7 +2470,7 @@ async fn timeline_offload_handler(
         }
         if let (false, reason) = timeline.can_offload() {
             return Err(ApiError::PreconditionFailed(
-                format!("Timeline::can_offload() check failed: {}", reason) .into(),
+                format!("Timeline::can_offload() check failed: {reason}") .into(),
             ));
         }
         offload_timeline(&tenant, &timeline)
@@ -2425,6 +2478,7 @@ async fn timeline_offload_handler(
             .map_err(|e| {
                 match e {
                     OffloadError::Cancelled => ApiError::ResourceUnavailable("Timeline shutting down".into()),
+                    OffloadError::AlreadyInProgress => ApiError::Conflict("Timeline already being offloaded or deleted".into()),
                     _ => ApiError::InternalServerError(anyhow!(e))
                 }
             })?;
@@ -2485,12 +2539,10 @@ async fn timeline_checkpoint_handler(
                 .compact(&cancel, flags, &ctx)
                 .await
                 .map_err(|e|
-                    match e {
-                        CompactionError::ShuttingDown => ApiError::ShuttingDown,
-                        CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
-                        CompactionError::CollectKeySpaceError(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
-                        CompactionError::Other(e) => ApiError::InternalServerError(e),
-                        CompactionError::AlreadyRunning(_) => ApiError::InternalServerError(anyhow::anyhow!(e)),
+                    if e.is_cancel() {
+                        ApiError::ShuttingDown
+                    } else {
+                        ApiError::InternalServerError(e.into_anyhow())
                     }
                 )?;
         }
@@ -2675,6 +2727,16 @@ async fn deletion_queue_flush(
     }
 }
 
+/// Try if `GetPage@Lsn` is successful, useful for manual debugging.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct GetPageResponse {
+    pub page: Bytes,
+    pub layers_visited: u32,
+    pub delta_layers_visited: u32,
+    pub records: Vec<(Lsn, NeonWalRecord)>,
+    pub img: Option<(Lsn, Bytes)>,
+}
+
 async fn getpage_at_lsn_handler(
     request: Request<Body>,
     cancel: CancellationToken,
@@ -2725,21 +2787,24 @@ async fn getpage_at_lsn_handler_inner(
 
         // Use last_record_lsn if no lsn is provided
         let lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
-        let page = timeline.get(key.0, lsn, &ctx).await?;
 
         if touch {
             json_response(StatusCode::OK, ())
         } else {
-            Result::<_, ApiError>::Ok(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "application/octet-stream")
-                    .body(hyper::Body::from(page))
-                    .unwrap(),
-            )
+            let mut reconstruct_state = ValuesReconstructState::new_with_debug(IoConcurrency::sequential());
+            let page = timeline.debug_get(key.0, lsn, &ctx, &mut reconstruct_state).await?;
+            let response = GetPageResponse {
+                page,
+                layers_visited: reconstruct_state.get_layers_visited(),
+                delta_layers_visited: reconstruct_state.get_delta_layers_visited(),
+                records: reconstruct_state.debug_state.records.clone(),
+                img: reconstruct_state.debug_state.img.clone(),
+            };
+
+            json_response(StatusCode::OK, response)
         }
     }
-    .instrument(info_span!("timeline_get", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .instrument(info_span!("timeline_debug_get", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
     .await
 }
 
@@ -3201,6 +3266,30 @@ async fn get_utilization(
         .map_err(ApiError::InternalServerError)
 }
 
+/// HADRON
+async fn list_tenant_visible_size_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let state = get_state(&request);
+
+    let mut map = BTreeMap::new();
+    for (tenant_shard_id, slot) in state.tenant_manager.list() {
+        match slot {
+            TenantSlot::Attached(tenant) => {
+                let visible_size = tenant.get_visible_size();
+                map.insert(tenant_shard_id, visible_size);
+            }
+            TenantSlot::Secondary(_) | TenantSlot::InProgress(_) => {
+                continue;
+            }
+        }
+    }
+
+    json_response(StatusCode::OK, map)
+}
+
 async fn list_aux_files(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -3381,7 +3470,7 @@ async fn put_tenant_timeline_import_basebackup(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let base_lsn: Lsn = must_parse_query_param(&request, "base_lsn")?;
     let end_lsn: Lsn = must_parse_query_param(&request, "end_lsn")?;
-    let pg_version: u32 = must_parse_query_param(&request, "pg_version")?;
+    let pg_version: PgMajorVersion = must_parse_query_param(&request, "pg_version")?;
 
     check_permission(&request, Some(tenant_id))?;
 
@@ -3604,6 +3693,7 @@ async fn activate_post_import_handler(
         let timeline_info = build_timeline_info(
             &timeline, false, // include_non_incremental_logical_size,
             false, // force_await_initial_logical_size
+            false, // include_image_consistent_lsn
             &ctx,
         )
         .await
@@ -3614,6 +3704,17 @@ async fn activate_post_import_handler(
     }
     .instrument(span)
     .await
+}
+
+// [Hadron] Reset gauge metrics that are used to raised alerts. We need this API as a stop-gap measure to reset alerts
+// after we manually rectify situations such as local SSD data loss. We will eventually automate this.
+async fn hadron_reset_alert_gauges(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    LOCAL_DATA_LOSS_SUSPECTED.set(0);
+    json_response(StatusCode::OK, ())
 }
 
 /// Read the end of a tar archive.
@@ -3668,6 +3769,23 @@ async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow
     Ok(())
 }
 
+async fn force_refresh_feature_flag(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant
+        .feature_resolver
+        .refresh_properties_and_flags(&tenant);
+    json_response(StatusCode::OK, ())
+}
+
 async fn tenant_evaluate_feature_flag(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -3675,8 +3793,8 @@ async fn tenant_evaluate_feature_flag(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let flag: String = must_parse_query_param(&request, "flag")?;
-    let as_type: String = must_parse_query_param(&request, "as")?;
+    let flag: String = parse_request_param(&request, "flag_key")?;
+    let as_type: Option<String> = parse_query_param(&request, "as")?;
 
     let state = get_state(&request);
 
@@ -3684,29 +3802,74 @@ async fn tenant_evaluate_feature_flag(
         let tenant = state
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
-        let properties = tenant.feature_resolver.collect_properties(tenant_shard_id.tenant_id);
-        if as_type == "boolean" {
-            let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+        // TODO: the properties we get here might be stale right after it is collected. But such races are rare (updated every 10s)
+        // and we don't need to worry about it for now.
+        let properties = tenant.feature_resolver.collect_properties();
+        if as_type.as_deref() == Some("boolean") {
+            let result = tenant.feature_resolver.evaluate_boolean(&flag);
             let result = result.map(|_| true).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
-        } else if as_type == "multivariate" {
-            let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+        } else if as_type.as_deref() == Some("multivariate") {
+            let result = tenant.feature_resolver.evaluate_multivariate(&flag).map_err(|e| e.to_string());
             json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
         } else {
             // Auto infer the type of the feature flag.
             let is_boolean = tenant.feature_resolver.is_feature_flag_boolean(&flag).map_err(|e| ApiError::InternalServerError(anyhow::anyhow!("{e}")))?;
             if is_boolean {
-                let result = tenant.feature_resolver.evaluate_boolean(&flag, tenant_shard_id.tenant_id);
+                let result = tenant.feature_resolver.evaluate_boolean(&flag);
                 let result = result.map(|_| true).map_err(|e| e.to_string());
                 json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             } else {
-                let result = tenant.feature_resolver.evaluate_multivariate(&flag, tenant_shard_id.tenant_id).map_err(|e| e.to_string());
+                let result = tenant.feature_resolver.evaluate_multivariate(&flag).map_err(|e| e.to_string());
                 json_response(StatusCode::OK, json!({ "result": result, "properties": properties }))
             }
         }
     }
     .instrument(info_span!("tenant_evaluate_feature_flag", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
     .await
+}
+
+async fn force_override_feature_flag_for_testing_put(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let flag: String = parse_request_param(&request, "flag_key")?;
+    let value: String = must_parse_query_param(&request, "value")?;
+    let state = get_state(&request);
+    state
+        .feature_resolver
+        .force_override_for_testing(&flag, Some(&value));
+    json_response(StatusCode::OK, ())
+}
+
+async fn force_override_feature_flag_for_testing_delete(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let flag: String = parse_request_param(&request, "flag_key")?;
+    let state = get_state(&request);
+    state
+        .feature_resolver
+        .force_override_for_testing(&flag, None);
+    json_response(StatusCode::OK, ())
+}
+
+async fn update_feature_flag_spec(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let body = json_request(&mut request).await?;
+    let state = get_state(&request);
+    state
+        .feature_resolver
+        .update(body)
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, ())
 }
 
 /// Common functionality of all the HTTP API handlers.
@@ -3852,9 +4015,14 @@ pub fn make_router(
         .expect("construct launch timestamp header middleware"),
     );
 
+    let force_metric_collection_on_scrape = state.conf.force_metric_collection_on_scrape;
+
+    let prometheus_metrics_handler_wrapper =
+        move |req| prometheus_metrics_handler(req, force_metric_collection_on_scrape);
+
     Ok(router
         .data(state)
-        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/metrics", move |r| request_span(r, prometheus_metrics_handler_wrapper))
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| api_handler(r, status_handler))
@@ -4047,7 +4215,7 @@ pub fn make_router(
         })
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/getpage",
-            |r| testing_api_handler("getpage@lsn", r, getpage_at_lsn_handler),
+            |r|  testing_api_handler("getpage@lsn", r, getpage_at_lsn_handler),
         )
         .get(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/touchpage",
@@ -4060,6 +4228,7 @@ pub fn make_router(
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .put("/v1/io_mode", |r| api_handler(r, put_io_mode_handler))
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
+        .get("/v1/list_tenant_visible_size", |r| api_handler(r, list_tenant_visible_size_handler))
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/ingest_aux_files",
             |r| testing_api_handler("ingest_aux_files", r, ingest_aux_files),
@@ -4085,8 +4254,23 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/activate_post_import",
             |r| api_handler(r, activate_post_import_handler),
         )
-        .get("/v1/tenant/:tenant_shard_id/feature_flag", |r| {
+        .get("/v1/tenant/:tenant_shard_id/feature_flag/:flag_key", |r| {
             api_handler(r, tenant_evaluate_feature_flag)
+        })
+        .post("/v1/tenant/:tenant_shard_id/force_refresh_feature_flag", |r| {
+            api_handler(r, force_refresh_feature_flag)
+        })
+        .put("/v1/feature_flag/:flag_key", |r| {
+            testing_api_handler("force override feature flag - put", r, force_override_feature_flag_for_testing_put)
+        })
+        .delete("/v1/feature_flag/:flag_key", |r| {
+            testing_api_handler("force override feature flag - delete", r, force_override_feature_flag_for_testing_delete)
+        })
+        .post("/v1/feature_flag_spec", |r| {
+            api_handler(r, update_feature_flag_spec)
+        })
+        .post("/hadron-internal/reset_alert_gauges", |r| {
+            api_handler(r, hadron_reset_alert_gauges)
         })
         .any(handler_404))
 }

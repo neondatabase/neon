@@ -36,6 +36,8 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::process::exit;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -47,9 +49,10 @@ use compute_tools::compute::{
     BUILD_TAG, ComputeNode, ComputeNodeParams, forward_termination_signal,
 };
 use compute_tools::extension_server::get_pg_version_string;
-use compute_tools::logger::*;
 use compute_tools::params::*;
+use compute_tools::pg_isready::get_pg_isready_bin;
 use compute_tools::spec::*;
+use compute_tools::{hadron_metrics, installed_extensions, logger::*};
 use rlimit::{Resource, setrlimit};
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -79,11 +82,28 @@ struct Cli {
     #[arg(long, default_value_t = 3081)]
     pub internal_http_port: u16,
 
+    /// Backwards-compatible --http-port for Hadron deployments. Functionally the
+    /// same as --external-http-port.
+    #[arg(
+        long,
+        conflicts_with = "external_http_port",
+        conflicts_with = "internal_http_port"
+    )]
+    pub http_port: Option<u16>,
+
     #[arg(short = 'D', long, value_name = "DATADIR")]
     pub pgdata: String,
 
     #[arg(short = 'C', long, value_name = "DATABASE_URL")]
     pub connstr: String,
+
+    #[arg(
+        long,
+        default_value = "neon_superuser",
+        value_name = "PRIVILEGED_ROLE_NAME",
+        value_parser = Self::parse_privileged_role_name
+    )]
+    pub privileged_role_name: String,
 
     #[cfg(target_os = "linux")]
     #[arg(long, default_value = "neon-postgres")]
@@ -124,6 +144,16 @@ struct Cli {
     /// Interval in seconds for collecting installed extensions statistics
     #[arg(long, default_value = "3600")]
     pub installed_extensions_collection_interval: u64,
+
+    /// Run in development mode, skipping VM-specific operations like process termination
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub dev: bool,
+
+    #[arg(long)]
+    pub pg_init_timeout: Option<u64>,
+
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub lakebase_mode: bool,
 }
 
 impl Cli {
@@ -143,6 +173,41 @@ impl Cli {
 
         Ok(url)
     }
+
+    /// For simplicity, we do not escape `privileged_role_name` anywhere in the code.
+    /// Since it's a system role, which we fully control, that's fine. Still, let's
+    /// validate it to avoid any surprises.
+    fn parse_privileged_role_name(value: &str) -> Result<String> {
+        use regex::Regex;
+
+        let pattern = Regex::new(r"^[a-z_]+$").unwrap();
+
+        if !pattern.is_match(value) {
+            bail!("--privileged-role-name can only contain lowercase letters and underscores")
+        }
+
+        Ok(value.to_string())
+    }
+}
+
+// Hadron helpers to get compatible compute_ctl http ports from Cli. The old `--http-port`
+// arg is used and acts the same as `--external-http-port`. The internal http port is defined
+// to be http_port + 1. Hadron runs in the dblet environment which uses the host network, so
+// we need to be careful with the ports to choose.
+fn get_external_http_port(cli: &Cli) -> u16 {
+    if cli.lakebase_mode {
+        return cli.http_port.unwrap_or(cli.external_http_port);
+    }
+    cli.external_http_port
+}
+fn get_internal_http_port(cli: &Cli) -> u16 {
+    if cli.lakebase_mode {
+        return cli
+            .http_port
+            .map(|p| p + 1)
+            .unwrap_or(cli.internal_http_port);
+    }
+    cli.internal_http_port
 }
 
 fn main() -> Result<()> {
@@ -159,24 +224,38 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    runtime.block_on(init())?;
+    let mut log_dir = None;
+    if cli.lakebase_mode {
+        log_dir = std::env::var("COMPUTE_CTL_LOG_DIRECTORY").ok();
+    }
+
+    let (tracing_provider, _file_logs_guard) = init(cli.dev, log_dir)?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
+
+    if cli.lakebase_mode {
+        installed_extensions::initialize_metrics();
+        hadron_metrics::initialize_metrics();
+    }
 
     let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
 
     let config = get_config(&cli)?;
 
+    let external_http_port = get_external_http_port(&cli);
+    let internal_http_port = get_internal_http_port(&cli);
+
     let compute_node = ComputeNode::new(
         ComputeNodeParams {
             compute_id: cli.compute_id,
             connstr,
+            privileged_role_name: cli.privileged_role_name.clone(),
             pgdata: cli.pgdata.clone(),
             pgbin: cli.pgbin.clone(),
             pgversion: get_pg_version_string(&cli.pgbin),
-            external_http_port: cli.external_http_port,
-            internal_http_port: cli.internal_http_port,
+            external_http_port,
+            internal_http_port,
             remote_ext_base_url: cli.remote_ext_base_url.clone(),
             resize_swap_on_bind: cli.resize_swap_on_bind,
             set_disk_quota_for_fs: cli.set_disk_quota_for_fs,
@@ -186,31 +265,46 @@ fn main() -> Result<()> {
             cgroup: cli.cgroup,
             #[cfg(target_os = "linux")]
             vm_monitor_addr: cli.vm_monitor_addr,
-            installed_extensions_collection_interval: cli.installed_extensions_collection_interval,
+            installed_extensions_collection_interval: Arc::new(AtomicU64::new(
+                cli.installed_extensions_collection_interval,
+            )),
+            pg_init_timeout: cli.pg_init_timeout.map(Duration::from_secs),
+            pg_isready_bin: get_pg_isready_bin(&cli.pgbin),
+            instance_id: std::env::var("INSTANCE_ID").ok(),
+            lakebase_mode: cli.lakebase_mode,
+            build_tag: BUILD_TAG.to_string(),
+            control_plane_uri: cli.control_plane_uri,
+            config_path_test_only: cli.config,
         },
         config,
     )?;
 
-    let exit_code = compute_node.run()?;
+    let exit_code = compute_node.run().context("running compute node")?;
 
     scenario.teardown();
 
-    deinit_and_exit(exit_code);
+    deinit_and_exit(tracing_provider, exit_code);
 }
 
-async fn init() -> Result<()> {
-    init_tracing_and_logging(DEFAULT_LOG_LEVEL).await?;
+fn init(
+    dev_mode: bool,
+    log_dir: Option<String>,
+) -> Result<(
+    Option<tracing_utils::Provider>,
+    Option<tracing_appender::non_blocking::WorkerGuard>,
+)> {
+    let (provider, file_logs_guard) = init_tracing_and_logging(DEFAULT_LOG_LEVEL, &log_dir)?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
         for sig in signals.forever() {
-            handle_exit_signal(sig);
+            handle_exit_signal(sig, dev_mode);
         }
     });
 
     info!("compute build_tag: {}", &BUILD_TAG.to_string());
 
-    Ok(())
+    Ok((provider, file_logs_guard))
 }
 
 fn get_config(cli: &Cli) -> Result<ComputeConfig> {
@@ -235,25 +329,27 @@ fn get_config(cli: &Cli) -> Result<ComputeConfig> {
     }
 }
 
-fn deinit_and_exit(exit_code: Option<i32>) -> ! {
-    // Shutdown trace pipeline gracefully, so that it has a chance to send any
-    // pending traces before we exit. Shutting down OTEL tracing provider may
-    // hang for quite some time, see, for example:
-    // - https://github.com/open-telemetry/opentelemetry-rust/issues/868
-    // - and our problems with staging https://github.com/neondatabase/cloud/issues/3707#issuecomment-1493983636
-    //
-    // Yet, we want computes to shut down fast enough, as we may need a new one
-    // for the same timeline ASAP. So wait no longer than 2s for the shutdown to
-    // complete, then just error out and exit the main thread.
-    info!("shutting down tracing");
-    let (sender, receiver) = mpsc::channel();
-    let _ = thread::spawn(move || {
-        tracing_utils::shutdown_tracing();
-        sender.send(()).ok()
-    });
-    let shutdown_res = receiver.recv_timeout(Duration::from_millis(2000));
-    if shutdown_res.is_err() {
-        error!("timed out while shutting down tracing, exiting anyway");
+fn deinit_and_exit(tracing_provider: Option<tracing_utils::Provider>, exit_code: Option<i32>) -> ! {
+    if let Some(p) = tracing_provider {
+        // Shutdown trace pipeline gracefully, so that it has a chance to send any
+        // pending traces before we exit. Shutting down OTEL tracing provider may
+        // hang for quite some time, see, for example:
+        // - https://github.com/open-telemetry/opentelemetry-rust/issues/868
+        // - and our problems with staging https://github.com/neondatabase/cloud/issues/3707#issuecomment-1493983636
+        //
+        // Yet, we want computes to shut down fast enough, as we may need a new one
+        // for the same timeline ASAP. So wait no longer than 2s for the shutdown to
+        // complete, then just error out and exit the main thread.
+        info!("shutting down tracing");
+        let (sender, receiver) = mpsc::channel();
+        let _ = thread::spawn(move || {
+            _ = p.shutdown();
+            sender.send(()).ok()
+        });
+        let shutdown_res = receiver.recv_timeout(Duration::from_millis(2000));
+        if shutdown_res.is_err() {
+            error!("timed out while shutting down tracing, exiting anyway");
+        }
     }
 
     info!("shutting down");
@@ -263,9 +359,9 @@ fn deinit_and_exit(exit_code: Option<i32>) -> ! {
 /// When compute_ctl is killed, send also termination signal to sync-safekeepers
 /// to prevent leakage. TODO: it is better to convert compute_ctl to async and
 /// wait for termination which would be easy then.
-fn handle_exit_signal(sig: i32) {
+fn handle_exit_signal(sig: i32, dev_mode: bool) {
     info!("received {sig} termination signal");
-    forward_termination_signal();
+    forward_termination_signal(dev_mode);
     exit(1);
 }
 
@@ -318,5 +414,50 @@ mod test {
             "https://example.com?hello=world",
         ])
         .expect_err("URL parameters are not allowed");
+    }
+
+    #[test]
+    fn verify_privileged_role_name() {
+        // Valid name
+        let cli = Cli::parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "my_superuser",
+        ]);
+        assert_eq!(cli.privileged_role_name, "my_superuser");
+
+        // Invalid names
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "NeonSuperuser",
+        ])
+        .expect_err("uppercase letters are not allowed");
+
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "$'neon_superuser",
+        ])
+        .expect_err("special characters are not allowed");
+
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "",
+        ])
+        .expect_err("empty name is not allowed");
     }
 }

@@ -53,7 +53,7 @@ jobs:
           submodules: true
 
       - name: Check for Postgres changes
-        uses: step-security/paths-filter@v3
+        uses: dorny/paths-filter@1441771bbfdd59dcd748680ee64ebd8faab1a242  #v3
         id: files_changed
         with:
           token: ${{ github.token }}
@@ -72,6 +72,7 @@ jobs:
   check-macos-build:
     needs: [ check-permissions, files-changed ]
     uses: ./.github/workflows/build-macos.yml
+    secrets: inherit
     with:
       pg_versions: ${{ needs.files-changed.outputs.postgres_changes }}
       rebuild_rust_code: ${{ fromJSON(needs.files-changed.outputs.rebuild_rust_code) }}

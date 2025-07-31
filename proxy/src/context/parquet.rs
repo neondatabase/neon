@@ -74,7 +74,7 @@ pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 #[derive(parquet_derive::ParquetRecordWriter)]
 pub(crate) struct RequestData {
-    region: &'static str,
+    region: String,
     protocol: &'static str,
     /// Must be UTC. The derive macro doesn't like the timezones
     timestamp: chrono::NaiveDateTime,
@@ -147,7 +147,7 @@ impl From<&RequestContextInner> for RequestData {
             }),
             jwt_issuer: value.jwt_issuer.clone(),
             protocol: value.protocol.as_str(),
-            region: value.region,
+            region: String::new(),
             error: value.error_kind.as_ref().map(|e| e.to_metric_label()),
             success: value.success,
             cold_start_info: value.cold_start_info.as_str(),
@@ -167,6 +167,7 @@ impl From<&RequestContextInner> for RequestData {
 pub async fn worker(
     cancellation_token: CancellationToken,
     config: ParquetUploadArgs,
+    region: String,
 ) -> anyhow::Result<()> {
     let Some(remote_storage_config) = config.parquet_upload_remote_storage else {
         tracing::warn!("parquet request upload: no s3 bucket configured");
@@ -232,12 +233,17 @@ pub async fn worker(
                 .context("remote storage for disconnect events init")?;
         let parquet_config_disconnect = parquet_config.clone();
         tokio::try_join!(
-            worker_inner(storage, rx, parquet_config),
-            worker_inner(storage_disconnect, rx_disconnect, parquet_config_disconnect)
+            worker_inner(storage, rx, parquet_config, &region),
+            worker_inner(
+                storage_disconnect,
+                rx_disconnect,
+                parquet_config_disconnect,
+                &region
+            )
         )
         .map(|_| ())
     } else {
-        worker_inner(storage, rx, parquet_config).await
+        worker_inner(storage, rx, parquet_config, &region).await
     }
 }
 
@@ -257,10 +263,11 @@ async fn worker_inner(
     storage: GenericRemoteStorage,
     rx: impl Stream<Item = RequestData>,
     config: ParquetConfig,
+    region: &str,
 ) -> anyhow::Result<()> {
     #[cfg(any(test, feature = "testing"))]
     let storage = if config.test_remote_failures > 0 {
-        GenericRemoteStorage::unreliable_wrapper(storage, config.test_remote_failures)
+        GenericRemoteStorage::unreliable_wrapper(storage, config.test_remote_failures, 100)
     } else {
         storage
     };
@@ -277,7 +284,8 @@ async fn worker_inner(
     let mut last_upload = time::Instant::now();
 
     let mut len = 0;
-    while let Some(row) = rx.next().await {
+    while let Some(mut row) = rx.next().await {
+        region.clone_into(&mut row.region);
         rows.push(row);
         let force = last_upload.elapsed() > config.max_duration;
         if rows.len() == config.rows_per_group || force {
@@ -515,29 +523,29 @@ mod tests {
 
     fn generate_request_data(rng: &mut impl Rng) -> RequestData {
         RequestData {
-            session_id: uuid::Builder::from_random_bytes(rng.r#gen()).into_uuid(),
-            peer_addr: Ipv4Addr::from(rng.r#gen::<[u8; 4]>()).to_string(),
+            session_id: uuid::Builder::from_random_bytes(rng.random()).into_uuid(),
+            peer_addr: Ipv4Addr::from(rng.random::<[u8; 4]>()).to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(
-                rng.gen_range(1703862754..1803862754),
+                rng.random_range(1703862754..1803862754),
             )
             .unwrap()
             .naive_utc(),
             application_name: Some("test".to_owned()),
             user_agent: Some("test-user-agent".to_owned()),
-            username: Some(hex::encode(rng.r#gen::<[u8; 4]>())),
-            endpoint_id: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
-            database: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
-            project: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
-            branch: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
+            username: Some(hex::encode(rng.random::<[u8; 4]>())),
+            endpoint_id: Some(hex::encode(rng.random::<[u8; 16]>())),
+            database: Some(hex::encode(rng.random::<[u8; 16]>())),
+            project: Some(hex::encode(rng.random::<[u8; 16]>())),
+            branch: Some(hex::encode(rng.random::<[u8; 16]>())),
             pg_options: None,
             auth_method: None,
             jwt_issuer: None,
-            protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
-            region: "us-east-1",
+            protocol: ["tcp", "ws", "http"][rng.random_range(0..3)],
+            region: String::new(),
             error: None,
-            success: rng.r#gen(),
+            success: rng.random(),
             cold_start_info: "no",
-            duration_us: rng.gen_range(0..30_000_000),
+            duration_us: rng.random_range(0..30_000_000),
             disconnect_timestamp: None,
         }
     }
@@ -565,7 +573,9 @@ mod tests {
             .await
             .unwrap();
 
-        worker_inner(storage, rx, config).await.unwrap();
+        worker_inner(storage, rx, config, "us-east-1")
+            .await
+            .unwrap();
 
         let mut files = WalkDir::new(tmpdir.as_std_path())
             .into_iter()
@@ -612,15 +622,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313953, 3, 6000),
-                (1313942, 3, 6000),
-                (1314001, 3, 6000),
-                (1313958, 3, 6000),
-                (1314094, 3, 6000),
-                (1313931, 3, 6000),
-                (1313725, 3, 6000),
-                (1313960, 3, 6000),
-                (438318, 1, 2000)
+                (1313878, 3, 6000),
+                (1313891, 3, 6000),
+                (1314058, 3, 6000),
+                (1313914, 3, 6000),
+                (1313760, 3, 6000),
+                (1314084, 3, 6000),
+                (1313965, 3, 6000),
+                (1313911, 3, 6000),
+                (438290, 1, 2000)
             ]
         );
 
@@ -652,11 +662,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1205810, 5, 10000),
-                (1205534, 5, 10000),
-                (1205835, 5, 10000),
-                (1205820, 5, 10000),
-                (1206074, 5, 10000)
+                (1206039, 5, 10000),
+                (1205798, 5, 10000),
+                (1205776, 5, 10000),
+                (1206051, 5, 10000),
+                (1205746, 5, 10000)
             ]
         );
 
@@ -681,15 +691,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313953, 3, 6000),
-                (1313942, 3, 6000),
-                (1314001, 3, 6000),
-                (1313958, 3, 6000),
-                (1314094, 3, 6000),
-                (1313931, 3, 6000),
-                (1313725, 3, 6000),
-                (1313960, 3, 6000),
-                (438318, 1, 2000)
+                (1313878, 3, 6000),
+                (1313891, 3, 6000),
+                (1314058, 3, 6000),
+                (1313914, 3, 6000),
+                (1313760, 3, 6000),
+                (1314084, 3, 6000),
+                (1313965, 3, 6000),
+                (1313911, 3, 6000),
+                (438290, 1, 2000)
             ]
         );
 
@@ -726,7 +736,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(658584, 2, 3001), (658298, 2, 3000), (658094, 2, 2999)]
+            [(658552, 2, 3001), (658265, 2, 3000), (658061, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

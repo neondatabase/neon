@@ -1,0 +1,112 @@
+name: Periodic proxy performance test on unit-perf-aws-arm runners
+
+on:
+  push: # TODO: remove after testing
+    branches:
+      - test-proxy-bench # Runs on pushes to test-proxy-bench branch
+  # schedule:
+    # * is a special character in YAML so you have to quote this string
+    #        ┌───────────── minute (0 - 59)
+    #        │ ┌───────────── hour (0 - 23)
+    #        │ │ ┌───────────── day of the month (1 - 31)
+    #        │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #        │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    # - cron: '0 5 * * *' # Runs at 5 UTC once a day
+  workflow_dispatch: # adds an ability to run this manually
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run_periodic_proxybench_test:
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
+    runs-on: [ self-hosted, unit-perf-aws-arm ]
+    timeout-minutes: 60  # 1h timeout
+    container:
+      image: ghcr.io/neondatabase/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --init
+    steps:
+    - name: Checkout proxy-bench Repo
+      uses: actions/checkout@v4
+      with:
+        repository: neondatabase/proxy-bench
+        path: proxy-bench
+
+    - name: Set up the environment which depends on $RUNNER_TEMP on nvme drive
+      id: set-env
+      shell: bash -euxo pipefail {0}
+      run: |
+        PROXY_BENCH_PATH=$(realpath ./proxy-bench)
+        {
+          echo "PROXY_BENCH_PATH=$PROXY_BENCH_PATH"
+          echo "NEON_DIR=${RUNNER_TEMP}/neon"
+          echo "NEON_PROXY_PATH=${RUNNER_TEMP}/neon/bin/proxy"
+          echo "TEST_OUTPUT=${PROXY_BENCH_PATH}/test_output"
+          echo ""
+        } >> "$GITHUB_ENV"
+
+    - name: Cache poetry deps
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pypoetry/virtualenvs
+        key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
+
+    - name: Install Python deps
+      shell: bash -euxo pipefail {0}
+      run: ./scripts/pysync
+
+    - name: show ulimits
+      shell: bash -euxo pipefail {0}
+      run: |
+        ulimit -a
+
+    - name: Run proxy-bench
+      working-directory: ${{ env.PROXY_BENCH_PATH }}
+      run: ./run.sh --with-grafana --bare-metal
+
+    - name: Ingest Bench Results
+      if: always()
+      working-directory: ${{ env.NEON_DIR }}
+      run: |
+        mkdir -p $TEST_OUTPUT
+        python $NEON_DIR/scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
+
+    - name: Push Metrics to Proxy perf database
+      shell: bash -euxo pipefail {0}
+      if: always()
+      env:
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PROXY_TEST_RESULT_CONNSTR }}"
+        REPORT_FROM: $TEST_OUTPUT
+      working-directory: ${{ env.NEON_DIR }}
+      run: $NEON_DIR/scripts/generate_and_push_perf_report.sh
+
+    - name: Notify Failure
+      if: failure()
+      run: echo "Proxy bench job failed" && exit 1
+
+    - name: Cleanup Test Resources
+      if: always()
+      shell: bash -euxo pipefail {0}
+      run: |
+        # Cleanup the test resources
+        if [[ -d "${TEST_OUTPUT}" ]]; then
+          rm -rf ${TEST_OUTPUT}
+        fi
+        if [[ -d "${PROXY_BENCH_PATH}/test_output" ]]; then
+          rm -rf ${PROXY_BENCH_PATH}/test_output
+        fi

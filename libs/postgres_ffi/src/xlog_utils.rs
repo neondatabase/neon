@@ -9,11 +9,12 @@
 
 use super::super::waldecoder::WalStreamDecoder;
 use super::bindings::{
-    CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID, TimestampTz,
+    CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID,
     XLogLongPageHeaderData, XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
+    MY_PGVERSION
 };
+use postgres_ffi_types::TimestampTz;
 use super::wal_generator::LogicalMessageGenerator;
-use super::PG_MAJORVERSION;
 use crate::pg_constants;
 use crate::PG_TLI;
 use crate::{uint32, uint64, Oid};
@@ -21,8 +22,6 @@ use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
 
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
-
-use log::*;
 
 use serde::Serialize;
 use std::ffi::{CString, OsStr};
@@ -233,8 +232,8 @@ pub fn find_end_of_wal(
     let mut result = start_lsn;
     let mut curr_lsn = start_lsn;
     let mut buf = [0u8; XLOG_BLCKSZ];
-    let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
-    debug!("find_end_of_wal PG_VERSION: {}", pg_version);
+    let pg_version = MY_PGVERSION;
+    tracing::debug!("find_end_of_wal PG_VERSION: {}", pg_version);
 
     let mut decoder = WalStreamDecoder::new(start_lsn, pg_version);
 
@@ -246,7 +245,7 @@ pub fn find_end_of_wal(
         match open_wal_segment(&seg_file_path)? {
             None => {
                 // no more segments
-                debug!(
+                tracing::debug!(
                     "find_end_of_wal reached end at {:?}, segment {:?} doesn't exist",
                     result, seg_file_path
                 );
@@ -259,7 +258,7 @@ pub fn find_end_of_wal(
                 while curr_lsn.segment_number(wal_seg_size) == segno {
                     let bytes_read = segment.read(&mut buf)?;
                     if bytes_read == 0 {
-                        debug!(
+                        tracing::debug!(
                             "find_end_of_wal reached end at {:?}, EOF in segment {:?} at offset {}",
                             result,
                             seg_file_path,
@@ -275,7 +274,7 @@ pub fn find_end_of_wal(
                         match decoder.poll_decode() {
                             Ok(Some(record)) => result = record.0,
                             Err(e) => {
-                                debug!(
+                                tracing::debug!(
                                     "find_end_of_wal reached end at {:?}, decode error: {:?}",
                                     result, e
                                 );

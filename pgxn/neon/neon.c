@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * neon.c
- *	  Main entry point into the neon exension
+ *	  Main entry point into the neon extension
  *
  *-------------------------------------------------------------------------
  */
@@ -22,6 +22,7 @@
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "storage/proc.h"
+#include "storage/ipc.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
 #include "utils/builtins.h"
@@ -30,12 +31,13 @@
 #include "utils/guc_tables.h"
 
 #include "communicator.h"
+#include "communicator_process.h"
 #include "extension_server.h"
 #include "file_cache.h"
 #include "neon.h"
+#include "neon_ddl_handler.h"
 #include "neon_lwlsncache.h"
 #include "neon_perf_counters.h"
-#include "control_plane_connector.h"
 #include "logical_replication_monitor.h"
 #include "unstable_extensions.h"
 #include "walsender_hooks.h"
@@ -46,8 +48,10 @@
 PG_MODULE_MAGIC;
 void		_PG_init(void);
 
+bool lakebase_mode = false;
 
 static int  running_xacts_overflow_policy;
+static emit_log_hook_type prev_emit_log_hook;
 static bool monitor_query_exec_time = false;
 
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
@@ -56,11 +60,15 @@ static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static void neon_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void neon_ExecutorEnd(QueryDesc *queryDesc);
 
-#if PG_MAJORVERSION_NUM >= 16
 static shmem_startup_hook_type prev_shmem_startup_hook;
-
 static void neon_shmem_startup_hook(void);
+static void neon_shmem_request_hook(void);
+
+#if PG_MAJORVERSION_NUM >= 15
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
 #endif
+
+
 #if PG_MAJORVERSION_NUM >= 17
 uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
 uint32		WAIT_EVENT_NEON_LFC_READ;
@@ -74,6 +82,8 @@ uint32		WAIT_EVENT_NEON_PS_READ;
 uint32		WAIT_EVENT_NEON_WAL_DL;
 #endif
 
+int databricks_test_hook = 0;
+
 enum RunningXactsOverflowPolicies {
 	OP_IGNORE,
 	OP_SKIP,
@@ -84,6 +94,14 @@ static const struct config_enum_entry running_xacts_overflow_policies[] = {
 	{"ignore", OP_IGNORE, false},
 	{"skip", OP_SKIP, false},
 	{"wait", OP_WAIT, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry debug_compare_local_modes[] = {
+	{"none", DEBUG_COMPARE_LOCAL_NONE, false},
+	{"prefetch", DEBUG_COMPARE_LOCAL_PREFETCH, false},
+	{"lfc", DEBUG_COMPARE_LOCAL_LFC, false},
+	{"all", DEBUG_COMPARE_LOCAL_ALL, false},
 	{NULL, 0, false}
 };
 
@@ -430,6 +448,20 @@ ReportSearchPath(void)
 static int neon_pgstat_file_size_limit;
 #endif
 
+static void DatabricksSqlErrorHookImpl(ErrorData *edata) {
+	if (prev_emit_log_hook != NULL) {
+		prev_emit_log_hook(edata);
+	}
+
+	if (edata->sqlerrcode == ERRCODE_DATA_CORRUPTED) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->data_corruption_count, 1);
+	} else if (edata->sqlerrcode == ERRCODE_INDEX_CORRUPTED) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->index_corruption_count, 1);
+	} else if (edata->sqlerrcode == ERRCODE_INTERNAL_ERROR) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->internal_error_count, 1);
+	}
+}
+
 void
 _PG_init(void)
 {
@@ -439,22 +471,58 @@ _PG_init(void)
 	 */
 #if PG_VERSION_NUM >= 160000
 	load_file("$libdir/neon_rmgr", false);
-
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = neon_shmem_startup_hook;
 #endif
 
+	if (lakebase_mode) {
+		prev_emit_log_hook = emit_log_hook;
+		emit_log_hook = DatabricksSqlErrorHookImpl;
+	}
+
+	/*
+	 * Initializing a pre-loaded Postgres extension happens in three stages:
+	 *
+	 * 1. _PG_init() is called early at postmaster startup. In this stage, no
+	 *    shared memory has been allocated yet. Core Postgres GUCs have been
+	 *    initialized from the config files, but notably, MaxBackends has not
+	 *    calculated yet. In this stage, we must register any extension GUCs
+	 *    and can do other early initialization that doesn't depend on shared
+	 *    memory. In this stage we must also register "shmem request" and
+	 *    "shmem starutup" hooks, to be called in stages 2 and 3.
+	 *
+	 * 2. After MaxBackends have been calculated, the "shmem request" hooks
+	 *    are called. The hooks can reserve shared memory by calling
+	 *    RequestAddinShmemSpace and RequestNamedLWLockTranche().  The "shmem
+	 *    request hooks" are a new mechanism in Postgres v15. In v14 and
+	 *    below, you had to make those Requests in stage 1 already, which
+	 *    means they could not depend on MaxBackends. (See hack in
+	 *    NeonPerfCountersShmemRequest())
+	 *
+	 * 3. After some more runtime-computed GUCs that affect the amount of
+	 *    shared memory needed have been calculated, the "shmem startup" hooks
+	 *    are called. In this stage, we allocate any shared memory, LWLocks
+	 *    and other shared resources.
+	 *
+	 * Here, in the 'neon' extension, we register just one shmem request hook
+	 * and one startup hook, which call into functions in all the subsystems
+	 * that are part of the extension. On v14, the ShmemRequest functions are
+	 * called in stage 1, and on v15 onwards they are called in stage 2.
+	 */
+
+	/* Stage 1: Define GUCs, and other early intialization */
 	pg_init_libpagestore();
+	relsize_hash_init();
 	lfc_init();
 	pg_init_walproposer();
 	init_lwlsncache();
+
+	pg_init_communicator_process();
 
 	pg_init_communicator();
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();
 	InitLogicalReplicationMonitor();
-	InitControlPlaneConnector();
+	InitDDLHandler();
 
 	pg_init_extension_server();
 
@@ -462,7 +530,7 @@ _PG_init(void)
 
 	DefineCustomBoolVariable(
 							"neon.disable_logical_replication_subscribers",
-							"Disables incomming logical replication",
+							"Disable incoming logical replication",
 							NULL,
 							&disable_logical_replication_subscribers,
 							false,
@@ -519,6 +587,48 @@ _PG_init(void)
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
+	DefineCustomEnumVariable(
+							"neon.debug_compare_local",
+							"Debug mode for comparing content of pages in prefetch ring/LFC/PS and local disk",
+							NULL,
+							&debug_compare_local,
+							DEBUG_COMPARE_LOCAL_NONE,
+							debug_compare_local_modes,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomStringVariable(
+							"neon.privileged_role_name",
+							"Name of the 'weak' superuser role, which we give to the users",
+							NULL,
+							&privileged_role_name,
+							"neon_superuser",
+							PGC_POSTMASTER, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							"neon.lakebase_mode",
+							"Is neon running in Lakebase?",
+							NULL,
+							&lakebase_mode,
+							false,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
+
+	// A test hook used in sql regress to trigger specific behaviors
+	// to test features easily.
+	DefineCustomIntVariable(
+							"databricks.test_hook",
+							"The test hook used in sql regress tests only",
+							NULL,
+							&databricks_test_hook,
+							0,
+							0, INT32_MAX,
+							PGC_SUSET,
+							0,
+							NULL, NULL, NULL);
+
 	/*
 	 * Important: This must happen after other parts of the extension are
 	 * loaded, otherwise any settings to GUCs that were set before the
@@ -528,15 +638,37 @@ _PG_init(void)
 
 	ReportSearchPath();
 
+	/*
+	 * Register initialization hooks for stage 2. (On v14, there's no "shmem
+	 * request" hooks, so call the ShmemRequest functions immediately.)
+	 */
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = neon_shmem_request_hook;
+#else
+	neon_shmem_request_hook();
+#endif
+
+	/* Register hooks for stage 3 */
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = neon_shmem_startup_hook;
+
+	/* Other misc initialization */
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = neon_ExecutorStart;
 	prev_ExecutorEnd = ExecutorEnd_hook;
 	ExecutorEnd_hook = neon_ExecutorEnd;
 }
 
+/* Various functions exposed at SQL level */
+
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
 PG_FUNCTION_INFO_V1(backpressure_throttling_time);
+PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
+PG_FUNCTION_INFO_V1(approximate_working_set_size);
+PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
+PG_FUNCTION_INFO_V1(local_cache_pages);
 
 Datum
 pg_cluster_size(PG_FUNCTION_ARGS)
@@ -583,13 +715,149 @@ backpressure_throttling_time(PG_FUNCTION_ARGS)
 	PG_RETURN_UINT64(BackpressureThrottlingTime());
 }
 
-#if PG_MAJORVERSION_NUM >= 16
+Datum
+approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
+{
+	time_t		duration;
+	int32		dc;
+
+	duration = PG_ARGISNULL(0) ? (time_t) -1 : PG_GETARG_INT32(0);
+
+	dc = lfc_approximate_working_set_size_seconds(duration, false);
+	if (dc < 0)
+		PG_RETURN_NULL();
+	else
+		PG_RETURN_INT32(dc);
+}
+
+Datum
+approximate_working_set_size(PG_FUNCTION_ARGS)
+{
+	bool		reset = PG_GETARG_BOOL(0);
+	int32		dc;
+
+	dc = lfc_approximate_working_set_size_seconds(-1, reset);
+	if (dc < 0)
+		PG_RETURN_NULL();
+	else
+		PG_RETURN_INT32(dc);
+}
+
+Datum
+neon_get_lfc_stats(PG_FUNCTION_ARGS)
+{
+#define NUM_NEON_GET_STATS_COLS        2
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	LfcStatsEntry *entries;
+	size_t		num_entries;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	/* lfc_get_stats() does all the heavy lifting */
+	entries = lfc_get_stats(&num_entries);
+
+	/* Convert the LfcStatsEntrys to a result set */
+	for (size_t i = 0; i < num_entries; i++)
+	{
+		LfcStatsEntry *entry = &entries[i];
+		Datum		values[NUM_NEON_GET_STATS_COLS];
+		bool		nulls[NUM_NEON_GET_STATS_COLS];
+
+		values[0] = CStringGetTextDatum(entry->metric_name);
+		nulls[0] = false;
+		values[1] = Int64GetDatum(entry->isnull ? 0 : entry->value);
+		nulls[1] = entry->isnull;
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	PG_RETURN_VOID();
+
+#undef NUM_NEON_GET_STATS_COLS
+}
+
+Datum
+local_cache_pages(PG_FUNCTION_ARGS)
+{
+#define NUM_LOCALCACHE_PAGES_COLS	7
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	LocalCachePagesRec *entries;
+	size_t		num_entries;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	/* lfc_local_cache_pages() does all the heavy lifting */
+	entries = lfc_local_cache_pages(&num_entries);
+
+	/* Convert the LocalCachePagesRec structs to a result set */
+	for (size_t i = 0; i < num_entries; i++)
+	{
+		LocalCachePagesRec *entry = &entries[i];
+		Datum		values[NUM_LOCALCACHE_PAGES_COLS];
+		bool		nulls[NUM_LOCALCACHE_PAGES_COLS] = {
+			false, false, false, false, false, false, false
+		};
+
+		values[0] = Int64GetDatum((int64) entry->pageoffs);
+		values[1] = ObjectIdGetDatum(entry->relfilenode);
+		values[2] = ObjectIdGetDatum(entry->reltablespace);
+		values[3] = ObjectIdGetDatum(entry->reldatabase);
+		values[4] = ObjectIdGetDatum(entry->forknum);
+		values[5] = Int64GetDatum((int64) entry->blocknum);
+		values[6] = Int32GetDatum(entry->accesscount);
+
+		/* Build and return the tuple. */
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	PG_RETURN_VOID();
+
+#undef NUM_LOCALCACHE_PAGES_COLS
+}
+
+/*
+ * Initialization stage 2: make requests for the amount of shared memory we
+ * will need.
+ *
+ * For a high-level explanation of the initialization process, see _PG_init().
+ */
+static void
+neon_shmem_request_hook(void)
+{
+#if PG_VERSION_NUM >= 150000
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+#endif
+
+	LfcShmemRequest();
+	NeonPerfCountersShmemRequest();
+	PagestoreShmemRequest();
+	RelsizeCacheShmemRequest();
+	WalproposerShmemRequest();
+	LwLsnCacheShmemRequest();
+}
+
+
+/*
+ * Initialization stage 3: Initialize shared memory.
+ *
+ * For a high-level explanation of the initialization process, see _PG_init().
+ */
 static void
 neon_shmem_startup_hook(void)
 {
-	/* Initialize */
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+	LfcShmemInit();
+	NeonPerfCountersShmemInit();
+	if (lakebase_mode) {
+		DatabricksMetricsShmemInit();
+	}
+	PagestoreShmemInit();
+	RelsizeCacheShmemInit();
+	WalproposerShmemInit();
+	LwLsnCacheShmemInit();
 
 #if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");
@@ -603,8 +871,9 @@ neon_shmem_startup_hook(void)
 	WAIT_EVENT_NEON_PS_READ = WaitEventExtensionNew("Neon/PS_ReadIO");
 	WAIT_EVENT_NEON_WAL_DL = WaitEventExtensionNew("Neon/WAL_Download");
 #endif
+
+	LWLockRelease(AddinShmemInitLock);
 }
-#endif
 
 /*
  * ExecutorStart hook: start up tracking if needed

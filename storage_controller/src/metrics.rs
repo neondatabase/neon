@@ -76,6 +76,9 @@ pub(crate) struct StorageControllerMetricGroup {
     /// How many shards would like to reconcile but were blocked by concurrency limits
     pub(crate) storage_controller_pending_reconciles: measured::Gauge,
 
+    /// How many shards are stuck and will be ignored when considering to run optimizations
+    pub(crate) storage_controller_stuck_reconciles: measured::Gauge,
+
     /// HTTP request status counters for handled requests
     pub(crate) storage_controller_http_request_status:
         measured::CounterVec<HttpRequestStatusLabelGroupSet>,
@@ -97,7 +100,7 @@ pub(crate) struct StorageControllerMetricGroup {
     /// Count of HTTP requests to the safekeeper that resulted in an error,
     /// broken down by the safekeeper node id, request name and method
     pub(crate) storage_controller_safekeeper_request_error:
-        measured::CounterVec<PageserverRequestLabelGroupSet>,
+        measured::CounterVec<SafekeeperRequestLabelGroupSet>,
 
     /// Latency of HTTP requests to the pageserver, broken down by pageserver
     /// node id, request name and method. This include both successful and unsuccessful
@@ -111,7 +114,7 @@ pub(crate) struct StorageControllerMetricGroup {
     /// requests.
     #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
     pub(crate) storage_controller_safekeeper_request_latency:
-        measured::HistogramVec<PageserverRequestLabelGroupSet, 5>,
+        measured::HistogramVec<SafekeeperRequestLabelGroupSet, 5>,
 
     /// Count of pass-through HTTP requests to the pageserver that resulted in an error,
     /// broken down by the pageserver node id, request name and method
@@ -148,6 +151,29 @@ pub(crate) struct StorageControllerMetricGroup {
     /// Indicator of completed safekeeper reconciles, broken down by safekeeper.
     pub(crate) storage_controller_safekeeper_reconciles_complete:
         measured::CounterVec<SafekeeperReconcilerLabelGroupSet>,
+
+    /* BEGIN HADRON */
+    /// Hadron `config_watcher` reconciliation runs completed, broken down by success/failure.
+    pub(crate) storage_controller_config_watcher_complete:
+        measured::CounterVec<ConfigWatcherCompleteLabelGroupSet>,
+
+    /// Hadron long waits for node state changes during drain and fill.
+    pub(crate) storage_controller_drain_and_fill_long_waits: measured::Counter,
+
+    /// Set to 1 if we detect any page server pods with pending node pool rotation annotations.
+    /// Requires manual reset after oncall investigation.
+    pub(crate) storage_controller_ps_node_pool_rotation_pending: measured::Gauge,
+
+    /// Hadron storage scrubber status.
+    pub(crate) storage_controller_storage_scrub_status:
+        measured::CounterVec<StorageScrubberLabelGroupSet>,
+
+    /// Desired number of pageservers managed by the storage controller
+    pub(crate) storage_controller_num_pageservers_desired: measured::Gauge,
+
+    /// Desired number of safekeepers managed by the storage controller
+    pub(crate) storage_controller_num_safekeeper_desired: measured::Gauge,
+    /* END HADRON */
 }
 
 impl StorageControllerMetrics {
@@ -168,6 +194,10 @@ impl Default for StorageControllerMetrics {
         let mut metrics_group = StorageControllerMetricGroup::new();
         metrics_group
             .storage_controller_reconcile_complete
+            .init_all_dense();
+
+        metrics_group
+            .storage_controller_config_watcher_complete
             .init_all_dense();
 
         Self {
@@ -219,6 +249,16 @@ pub(crate) struct PageserverRequestLabelGroup<'a> {
     pub(crate) method: Method,
 }
 
+#[derive(measured::LabelGroup, Clone)]
+#[label(set = SafekeeperRequestLabelGroupSet)]
+pub(crate) struct SafekeeperRequestLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) safekeeper_id: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) path: &'a str,
+    pub(crate) method: Method,
+}
+
 #[derive(measured::LabelGroup)]
 #[label(set = DatabaseQueryErrorLabelGroupSet)]
 pub(crate) struct DatabaseQueryErrorLabelGroup {
@@ -249,11 +289,48 @@ pub(crate) struct ReconcileLongRunningLabelGroup<'a> {
     pub(crate) sequence: &'a str,
 }
 
+#[derive(measured::LabelGroup, Clone)]
+#[label(set = StorageScrubberLabelGroupSet)]
+pub(crate) struct StorageScrubberLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) tenant_id: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) shard_number: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) timeline_id: &'a str,
+    pub(crate) outcome: StorageScrubberOutcome,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy)]
+pub(crate) enum StorageScrubberOutcome {
+    PSOk,
+    PSWarning,
+    PSError,
+    PSOrphan,
+    SKOk,
+    SKError,
+}
+
+#[derive(measured::LabelGroup)]
+#[label(set = ConfigWatcherCompleteLabelGroupSet)]
+pub(crate) struct ConfigWatcherCompleteLabelGroup {
+    // Reuse the ReconcileOutcome from the SC's reconciliation metrics.
+    pub(crate) status: ReconcileOutcome,
+}
+
 #[derive(FixedCardinalityLabel, Clone, Copy)]
 pub(crate) enum ReconcileOutcome {
+    // Successfully reconciled everything.
     #[label(rename = "ok")]
     Success,
+    // Used by tenant-shard reconciler only. Reconciled pageserver state successfully,
+    // but failed to delivery the compute notificiation. This error is typically transient
+    // but if its occurance keeps increasing, it should be investigated.
+    #[label(rename = "ok_no_notify")]
+    SuccessNoNotify,
+    // We failed to reconcile some state and the reconcilation will be retried.
     Error,
+    // Reconciliation was cancelled.
     Cancel,
 }
 
@@ -323,6 +400,7 @@ pub(crate) enum DatabaseErrorLabel {
     ConnectionPool,
     Logical,
     Migration,
+    Cas,
 }
 
 impl DatabaseError {
@@ -333,6 +411,7 @@ impl DatabaseError {
             Self::ConnectionPool(_) => DatabaseErrorLabel::ConnectionPool,
             Self::Logical(_) => DatabaseErrorLabel::Logical,
             Self::Migration(_) => DatabaseErrorLabel::Migration,
+            Self::Cas(_) => DatabaseErrorLabel::Cas,
         }
     }
 }

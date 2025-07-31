@@ -16,44 +16,6 @@ use super::LeakyBucketConfig;
 use crate::ext::LockExt;
 use crate::intern::EndpointIdInt;
 
-pub struct GlobalRateLimiter {
-    data: Vec<RateBucket>,
-    info: Vec<RateBucketInfo>,
-}
-
-impl GlobalRateLimiter {
-    pub fn new(info: Vec<RateBucketInfo>) -> Self {
-        Self {
-            data: vec![
-                RateBucket {
-                    start: Instant::now(),
-                    count: 0,
-                };
-                info.len()
-            ],
-            info,
-        }
-    }
-
-    /// Check that number of connections is below `max_rps` rps.
-    pub fn check(&mut self) -> bool {
-        let now = Instant::now();
-
-        let should_allow_request = self
-            .data
-            .iter_mut()
-            .zip(&self.info)
-            .all(|(bucket, info)| bucket.should_allow_request(info, now, 1));
-
-        if should_allow_request {
-            // only increment the bucket counts if the request will actually be accepted
-            self.data.iter_mut().for_each(|b| b.inc(1));
-        }
-
-        should_allow_request
-    }
-}
-
 // Simple per-endpoint rate limiter.
 //
 // Check that number of connections to the endpoint is below `max_rps` rps.
@@ -139,12 +101,6 @@ impl RateBucketInfo {
         Self::new(200, Duration::from_secs(600)),
     ];
 
-    // For all the sessions will be cancel key. So this limit is essentially global proxy limit.
-    pub const DEFAULT_REDIS_SET: [Self; 2] = [
-        Self::new(100_000, Duration::from_secs(1)),
-        Self::new(50_000, Duration::from_secs(10)),
-    ];
-
     pub fn rps(&self) -> f64 {
         (self.max_rpi as f64) / self.interval.as_secs_f64()
     }
@@ -191,7 +147,7 @@ impl RateBucketInfo {
 
 impl<K: Hash + Eq> BucketRateLimiter<K> {
     pub fn new(info: impl Into<Cow<'static, [RateBucketInfo]>>) -> Self {
-        Self::new_with_rand_and_hasher(info, StdRng::from_entropy(), RandomState::new())
+        Self::new_with_rand_and_hasher(info, StdRng::from_os_rng(), RandomState::new())
     }
 }
 
@@ -217,7 +173,11 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
         //    = 30MB
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
+        if self
+            .access_count
+            .fetch_add(1, Ordering::AcqRel)
+            .is_multiple_of(2048)
+        {
             self.do_gc();
         }
 
@@ -256,7 +216,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         let n = self.map.shards().len();
         // this lock is ok as the periodic cycle of do_gc makes this very unlikely to collide
         // (impossible, infact, unless we have 2048 threads)
-        let shard = self.rand.lock_propagate_poison().gen_range(0..n);
+        let shard = self.rand.lock_propagate_poison().random_range(0..n);
         self.map.shards()[shard].write().clear();
     }
 }
