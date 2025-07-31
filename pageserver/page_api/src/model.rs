@@ -33,6 +33,8 @@ pub enum ProtocolError {
     Invalid(&'static str, String),
     #[error("required field '{0}' is missing")]
     Missing(&'static str),
+    #[error("invalid combination of not_modified_lsn '{0}' and request_lsn '{1}'")]
+    InvalidLsns(Lsn, Lsn),
 }
 
 impl ProtocolError {
@@ -85,9 +87,9 @@ impl TryFrom<proto::ReadLsn> for ReadLsn {
             return Err(ProtocolError::invalid("request_lsn", pb.request_lsn));
         }
         if pb.not_modified_since_lsn > pb.request_lsn {
-            return Err(ProtocolError::invalid(
-                "not_modified_since_lsn",
-                pb.not_modified_since_lsn,
+            return Err(ProtocolError::InvalidLsns(
+                Lsn(pb.not_modified_since_lsn),
+                Lsn(pb.request_lsn),
             ));
         }
         Ok(Self {
