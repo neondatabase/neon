@@ -24,12 +24,12 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::PgVersionId;
+use safekeeper_api::Term;
 use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration};
 use safekeeper_api::models::{
     PullTimelineRequest, TimelineLocateResponse, TimelineMembershipSwitchRequest,
     TimelineMembershipSwitchResponse,
 };
-use safekeeper_api::{INITIAL_TERM, Term};
 use safekeeper_client::mgmt_api;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -1230,10 +1230,7 @@ impl Service {
             }
             // It it is the same new_sk_set, we can continue the migration (retry).
         } else {
-            let prev_finished = timeline.cplane_notified_generation == timeline.generation
-                && timeline.sk_set_notified_generation == timeline.generation;
-
-            if !prev_finished {
+            if !is_migration_finished(&timeline) {
                 // The previous migration is committed, but the finish step failed.
                 // Safekeepers/cplane might not know about the last membership configuration.
                 // Retry the finish step to ensure smooth migration.
@@ -1298,13 +1295,7 @@ impl Service {
             )
             .await?;
 
-        let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
-        for res in results.into_iter().flatten() {
-            let sk_position = (res.last_log_term, res.flush_lsn);
-            if sync_position < sk_position {
-                sync_position = sk_position;
-            }
-        }
+        let sync_position = Self::get_sync_position(&results)?;
 
         tracing::info!(
             %generation,
@@ -1551,6 +1542,8 @@ impl Service {
         timeline_id: TimelineId,
         timeline: &TimelinePersistence,
     ) -> Result<(), ApiError> {
+        tracing::info!(generation=?timeline.generation, sk_set=?timeline.sk_set, new_sk_set=?timeline.new_sk_set, "retrying finish safekeeper migration");
+
         if timeline.new_sk_set.is_some() {
             // Logical error, should never happen.
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -1598,4 +1591,152 @@ impl Service {
 
         Ok(())
     }
+
+    /// Get membership switch responses from all safekeepers and return the sync position.
+    ///
+    /// Sync position is a position equal or greater than the commit position.
+    /// It is guaranteed that all WAL entries with (last_log_term, flush_lsn)
+    /// greater than the sync position are not committed (= not on a quorum).
+    ///
+    /// Returns error if there is no quorum of successful responses.
+    fn get_sync_position(
+        responses: &[mgmt_api::Result<TimelineMembershipSwitchResponse>],
+    ) -> Result<(Term, Lsn), ApiError> {
+        let quorum_size = responses.len() / 2 + 1;
+
+        let mut wal_positions = responses
+            .iter()
+            .flatten()
+            .map(|res| (res.last_log_term, res.flush_lsn))
+            .collect::<Vec<_>>();
+
+        // Should be already checked if the responses are from tenant_timeline_set_membership_quorum.
+        if wal_positions.len() < quorum_size {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "not enough successful responses to get sync position: {}/{}",
+                wal_positions.len(),
+                quorum_size,
+            )));
+        }
+
+        wal_positions.sort();
+
+        Ok(wal_positions[quorum_size - 1])
+    }
+
+    /// Abort ongoing safekeeper migration.
+    pub(crate) async fn tenant_timeline_safekeeper_migrate_abort(
+        self: &Arc<Self>,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<(), ApiError> {
+        // TODO(diko): per-tenant lock is too wide. Consider introducing per-timeline locks.
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineSafekeeperMigrate,
+        )
+        .await;
+
+        // Fetch current timeline configuration from the configuration storage.
+        let timeline = self
+            .persistence
+            .get_timeline(tenant_id, timeline_id)
+            .await?;
+
+        let Some(timeline) = timeline else {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!(
+                    "timeline {tenant_id}/{timeline_id} doesn't exist in timelines table"
+                )
+                .into(),
+            ));
+        };
+
+        let mut generation = SafekeeperGeneration::new(timeline.generation as u32);
+
+        let Some(new_sk_set) = &timeline.new_sk_set else {
+            // No new_sk_set -> no active migration that we can abort.
+            tracing::info!("timeline has no active migration");
+
+            if !is_migration_finished(&timeline) {
+                // The last migration is committed, but the finish step failed.
+                // Safekeepers/cplane might not know about the last membership configuration.
+                // Retry the finish step to make the timeline state clean.
+                self.finish_safekeeper_migration_retry(tenant_id, timeline_id, &timeline)
+                    .await?;
+            }
+            return Ok(());
+        };
+
+        tracing::info!(sk_set=?timeline.sk_set, ?new_sk_set, ?generation, "aborting timeline migration");
+
+        let cur_safekeepers = self.get_safekeepers(&timeline.sk_set)?;
+        let new_safekeepers = self.get_safekeepers(new_sk_set)?;
+
+        let cur_sk_member_set =
+            Self::make_member_set(&cur_safekeepers).map_err(ApiError::InternalServerError)?;
+
+        // Increment current generation and remove new_sk_set from the timeline to abort the migration.
+        generation = generation.next();
+
+        let mconf = membership::Configuration {
+            generation,
+            members: cur_sk_member_set,
+            new_members: None,
+        };
+
+        // Exclude safekeepers which were added during the current migration.
+        let cur_ids: HashSet<NodeId> = cur_safekeepers.iter().map(|sk| sk.get_id()).collect();
+        let exclude_safekeepers = new_safekeepers
+            .into_iter()
+            .filter(|sk| !cur_ids.contains(&sk.get_id()))
+            .collect::<Vec<_>>();
+
+        let exclude_requests = exclude_safekeepers
+            .iter()
+            .map(|sk| TimelinePendingOpPersistence {
+                sk_id: sk.skp.id,
+                tenant_id: tenant_id.to_string(),
+                timeline_id: timeline_id.to_string(),
+                generation: generation.into_inner() as i32,
+                op_kind: SafekeeperTimelineOpKind::Exclude,
+            })
+            .collect::<Vec<_>>();
+
+        let cur_sk_set = cur_safekeepers
+            .iter()
+            .map(|sk| sk.get_id())
+            .collect::<Vec<_>>();
+
+        // Persist new mconf and exclude requests.
+        self.persistence
+            .update_timeline_membership(
+                tenant_id,
+                timeline_id,
+                generation,
+                &cur_sk_set,
+                None,
+                &exclude_requests,
+            )
+            .await?;
+
+        // At this point we have already commited the abort, but still need to notify
+        // cplane/safekeepers with the new mconf. That's what finish_safekeeper_migration does.
+        self.finish_safekeeper_migration(
+            tenant_id,
+            timeline_id,
+            &cur_safekeepers,
+            &mconf,
+            &exclude_safekeepers,
+        )
+        .await?;
+
+        Ok(())
+    }
+}
+
+fn is_migration_finished(timeline: &TimelinePersistence) -> bool {
+    timeline.cplane_notified_generation == timeline.generation
+        && timeline.sk_set_notified_generation == timeline.generation
 }

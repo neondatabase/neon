@@ -7813,7 +7813,7 @@ impl Service {
             register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
-            register_req.listen_grpc_addr,
+            register_req.listen_grpc_addr.clone(),
             register_req.listen_grpc_port,
             register_req.availability_zone_id.clone(),
             self.config.use_https_pageserver_api,
@@ -7848,6 +7848,8 @@ impl Service {
                     .update_node_on_registration(
                         register_req.node_id,
                         register_req.listen_https_port,
+                        register_req.listen_grpc_addr,
+                        register_req.listen_grpc_port,
                     )
                     .await?
             }

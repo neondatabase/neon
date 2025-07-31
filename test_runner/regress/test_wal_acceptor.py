@@ -2742,7 +2742,6 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
     wait_until(unevicted)
 
 
-@pytest.mark.skip(reason="Lakebase mode")
 def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
     """
     Test that the timeline disk usage circuit breaker works as expected. We test that:
@@ -2762,7 +2761,12 @@ def test_timeline_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
 
     # Create a timeline and endpoint
     env.create_branch("test_timeline_disk_usage_limit")
-    endpoint = env.endpoints.create_start("test_timeline_disk_usage_limit")
+    endpoint = env.endpoints.create_start(
+        "test_timeline_disk_usage_limit",
+        config_lines=[
+            "neon.lakebase_mode=true",
+        ],
+    )
 
     # Install the neon extension in the test database. We need it to query perf counter metrics.
     with closing(endpoint.connect()) as conn:

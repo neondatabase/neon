@@ -19,7 +19,7 @@ async fn list_dbs(client: &mut Client) -> Result<Vec<String>, PostgresError> {
         .query(
             "SELECT datname FROM pg_catalog.pg_database
                 WHERE datallowconn
-                AND datconnlimit <> - 2
+                AND datconnlimit OPERATOR(pg_catalog.<>) (OPERATOR(pg_catalog.-) 2::pg_catalog.int4)
                 LIMIT 500",
             &[],
         )
@@ -67,7 +67,7 @@ pub async fn get_installed_extensions(
 
         let extensions: Vec<(String, String, i32)> = client
             .query(
-                "SELECT extname, extversion, extowner::integer FROM pg_catalog.pg_extension",
+                "SELECT extname, extversion, extowner::pg_catalog.int4 FROM pg_catalog.pg_extension",
                 &[],
             )
             .await?

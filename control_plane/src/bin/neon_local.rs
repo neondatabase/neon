@@ -71,8 +71,9 @@ const DEFAULT_PG_VERSION_NUM: &str = "17";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
+/// Neon CLI.
 #[derive(clap::Parser)]
-#[command(version = GIT_VERSION, about, name = "Neon CLI")]
+#[command(version = GIT_VERSION, name = "Neon CLI")]
 struct Cli {
     #[command(subcommand)]
     command: NeonLocalCmd,
@@ -107,30 +108,31 @@ enum NeonLocalCmd {
     Stop(StopCmdArgs),
 }
 
+/// Initialize a new Neon repository, preparing configs for services to start with.
 #[derive(clap::Args)]
-#[clap(about = "Initialize a new Neon repository, preparing configs for services to start with")]
 struct InitCmdArgs {
-    #[clap(long, help("How many pageservers to create (default 1)"))]
+    /// How many pageservers to create (default 1).
+    #[clap(long)]
     num_pageservers: Option<u16>,
 
     #[clap(long)]
     config: Option<PathBuf>,
 
-    #[clap(long, help("Force initialization even if the repository is not empty"))]
+    /// Force initialization even if the repository is not empty.
+    #[clap(long, default_value = "must-not-exist")]
     #[arg(value_parser)]
-    #[clap(default_value = "must-not-exist")]
     force: InitForceMode,
 }
 
+/// Start pageserver and safekeepers.
 #[derive(clap::Args)]
-#[clap(about = "Start pageserver and safekeepers")]
 struct StartCmdArgs {
     #[clap(long = "start-timeout", default_value = "10s")]
     timeout: humantime::Duration,
 }
 
+/// Stop pageserver and safekeepers.
 #[derive(clap::Args)]
-#[clap(about = "Stop pageserver and safekeepers")]
 struct StopCmdArgs {
     #[arg(value_enum)]
     #[clap(long, default_value_t = StopMode::Fast)]
@@ -143,8 +145,8 @@ enum StopMode {
     Immediate,
 }
 
+/// Manage tenants.
 #[derive(clap::Subcommand)]
-#[clap(about = "Manage tenants")]
 enum TenantCmd {
     List,
     Create(TenantCreateCmdArgs),
@@ -155,38 +157,36 @@ enum TenantCmd {
 
 #[derive(clap::Args)]
 struct TenantCreateCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_id: Option<TenantId>,
 
-    #[clap(
-        long,
-        help = "Use a specific timeline id when creating a tenant and its initial timeline"
-    )]
+    /// Use a specific timeline id when creating a tenant and its initial timeline.
+    #[clap(long)]
     timeline_id: Option<TimelineId>,
 
     #[clap(short = 'c')]
     config: Vec<String>,
 
+    /// Postgres version to use for the initial timeline.
     #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
-    #[clap(long, help = "Postgres version to use for the initial timeline")]
+    #[clap(long)]
     pg_version: PgMajorVersion,
 
-    #[clap(
-        long,
-        help = "Use this tenant in future CLI commands where tenant_id is needed, but not specified"
-    )]
+    /// Use this tenant in future CLI commands where tenant_id is needed, but not specified.
+    #[clap(long)]
     set_default: bool,
 
-    #[clap(long, help = "Number of shards in the new tenant")]
+    /// Number of shards in the new tenant.
+    #[clap(long)]
     #[arg(default_value_t = 0)]
     shard_count: u8,
-    #[clap(long, help = "Sharding stripe size in pages")]
+    /// Sharding stripe size in pages.
+    #[clap(long)]
     shard_stripe_size: Option<u32>,
 
-    #[clap(long, help = "Placement policy shards in this tenant")]
+    /// Placement policy shards in this tenant.
+    #[clap(long)]
     #[arg(value_parser = parse_placement_policy)]
     placement_policy: Option<PlacementPolicy>,
 }
@@ -195,44 +195,35 @@ fn parse_placement_policy(s: &str) -> anyhow::Result<PlacementPolicy> {
     Ok(serde_json::from_str::<PlacementPolicy>(s)?)
 }
 
+/// Set a particular tenant as default in future CLI commands where tenant_id is needed, but not
+/// specified.
 #[derive(clap::Args)]
-#[clap(
-    about = "Set a particular tenant as default in future CLI commands where tenant_id is needed, but not specified"
-)]
 struct TenantSetDefaultCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_id: TenantId,
 }
 
 #[derive(clap::Args)]
 struct TenantConfigCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_id: Option<TenantId>,
 
     #[clap(short = 'c')]
     config: Vec<String>,
 }
 
+/// Import a tenant that is present in remote storage, and create branches for its timelines.
 #[derive(clap::Args)]
-#[clap(
-    about = "Import a tenant that is present in remote storage, and create branches for its timelines"
-)]
 struct TenantImportCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_id: TenantId,
 }
 
+/// Manage timelines.
 #[derive(clap::Subcommand)]
-#[clap(about = "Manage timelines")]
 enum TimelineCmd {
     List(TimelineListCmdArgs),
     Branch(TimelineBranchCmdArgs),
@@ -240,98 +231,87 @@ enum TimelineCmd {
     Import(TimelineImportCmdArgs),
 }
 
+/// List all timelines available to this pageserver.
 #[derive(clap::Args)]
-#[clap(about = "List all timelines available to this pageserver")]
 struct TimelineListCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_shard_id: Option<TenantShardId>,
 }
 
+/// Create a new timeline, branching off from another timeline.
 #[derive(clap::Args)]
-#[clap(about = "Create a new timeline, branching off from another timeline")]
 struct TimelineBranchCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_id: Option<TenantId>,
-
-    #[clap(long, help = "New timeline's ID")]
+    /// New timeline's ID, as a 32-byte hexadecimal string.
+    #[clap(long)]
     timeline_id: Option<TimelineId>,
-
-    #[clap(long, help = "Human-readable alias for the new timeline")]
+    /// Human-readable alias for the new timeline.
+    #[clap(long)]
     branch_name: String,
-
-    #[clap(
-        long,
-        help = "Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name."
-    )]
+    /// Use last Lsn of another timeline (and its data) as base when creating the new timeline. The
+    /// timeline gets resolved by its branch name.
+    #[clap(long)]
     ancestor_branch_name: Option<String>,
-
-    #[clap(
-        long,
-        help = "When using another timeline as base, use a specific Lsn in it instead of the latest one"
-    )]
+    /// When using another timeline as base, use a specific Lsn in it instead of the latest one.
+    #[clap(long)]
     ancestor_start_lsn: Option<Lsn>,
 }
 
+/// Create a new blank timeline.
 #[derive(clap::Args)]
-#[clap(about = "Create a new blank timeline")]
 struct TimelineCreateCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_id: Option<TenantId>,
-
-    #[clap(long, help = "New timeline's ID")]
+    /// New timeline's ID, as a 32-byte hexadecimal string.
+    #[clap(long)]
     timeline_id: Option<TimelineId>,
-
-    #[clap(long, help = "Human-readable alias for the new timeline")]
+    /// Human-readable alias for the new timeline.
+    #[clap(long)]
     branch_name: String,
 
+    /// Postgres version.
     #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
-    #[clap(long, help = "Postgres version")]
+    #[clap(long)]
     pg_version: PgMajorVersion,
 }
 
+/// Import a timeline from a basebackup directory.
 #[derive(clap::Args)]
-#[clap(about = "Import timeline from a basebackup directory")]
 struct TimelineImportCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_id: Option<TenantId>,
-
-    #[clap(long, help = "New timeline's ID")]
+    /// New timeline's ID, as a 32-byte hexadecimal string.
+    #[clap(long)]
     timeline_id: TimelineId,
-
-    #[clap(long, help = "Human-readable alias for the new timeline")]
+    /// Human-readable alias for the new timeline.
+    #[clap(long)]
     branch_name: String,
-
-    #[clap(long, help = "Basebackup tarfile to import")]
+    /// Basebackup tarfile to import.
+    #[clap(long)]
     base_tarfile: PathBuf,
-
-    #[clap(long, help = "Lsn the basebackup starts at")]
+    /// LSN the basebackup starts at.
+    #[clap(long)]
     base_lsn: Lsn,
-
-    #[clap(long, help = "Wal to add after base")]
+    /// WAL to add after base.
+    #[clap(long)]
     wal_tarfile: Option<PathBuf>,
-
-    #[clap(long, help = "Lsn the basebackup ends at")]
+    /// LSN the basebackup ends at.
+    #[clap(long)]
     end_lsn: Option<Lsn>,
 
+    /// Postgres version of the basebackup being imported.
     #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
-    #[clap(long, help = "Postgres version of the backup being imported")]
+    #[clap(long)]
     pg_version: PgMajorVersion,
 }
 
+/// Manage pageservers.
 #[derive(clap::Subcommand)]
-#[clap(about = "Manage pageservers")]
 enum PageserverCmd {
     Status(PageserverStatusCmdArgs),
     Start(PageserverStartCmdArgs),
@@ -339,223 +319,202 @@ enum PageserverCmd {
     Restart(PageserverRestartCmdArgs),
 }
 
+/// Show status of a local pageserver.
 #[derive(clap::Args)]
-#[clap(about = "Show status of a local pageserver")]
 struct PageserverStatusCmdArgs {
-    #[clap(long = "id", help = "pageserver id")]
+    /// Pageserver ID.
+    #[clap(long = "id")]
     pageserver_id: Option<NodeId>,
 }
 
+/// Start local pageserver.
 #[derive(clap::Args)]
-#[clap(about = "Start local pageserver")]
 struct PageserverStartCmdArgs {
-    #[clap(long = "id", help = "pageserver id")]
+    /// Pageserver ID.
+    #[clap(long = "id")]
     pageserver_id: Option<NodeId>,
-
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    /// Timeout until we fail the command.
+    #[clap(short = 't', long)]
     #[arg(default_value = "10s")]
     start_timeout: humantime::Duration,
 }
 
+/// Stop local pageserver.
 #[derive(clap::Args)]
-#[clap(about = "Stop local pageserver")]
 struct PageserverStopCmdArgs {
-    #[clap(long = "id", help = "pageserver id")]
+    /// Pageserver ID.
+    #[clap(long = "id")]
     pageserver_id: Option<NodeId>,
-
-    #[clap(
-        short = 'm',
-        help = "If 'immediate', don't flush repository data at shutdown"
-    )]
+    /// If 'immediate', don't flush repository data at shutdown
+    #[clap(short = 'm')]
     #[arg(value_enum, default_value = "fast")]
     stop_mode: StopMode,
 }
 
+/// Restart local pageserver.
 #[derive(clap::Args)]
-#[clap(about = "Restart local pageserver")]
 struct PageserverRestartCmdArgs {
-    #[clap(long = "id", help = "pageserver id")]
+    /// Pageserver ID.
+    #[clap(long = "id")]
     pageserver_id: Option<NodeId>,
-
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    /// Timeout until we fail the command.
+    #[clap(short = 't', long)]
     #[arg(default_value = "10s")]
     start_timeout: humantime::Duration,
 }
 
+/// Manage storage controller.
 #[derive(clap::Subcommand)]
-#[clap(about = "Manage storage controller")]
 enum StorageControllerCmd {
     Start(StorageControllerStartCmdArgs),
     Stop(StorageControllerStopCmdArgs),
 }
 
+/// Start storage controller.
 #[derive(clap::Args)]
-#[clap(about = "Start storage controller")]
 struct StorageControllerStartCmdArgs {
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    /// Timeout until we fail the command.
+    #[clap(short = 't', long)]
     #[arg(default_value = "10s")]
     start_timeout: humantime::Duration,
-
-    #[clap(
-        long,
-        help = "Identifier used to distinguish storage controller instances"
-    )]
+    /// Identifier used to distinguish storage controller instances.
+    #[clap(long)]
     #[arg(default_value_t = 1)]
     instance_id: u8,
-
-    #[clap(
-        long,
-        help = "Base port for the storage controller instance idenfified by instance-id (defaults to pageserver cplane api)"
-    )]
+    /// Base port for the storage controller instance identified by instance-id (defaults to
+    /// pageserver cplane api).
+    #[clap(long)]
     base_port: Option<u16>,
 
-    #[clap(
-        long,
-        help = "Whether the storage controller should handle pageserver-reported local disk loss events."
-    )]
+    /// Whether the storage controller should handle pageserver-reported local disk loss events.
+    #[clap(long)]
     handle_ps_local_disk_loss: Option<bool>,
 }
 
+/// Stop storage controller.
 #[derive(clap::Args)]
-#[clap(about = "Stop storage controller")]
 struct StorageControllerStopCmdArgs {
-    #[clap(
-        short = 'm',
-        help = "If 'immediate', don't flush repository data at shutdown"
-    )]
+    /// If 'immediate', don't flush repository data at shutdown
+    #[clap(short = 'm')]
     #[arg(value_enum, default_value = "fast")]
     stop_mode: StopMode,
-
-    #[clap(
-        long,
-        help = "Identifier used to distinguish storage controller instances"
-    )]
+    /// Identifier used to distinguish storage controller instances.
+    #[clap(long)]
     #[arg(default_value_t = 1)]
     instance_id: u8,
 }
 
+/// Manage storage broker.
 #[derive(clap::Subcommand)]
-#[clap(about = "Manage storage broker")]
 enum StorageBrokerCmd {
     Start(StorageBrokerStartCmdArgs),
     Stop(StorageBrokerStopCmdArgs),
 }
 
+/// Start broker.
 #[derive(clap::Args)]
-#[clap(about = "Start broker")]
 struct StorageBrokerStartCmdArgs {
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
-    #[arg(default_value = "10s")]
+    /// Timeout until we fail the command.
+    #[clap(short = 't', long, default_value = "10s")]
     start_timeout: humantime::Duration,
 }
 
+/// Stop broker.
 #[derive(clap::Args)]
-#[clap(about = "stop broker")]
 struct StorageBrokerStopCmdArgs {
-    #[clap(
-        short = 'm',
-        help = "If 'immediate', don't flush repository data at shutdown"
-    )]
+    /// If 'immediate', don't flush repository data on shutdown.
+    #[clap(short = 'm')]
     #[arg(value_enum, default_value = "fast")]
     stop_mode: StopMode,
 }
 
+/// Manage safekeepers.
 #[derive(clap::Subcommand)]
-#[clap(about = "Manage safekeepers")]
 enum SafekeeperCmd {
     Start(SafekeeperStartCmdArgs),
     Stop(SafekeeperStopCmdArgs),
     Restart(SafekeeperRestartCmdArgs),
 }
 
+/// Manage object storage.
 #[derive(clap::Subcommand)]
-#[clap(about = "Manage object storage")]
 enum EndpointStorageCmd {
     Start(EndpointStorageStartCmd),
     Stop(EndpointStorageStopCmd),
 }
 
+/// Start object storage.
 #[derive(clap::Args)]
-#[clap(about = "Start object storage")]
 struct EndpointStorageStartCmd {
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    /// Timeout until we fail the command.
+    #[clap(short = 't', long)]
     #[arg(default_value = "10s")]
     start_timeout: humantime::Duration,
 }
 
+/// Stop object storage.
 #[derive(clap::Args)]
-#[clap(about = "Stop object storage")]
 struct EndpointStorageStopCmd {
+    /// If 'immediate', don't flush repository data on shutdown.
+    #[clap(short = 'm')]
     #[arg(value_enum, default_value = "fast")]
-    #[clap(
-        short = 'm',
-        help = "If 'immediate', don't flush repository data at shutdown"
-    )]
     stop_mode: StopMode,
 }
 
+/// Start local safekeeper.
 #[derive(clap::Args)]
-#[clap(about = "Start local safekeeper")]
 struct SafekeeperStartCmdArgs {
-    #[clap(help = "safekeeper id")]
+    /// Safekeeper ID.
     #[arg(default_value_t = NodeId(1))]
     id: NodeId,
 
-    #[clap(
-        short = 'e',
-        long = "safekeeper-extra-opt",
-        help = "Additional safekeeper invocation options, e.g. -e=--http-auth-public-key-path=foo"
-    )]
+    /// Additional safekeeper invocation options, e.g. -e=--http-auth-public-key-path=foo.
+    #[clap(short = 'e', long = "safekeeper-extra-opt")]
     extra_opt: Vec<String>,
 
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    /// Timeout until we fail the command.
+    #[clap(short = 't', long)]
     #[arg(default_value = "10s")]
     start_timeout: humantime::Duration,
 }
 
+/// Stop local safekeeper.
 #[derive(clap::Args)]
-#[clap(about = "Stop local safekeeper")]
 struct SafekeeperStopCmdArgs {
-    #[clap(help = "safekeeper id")]
+    /// Safekeeper ID.
     #[arg(default_value_t = NodeId(1))]
     id: NodeId,
 
+    /// If 'immediate', don't flush repository data on shutdown.
     #[arg(value_enum, default_value = "fast")]
-    #[clap(
-        short = 'm',
-        help = "If 'immediate', don't flush repository data at shutdown"
-    )]
+    #[clap(short = 'm')]
     stop_mode: StopMode,
 }
 
+/// Restart local safekeeper.
 #[derive(clap::Args)]
-#[clap(about = "Restart local safekeeper")]
 struct SafekeeperRestartCmdArgs {
-    #[clap(help = "safekeeper id")]
+    /// Safekeeper ID.
     #[arg(default_value_t = NodeId(1))]
     id: NodeId,
 
+    /// If 'immediate', don't flush repository data on shutdown.
     #[arg(value_enum, default_value = "fast")]
-    #[clap(
-        short = 'm',
-        help = "If 'immediate', don't flush repository data at shutdown"
-    )]
+    #[clap(short = 'm')]
     stop_mode: StopMode,
 
-    #[clap(
-        short = 'e',
-        long = "safekeeper-extra-opt",
-        help = "Additional safekeeper invocation options, e.g. -e=--http-auth-public-key-path=foo"
-    )]
+    /// Additional safekeeper invocation options, e.g. -e=--http-auth-public-key-path=foo.
+    #[clap(short = 'e', long = "safekeeper-extra-opt")]
     extra_opt: Vec<String>,
 
-    #[clap(short = 't', long, help = "timeout until we fail the command")]
+    /// Timeout until we fail the command.
+    #[clap(short = 't', long)]
     #[arg(default_value = "10s")]
     start_timeout: humantime::Duration,
 }
 
+/// Manage Postgres instances.
 #[derive(clap::Subcommand)]
-#[clap(about = "Manage Postgres instances")]
 enum EndpointCmd {
     List(EndpointListCmdArgs),
     Create(EndpointCreateCmdArgs),
@@ -567,33 +526,27 @@ enum EndpointCmd {
     GenerateJwt(EndpointGenerateJwtCmdArgs),
 }
 
+/// List endpoints.
 #[derive(clap::Args)]
-#[clap(about = "List endpoints")]
 struct EndpointListCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_shard_id: Option<TenantShardId>,
 }
 
+/// Create a compute endpoint.
 #[derive(clap::Args)]
-#[clap(about = "Create a compute endpoint")]
 struct EndpointCreateCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long = "tenant-id")]
     tenant_id: Option<TenantId>,
-
-    #[clap(help = "Postgres endpoint id")]
+    /// Postgres endpoint ID.
     endpoint_id: Option<String>,
-    #[clap(long, help = "Name of the branch the endpoint will run on")]
+    /// Name of the branch the endpoint will run on.
+    #[clap(long)]
     branch_name: Option<String>,
-    #[clap(
-        long,
-        help = "Specify Lsn on the timeline to start from. By default, end of the timeline would be used"
-    )]
+    /// Specify LSN on the timeline to start from. By default, end of the timeline would be used.
+    #[clap(long)]
     lsn: Option<Lsn>,
     #[clap(long)]
     pg_port: Option<u16>,
@@ -604,16 +557,13 @@ struct EndpointCreateCmdArgs {
     #[clap(long = "pageserver-id")]
     endpoint_pageserver_id: Option<NodeId>,
 
-    #[clap(
-        long,
-        help = "Don't do basebackup, create endpoint directory with only config files",
-        action = clap::ArgAction::Set,
-        default_value_t = false
-    )]
+    /// Don't do basebackup, create endpoint directory with only config files.
+    #[clap(long, action = clap::ArgAction::Set, default_value_t = false)]
     config_only: bool,
 
+    /// Postgres version.
     #[arg(default_value = DEFAULT_PG_VERSION_NUM)]
-    #[clap(long, help = "Postgres version")]
+    #[clap(long)]
     pg_version: PgMajorVersion,
 
     /// Use gRPC to communicate with Pageservers, by generating grpc:// connstrings.
@@ -624,170 +574,140 @@ struct EndpointCreateCmdArgs {
     #[clap(long)]
     grpc: bool,
 
-    #[clap(
-        long,
-        help = "If set, the node will be a hot replica on the specified timeline",
-        action = clap::ArgAction::Set,
-        default_value_t = false
-    )]
+    /// If set, the node will be a hot replica on the specified timeline.
+    #[clap(long, action = clap::ArgAction::Set, default_value_t = false)]
     hot_standby: bool,
-
-    #[clap(long, help = "If set, will set up the catalog for neon_superuser")]
+    /// If set, will set up the catalog for neon_superuser.
+    #[clap(long)]
     update_catalog: bool,
-
-    #[clap(
-        long,
-        help = "Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but useful for tests."
-    )]
+    /// Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but
+    /// useful for tests.
+    #[clap(long)]
     allow_multiple: bool,
 
-    /// Only allow changing it on creation
-    #[clap(long, help = "Name of the privileged role for the endpoint")]
+    /// Name of the privileged role for the endpoint.
+    // Only allow changing it on creation.
+    #[clap(long)]
     privileged_role_name: Option<String>,
 }
 
+/// Start Postgres. If the endpoint doesn't exist yet, it is created.
 #[derive(clap::Args)]
-#[clap(about = "Start postgres. If the endpoint doesn't exist yet, it is created.")]
 struct EndpointStartCmdArgs {
-    #[clap(help = "Postgres endpoint id")]
+    /// Postgres endpoint ID.
     endpoint_id: String,
+    /// Pageserver ID.
     #[clap(long = "pageserver-id")]
     endpoint_pageserver_id: Option<NodeId>,
-
-    #[clap(
-        long,
-        help = "Safekeepers membership generation to prefix neon.safekeepers with. Normally neon_local sets it on its own, but this option allows to override. Non zero value forces endpoint to use membership configurations."
-    )]
+    /// Safekeepers membership generation to prefix neon.safekeepers with.
+    #[clap(long)]
     safekeepers_generation: Option<u32>,
-    #[clap(
-        long,
-        help = "List of safekeepers endpoint will talk to. Normally neon_local chooses them on its own, but this option allows to override."
-    )]
+    /// List of safekeepers endpoint will talk to.
+    #[clap(long)]
     safekeepers: Option<String>,
-
-    #[clap(
-        long,
-        help = "Configure the remote extensions storage proxy gateway URL to request for extensions.",
-        alias = "remote-ext-config"
-    )]
+    /// Configure the remote extensions storage proxy gateway URL to request for extensions.
+    #[clap(long, alias = "remote-ext-config")]
     remote_ext_base_url: Option<String>,
-
-    #[clap(
-        long,
-        help = "If set, will create test user `user` and `neondb` database. Requires `update-catalog = true`"
-    )]
+    /// If set, will create test user `user` and `neondb` database. Requires `update-catalog = true`
+    #[clap(long)]
     create_test_user: bool,
-
-    #[clap(
-        long,
-        help = "Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but useful for tests."
-    )]
+    /// Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but
+    /// useful for tests.
+    #[clap(long)]
     allow_multiple: bool,
-
-    #[clap(short = 't', long, value_parser= humantime::parse_duration, help = "timeout until we fail the command")]
+    /// Timeout until we fail the command.
+    #[clap(short = 't', long, value_parser= humantime::parse_duration)]
     #[arg(default_value = "90s")]
     start_timeout: Duration,
 
-    #[clap(
-        long,
-        help = "Download LFC cache from endpoint storage on endpoint startup",
-        default_value = "false"
-    )]
+    /// Download LFC cache from endpoint storage on endpoint startup
+    #[clap(long, default_value = "false")]
     autoprewarm: bool,
 
-    #[clap(long, help = "Upload LFC cache to endpoint storage periodically")]
+    /// Upload LFC cache to endpoint storage periodically
+    #[clap(long)]
     offload_lfc_interval_seconds: Option<std::num::NonZeroU64>,
 
-    #[clap(
-        long,
-        help = "Run in development mode, skipping VM-specific operations like process termination",
-        action = clap::ArgAction::SetTrue
-    )]
+    /// Run in development mode, skipping VM-specific operations like process termination
+    #[clap(long, action = clap::ArgAction::SetTrue)]
     dev: bool,
 }
 
+/// Reconfigure an endpoint.
 #[derive(clap::Args)]
-#[clap(about = "Reconfigure an endpoint")]
 struct EndpointReconfigureCmdArgs {
-    #[clap(
-        long = "tenant-id",
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant id. Represented as a hexadecimal string 32 symbols length
+    #[clap(long = "tenant-id")]
     tenant_id: Option<TenantId>,
-
-    #[clap(help = "Postgres endpoint id")]
+    /// Postgres endpoint ID.
     endpoint_id: String,
+    /// Pageserver ID.
     #[clap(long = "pageserver-id")]
     endpoint_pageserver_id: Option<NodeId>,
-
     #[clap(long)]
     safekeepers: Option<String>,
 }
 
+/// Refresh the endpoint's configuration by forcing it reload it's spec
 #[derive(clap::Args)]
-#[clap(about = "Refresh the endpoint's configuration by forcing it reload it's spec")]
 struct EndpointRefreshConfigurationArgs {
-    #[clap(help = "Postgres endpoint id")]
+    /// Postgres endpoint id
     endpoint_id: String,
 }
 
+/// Stop an endpoint.
 #[derive(clap::Args)]
-#[clap(about = "Stop an endpoint")]
 struct EndpointStopCmdArgs {
-    #[clap(help = "Postgres endpoint id")]
+    /// Postgres endpoint ID.
     endpoint_id: String,
-
-    #[clap(
-        long,
-        help = "Also delete data directory (now optional, should be default in future)"
-    )]
+    /// Also delete data directory (now optional, should be default in future).
+    #[clap(long)]
     destroy: bool,
 
-    #[clap(long, help = "Postgres shutdown mode")]
+    /// Postgres shutdown mode, passed to `pg_ctl -m <mode>`.
+    #[clap(long)]
     #[clap(default_value = "fast")]
     mode: EndpointTerminateMode,
 }
 
+/// Update the pageservers in the spec file of the compute endpoint
 #[derive(clap::Args)]
-#[clap(about = "Update the pageservers in the spec file of the compute endpoint")]
 struct EndpointUpdatePageserversCmdArgs {
-    #[clap(help = "Postgres endpoint id")]
+    /// Postgres endpoint id
     endpoint_id: String,
 
-    #[clap(short = 'p', long, help = "Specified pageserver id")]
+    /// Specified pageserver id
+    #[clap(short = 'p', long)]
     pageserver_id: Option<NodeId>,
 }
 
+/// Generate a JWT for an endpoint.
 #[derive(clap::Args)]
-#[clap(about = "Generate a JWT for an endpoint")]
 struct EndpointGenerateJwtCmdArgs {
-    #[clap(help = "Postgres endpoint id")]
+    /// Postgres endpoint ID.
     endpoint_id: String,
-
-    #[clap(short = 's', long, help = "Scope to generate the JWT with", value_parser = ComputeClaimsScope::from_str)]
+    /// Scope to generate the JWT with.
+    #[clap(short = 's', long, value_parser = ComputeClaimsScope::from_str)]
     scope: Option<ComputeClaimsScope>,
 }
 
+/// Manage neon_local branch name mappings.
 #[derive(clap::Subcommand)]
-#[clap(about = "Manage neon_local branch name mappings")]
 enum MappingsCmd {
     Map(MappingsMapCmdArgs),
 }
 
+/// Create new mapping which cannot exist already.
 #[derive(clap::Args)]
-#[clap(about = "Create new mapping which cannot exist already")]
 struct MappingsMapCmdArgs {
-    #[clap(
-        long,
-        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Tenant ID, as a 32-byte hexadecimal string.
+    #[clap(long)]
     tenant_id: TenantId,
-    #[clap(
-        long,
-        help = "Timeline id. Represented as a hexadecimal string 32 symbols length"
-    )]
+    /// Timeline ID, as a 32-byte hexadecimal string.
+    #[clap(long)]
     timeline_id: TimelineId,
-    #[clap(long, help = "Branch name to give to the timeline")]
+    /// Branch name to give to the timeline.
+    #[clap(long)]
     branch_name: String,
 }
 
