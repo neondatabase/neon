@@ -9,7 +9,7 @@ use crate::file_cache::FileCache;
 use crate::global_allocator::MyAllocatorCollector;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
-use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
+use crate::neon_request::{CGetPageVRequest, CGetPageVUncachedRequest, CPrefetchVRequest};
 use crate::neon_request::{INVALID_BLOCK_NUMBER, NeonIORequest, NeonIOResult};
 use crate::worker_process::control_socket;
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
@@ -398,6 +398,12 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 Ok(()) => NeonIOResult::GetPageV,
                 Err(errno) => NeonIOResult::Error(errno),
             },
+            NeonIORequest::GetPageVUncached(req) => {
+                match self.handle_get_pagev_uncached_request(req).await {
+                    Ok(()) => NeonIOResult::GetPageV,
+                    Err(errno) => NeonIOResult::Error(errno),
+                }
+            }
             NeonIORequest::ReadSlruSegment(req) => {
                 let lsn = Lsn(req.request_lsn);
                 let file_path = req.destination_file_path();
@@ -649,6 +655,71 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                             false,
                         )
                         .await;
+                }
+            }
+            Err(err) => {
+                info!("tonic error: {err:?}");
+                return Err(-1);
+            }
+        }
+        Ok(())
+    }
+
+    /// Subroutine to handle an GetPageVUncached request.
+    ///
+    /// Note: this bypasses the cache, in-progress IO locking, and all other side-effects.
+    /// This request type is only used in tests.
+    async fn handle_get_pagev_uncached_request(
+        &'t self,
+        req: &CGetPageVUncachedRequest,
+    ) -> Result<(), i32> {
+        let rel = req.reltag();
+
+        // Construct a pageserver request
+        let block_numbers: Vec<u32> =
+            (req.block_number..(req.block_number + (req.nblocks as u32))).collect();
+        let read_lsn = page_api::ReadLsn {
+            request_lsn: Lsn(req.request_lsn),
+            not_modified_since_lsn: Some(Lsn(req.not_modified_since)),
+        };
+        trace!(
+            "sending (uncached) getpage request for blocks {:?} in rel {:?} lsns {}",
+            block_numbers, rel, read_lsn
+        );
+        match self
+            .client
+            .get_page(page_api::GetPageRequest {
+                request_id: req.request_id.into(),
+                request_class: page_api::GetPageClass::Normal,
+                read_lsn,
+                rel,
+                block_numbers: block_numbers.clone(),
+            })
+            .await
+        {
+            Ok(resp) => {
+                // Write the received page images directly to the shared memory location
+                // that the backend requested.
+                if resp.pages.len() != block_numbers.len() {
+                    error!(
+                        "received unexpected response with {} page images from pageserver for a request for {} pages",
+                        resp.pages.len(),
+                        block_numbers.len(),
+                    );
+                    return Err(-1);
+                }
+
+                trace!(
+                    "received getpage response for blocks {:?} in rel {:?} lsns {}",
+                    block_numbers, rel, read_lsn
+                );
+
+                for (page, dest) in resp.pages.into_iter().zip(req.dest) {
+                    let src: &[u8] = page.image.as_ref();
+                    let len = std::cmp::min(src.len(), dest.bytes_total());
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
+                    };
                 }
             }
             Err(err) => {

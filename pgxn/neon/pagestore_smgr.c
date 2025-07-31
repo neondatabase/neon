@@ -1438,7 +1438,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	{
 		// FIXME: request_lsns is ignored. That affects the neon_test_utils callers.
 		// Add the capability to specify the LSNs explicitly, for the sake of neon_test_utils ?
-		communicator_new_read_at_lsnv(rinfo, forkNum, blkno, &buffer, 1);
+		communicator_new_read_at_lsn_uncached(rinfo, forkNum, blkno, buffer, request_lsns.request_lsn, request_lsns.not_modified_since);
 	}
 	else
 		communicator_read_at_lsnv(rinfo, forkNum, blkno, &request_lsns, &buffer, 1, NULL);
@@ -1569,8 +1569,8 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 
 	if (neon_use_communicator_worker)
 	{
-		communicator_new_read_at_lsnv(InfoFromSMgrRel(reln), forkNum, blkno,
-									  (void *) &buffer, 1);
+		communicator_new_readv(InfoFromSMgrRel(reln), forkNum, blkno,
+							   (void *) &buffer, 1);
 	}
 	else
 	{
@@ -1685,8 +1685,8 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	if (neon_use_communicator_worker)
 	{
-		communicator_new_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum,
-									  buffers, nblocks);
+		communicator_new_readv(InfoFromSMgrRel(reln), forknum, blocknum,
+							   buffers, nblocks);
 	}
 	else
 	{

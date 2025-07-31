@@ -30,9 +30,11 @@ extern void communicator_new_init(void);
 extern bool communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum);
 extern BlockNumber communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forknum);
 extern int64 communicator_new_dbsize(Oid dbNode);
-extern void communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum,
-										  BlockNumber base_blockno,
-										  void **buffers, BlockNumber nblocks);
+extern void communicator_new_readv(NRelFileInfo rinfo, ForkNumber forkNum,
+								   BlockNumber base_blockno,
+								   void **buffers, BlockNumber nblocks);
+extern void communicator_new_read_at_lsn_uncached(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blockno,
+												  void *buffer, XLogRecPtr request_lsn, XLogRecPtr not_modified_since);
 extern void communicator_new_prefetch_register_bufferv(NRelFileInfo rinfo, ForkNumber forkNum,
 													   BlockNumber blockno,
 													   BlockNumber nblocks);

@@ -635,8 +635,8 @@ communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum)
  * Read N consecutive pages from a relation
  */
 void
-communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blockno,
-							  void **buffers, BlockNumber nblocks)
+communicator_new_readv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blockno,
+					   void **buffers, BlockNumber nblocks)
 {
 	NeonIOResult result;
 	CCachedGetPageVResult cached_result;
@@ -698,8 +698,8 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 				/* Split the vector-request into single page requests */
 				for (int j = 0; j < nblocks; j++)
 				{
-					communicator_new_read_at_lsnv(rinfo, forkNum, blockno + j,
-												  &buffers[j], 1);
+					communicator_new_readv(rinfo, forkNum, blockno + j,
+										   &buffers[j], 1);
 				}
 				return;
 			}
@@ -791,13 +791,67 @@ retry:
 				memcpy(buffers[0], bounce_buf_used, BLCKSZ);
 			return;
 		case NeonIOResult_Error:
+			if (nblocks > 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not read block %u in rel %u/%u/%u.%u: %s",
+								blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+			else
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not read %u blocks at %u in rel %u/%u/%u.%u: %s",
+								nblocks, blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+			break;
+		default:
+			elog(ERROR, "unexpected result for GetPageV operation: %d", result.tag);
+			break;
+	}
+}
+
+/*
+ * Read a page at given LSN, bypassing the LFC.
+ *
+ * For tests and debugging purposes only.
+ */
+void
+communicator_new_read_at_lsn_uncached(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blockno,
+									  void *buffer, XLogRecPtr request_lsn, XLogRecPtr not_modified_since)
+{
+	NeonIOResult result;
+	void	   *bounce_buf_used;
+	NeonIORequest request = {
+		.tag = NeonIORequest_GetPageVUncached,
+		.get_page_v_uncached = {
+			.request_id = assign_request_id(),
+			.spc_oid = NInfoGetSpcOid(rinfo),
+			.db_oid = NInfoGetDbOid(rinfo),
+			.rel_number = NInfoGetRelNumber(rinfo),
+			.fork_number = forkNum,
+			.block_number = blockno,
+			.nblocks = 1,
+			.request_lsn = request_lsn,
+			.not_modified_since = not_modified_since,
+		}
+	};
+
+	/* This is for tests only and doesn't need to be particularly fast. Always use the bounce buffer for simplicity */
+	request.get_page_v_uncached.dest[0].ptr = bounce_buf_used = bounce_buf();
+
+	/* don't use the specialized bcomm_start_get_page_v_request() function here, because we want to bypass the LFC */
+	perform_request(&request, &result);
+	switch (result.tag)
+	{
+		case NeonIOResult_GetPageV:
+			memcpy(buffer, bounce_buf_used, BLCKSZ);
+			return;
+		case NeonIOResult_Error:
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read block %u in rel %u/%u/%u.%u: %s",
+					 errmsg("could not read (uncached) block %u in rel %u/%u/%u.%u: %s",
 							blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
 			break;
 		default:
-			elog(ERROR, "unexpected result for GetPage operation: %d", result.tag);
+			elog(ERROR, "unexpected result for GetPageV operation: %d", result.tag);
 			break;
 	}
 }
@@ -1215,8 +1269,18 @@ print_neon_io_request(NeonIORequest *request)
 				CGetPageVRequest *r = &request->get_page_v;
 
 				snprintf(buf, sizeof(buf), "GetPageV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+				return buf;
+			}
+		case NeonIORequest_GetPageVUncached:
+			{
+				CGetPageVUncachedRequest *r = &request->get_page_v_uncached;
+
+				snprintf(buf, sizeof(buf), "GetPageVUncached: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %d request_lsn %X/%X not_modified_since %X/%X",
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+						 LSN_FORMAT_ARGS(r->request_lsn), LSN_FORMAT_ARGS(r->not_modified_since));
 				return buf;
 			}
 		case NeonIORequest_ReadSlruSegment:
@@ -1236,8 +1300,8 @@ print_neon_io_request(NeonIORequest *request)
 				CPrefetchVRequest *r = &request->prefetch_v;
 
 				snprintf(buf, sizeof(buf), "PrefetchV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
 				return buf;
 			}
 		case NeonIORequest_DbSize:
@@ -1245,7 +1309,7 @@ print_neon_io_request(NeonIORequest *request)
 				CDbSizeRequest *r = &request->db_size;
 
 				snprintf(buf, sizeof(buf), "PrefetchV: req " UINT64_FORMAT " db %u",
-								r->request_id, r->db_oid);
+						 r->request_id, r->db_oid);
 				return buf;
 			}
 		case NeonIORequest_WritePage:
@@ -1253,9 +1317,9 @@ print_neon_io_request(NeonIORequest *request)
 				CWritePageRequest *r = &request->write_page;
 
 				snprintf(buf, sizeof(buf), "WritePage: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
-								LSN_FORMAT_ARGS(r->lsn));
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+						 LSN_FORMAT_ARGS(r->lsn));
 				return buf;
 			}
 		case NeonIORequest_RelExtend:
