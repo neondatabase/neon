@@ -212,11 +212,13 @@ class NeonLocalCli(AbstractNeonCli):
             pg_version,
         ]
         if conf is not None:
-            args.extend(
-                chain.from_iterable(
-                    product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
-                )
-            )
+            for key, value in conf.items():
+                if isinstance(value, bool):
+                    args.extend(
+                        ["-c", f"{key}:{str(value).lower()}"]
+                    )  # only accepts true/false not True/False
+                else:
+                    args.extend(["-c", f"{key}:{value}"])
 
         if set_default:
             args.append("--set-default")
@@ -585,7 +587,9 @@ class NeonLocalCli(AbstractNeonCli):
         ]
         extra_env_vars = env or {}
         if basebackup_request_tries is not None:
-            extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_TRIES"] = str(basebackup_request_tries)
+            extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_RETRIES"] = str(
+                basebackup_request_tries
+            )
         if remote_ext_base_url is not None:
             args.extend(["--remote-ext-base-url", remote_ext_base_url])
 
@@ -621,6 +625,7 @@ class NeonLocalCli(AbstractNeonCli):
         pageserver_id: int | None = None,
         safekeepers: list[int] | None = None,
         check_return_code=True,
+        timeout_sec: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = ["endpoint", "reconfigure", endpoint_id]
         if tenant_id is not None:
@@ -629,7 +634,16 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--pageserver-id", str(pageserver_id)])
         if safekeepers is not None:
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
-        return self.raw_cli(args, check_return_code=check_return_code)
+        return self.raw_cli(args, check_return_code=check_return_code, timeout=timeout_sec)
+
+    def endpoint_refresh_configuration(
+        self,
+        endpoint_id: str,
+    ) -> subprocess.CompletedProcess[str]:
+        args = ["endpoint", "refresh-configuration", endpoint_id]
+        res = self.raw_cli(args)
+        res.check_returncode()
+        return res
 
     def endpoint_stop(
         self,
@@ -654,6 +668,22 @@ class NeonLocalCli(AbstractNeonCli):
         lsn_str = proc.stdout.split()[-1]
         lsn: Lsn | None = None if lsn_str == "null" else Lsn(lsn_str)
         return lsn, proc
+
+    def endpoint_update_pageservers(
+        self,
+        endpoint_id: str,
+        pageserver_id: int | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        args = [
+            "endpoint",
+            "update-pageservers",
+            endpoint_id,
+        ]
+        if pageserver_id is not None:
+            args.extend(["--pageserver-id", str(pageserver_id)])
+        res = self.raw_cli(args)
+        res.check_returncode()
+        return res
 
     def mappings_map_branch(
         self, name: str, tenant_id: TenantId, timeline_id: TimelineId

@@ -37,7 +37,7 @@
 //!         <other PostgreSQL files>
 //! ```
 //!
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -58,8 +58,12 @@ use compute_api::responses::{
 };
 use compute_api::spec::{
     Cluster, ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, Database, PageserverProtocol,
-    PgIdent, RemoteExtSpec, Role,
+    PageserverShardInfo, PgIdent, RemoteExtSpec, Role,
 };
+
+// re-export these, because they're used in the reconfigure() function
+pub use compute_api::spec::{PageserverConnectionInfo, PageserverShardConnectionInfo};
+
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations,
     OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
@@ -74,9 +78,11 @@ use sha2::{Digest, Sha256};
 use spki::der::Decode;
 use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
-use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
-use utils::shard::ShardStripeSize;
+use utils::shard::{ShardCount, ShardIndex, ShardNumber};
+
+use pageserver_api::config::DEFAULT_GRPC_LISTEN_PORT as DEFAULT_PAGESERVER_GRPC_PORT;
+use postgres_connection::parse_host_port;
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;
@@ -387,9 +393,8 @@ pub struct EndpointStartArgs {
     pub endpoint_storage_addr: String,
     pub safekeepers_generation: Option<SafekeeperGeneration>,
     pub safekeepers: Vec<NodeId>,
-    pub pageservers: Vec<(PageserverProtocol, Host, u16)>,
+    pub pageserver_conninfo: PageserverConnectionInfo,
     pub remote_ext_base_url: Option<String>,
-    pub shard_stripe_size: usize,
     pub create_test_user: bool,
     pub start_timeout: Duration,
     pub autoprewarm: bool,
@@ -662,14 +667,6 @@ impl Endpoint {
         }
     }
 
-    fn build_pageserver_connstr(pageservers: &[(PageserverProtocol, Host, u16)]) -> String {
-        pageservers
-            .iter()
-            .map(|(scheme, host, port)| format!("{scheme}://no_user@{host}:{port}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-
     /// Map safekeepers ids to the actual connection strings.
     fn build_safekeepers_connstrs(&self, sk_ids: Vec<NodeId>) -> Result<Vec<String>> {
         let mut safekeeper_connstrings = Vec::new();
@@ -715,9 +712,6 @@ impl Endpoint {
             std::fs::remove_dir_all(self.pgdata())?;
         }
 
-        let pageserver_connstring = Self::build_pageserver_connstr(&args.pageservers);
-        assert!(!pageserver_connstring.is_empty());
-
         let safekeeper_connstrings = self.build_safekeepers_connstrs(args.safekeepers)?;
 
         // check for file remote_extensions_spec.json
@@ -731,6 +725,44 @@ impl Endpoint {
         } else {
             remote_extensions = None;
         };
+
+        // For the sake of backwards-compatibility, also fill in 'pageserver_connstring'
+        //
+        // XXX: I believe this is not really needed, except to make
+        // test_forward_compatibility happy.
+        //
+        // Use a closure so that we can conviniently return None in the middle of the
+        // loop.
+        let pageserver_connstring: Option<String> = (|| {
+            let num_shards = args.pageserver_conninfo.shard_count.count();
+            let mut connstrings = Vec::new();
+            for shard_no in 0..num_shards {
+                let shard_index = ShardIndex {
+                    shard_count: args.pageserver_conninfo.shard_count,
+                    shard_number: ShardNumber(shard_no),
+                };
+                let shard = args
+                    .pageserver_conninfo
+                    .shards
+                    .get(&shard_index)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "shard {} not found in pageserver_connection_info",
+                            shard_index
+                        )
+                    })?;
+                let pageserver = shard
+                    .pageservers
+                    .first()
+                    .ok_or(anyhow!("must have at least one pageserver"))?;
+                if let Some(libpq_url) = &pageserver.libpq_url {
+                    connstrings.push(libpq_url.clone());
+                } else {
+                    return Ok::<_, anyhow::Error>(None);
+                }
+            }
+            Ok(Some(connstrings.join(",")))
+        })()?;
 
         // Create config file
         let config = {
@@ -776,13 +808,14 @@ impl Endpoint {
                 branch_id: None,
                 endpoint_id: Some(self.endpoint_id.clone()),
                 mode: self.mode,
-                pageserver_connstring: Some(pageserver_connstring),
+                pageserver_connection_info: Some(args.pageserver_conninfo.clone()),
+                pageserver_connstring,
                 safekeepers_generation: args.safekeepers_generation.map(|g| g.into_inner()),
                 safekeeper_connstrings,
                 storage_auth_token: args.auth_token.clone(),
                 remote_extensions,
                 pgbouncer_settings: None,
-                shard_stripe_size: Some(args.shard_stripe_size),
+                shard_stripe_size: args.pageserver_conninfo.stripe_size, // redundant with pageserver_connection_info.stripe_size
                 local_proxy_config: None,
                 reconfigure_concurrency: self.reconfigure_concurrency,
                 drop_subscriptions_before_start: self.drop_subscriptions_before_start,
@@ -793,6 +826,7 @@ impl Endpoint {
                 autoprewarm: args.autoprewarm,
                 offload_lfc_interval_seconds: args.offload_lfc_interval_seconds,
                 suspend_timeout_seconds: -1, // Only used in neon_local.
+                databricks_settings: None,
             };
 
             // this strange code is needed to support respec() in tests
@@ -937,7 +971,9 @@ impl Endpoint {
                         | ComputeStatus::Configuration
                         | ComputeStatus::TerminationPendingFast
                         | ComputeStatus::TerminationPendingImmediate
-                        | ComputeStatus::Terminated => {
+                        | ComputeStatus::Terminated
+                        | ComputeStatus::RefreshConfigurationPending
+                        | ComputeStatus::RefreshConfiguration => {
                             bail!("unexpected compute status: {:?}", state.status)
                         }
                     }
@@ -956,6 +992,27 @@ impl Endpoint {
 
         // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
         drop(scopeguard::ScopeGuard::into_inner(child));
+
+        Ok(())
+    }
+
+    // Update the pageservers in the spec file of the endpoint. This is useful to test the spec refresh scenario.
+    pub async fn update_pageservers_in_config(
+        &self,
+        pageserver_conninfo: &PageserverConnectionInfo,
+    ) -> Result<()> {
+        let config_path = self.endpoint_path().join("config.json");
+        let mut config: ComputeConfig = {
+            let file = std::fs::File::open(&config_path)?;
+            serde_json::from_reader(file)?
+        };
+
+        let mut spec = config.spec.unwrap();
+        spec.pageserver_connection_info = Some(pageserver_conninfo.clone());
+        config.spec = Some(spec);
+
+        let file = std::fs::File::create(&config_path)?;
+        serde_json::to_writer_pretty(file, &config)?;
 
         Ok(())
     }
@@ -994,8 +1051,7 @@ impl Endpoint {
 
     pub async fn reconfigure(
         &self,
-        pageservers: Option<Vec<(PageserverProtocol, Host, u16)>>,
-        stripe_size: Option<ShardStripeSize>,
+        pageserver_conninfo: Option<&PageserverConnectionInfo>,
         safekeepers: Option<Vec<NodeId>>,
         safekeeper_generation: Option<SafekeeperGeneration>,
     ) -> Result<()> {
@@ -1010,15 +1066,15 @@ impl Endpoint {
         let postgresql_conf = self.read_postgresql_conf()?;
         spec.cluster.postgresql_conf = Some(postgresql_conf);
 
-        // If pageservers are not specified, don't change them.
-        if let Some(pageservers) = pageservers {
-            anyhow::ensure!(!pageservers.is_empty(), "no pageservers provided");
-
-            let pageserver_connstr = Self::build_pageserver_connstr(&pageservers);
-            spec.pageserver_connstring = Some(pageserver_connstr);
-            if stripe_size.is_some() {
-                spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
-            }
+        if let Some(pageserver_conninfo) = pageserver_conninfo {
+            // If pageservers are provided, we need to ensure that they are not empty.
+            // This is a requirement for the compute_ctl configuration.
+            anyhow::ensure!(
+                !pageserver_conninfo.shards.is_empty(),
+                "no pageservers provided"
+            );
+            spec.pageserver_connection_info = Some(pageserver_conninfo.clone());
+            spec.shard_stripe_size = pageserver_conninfo.stripe_size;
         }
 
         // If safekeepers are not specified, don't change them.
@@ -1067,11 +1123,9 @@ impl Endpoint {
 
     pub async fn reconfigure_pageservers(
         &self,
-        pageservers: Vec<(PageserverProtocol, Host, u16)>,
-        stripe_size: Option<ShardStripeSize>,
+        pageservers: &PageserverConnectionInfo,
     ) -> Result<()> {
-        self.reconfigure(Some(pageservers), stripe_size, None, None)
-            .await
+        self.reconfigure(Some(pageservers), None, None).await
     }
 
     pub async fn reconfigure_safekeepers(
@@ -1079,7 +1133,7 @@ impl Endpoint {
         safekeepers: Vec<NodeId>,
         generation: SafekeeperGeneration,
     ) -> Result<()> {
-        self.reconfigure(None, None, Some(safekeepers), Some(generation))
+        self.reconfigure(None, Some(safekeepers), Some(generation))
             .await
     }
 
@@ -1125,6 +1179,33 @@ impl Endpoint {
         Ok(response)
     }
 
+    pub async fn refresh_configuration(&self) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let response = client
+            .post(format!(
+                "http://{}:{}/refresh_configuration",
+                self.internal_http_address.ip(),
+                self.internal_http_address.port()
+            ))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            Ok(())
+        } else {
+            let url = response.url().to_owned();
+            let msg = match response.text().await {
+                Ok(err_body) => format!("Error: {err_body}"),
+                Err(_) => format!("Http error ({}) at {}.", status.as_u16(), url),
+            };
+            Err(anyhow::anyhow!(msg))
+        }
+    }
+
     pub fn connstr(&self, user: &str, db_name: &str) -> String {
         format!(
             "postgresql://{}@{}:{}/{}",
@@ -1134,4 +1215,85 @@ impl Endpoint {
             db_name
         )
     }
+}
+
+/// If caller is telling us what pageserver to use, this is not a tenant which is
+/// fully managed by storage controller, therefore not sharded.
+pub fn local_pageserver_conf_to_conn_info(
+    conf: &crate::local_env::PageServerConf,
+) -> Result<PageserverConnectionInfo> {
+    let libpq_url = {
+        let (host, port) = parse_host_port(&conf.listen_pg_addr)?;
+        let port = port.unwrap_or(5432);
+        Some(format!("postgres://no_user@{host}:{port}"))
+    };
+    let grpc_url = if let Some(grpc_addr) = &conf.listen_grpc_addr {
+        let (host, port) = parse_host_port(grpc_addr)?;
+        let port = port.unwrap_or(DEFAULT_PAGESERVER_GRPC_PORT);
+        Some(format!("grpc://no_user@{host}:{port}"))
+    } else {
+        None
+    };
+    let ps_conninfo = PageserverShardConnectionInfo {
+        id: Some(conf.id),
+        libpq_url,
+        grpc_url,
+    };
+
+    let shard_info = PageserverShardInfo {
+        pageservers: vec![ps_conninfo],
+    };
+
+    let shards: HashMap<_, _> = vec![(ShardIndex::unsharded(), shard_info)]
+        .into_iter()
+        .collect();
+    Ok(PageserverConnectionInfo {
+        shard_count: ShardCount::unsharded(),
+        stripe_size: None,
+        shards,
+        prefer_protocol: PageserverProtocol::default(),
+    })
+}
+
+pub fn tenant_locate_response_to_conn_info(
+    response: &pageserver_api::controller_api::TenantLocateResponse,
+) -> Result<PageserverConnectionInfo> {
+    let mut shards = HashMap::new();
+    for shard in response.shards.iter() {
+        tracing::info!("parsing {}", shard.listen_pg_addr);
+        let libpq_url = {
+            let host = &shard.listen_pg_addr;
+            let port = shard.listen_pg_port;
+            Some(format!("postgres://no_user@{host}:{port}"))
+        };
+        let grpc_url = if let Some(grpc_addr) = &shard.listen_grpc_addr {
+            let host = grpc_addr;
+            let port = shard.listen_grpc_port.expect("no gRPC port");
+            Some(format!("grpc://no_user@{host}:{port}"))
+        } else {
+            None
+        };
+
+        let shard_info = PageserverShardInfo {
+            pageservers: vec![PageserverShardConnectionInfo {
+                id: Some(shard.node_id),
+                libpq_url,
+                grpc_url,
+            }],
+        };
+
+        shards.insert(shard.shard_id.to_index(), shard_info);
+    }
+
+    let stripe_size = if response.shard_params.count.is_unsharded() {
+        None
+    } else {
+        Some(response.shard_params.stripe_size)
+    };
+    Ok(PageserverConnectionInfo {
+        shard_count: response.shard_params.count,
+        stripe_size,
+        shards,
+        prefer_protocol: PageserverProtocol::default(),
+    })
 }

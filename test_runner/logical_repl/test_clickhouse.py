@@ -53,8 +53,13 @@ def test_clickhouse(remote_pg: RemotePostgres):
     cur.execute("CREATE TABLE table1 (id integer primary key, column1 varchar(10));")
     cur.execute("INSERT INTO table1 (id, column1) VALUES (1, 'abc'), (2, 'def');")
     conn.commit()
-    client = clickhouse_connect.get_client(host=clickhouse_host)
+    if "CLICKHOUSE_PASSWORD" not in os.environ:
+        raise RuntimeError("CLICKHOUSE_PASSWORD is not set")
+    client = clickhouse_connect.get_client(
+        host=clickhouse_host, password=os.environ["CLICKHOUSE_PASSWORD"]
+    )
     client.command("SET allow_experimental_database_materialized_postgresql=1")
+    client.command("DROP DATABASE IF EXISTS db1_postgres")
     client.command(
         "CREATE DATABASE db1_postgres ENGINE = "
         f"MaterializedPostgreSQL('{conn_options['host']}', "

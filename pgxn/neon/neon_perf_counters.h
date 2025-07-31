@@ -167,11 +167,7 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
  */
 #define NUM_NEON_PERF_COUNTER_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
 
-#if PG_VERSION_NUM >= 170000
 #define MyNeonCounters (&neon_per_backend_counters_shared[MyProcNumber])
-#else
-#define MyNeonCounters (&neon_per_backend_counters_shared[MyProc->pgprocno])
-#endif
 
 extern void inc_getpage_wait(uint64 latency);
 extern void inc_page_cache_read_wait(uint64 latency);
@@ -180,6 +176,25 @@ extern void inc_query_time(uint64 elapsed);
 
 extern Size NeonPerfCountersShmemSize(void);
 extern void NeonPerfCountersShmemInit(void);
+
+/* BEGIN_HADRON */
+typedef struct
+{
+	pg_atomic_uint32 index_corruption_count;
+	pg_atomic_uint32 data_corruption_count;
+	pg_atomic_uint32 internal_error_count;
+	pg_atomic_uint32 ps_corruption_detected;
+} databricks_metrics;
+
+extern databricks_metrics *databricks_metrics_shared;
+
+extern Size DatabricksMetricsShmemSize(void);
+extern void DatabricksMetricsShmemInit(void);
+
+extern int databricks_test_hook;
+
+static const int TestHookCorruption = 1;
+/* END_HADRON */
 
 
 #endif							/* NEON_PERF_COUNTERS_H */

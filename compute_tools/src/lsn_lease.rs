@@ -4,14 +4,13 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
-use compute_api::spec::{ComputeMode, PageserverProtocol};
-use itertools::Itertools as _;
+use compute_api::spec::{ComputeMode, PageserverConnectionInfo, PageserverProtocol};
 use pageserver_page_api as page_api;
 use postgres::{NoTls, SimpleQueryMessage};
 use tracing::{info, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
-use utils::shard::{ShardCount, ShardNumber, TenantShardId};
+use utils::shard::TenantShardId;
 
 use crate::compute::ComputeNode;
 
@@ -78,17 +77,16 @@ fn acquire_lsn_lease_with_retry(
 
     loop {
         // Note: List of pageservers is dynamic, need to re-read configs before each attempt.
-        let (connstrings, auth) = {
+        let (conninfo, auth) = {
             let state = compute.state.lock().unwrap();
             let spec = state.pspec.as_ref().expect("spec must be set");
             (
-                spec.pageserver_connstr.clone(),
+                spec.pageserver_conninfo.clone(),
                 spec.storage_auth_token.clone(),
             )
         };
 
-        let result =
-            try_acquire_lsn_lease(&connstrings, auth.as_deref(), tenant_id, timeline_id, lsn);
+        let result = try_acquire_lsn_lease(conninfo, auth.as_deref(), tenant_id, timeline_id, lsn);
         match result {
             Ok(Some(res)) => {
                 return Ok(res);
@@ -112,35 +110,44 @@ fn acquire_lsn_lease_with_retry(
 
 /// Tries to acquire LSN leases on all Pageserver shards.
 fn try_acquire_lsn_lease(
-    connstrings: &str,
+    conninfo: PageserverConnectionInfo,
     auth: Option<&str>,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
 ) -> Result<Option<SystemTime>> {
-    let connstrings = connstrings.split(',').collect_vec();
-    let shard_count = connstrings.len();
     let mut leases = Vec::new();
 
-    for (shard_number, &connstring) in connstrings.iter().enumerate() {
-        let tenant_shard_id = match shard_count {
-            0 | 1 => TenantShardId::unsharded(tenant_id),
-            shard_count => TenantShardId {
-                tenant_id,
-                shard_number: ShardNumber(shard_number as u8),
-                shard_count: ShardCount::new(shard_count as u8),
-            },
+    for (shard_index, shard) in conninfo.shards.into_iter() {
+        let tenant_shard_id = TenantShardId {
+            tenant_id,
+            shard_number: shard_index.shard_number,
+            shard_count: shard_index.shard_count,
         };
 
-        let lease = match PageserverProtocol::from_connstring(connstring)? {
-            PageserverProtocol::Libpq => {
-                acquire_lsn_lease_libpq(connstring, auth, tenant_shard_id, timeline_id, lsn)?
-            }
-            PageserverProtocol::Grpc => {
-                acquire_lsn_lease_grpc(connstring, auth, tenant_shard_id, timeline_id, lsn)?
-            }
-        };
-        leases.push(lease);
+        // XXX: If there are more than pageserver for the one shard, do we need to get a
+        // leas on all of them? Currently, that's what we assume, but this is hypothetical
+        // as of this writing, as we never pass the info for more than one pageserver per
+        // shard.
+        for pageserver in shard.pageservers {
+            let lease = match conninfo.prefer_protocol {
+                PageserverProtocol::Grpc => acquire_lsn_lease_grpc(
+                    &pageserver.grpc_url.unwrap(),
+                    auth,
+                    tenant_shard_id,
+                    timeline_id,
+                    lsn,
+                )?,
+                PageserverProtocol::Libpq => acquire_lsn_lease_libpq(
+                    &pageserver.libpq_url.unwrap(),
+                    auth,
+                    tenant_shard_id,
+                    timeline_id,
+                    lsn,
+                )?,
+            };
+            leases.push(lease);
+        }
     }
 
     Ok(leases.into_iter().min().flatten())

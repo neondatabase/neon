@@ -4,6 +4,8 @@ use anyhow::bail;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::metrics::{Metrics, ServiceInfo};
+
 /// Handle unix signals appropriately.
 pub async fn handle<F>(
     token: CancellationToken,
@@ -28,10 +30,12 @@ where
             // Shut down the whole application.
             _ = interrupt.recv() => {
                 warn!("received SIGINT, exiting immediately");
+                Metrics::get().service.info.set_label(ServiceInfo::terminating());
                 bail!("interrupted");
             }
             _ = terminate.recv() => {
                 warn!("received SIGTERM, shutting down once all existing connections have closed");
+                Metrics::get().service.info.set_label(ServiceInfo::terminating());
                 token.cancel();
             }
         }

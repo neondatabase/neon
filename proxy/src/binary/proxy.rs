@@ -40,7 +40,7 @@ use crate::config::{
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, ServiceInfo};
 use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::redis::kv_ops::RedisKVClient;
@@ -535,12 +535,7 @@ pub async fn run() -> anyhow::Result<()> {
     // add a task to flush the db_schema cache every 10 minutes
     #[cfg(feature = "rest_broker")]
     if let Some(db_schema_cache) = &config.rest_config.db_schema_cache {
-        maintenance_tasks.spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(600)).await;
-                db_schema_cache.flush();
-            }
-        });
+        maintenance_tasks.spawn(db_schema_cache.maintain());
     }
 
     if let Some(metrics_config) = &config.metric_collection {
@@ -590,6 +585,11 @@ pub async fn run() -> anyhow::Result<()> {
         }
     }
 
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
+
     let maintenance = loop {
         // get one complete task
         match futures::future::select(
@@ -617,7 +617,12 @@ pub async fn run() -> anyhow::Result<()> {
 /// ProxyConfig is created at proxy startup, and lives forever.
 fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let thread_pool = ThreadPool::new(args.scram_thread_pool_size);
-    Metrics::install(thread_pool.metrics.clone());
+    Metrics::get()
+        .proxy
+        .scram_pool
+        .0
+        .set(thread_pool.metrics.clone())
+        .ok();
 
     let tls_config = match (&args.tls_key, &args.tls_cert) {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
@@ -690,12 +695,15 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
     let authentication_config = AuthenticationConfig {
         jwks_cache: JwkCache::default(),
-        thread_pool,
+        scram_thread_pool: thread_pool,
         scram_protocol_timeout: args.scram_protocol_timeout,
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
         is_vpc_acccess_proxy: args.is_private_access_proxy,
         is_auth_broker: args.is_auth_broker,
+        #[cfg(not(feature = "rest_broker"))]
         accept_jwts: args.is_auth_broker,
+        #[cfg(feature = "rest_broker")]
+        accept_jwts: args.is_auth_broker || args.is_rest_broker,
         console_redirect_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
@@ -711,12 +719,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         info!("Using DbSchemaCache with options={db_schema_cache_config:?}");
 
         let db_schema_cache = if args.is_rest_broker {
-            Some(DbSchemaCache::new(
-                "db_schema_cache",
-                db_schema_cache_config.size,
-                db_schema_cache_config.ttl,
-                true,
-            ))
+            Some(DbSchemaCache::new(db_schema_cache_config))
         } else {
             None
         };

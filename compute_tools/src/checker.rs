@@ -24,9 +24,9 @@ pub async fn check_writability(compute: &ComputeNode) -> Result<()> {
     });
 
     let query = "
-    INSERT INTO health_check VALUES (1, now())
+    INSERT INTO public.health_check VALUES (1, pg_catalog.now())
         ON CONFLICT (id) DO UPDATE
-         SET updated_at = now();";
+         SET updated_at = pg_catalog.now();";
 
     match client.simple_query(query).await {
         Result::Ok(result) => {

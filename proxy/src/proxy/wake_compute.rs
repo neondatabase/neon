@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use tracing::{error, info};
 
+use crate::cache::node_info::CachedNodeInfo;
 use crate::config::RetryConfig;
 use crate::context::RequestContext;
-use crate::control_plane::CachedNodeInfo;
 use crate::control_plane::errors::{ControlPlaneError, WakeComputeError};
 use crate::error::ReportableError;
 use crate::metrics::{

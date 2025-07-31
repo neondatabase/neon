@@ -2,10 +2,11 @@ DO $$
 DECLARE
     query varchar;
 BEGIN
-    FOR query IN SELECT 'ALTER FUNCTION '||nsp.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||') OWNER TO {db_owner};'
-    FROM pg_proc p
-        JOIN pg_namespace nsp ON p.pronamespace = nsp.oid
-    WHERE nsp.nspname = 'anon' LOOP
+    FOR query IN
+    SELECT pg_catalog.format('ALTER FUNCTION %I(%s) OWNER TO {db_owner};', p.oid::regproc, pg_catalog.pg_get_function_identity_arguments(p.oid))
+    FROM pg_catalog.pg_proc p
+        WHERE p.pronamespace OPERATOR(pg_catalog.=) 'anon'::regnamespace::oid
+    LOOP
         EXECUTE query;
     END LOOP;
 END

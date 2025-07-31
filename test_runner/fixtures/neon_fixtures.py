@@ -262,7 +262,6 @@ class PgProtocol:
         # pooler does not support statement_timeout
         # Check if the hostname contains the string 'pooler'
         hostname = result.get("host", "")
-        log.info(f"Hostname: {hostname}")
         options = result.get("options", "")
         if "statement_timeout" not in options and "pooler" not in hostname:
             options = f"-cstatement_timeout=120s {options}"
@@ -2314,6 +2313,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         timeline_id: TimelineId,
         new_sk_set: list[int],
     ):
+        log.info(f"migrate_safekeepers({tenant_id}, {timeline_id}, {new_sk_set})")
         response = self.request(
             "POST",
             f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate",
@@ -3910,6 +3910,41 @@ class NeonProxy(PgProtocol):
             assert response.status_code == expected_code, f"response: {response.json()}"
         return response.json()
 
+    def http_multiquery(self, *queries, **kwargs):
+        # TODO maybe use default values if not provided
+        user = quote(kwargs["user"])
+        password = quote(kwargs["password"])
+        expected_code = kwargs.get("expected_code")
+        timeout = kwargs.get("timeout")
+
+        json_queries = []
+        for query in queries:
+            if type(query) is str:
+                json_queries.append({"query": query})
+            else:
+                [query, params] = query
+                json_queries.append({"query": query, "params": params})
+
+        queries_str = [j["query"] for j in json_queries]
+        log.info(f"Executing http queries: {queries_str}")
+
+        connstr = f"postgresql://{user}:{password}@{self.domain}:{self.proxy_port}/postgres"
+        response = requests.post(
+            f"https://{self.domain}:{self.external_http_port}/sql",
+            data=json.dumps({"queries": json_queries}),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Pool-Opt-In": "true",
+            },
+            verify=str(self.test_output_dir / "proxy.crt"),
+            timeout=timeout,
+        )
+
+        if expected_code is not None:
+            assert response.status_code == expected_code, f"response: {response.json()}"
+        return response.json()
+
     async def http2_query(self, query, args, **kwargs):
         # TODO maybe use default values if not provided
         user = kwargs["user"]
@@ -4759,9 +4794,10 @@ class Endpoint(PgProtocol, LogUtils):
                     m = re.search(r"=\s*(\S+)", line)
                     assert m is not None, f"malformed config line {line}"
                     size = m.group(1)
-                    assert size_to_bytes(size) >= size_to_bytes("1MB"), (
-                        "LFC size cannot be set less than 1MB"
-                    )
+                    if size_to_bytes(size) > 0:
+                        assert size_to_bytes(size) >= size_to_bytes("1MB"), (
+                            "LFC size cannot be set less than 1MB"
+                        )
             lfc_path_escaped = str(lfc_path).replace("'", "''")
             config_lines = [
                 f"neon.file_cache_path = '{lfc_path_escaped}'",
@@ -4894,15 +4930,38 @@ class Endpoint(PgProtocol, LogUtils):
     def is_running(self):
         return self._running._value > 0
 
-    def reconfigure(self, pageserver_id: int | None = None, safekeepers: list[int] | None = None):
+    def reconfigure(
+        self,
+        pageserver_id: int | None = None,
+        safekeepers: list[int] | None = None,
+        timeout_sec: float = 120,
+    ):
         assert self.endpoint_id is not None
         # If `safekeepers` is not None, they are remember them as active and use
         # in the following commands.
         if safekeepers is not None:
             self.active_safekeepers = safekeepers
-        self.env.neon_cli.endpoint_reconfigure(
-            self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
-        )
+
+        start_time = time.time()
+        while True:
+            try:
+                self.env.neon_cli.endpoint_reconfigure(
+                    self.endpoint_id,
+                    self.tenant_id,
+                    pageserver_id,
+                    self.active_safekeepers,
+                    timeout_sec=timeout_sec,
+                )
+                return
+            except RuntimeError as e:
+                if time.time() - start_time > timeout_sec:
+                    raise e
+                log.warning(f"Reconfigure failed with error: {e}. Retrying...")
+                time.sleep(5)
+
+    def refresh_configuration(self):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_refresh_configuration(self.endpoint_id)
 
     def respec(self, **kwargs: Any) -> None:
         """Update the endpoint.json file used by control_plane."""
@@ -4915,6 +4974,10 @@ class Endpoint(PgProtocol, LogUtils):
         with open(config_path, "w") as file:
             log.debug(json.dumps(dict(data_dict, **kwargs)))
             json.dump(dict(data_dict, **kwargs), file, indent=4)
+
+    def get_compute_spec(self) -> dict[str, Any]:
+        out = json.loads((Path(self.endpoint_path()) / "config.json").read_text())["spec"]
+        return cast("dict[str, Any]", out)
 
     def respec_deep(self, **kwargs: Any) -> None:
         """
@@ -4945,6 +5008,10 @@ class Endpoint(PgProtocol, LogUtils):
         with open(config_path, "w") as file:
             log.debug("Updating compute config to: %s", json.dumps(config, indent=4))
             json.dump(config, file, indent=4)
+
+    def update_pageservers_in_config(self, pageserver_id: int | None = None):
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_update_pageservers(self.endpoint_id, pageserver_id)
 
     def wait_for_migrations(self, wait_for: int = NUM_COMPUTE_MIGRATIONS) -> None:
         """
@@ -5213,16 +5280,32 @@ class EndpointFactory:
         )
 
     def stop_all(self, fail_on_error=True) -> Self:
-        exception = None
-        for ep in self.endpoints:
+        """
+        Stop all the endpoints in parallel.
+        """
+
+        # Note: raising an exception from a task in a task group cancels
+        # all the other tasks. We don't want that, hence the 'stop_one'
+        # function catches exceptions and puts them on the 'exceptions'
+        # list for later processing.
+        exceptions = []
+
+        async def stop_one(ep):
             try:
-                ep.stop()
+                await asyncio.to_thread(ep.stop)
             except Exception as e:
                 log.error(f"Failed to stop endpoint {ep.endpoint_id}: {e}")
-                exception = e
+                exceptions.append(e)
 
-        if fail_on_error and exception is not None:
-            raise exception
+        async def async_stop_all():
+            async with asyncio.TaskGroup() as tg:
+                for ep in self.endpoints:
+                    tg.create_task(stop_one(ep))
+
+        asyncio.run(async_stop_all())
+
+        if fail_on_error and exceptions:
+            raise ExceptionGroup("stopping an endpoint failed", exceptions)
 
         return self
 
