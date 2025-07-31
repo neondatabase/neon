@@ -32,6 +32,7 @@
 #include "tcop/tcopprot.h"
 #include "utils/timestamp.h"
 
+#include "communicator_new.h"
 #include "communicator_process.h"
 #include "file_cache.h"
 #include "neon.h"
@@ -368,4 +369,17 @@ callback_get_request_lsn_unsafe(void)
 
 		return flushlsn;
 	}
+}
+
+/*
+ * Get metrics, for the built-in metrics exporter that's part of the
+ * communicator process.
+ */
+struct LfcMetrics
+callback_get_lfc_metrics_unsafe(void)
+{
+	if (neon_use_communicator_worker)
+		return communicator_new_get_lfc_metrics_unsafe();
+	else
+		return lfc_get_metrics_unsafe();
 }

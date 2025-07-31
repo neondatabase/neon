@@ -1443,7 +1443,6 @@ communicator_new_approximate_working_set_size_seconds(time_t duration, bool rese
 	return dc;
 }
 
-
 /*
  * Return an array of LfcStatsEntrys
  */
@@ -1452,13 +1451,13 @@ communicator_new_lfc_get_stats(size_t *num_entries)
 {
 	LfcStatsEntry *entries;
 	size_t		n = 0;
-	uint64		cache_misses = 0;
 	uint64		cache_hits = 0;
+	uint64		cache_misses = 0;
 
 	for (int i = 0; i < MaxProcs; i++)
 	{
-		cache_misses += communicator_shmem_ptr->backends[i].cache_misses;
 		cache_hits += communicator_shmem_ptr->backends[i].cache_hits;
+		cache_misses += communicator_shmem_ptr->backends[i].cache_misses;
 	}
 
 #define NUM_ENTRIES 10
@@ -1466,11 +1465,11 @@ communicator_new_lfc_get_stats(size_t *num_entries)
 
 	entries[n++] = (LfcStatsEntry)
 	{
-		"file_cache_misses", false, cache_misses
+		"file_cache_hits", false, cache_hits
 	};
 	entries[n++] = (LfcStatsEntry)
 	{
-		"file_cache_hits", false, cache_hits
+		"file_cache_misses", false, cache_misses
 	};
 
 	entries[n++] = (LfcStatsEntry)
@@ -1512,4 +1511,41 @@ communicator_new_lfc_get_stats(size_t *num_entries)
 
 	*num_entries = n;
 	return entries;
+}
+
+/*
+ * Get metrics, for the built-in metrics exporter that's part of the
+ * communicator process.
+ *
+ * NB: This is called from a Rust tokio task inside the communicator process.
+ * Acquiring lwlocks, elog(), allocating memory or anything else non-trivial
+ * is strictly prohibited here!
+ */
+struct LfcMetrics
+communicator_new_get_lfc_metrics_unsafe(void)
+{
+	uint64		cache_hits = 0;
+	uint64		cache_misses = 0;
+
+	struct LfcMetrics result = {
+		.lfc_cache_size_limit = (int64) lfc_size_limit * 1024 * 1024,
+		.lfc_used = 0, /* TODO */
+		.lfc_writes = 0, /* TODO */
+	};
+
+	for (int i = 0; i < MaxProcs; i++)
+	{
+		cache_hits += communicator_shmem_ptr->backends[i].cache_hits;
+		cache_misses += communicator_shmem_ptr->backends[i].cache_misses;
+	}
+	result.lfc_hits = cache_hits;
+	result.lfc_misses = cache_misses;
+
+	for (int minutes = 1; minutes <= 60; minutes++)
+	{
+		result.lfc_approximate_working_set_size_windows[minutes - 1] =
+			communicator_new_approximate_working_set_size_seconds(minutes * 60, false);
+	}
+
+	return result;
 }

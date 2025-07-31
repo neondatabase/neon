@@ -46,6 +46,9 @@ extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blk
 extern FileCacheState* lfc_get_state(size_t max_entries);
 extern LfcStatsEntry *lfc_get_stats(size_t *num_entries);
 
+struct LfcMetrics; /* defined in communicator_bindings.h */
+extern struct LfcMetrics lfc_get_metrics_unsafe(void);
+
 typedef struct
 {
 	uint32		pageoffs;

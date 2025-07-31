@@ -62,6 +62,7 @@ extern void communicator_new_update_cached_rel_size(NRelFileInfo rinfo, ForkNumb
 
 /* other functions */
 extern int32 communicator_new_approximate_working_set_size_seconds(time_t duration, bool reset);
+extern struct LfcMetrics communicator_new_get_lfc_metrics_unsafe(void);
 extern FileCacheState *communicator_new_get_lfc_state(size_t max_entries);
 extern struct LfcStatsEntry *communicator_new_lfc_get_stats(size_t *num_entries);
 

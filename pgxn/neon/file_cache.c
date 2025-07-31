@@ -1691,15 +1691,15 @@ lfc_approximate_working_set_size_seconds(time_t duration, bool reset)
 }
 
 /*
- * Get metrics, for the built-in metrics exporter that's part of the communicator
- * process.
+ * Get metrics, for the built-in metrics exporter that's part of the
+ * communicator process.
  *
  * NB: This is called from a Rust tokio task inside the communicator process.
  * Acquiring lwlocks, elog(), allocating memory or anything else non-trivial
  * is strictly prohibited here!
  */
 struct LfcMetrics
-callback_get_lfc_metrics_unsafe(void)
+lfc_get_metrics_unsafe(void)
 {
 	struct LfcMetrics result = {
 		.lfc_cache_size_limit = (int64) lfc_size_limit * 1024 * 1024,
