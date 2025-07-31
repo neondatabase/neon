@@ -2950,7 +2950,6 @@ def test_global_disk_usage_limit(neon_env_builder: NeonEnvBuilder):
             assert cur.fetchone() == (3000,)
 
 
-@pytest.mark.skip(reason="Lakebase Mode")
 def test_max_active_safekeeper_commit_lag(neon_env_builder: NeonEnvBuilder):
     """
     This test validates the `max_active_safekeeper_commit_lag` metric. The
@@ -2963,7 +2962,11 @@ def test_max_active_safekeeper_commit_lag(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     # Create branch and start endpoint
     env.create_branch("test_commit_lsn_lag_failpoint")
-    endpoint = env.endpoints.create_start("test_commit_lsn_lag_failpoint")
+    endpoint = env.endpoints.create_start(
+        "test_commit_lsn_lag_failpoint",
+        config_lines=[
+            "neon.lakebase_mode=true"
+        ])
     # Enable neon extension and table
     endpoint.safe_psql("CREATE EXTENSION IF NOT EXISTS neon")
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
