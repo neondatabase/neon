@@ -8,7 +8,7 @@ use std::path::Path;
 
 use compute_api::responses::TlsConfig;
 use compute_api::spec::{
-    ComputeAudit, ComputeMode, ComputeSpec, DatabricksSettings, GenericOption,
+    ComputeAudit, ComputeMode, ComputeSpec, DatabricksSettings, GenericOption, PageserverProtocol,
 };
 
 use crate::compute::ComputeNodeParams;
@@ -69,6 +69,15 @@ pub fn write_postgres_conf(
     writeln!(file, "# Neon storage settings")?;
     writeln!(file)?;
     if let Some(conninfo) = &spec.pageserver_connection_info {
+        match conninfo.prefer_protocol {
+            PageserverProtocol::Libpq => {
+                writeln!(file, "neon.use_communicator_worker=false")?;
+            }
+            PageserverProtocol::Grpc => {
+                writeln!(file, "neon.use_communicator_worker=true")?;
+            }
+        }
+
         // Stripe size GUC should be defined prior to connection string
         if let Some(stripe_size) = conninfo.stripe_size {
             writeln!(
@@ -148,6 +157,8 @@ pub fn write_postgres_conf(
             writeln!(file, "# no neon.pageserver_grpc_urls")?;
         }
     } else {
+        writeln!(file, "neon.use_communicator_worker=false")?;
+
         // Stripe size GUC should be defined prior to connection string
         if let Some(stripe_size) = spec.shard_stripe_size {
             writeln!(file, "# from compute spec's shard_stripe_size field")?;
