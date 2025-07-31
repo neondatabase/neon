@@ -24,9 +24,7 @@
 #include "utils/dynahash.h"
 #include "utils/guc.h"
 
-#if PG_VERSION_NUM >= 150000
 #include "miscadmin.h"
-#endif
 
 /*
  * The main goal of this cache is to avoid repeated calls of mdexists in neon_write,
