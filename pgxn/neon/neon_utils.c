@@ -183,3 +183,22 @@ alloc_curl_handle(void)
 }
 
 #endif
+
+/*
+ * Check if a BufferTag is valid by verifying all its fields are not invalid.
+ */
+bool
+BufferTagIsValid(const BufferTag *tag)
+{
+	#if PG_MAJORVERSION_NUM >= 16
+	return (tag->spcOid != InvalidOid) &&
+		(tag->relNumber != InvalidRelFileNumber) &&
+		(tag->forkNum != InvalidForkNumber) &&
+		(tag->blockNum != InvalidBlockNumber);
+	#else
+	return (tag->rnode.spcNode != InvalidOid) &&
+		(tag->rnode.relNode != InvalidOid) &&
+		(tag->forkNum != InvalidForkNumber) &&
+		(tag->blockNum != InvalidBlockNumber);
+	#endif
+}

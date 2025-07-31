@@ -405,7 +405,7 @@ where
     // TODO: An Iterator might be nicer. The communicator's clock algorithm needs to
     // _slowly_ iterate through all buckets with its clock hand,  without holding a lock.
     // If we switch to an Iterator, it must not hold the lock.
-    pub fn get_at_bucket(&self, pos: usize) -> Option<ValueReadGuard<(K, V)>> {
+    pub fn get_at_bucket(&self, pos: usize) -> Option<ValueReadGuard<'_, (K, V)>> {
         let map = unsafe { self.shared_ptr.as_ref() }.unwrap().read();
         if pos >= map.buckets.len() {
             return None;

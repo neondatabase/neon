@@ -15,6 +15,8 @@ use futures::FutureExt;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
+use super::cache::Pbkdf2Cache;
+use super::pbkdf2;
 use super::pbkdf2::Pbkdf2;
 use crate::intern::EndpointIdInt;
 use crate::metrics::{ThreadPoolMetrics, ThreadPoolWorkerId};
@@ -23,6 +25,10 @@ use crate::scram::countmin::CountMinSketch;
 pub struct ThreadPool {
     runtime: Option<tokio::runtime::Runtime>,
     pub metrics: Arc<ThreadPoolMetrics>,
+
+    // we hash a lot of passwords.
+    // we keep a cache of partial hashes for faster validation.
+    pub(super) cache: Pbkdf2Cache,
 }
 
 /// How often to reset the sketch values
@@ -68,6 +74,7 @@ impl ThreadPool {
             Self {
                 runtime: Some(runtime),
                 metrics: Arc::new(ThreadPoolMetrics::new(n_workers as usize)),
+                cache: Pbkdf2Cache::new(),
             }
         })
     }
@@ -130,7 +137,7 @@ struct JobSpec {
 }
 
 impl Future for JobSpec {
-    type Output = [u8; 32];
+    type Output = pbkdf2::Block;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         STATE.with_borrow_mut(|state| {
@@ -166,10 +173,10 @@ impl Future for JobSpec {
     }
 }
 
-pub(crate) struct JobHandle(tokio::task::JoinHandle<[u8; 32]>);
+pub(crate) struct JobHandle(tokio::task::JoinHandle<pbkdf2::Block>);
 
 impl Future for JobHandle {
-    type Output = [u8; 32];
+    type Output = pbkdf2::Block;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.0.poll_unpin(cx) {
@@ -203,10 +210,10 @@ mod tests {
             .spawn_job(ep, Pbkdf2::start(b"password", &salt, 4096))
             .await;
 
-        let expected = [
+        let expected = &[
             10, 114, 73, 188, 140, 222, 196, 156, 214, 184, 79, 157, 119, 242, 16, 31, 53, 242,
             178, 43, 95, 8, 225, 182, 122, 40, 219, 21, 89, 147, 64, 140,
         ];
-        assert_eq!(actual, expected);
+        assert_eq!(actual.as_slice(), expected);
     }
 }

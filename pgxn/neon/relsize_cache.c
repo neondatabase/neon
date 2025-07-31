@@ -13,6 +13,7 @@
 #include "neon.h"
 #include "neon_pgversioncompat.h"
 
+#include "miscadmin.h"
 #include "pagestore_client.h"
 #include RELFILEINFO_HDR
 #include "storage/smgr.h"
@@ -22,8 +23,6 @@
 #include "catalog/pg_tablespace_d.h"
 #include "utils/dynahash.h"
 #include "utils/guc.h"
-
-#include "miscadmin.h"
 
 typedef struct
 {

@@ -73,10 +73,6 @@
 #include "access/xlogrecovery.h"
 #endif
 
-#if PG_VERSION_NUM < 160000
-typedef PGAlignedBlock PGIOAlignedBlock;
-#endif
-
 #include "access/nbtree.h"
 #include "storage/bufpage.h"
 #include "access/xlog_internal.h"
@@ -88,7 +84,7 @@ static char *hexdump_page(char *page);
 		NInfoGetRelNumber(InfoFromSMgrRel(reln)) >= FirstNormalObjectId \
 )
 
-const int	SmgrTrace = DEBUG1;
+const int	SmgrTrace = DEBUG5;
 
 /* unlogged relation build states */
 typedef enum
@@ -306,7 +302,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 */
 		lsns[batch_size++] = lsn;
 
-		if (batch_size >= BLOCK_BATCH_SIZE)
+		if (batch_size >= BLOCK_BATCH_SIZE && !neon_use_communicator_worker)
 		{
 			neon_set_lwlsn_block_v(lsns, InfoFromSMgrRel(reln), forknum,
 									   batch_blockno,
@@ -316,7 +312,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		}
 	}
 
-	if (batch_size != 0)
+	if (batch_size != 0 && !neon_use_communicator_worker)
 	{
 		neon_set_lwlsn_block_v(lsns, InfoFromSMgrRel(reln), forknum,
 								   batch_blockno,
@@ -441,11 +437,17 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 						forknum, LSN_FORMAT_ARGS(lsn))));
 	}
 
-	/*
-	 * Remember the LSN on this page. When we read the page again, we must
-	 * read the same or newer version of it.
-	 */
-	neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
+	if (!neon_use_communicator_worker)
+	{
+		/*
+		 * Remember the LSN on this page. When we read the page again, we must
+		 * read the same or newer version of it.
+		 *
+		 * (With the new communicator, the caller will make a write-request
+		 * for this page, which updates the last-written LSN too)
+		 */
+		neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forknum, blocknum);
+	}
 }
 
 /*
@@ -568,6 +570,7 @@ neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 {
 	XLogRecPtr	last_written_lsns[PG_IOV_MAX];
 
+	Assert(!neon_use_communicator_worker);
 	Assert(nblocks <= PG_IOV_MAX);
 
 	neon_get_lwlsn_v(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
@@ -906,8 +909,25 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 		if (isRedo)
 		{
+			/*
+			 * TODO: the protocol can check for existence and get the relsize
+			 * in one roundtrip. Add a similar call to the
+			 * backend<->communicator API. (The size is cached on the
+			 * rel_exists call, so this does only one roundtrip to the
+			 * pageserver, but two function calls and two cache lookups.)
+			 */
 			if (!communicator_new_rel_exists(InfoFromSMgrRel(reln), forkNum))
+			{
 				communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum, lsn);
+				reln->smgr_cached_nblocks[forkNum] = 0;
+			}
+			else
+			{
+				BlockNumber nblocks;
+
+				nblocks = communicator_new_rel_nblocks(InfoFromSMgrRel(reln), forkNum);
+				reln->smgr_cached_nblocks[forkNum] = nblocks;
+			}
 		}
 		else
 			communicator_new_rel_create(InfoFromSMgrRel(reln), forkNum, lsn);
@@ -991,6 +1011,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 #endif
 {
 	XLogRecPtr	lsn;
+	bool		lsn_was_zero;
 	BlockNumber n_blocks = 0;
 
 	switch (reln->smgr_relpersistence)
@@ -1055,9 +1076,19 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
 
+	/*
+	 * smgr_extend is often called with an all-zeroes page, so
+	 * lsn==InvalidXLogRecPtr. An smgr_write() call will come for the buffer
+	 * later, after it has been initialized with the real page contents, and
+	 * it is eventually evicted from the buffer cache. But we need a valid LSN
+	 * to the relation metadata update now.
+	 */
+	lsn_was_zero = (lsn == InvalidXLogRecPtr);
+	if (lsn_was_zero)
+		lsn = GetXLogInsertRecPtr();
+
 	if (neon_use_communicator_worker)
 	{
-		// FIXME: this can pass lsn == invalid. Is that ok?
 		communicator_new_rel_extend(InfoFromSMgrRel(reln), forkNum, blkno, (const void *) buffer, lsn);
 
 		if (debug_compare_local)
@@ -1084,11 +1115,8 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		 * it is eventually evicted from the buffer cache. But we need a valid LSN
 		 * to the relation metadata update now.
 		 */
-		if (lsn == InvalidXLogRecPtr)
-		{
-			lsn = GetXLogInsertRecPtr();
+		if (lsn_was_zero)
 			neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum, blkno);
-		}
 		neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
 	}
 }
@@ -1410,7 +1438,7 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	{
 		// FIXME: request_lsns is ignored. That affects the neon_test_utils callers.
 		// Add the capability to specify the LSNs explicitly, for the sake of neon_test_utils ?
-		communicator_new_read_at_lsnv(rinfo, forkNum, blkno, &buffer, 1);
+		communicator_new_read_at_lsn_uncached(rinfo, forkNum, blkno, buffer, request_lsns.request_lsn, request_lsns.not_modified_since);
 	}
 	else
 		communicator_read_at_lsnv(rinfo, forkNum, blkno, &request_lsns, &buffer, 1, NULL);
@@ -1541,8 +1569,8 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 
 	if (neon_use_communicator_worker)
 	{
-		communicator_new_read_at_lsnv(InfoFromSMgrRel(reln), forkNum, blkno,
-									  (void *) &buffer, 1);
+		communicator_new_readv(InfoFromSMgrRel(reln), forkNum, blkno,
+							   (void *) &buffer, 1);
 	}
 	else
 	{
@@ -1657,8 +1685,8 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	if (neon_use_communicator_worker)
 	{
-		communicator_new_read_at_lsnv(InfoFromSMgrRel(reln), forknum, blocknum,
-									  buffers, nblocks);
+		communicator_new_readv(InfoFromSMgrRel(reln), forknum, blocknum,
+							   buffers, nblocks);
 	}
 	else
 	{
@@ -2505,10 +2533,6 @@ neon_extend_rel_size(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, 
 		if (blkno >= relsize)
 			communicator_new_rel_zeroextend(rinfo, forknum, relsize, (blkno - relsize) + 1, end_recptr);
 
-		/*
-		 * FIXME: does this need to update the last-written LSN too, like the
-		 * old implementation?
-		 */
 		return;
 	}
 
@@ -2666,21 +2690,27 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	}
 
 	/*
-	 * we don't have the buffer in memory, update lwLsn past this record, also
-	 * evict page from file cache
+	 * We don't have the buffer in shared buffers. Check if it's in the LFC.
+	 * If it's not there either, update the lwLsn past this record.
 	 */
 	if (no_redo_needed)
 	{
-		neon_set_lwlsn_block(end_recptr, rinfo, forknum, blkno);
+		bool		in_cache;
+
 		/*
-		 * Redo changes if page exists in LFC.
-		 * We should perform this check after assigning LwLSN to prevent
-		 * prefetching of some older version of the page by some other backend.
+		 * Redo changes if the page is present in the LFC.
 		 */
 		if (neon_use_communicator_worker)
-			no_redo_needed = communicator_new_cache_contains(rinfo, forknum, blkno);
+		{
+			in_cache = communicator_new_update_lwlsn_for_block_if_not_cached(rinfo, forknum, blkno, end_recptr);
+		}
 		else
-			no_redo_needed = !lfc_cache_contains(rinfo, forknum, blkno);
+		{
+			in_cache = lfc_cache_contains(rinfo, forknum, blkno);
+			neon_set_lwlsn_block(end_recptr, rinfo, forknum, blkno);
+		}
+
+		no_redo_needed = !in_cache;
 	}
 
 	LWLockRelease(partitionLock);

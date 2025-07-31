@@ -36,6 +36,10 @@ pub enum NeonIORequest {
     PrefetchV(CPrefetchVRequest),
     DbSize(CDbSizeRequest),
 
+    /// This is like GetPageV, but bypasses the LFC and allows specifiying the
+    /// request LSNs directly. For debugging purposes only.
+    GetPageVUncached(CGetPageVUncachedRequest),
+
     // Write requests. These are needed to keep the relation size cache and LFC up-to-date.
     // They are not sent to the pageserver.
     WritePage(CWritePageRequest),
@@ -89,6 +93,7 @@ impl NeonIORequest {
             Empty => 0,
             RelSize(req) => req.request_id,
             GetPageV(req) => req.request_id,
+            GetPageVUncached(req) => req.request_id,
             ReadSlruSegment(req) => req.request_id,
             PrefetchV(req) => req.request_id,
             DbSize(req) => req.request_id,
@@ -186,6 +191,24 @@ pub struct CGetPageVRequest {
     pub fork_number: u8,
     pub block_number: u32,
     pub nblocks: u8,
+
+    // These fields define where the result is written. Must point into a buffer in shared memory!
+    pub dest: [ShmemBuf; MAX_GETPAGEV_PAGES],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CGetPageVUncachedRequest {
+    pub request_id: u64,
+    pub spc_oid: COid,
+    pub db_oid: COid,
+    pub rel_number: u32,
+    pub fork_number: u8,
+    pub block_number: u32,
+    pub nblocks: u8,
+
+    pub request_lsn: CLsn,
+    pub not_modified_since: CLsn,
 
     // These fields define where the result is written. Must point into a buffer in shared memory!
     pub dest: [ShmemBuf; MAX_GETPAGEV_PAGES],
@@ -321,6 +344,17 @@ impl CRelSizeRequest {
 }
 
 impl CGetPageVRequest {
+    pub fn reltag(&self) -> page_api::RelTag {
+        page_api::RelTag {
+            spcnode: self.spc_oid,
+            dbnode: self.db_oid,
+            relnode: self.rel_number,
+            forknum: self.fork_number,
+        }
+    }
+}
+
+impl CGetPageVUncachedRequest {
     pub fn reltag(&self) -> page_api::RelTag {
         page_api::RelTag {
             spcnode: self.spc_oid,

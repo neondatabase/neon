@@ -715,7 +715,7 @@ fn start_pageserver(
                 disk_usage_eviction_state,
                 deletion_queue.new_client(),
                 secondary_controller,
-                feature_resolver,
+                feature_resolver.clone(),
             )
             .context("Failed to initialize router state")?,
         );
@@ -841,14 +841,14 @@ fn start_pageserver(
         } else {
             None
         },
+        feature_resolver.clone(),
     );
 
-    // Spawn a Pageserver gRPC server task. It will spawn separate tasks for
-    // each stream/request.
+    // Spawn a Pageserver gRPC server task. It will spawn separate tasks for each request/stream.
+    // It uses a separate compute request Tokio runtime (COMPUTE_REQUEST_RUNTIME).
     //
-    // TODO: this uses a separate Tokio runtime for the page service. If we want
-    // other gRPC services, they will need their own port and runtime. Is this
-    // necessary?
+    // NB: this port is exposed to computes. It should only provide services that we're okay with
+    // computes accessing. Internal services should use a separate port.
     let mut page_service_grpc = None;
     if let Some(grpc_listener) = grpc_listener {
         page_service_grpc = Some(GrpcPageServiceHandler::spawn(

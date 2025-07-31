@@ -24,12 +24,12 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::models::{SafekeeperInfo, SafekeepersInfo, TimelineInfo};
 use safekeeper_api::PgVersionId;
+use safekeeper_api::Term;
 use safekeeper_api::membership::{self, MemberSet, SafekeeperGeneration};
 use safekeeper_api::models::{
     PullTimelineRequest, TimelineLocateResponse, TimelineMembershipSwitchRequest,
     TimelineMembershipSwitchResponse,
 };
-use safekeeper_api::{INITIAL_TERM, Term};
 use safekeeper_client::mgmt_api;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -991,6 +991,7 @@ impl Service {
         timeline_id: TimelineId,
         to_safekeepers: &[Safekeeper],
         from_safekeepers: &[Safekeeper],
+        mconf: membership::Configuration,
     ) -> Result<(), ApiError> {
         let http_hosts = from_safekeepers
             .iter()
@@ -1009,14 +1010,11 @@ impl Service {
                 .collect::<Vec<_>>()
         );
 
-        // TODO(diko): need to pass mconf/generation with the request
-        // to properly handle tombstones. Ignore tombstones for now.
-        // Worst case: we leave a timeline on a safekeeper which is not in the current set.
         let req = PullTimelineRequest {
             tenant_id,
             timeline_id,
             http_hosts,
-            ignore_tombstone: Some(true),
+            mconf: Some(mconf),
         };
 
         const SK_PULL_TIMELINE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1300,13 +1298,7 @@ impl Service {
             )
             .await?;
 
-        let mut sync_position = (INITIAL_TERM, Lsn::INVALID);
-        for res in results.into_iter().flatten() {
-            let sk_position = (res.last_log_term, res.flush_lsn);
-            if sync_position < sk_position {
-                sync_position = sk_position;
-            }
-        }
+        let sync_position = Self::get_sync_position(&results)?;
 
         tracing::info!(
             %generation,
@@ -1336,6 +1328,7 @@ impl Service {
             timeline_id,
             &pull_to_safekeepers,
             &cur_safekeepers,
+            joint_config.clone(),
         )
         .await?;
 
@@ -1598,5 +1591,37 @@ impl Service {
         .await?;
 
         Ok(())
+    }
+
+    /// Get membership switch responses from all safekeepers and return the sync position.
+    ///
+    /// Sync position is a position equal or greater than the commit position.
+    /// It is guaranteed that all WAL entries with (last_log_term, flush_lsn)
+    /// greater than the sync position are not committed (= not on a quorum).
+    ///
+    /// Returns error if there is no quorum of successful responses.
+    fn get_sync_position(
+        responses: &[mgmt_api::Result<TimelineMembershipSwitchResponse>],
+    ) -> Result<(Term, Lsn), ApiError> {
+        let quorum_size = responses.len() / 2 + 1;
+
+        let mut wal_positions = responses
+            .iter()
+            .flatten()
+            .map(|res| (res.last_log_term, res.flush_lsn))
+            .collect::<Vec<_>>();
+
+        // Should be already checked if the responses are from tenant_timeline_set_membership_quorum.
+        if wal_positions.len() < quorum_size {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "not enough successful responses to get sync position: {}/{}",
+                wal_positions.len(),
+                quorum_size,
+            )));
+        }
+
+        wal_positions.sort();
+
+        Ok(wal_positions[quorum_size - 1])
     }
 }

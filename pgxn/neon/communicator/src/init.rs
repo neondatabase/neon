@@ -38,7 +38,7 @@ pub struct CommunicatorInitStruct {
 
     pub neon_request_slots: &'static [NeonIORequestSlot],
 
-    pub integrated_cache_init_struct: IntegratedCacheInitStruct,
+    pub integrated_cache_init_struct: IntegratedCacheInitStruct<'static>,
 }
 
 impl std::fmt::Debug for CommunicatorInitStruct {
@@ -122,8 +122,6 @@ pub extern "C" fn rcommunicator_shmem_init(
     cis
 }
 
-// fixme: currently unused
-#[allow(dead_code)]
 pub fn alloc_from_slice<T>(
     area: &mut [MaybeUninit<u8>],
 ) -> (&mut MaybeUninit<T>, &mut [MaybeUninit<u8>]) {

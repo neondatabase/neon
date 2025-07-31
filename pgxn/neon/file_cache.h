@@ -44,8 +44,24 @@ extern bool lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blk
 						 const void* buffer, XLogRecPtr lsn);
 
 extern FileCacheState* lfc_get_state(size_t max_entries);
+extern LfcStatsEntry *lfc_get_stats(size_t *num_entries);
+
+struct LfcMetrics; /* defined in communicator_bindings.h */
+extern struct LfcMetrics lfc_get_metrics_unsafe(void);
+
+typedef struct
+{
+	uint32		pageoffs;
+	Oid			relfilenode;
+	Oid			reltablespace;
+	Oid			reldatabase;
+	ForkNumber	forknum;
+	BlockNumber blocknum;
+	uint16		accesscount;
+} LocalCachePagesRec;
+extern LocalCachePagesRec *lfc_local_cache_pages(size_t *num_entries);
+
 extern int32 lfc_approximate_working_set_size_seconds(time_t duration, bool reset);
-extern LfcStatsEntry *get_lfc_stats(uint32 *num_entries);
 
 static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,

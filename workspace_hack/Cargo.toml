@@ -29,6 +29,7 @@ clap = { version = "4", features = ["derive", "env", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "help", "std", "string", "suggestions", "usage"] }
 const-oid = { version = "0.9", default-features = false, features = ["db", "std"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+crossbeam-epoch = { version = "0.9" }
 crypto-bigint = { version = "0.5", features = ["generic-array", "zeroize"] }
 der = { version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
 deranged = { version = "0.3", default-features = false, features = ["powerfmt", "serde", "std"] }
@@ -73,6 +74,7 @@ num-rational = { version = "0.4", default-features = false, features = ["num-big
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 p256 = { version = "0.13", features = ["jwk"] }
 parquet = { version = "53", default-features = false, features = ["zstd"] }
+portable-atomic = { version = "1", features = ["require-cas"] }
 prost = { version = "0.13", features = ["no-recursion-limit", "prost-derive"] }
 rand = { version = "0.9" }
 regex = { version = "1" }

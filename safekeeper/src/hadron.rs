@@ -193,7 +193,7 @@ pub async fn hcc_pull_timeline(
         tenant_id: timeline.tenant_id,
         timeline_id: timeline.timeline_id,
         http_hosts: Vec::new(),
-        ignore_tombstone: None,
+        mconf: None,
     };
     for host in timeline.peers {
         if host.0 == conf.my_id.0 {
@@ -387,6 +387,7 @@ pub fn get_filesystem_usage(path: &std::path::Path) -> u64 {
             critical_timeline!(
                 placeholder_ttid.tenant_id,
                 placeholder_ttid.timeline_id,
+                None::<&AtomicBool>,
                 "Global disk usage watcher failed to read filesystem usage: {:?}",
                 e
             );

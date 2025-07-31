@@ -18,14 +18,33 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use metrics::IntGauge;
+use measured::metric;
+use measured::metric::MetricEncoding;
+use measured::metric::gauge::GaugeState;
+use measured::{Gauge, MetricGroup};
 
-struct MyAllocator {
+pub(crate) struct MyAllocator {
     allocations: AtomicU64,
     deallocations: AtomicU64,
 
     allocated: AtomicUsize,
     high: AtomicUsize,
+}
+
+#[derive(MetricGroup)]
+#[metric(new())]
+struct MyAllocatorMetricGroup {
+    /// Number of allocations in Rust code
+    communicator_mem_allocations: Gauge,
+
+    /// Number of deallocations in Rust code
+    communicator_mem_deallocations: Gauge,
+
+    /// Bytes currently allocated
+    communicator_mem_allocated: Gauge,
+
+    /// High watermark of allocated bytes
+    communicator_mem_high: Gauge,
 }
 
 unsafe impl GlobalAlloc for MyAllocator {
@@ -52,58 +71,37 @@ static GLOBAL: MyAllocator = MyAllocator {
     high: AtomicUsize::new(0),
 };
 
-pub struct MyAllocatorCollector {
-    allocations: IntGauge,
-    deallocations: IntGauge,
-    allocated: IntGauge,
-    high: IntGauge,
+pub(crate) struct MyAllocatorCollector {
+    metrics: MyAllocatorMetricGroup,
 }
 
 impl MyAllocatorCollector {
-    pub fn new() -> MyAllocatorCollector {
-        MyAllocatorCollector {
-            allocations: IntGauge::new("allocations_total", "Number of allocations in Rust code")
-                .unwrap(),
-            deallocations: IntGauge::new(
-                "deallocations_total",
-                "Number of deallocations in Rust code",
-            )
-            .unwrap(),
-            allocated: IntGauge::new("allocated_total", "Bytes currently allocated").unwrap(),
-            high: IntGauge::new("allocated_high", "High watermark of allocated bytes").unwrap(),
+    pub(crate) fn new() -> Self {
+        Self {
+            metrics: MyAllocatorMetricGroup::new(),
         }
     }
 }
 
-impl metrics::core::Collector for MyAllocatorCollector {
-    fn desc(&self) -> Vec<&metrics::core::Desc> {
-        let mut descs = Vec::new();
-
-        descs.append(&mut self.allocations.desc());
-        descs.append(&mut self.deallocations.desc());
-        descs.append(&mut self.allocated.desc());
-        descs.append(&mut self.high.desc());
-
-        descs
-    }
-
-    fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
-        let mut values = Vec::new();
-
-        // update the gauges
-        self.allocations
+impl<T: metric::group::Encoding> MetricGroup<T> for MyAllocatorCollector
+where
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_group_into(&self, enc: &mut T) -> Result<(), <T as metric::group::Encoding>::Err> {
+        // Update the gauges with fresh values first
+        self.metrics
+            .communicator_mem_allocations
             .set(GLOBAL.allocations.load(Ordering::Relaxed) as i64);
-        self.deallocations
+        self.metrics
+            .communicator_mem_deallocations
             .set(GLOBAL.allocations.load(Ordering::Relaxed) as i64);
-        self.allocated
+        self.metrics
+            .communicator_mem_allocated
             .set(GLOBAL.allocated.load(Ordering::Relaxed) as i64);
-        self.high.set(GLOBAL.high.load(Ordering::Relaxed) as i64);
+        self.metrics
+            .communicator_mem_high
+            .set(GLOBAL.high.load(Ordering::Relaxed) as i64);
 
-        values.append(&mut self.allocations.collect());
-        values.append(&mut self.deallocations.collect());
-        values.append(&mut self.allocated.collect());
-        values.append(&mut self.high.collect());
-
-        values
+        self.metrics.collect_group_into(enc)
     }
 }

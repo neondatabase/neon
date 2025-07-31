@@ -9,7 +9,7 @@ use postgres_protocol2::message::backend::{ErrorFields, ErrorResponseBody};
 pub use self::sqlstate::*;
 
 #[allow(clippy::unreadable_literal)]
-mod sqlstate;
+pub mod sqlstate;
 
 /// The severity of a Postgres error or notice.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -452,16 +452,16 @@ impl Error {
         Error(Box::new(ErrorInner { kind, cause }))
     }
 
-    pub(crate) fn closed() -> Error {
+    pub fn closed() -> Error {
         Error::new(Kind::Closed, None)
     }
 
-    pub(crate) fn unexpected_message() -> Error {
+    pub fn unexpected_message() -> Error {
         Error::new(Kind::UnexpectedMessage, None)
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn db(error: ErrorResponseBody) -> Error {
+    pub fn db(error: ErrorResponseBody) -> Error {
         match DbError::parse(&mut error.fields()) {
             Ok(e) => Error::new(Kind::Db, Some(Box::new(e))),
             Err(e) => Error::new(Kind::Parse, Some(Box::new(e))),
@@ -493,7 +493,7 @@ impl Error {
         Error::new(Kind::Tls, Some(e))
     }
 
-    pub(crate) fn io(e: io::Error) -> Error {
+    pub fn io(e: io::Error) -> Error {
         Error::new(Kind::Io, Some(Box::new(e)))
     }
 

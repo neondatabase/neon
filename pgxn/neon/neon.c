@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * neon.c
- *	  Main entry point into the neon exension
+ *	  Main entry point into the neon extension
  *
  *-------------------------------------------------------------------------
  */
@@ -50,8 +50,10 @@
 PG_MODULE_MAGIC;
 void		_PG_init(void);
 
+bool lakebase_mode = false;
 
 static int  running_xacts_overflow_policy;
+static emit_log_hook_type prev_emit_log_hook;
 static bool monitor_query_exec_time = false;
 
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
@@ -81,6 +83,8 @@ uint32		WAIT_EVENT_NEON_PS_SEND;
 uint32		WAIT_EVENT_NEON_PS_READ;
 uint32		WAIT_EVENT_NEON_WAL_DL;
 #endif
+
+int databricks_test_hook = 0;
 
 enum RunningXactsOverflowPolicies {
 	OP_IGNORE,
@@ -446,6 +450,20 @@ ReportSearchPath(void)
 static int neon_pgstat_file_size_limit;
 #endif
 
+static void DatabricksSqlErrorHookImpl(ErrorData *edata) {
+	if (prev_emit_log_hook != NULL) {
+		prev_emit_log_hook(edata);
+	}
+
+	if (edata->sqlerrcode == ERRCODE_DATA_CORRUPTED) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->data_corruption_count, 1);
+	} else if (edata->sqlerrcode == ERRCODE_INDEX_CORRUPTED) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->index_corruption_count, 1);
+	} else if (edata->sqlerrcode == ERRCODE_INTERNAL_ERROR) {
+		pg_atomic_fetch_add_u32(&databricks_metrics_shared->internal_error_count, 1);
+	}
+}
+
 void
 _PG_init(void)
 {
@@ -466,6 +484,11 @@ _PG_init(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+	if (lakebase_mode) {
+		prev_emit_log_hook = emit_log_hook;
+		emit_log_hook = DatabricksSqlErrorHookImpl;
+	}
 
 	/*
 	 * Initializing a pre-loaded Postgres extension happens in three stages:
@@ -503,7 +526,7 @@ _PG_init(void)
 	lfc_init();
 	pg_init_prewarm();
 	pg_init_walproposer();
-	init_lwlsncache();
+	pg_init_lwlsncache();
 
 	pg_init_communicator_process();
 
@@ -521,7 +544,7 @@ _PG_init(void)
 
 	DefineCustomBoolVariable(
 							"neon.disable_logical_replication_subscribers",
-							"Disables incomming logical replication",
+							"Disable incoming logical replication",
 							NULL,
 							&disable_logical_replication_subscribers,
 							false,
@@ -580,7 +603,7 @@ _PG_init(void)
 
 	DefineCustomEnumVariable(
 							"neon.debug_compare_local",
-							"Debug mode for compaing content of pages in prefetch ring/LFC/PS and local disk",
+							"Debug mode for comparing content of pages in prefetch ring/LFC/PS and local disk",
 							NULL,
 							&debug_compare_local,
 							DEBUG_COMPARE_LOCAL_NONE,
@@ -596,6 +619,29 @@ _PG_init(void)
 							&privileged_role_name,
 							"neon_superuser",
 							PGC_POSTMASTER, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							"neon.lakebase_mode",
+							"Is neon running in Lakebase?",
+							NULL,
+							&lakebase_mode,
+							false,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
+
+	// A test hook used in sql regress to trigger specific behaviors
+	// to test features easily.
+	DefineCustomIntVariable(
+							"databricks.test_hook",
+							"The test hook used in sql regress tests only",
+							NULL,
+							&databricks_test_hook,
+							0,
+							0, INT32_MAX,
+							PGC_SUSET,
+							0,
+							NULL, NULL, NULL);
 
 	/*
 	 * Important: This must happen after other parts of the extension are
@@ -628,11 +674,15 @@ _PG_init(void)
 	ExecutorEnd_hook = neon_ExecutorEnd;
 }
 
+/* Various functions exposed at SQL level */
+
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
 PG_FUNCTION_INFO_V1(backpressure_throttling_time);
 PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
 PG_FUNCTION_INFO_V1(approximate_working_set_size);
+PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
+PG_FUNCTION_INFO_V1(local_cache_pages);
 
 Datum
 pg_cluster_size(PG_FUNCTION_ARGS)
@@ -713,38 +763,78 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(dc);
 }
 
-PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
 Datum
 neon_get_lfc_stats(PG_FUNCTION_ARGS)
 {
-#define NUM_NEON_GET_STATS_COLS	2
+#define NUM_NEON_GET_STATS_COLS        2
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	LfcStatsEntry *entries;
-	uint32		num_entries;
+	size_t		num_entries;
 
 	InitMaterializedSRF(fcinfo, 0);
 
+	/* lfc_get_stats() does all the heavy lifting */
 	if (neon_use_communicator_worker)
-		entries = communicator_new_get_lfc_stats(&num_entries);
+		entries = communicator_new_lfc_get_stats(&num_entries);
 	else
-		entries = get_lfc_stats(&num_entries);
+		entries = lfc_get_stats(&num_entries);
 
-	for (uint32 i = 0; i < num_entries; i++)
+	/* Convert the LfcStatsEntrys to a result set */
+	for (size_t i = 0; i < num_entries; i++)
 	{
 		LfcStatsEntry *entry = &entries[i];
 		Datum		values[NUM_NEON_GET_STATS_COLS];
 		bool		nulls[NUM_NEON_GET_STATS_COLS];
 
-		nulls[0] = false;
 		values[0] = CStringGetTextDatum(entry->metric_name);
-		nulls[1] = entry->isnull;
+		nulls[0] = false;
 		values[1] = Int64GetDatum(entry->isnull ? 0 : entry->value);
+		nulls[1] = entry->isnull;
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	PG_RETURN_VOID();
+
+#undef NUM_NEON_GET_STATS_COLS
+}
+
+Datum
+local_cache_pages(PG_FUNCTION_ARGS)
+{
+#define NUM_LOCALCACHE_PAGES_COLS	7
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	LocalCachePagesRec *entries;
+	size_t		num_entries;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	/* lfc_local_cache_pages() does all the heavy lifting */
+	entries = lfc_local_cache_pages(&num_entries);
+
+	/* Convert the LocalCachePagesRec structs to a result set */
+	for (size_t i = 0; i < num_entries; i++)
+	{
+		LocalCachePagesRec *entry = &entries[i];
+		Datum		values[NUM_LOCALCACHE_PAGES_COLS];
+		bool		nulls[NUM_LOCALCACHE_PAGES_COLS] = {
+			false, false, false, false, false, false, false
+		};
+
+		values[0] = Int64GetDatum((int64) entry->pageoffs);
+		values[1] = ObjectIdGetDatum(entry->relfilenode);
+		values[2] = ObjectIdGetDatum(entry->reltablespace);
+		values[3] = ObjectIdGetDatum(entry->reldatabase);
+		values[4] = ObjectIdGetDatum(entry->forknum);
+		values[5] = Int64GetDatum((int64) entry->blocknum);
+		values[6] = Int32GetDatum(entry->accesscount);
+
+		/* Build and return the tuple. */
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
 
 	PG_RETURN_VOID();
-}
 
+#undef NUM_LOCALCACHE_PAGES_COLS
+}
 
 /*
  * Initialization stage 2: make requests for the amount of shared memory we
@@ -779,7 +869,6 @@ neon_shmem_request_hook(void)
 static void
 neon_shmem_startup_hook(void)
 {
-	/* Initialize */
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
@@ -788,6 +877,9 @@ neon_shmem_startup_hook(void)
 	LfcShmemInit();
 	PrewarmShmemInit();
 	NeonPerfCountersShmemInit();
+	if (lakebase_mode) {
+		DatabricksMetricsShmemInit();
+	}
 	PagestoreShmemInit();
 	RelsizeCacheShmemInit();
 	WalproposerShmemInit();

@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -12,6 +13,7 @@ use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use indexmap::IndexMap;
+use moka::sync::Cache;
 use ouroboros::self_referencing;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
@@ -46,19 +48,19 @@ use super::backend::{HttpConnError, LocalProxyConnError, PoolingBackend};
 use super::conn_pool::AuthData;
 use super::conn_pool_lib::ConnInfo;
 use super::error::{ConnInfoError, Credentials, HttpCodeError, ReadPayloadError};
-use super::http_conn_pool::{self, Send};
+use super::http_conn_pool::{self, LocalProxyClient};
 use super::http_util::{
     ALLOW_POOL, CONN_STRING, NEON_REQUEST_ID, RAW_TEXT_OUTPUT, TXN_ISOLATION_LEVEL, TXN_READ_ONLY,
     get_conn_info, json_response, uuid_to_header_value,
 };
 use super::json::JsonConversionError;
 use crate::auth::backend::ComputeCredentialKeys;
-use crate::cache::{Cached, TimedLru};
+use crate::cache::common::{count_cache_insert, count_cache_outcome, eviction_listener};
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::http::read_body_with_limit;
-use crate::metrics::Metrics;
+use crate::metrics::{CacheKind, Metrics};
 use crate::serverless::sql_over_http::HEADER_VALUE_TRUE;
 use crate::types::EndpointCacheKey;
 use crate::util::deserialize_json_string;
@@ -138,19 +140,43 @@ pub struct ApiConfig {
 }
 
 // The DbSchemaCache is a cache of the ApiConfig and DbSchemaOwned for each endpoint
-pub(crate) type DbSchemaCache = TimedLru<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>;
+pub(crate) struct DbSchemaCache(Cache<EndpointCacheKey, Arc<(ApiConfig, DbSchemaOwned)>>);
 impl DbSchemaCache {
+    pub fn new(config: crate::config::CacheOptions) -> Self {
+        let builder = Cache::builder().name("schema");
+        let builder = config.moka(builder);
+
+        let metrics = &Metrics::get().cache;
+        if let Some(size) = config.size {
+            metrics.capacity.set(CacheKind::Schema, size as i64);
+        }
+
+        let builder =
+            builder.eviction_listener(|_k, _v, cause| eviction_listener(CacheKind::Schema, cause));
+
+        Self(builder.build())
+    }
+
+    pub async fn maintain(&self) -> Result<Infallible, anyhow::Error> {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            self.0.run_pending_tasks();
+        }
+    }
+
     pub async fn get_cached_or_remote(
         &self,
         endpoint_id: &EndpointCacheKey,
         auth_header: &HeaderValue,
         connection_string: &str,
-        client: &mut http_conn_pool::Client<Send>,
+        client: &mut http_conn_pool::Client<LocalProxyClient>,
         ctx: &RequestContext,
         config: &'static ProxyConfig,
     ) -> Result<Arc<(ApiConfig, DbSchemaOwned)>, RestError> {
-        match self.get_with_created_at(endpoint_id) {
-            Some(Cached { value: (v, _), .. }) => Ok(v),
+        let cache_result = count_cache_outcome(CacheKind::Schema, self.0.get(endpoint_id));
+        match cache_result {
+            Some(v) => Ok(v),
             None => {
                 info!("db_schema cache miss for endpoint: {:?}", endpoint_id);
                 let remote_value = self
@@ -173,7 +199,8 @@ impl DbSchemaCache {
                             db_extra_search_path: None,
                         };
                         let value = Arc::new((api_config, schema_owned));
-                        self.insert(endpoint_id.clone(), value);
+                        count_cache_insert(CacheKind::Schema);
+                        self.0.insert(endpoint_id.clone(), value);
                         return Err(e);
                     }
                     Err(e) => {
@@ -181,7 +208,8 @@ impl DbSchemaCache {
                     }
                 };
                 let value = Arc::new((api_config, schema_owned));
-                self.insert(endpoint_id.clone(), value.clone());
+                count_cache_insert(CacheKind::Schema);
+                self.0.insert(endpoint_id.clone(), value.clone());
                 Ok(value)
             }
         }
@@ -190,7 +218,7 @@ impl DbSchemaCache {
         &self,
         auth_header: &HeaderValue,
         connection_string: &str,
-        client: &mut http_conn_pool::Client<Send>,
+        client: &mut http_conn_pool::Client<LocalProxyClient>,
         ctx: &RequestContext,
         config: &'static ProxyConfig,
     ) -> Result<(ApiConfig, DbSchemaOwned), RestError> {
@@ -430,7 +458,7 @@ struct BatchQueryData<'a> {
 }
 
 async fn make_local_proxy_request<S: DeserializeOwned>(
-    client: &mut http_conn_pool::Client<Send>,
+    client: &mut http_conn_pool::Client<LocalProxyClient>,
     headers: impl IntoIterator<Item = (&HeaderName, HeaderValue)>,
     body: QueryData<'_>,
     max_len: usize,
@@ -461,7 +489,7 @@ async fn make_local_proxy_request<S: DeserializeOwned>(
 }
 
 async fn make_raw_local_proxy_request(
-    client: &mut http_conn_pool::Client<Send>,
+    client: &mut http_conn_pool::Client<LocalProxyClient>,
     headers: impl IntoIterator<Item = (&HeaderName, HeaderValue)>,
     body: String,
 ) -> Result<Response<Incoming>, RestError> {

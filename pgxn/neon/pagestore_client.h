@@ -256,6 +256,8 @@ typedef struct
 extern bool parse_shard_map(const char *connstr, ShardMap *result);
 extern shardno_t get_shard_number(BufferTag* tag);
 
+extern void AssignNumShards(shardno_t num_shards);
+
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
 extern void readahead_buffer_resize(int newsize, void *extra);

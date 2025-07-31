@@ -1,6 +1,6 @@
 import random
-import threading
 from enum import StrEnum
+from threading import Thread
 from time import sleep
 from typing import Any
 
@@ -47,19 +47,23 @@ def offload_lfc(method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor) 
         # With autoprewarm, we need to be sure LFC was offloaded after all writes
         # finish, so we sleep. Otherwise we'll have less prewarmed pages than we want
         sleep(AUTOOFFLOAD_INTERVAL_SECS)
-        client.offload_lfc_wait()
-        return
+        offload_res = client.offload_lfc_wait()
+        log.info(offload_res)
+        return offload_res
 
     if method == PrewarmMethod.COMPUTE_CTL:
         status = client.prewarm_lfc_status()
         assert status["status"] == "not_prewarmed"
         assert "error" not in status
-        client.offload_lfc()
+        offload_res = client.offload_lfc()
+        log.info(offload_res)
         assert client.prewarm_lfc_status()["status"] == "not_prewarmed"
+
         parsed = prom_parse(client)
         desired = {OFFLOAD_LABEL: 1, PREWARM_LABEL: 0, OFFLOAD_ERR_LABEL: 0, PREWARM_ERR_LABEL: 0}
         assert parsed == desired, f"{parsed=} != {desired=}"
-        return
+
+        return offload_res
 
     raise AssertionError(f"{method} not in PrewarmMethod")
 
@@ -68,21 +72,30 @@ def prewarm_endpoint(
     method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor, lfc_state: str | None
 ):
     if method == PrewarmMethod.AUTOPREWARM:
-        client.prewarm_lfc_wait()
+        prewarm_res = client.prewarm_lfc_wait()
+        log.info(prewarm_res)
     elif method == PrewarmMethod.COMPUTE_CTL:
-        client.prewarm_lfc()
+        prewarm_res = client.prewarm_lfc()
+        log.info(prewarm_res)
+        return prewarm_res
     elif method == PrewarmMethod.POSTGRES:
         cur.execute("select neon.prewarm_local_cache(%s)", (lfc_state,))
 
 
-def check_prewarmed(
+def check_prewarmed_contains(
     method: PrewarmMethod, client: EndpointHttpClient, desired_status: dict[str, str | int]
 ):
     if method == PrewarmMethod.AUTOPREWARM:
-        assert client.prewarm_lfc_status() == desired_status
+        prewarm_status = client.prewarm_lfc_status()
+        for k in desired_status:
+            assert desired_status[k] == prewarm_status[k]
+
         assert prom_parse(client)[PREWARM_LABEL] == 1
     elif method == PrewarmMethod.COMPUTE_CTL:
-        assert client.prewarm_lfc_status() == desired_status
+        prewarm_status = client.prewarm_lfc_status()
+        for k in desired_status:
+            assert desired_status[k] == prewarm_status[k]
+
         desired = {OFFLOAD_LABEL: 0, PREWARM_LABEL: 1, PREWARM_ERR_LABEL: 0, OFFLOAD_ERR_LABEL: 0}
         assert prom_parse(client) == desired
 
@@ -149,9 +162,6 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
     log.info(f"Used LFC size: {lfc_used_pages}")
     pg_cur.execute("select * from neon.get_prewarm_info()")
     total, prewarmed, skipped, _ = pg_cur.fetchall()[0]
-    log.info(f"Prewarm info: {total=} {prewarmed=} {skipped=}")
-    progress = (prewarmed + skipped) * 100 // total
-    log.info(f"Prewarm progress: {progress}%")
     assert lfc_used_pages > 10000
     assert total > 0
     assert prewarmed > 0
@@ -161,7 +171,72 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
     assert lfc_cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
 
     desired = {"status": "completed", "total": total, "prewarmed": prewarmed, "skipped": skipped}
-    check_prewarmed(method, client, desired)
+    check_prewarmed_contains(method, client, desired)
+
+
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+def test_lfc_prewarm_cancel(neon_simple_env: NeonEnv):
+    """
+    Test we can cancel LFC prewarm and prewarm successfully after
+    """
+    env = neon_simple_env
+    n_records = 1000000
+    cfg = [
+        "autovacuum = off",
+        "shared_buffers=1MB",
+        "neon.max_file_cache_size=1GB",
+        "neon.file_cache_size_limit=1GB",
+        "neon.file_cache_prewarm_limit=1000",
+    ]
+    endpoint = env.endpoints.create_start(branch_name="main", config_lines=cfg)
+
+    pg_conn = endpoint.connect()
+    pg_cur = pg_conn.cursor()
+    pg_cur.execute("create schema neon; create extension neon with schema neon")
+    pg_cur.execute("create database lfc")
+
+    lfc_conn = endpoint.connect(dbname="lfc")
+    lfc_cur = lfc_conn.cursor()
+    log.info(f"Inserting {n_records} rows")
+    lfc_cur.execute("create table t(pk integer primary key, payload text default repeat('?', 128))")
+    lfc_cur.execute(f"insert into t (pk) values (generate_series(1,{n_records}))")
+    log.info(f"Inserted {n_records} rows")
+
+    client = endpoint.http_client()
+    method = PrewarmMethod.COMPUTE_CTL
+    offload_lfc(method, client, pg_cur)
+
+    endpoint.stop()
+    endpoint.start()
+
+    thread = Thread(target=lambda: prewarm_endpoint(method, client, pg_cur, None))
+    thread.start()
+    # wait 2 seconds to ensure we cancel prewarm SQL query
+    sleep(2)
+    client.cancel_prewarm_lfc()
+    thread.join()
+    assert client.prewarm_lfc_status()["status"] == "cancelled"
+
+    prewarm_endpoint(method, client, pg_cur, None)
+    assert client.prewarm_lfc_status()["status"] == "completed"
+
+
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+def test_lfc_prewarm_empty(neon_simple_env: NeonEnv):
+    """
+    Test there are no errors when trying to offload or prewarm endpoint without cache using compute_ctl.
+    Endpoint without cache is simulated by turning off LFC manually, but in cloud/ setup this is
+    also reproduced on fresh endpoints
+    """
+    env = neon_simple_env
+    ep = env.endpoints.create_start("main", config_lines=["neon.file_cache_size_limit=0"])
+    client = ep.http_client()
+    conn = ep.connect()
+    cur = conn.cursor()
+    cur.execute("create schema neon; create extension neon with schema neon")
+    method = PrewarmMethod.COMPUTE_CTL
+    assert offload_lfc(method, client, cur)["status"] == "skipped"
+    assert prewarm_endpoint(method, client, cur, None)["status"] == "skipped"
 
 
 # autoprewarm isn't needed as we prewarm manually
@@ -232,11 +307,11 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMet
 
     workload_threads = []
     for _ in range(n_threads):
-        t = threading.Thread(target=workload)
+        t = Thread(target=workload)
         workload_threads.append(t)
         t.start()
 
-    prewarm_thread = threading.Thread(target=prewarm)
+    prewarm_thread = Thread(target=prewarm)
     prewarm_thread.start()
 
     def prewarmed():

@@ -23,16 +23,21 @@
 //
 
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use utils::lsn::{AtomicLsn, Lsn};
 
 use crate::file_cache::INVALID_CACHE_BLOCK;
 use crate::file_cache::{CacheBlock, FileCache};
+use crate::init::alloc_from_slice;
 use pageserver_page_api::RelTag;
 
-use metrics::{IntCounter, IntGauge};
+use measured::metric;
+use measured::metric::MetricEncoding;
+use measured::metric::counter::CounterState;
+use measured::metric::gauge::GaugeState;
+use measured::{Counter, Gauge, MetricGroup};
 
 use neon_shmem::hash::{HashMapInit, entry::Entry};
 use neon_shmem::shmem::ShmemHandle;
@@ -41,49 +46,78 @@ use neon_shmem::shmem::ShmemHandle;
 const RELSIZE_CACHE_SIZE: u32 = 64 * 1024;
 
 /// This struct is initialized at postmaster startup, and passed to all the processes via fork().
-pub struct IntegratedCacheInitStruct {
+
+pub struct IntegratedCacheInitStruct<'t> {
+    shared: &'t IntegratedCacheShared,
     relsize_cache_handle: HashMapInit<RelKey, RelEntry>,
     block_map_handle: HashMapInit<BlockKey, BlockEntry>,
 }
 
-/// Represents write-access to the integrated cache. This is used by the communicator process.
+/// This struct is allocated in the (fixed-size) shared memory area at postmaster startup.
+/// It is accessible by all the backends and the communicator process.
 #[derive(Debug)]
-pub struct IntegratedCacheWriteAccess {
+pub struct IntegratedCacheShared {
+    global_lw_lsn: AtomicU64,
+}
+
+/// Represents write-access to the integrated cache. This is used by the communicator process.
+pub struct IntegratedCacheWriteAccess<'t> {
+    shared: &'t IntegratedCacheShared,
     relsize_cache: neon_shmem::hash::HashMapAccess<RelKey, RelEntry>,
     block_map: Arc<neon_shmem::hash::HashMapAccess<BlockKey, BlockEntry>>,
-
-    global_lw_lsn: AtomicU64,
 
     pub(crate) file_cache: Option<FileCache>,
 
     // Fields for eviction
-    clock_hand: std::sync::Mutex<usize>,
+    clock_hand: AtomicUsize,
 
-    // Metrics
-    page_evictions_counter: IntCounter,
-    clock_iterations_counter: IntCounter,
+    metrics: IntegratedCacheMetricGroup,
+}
+
+#[derive(MetricGroup)]
+#[metric(new())]
+struct IntegratedCacheMetricGroup {
+    /// Page evictions from the Local File Cache
+    cache_page_evictions_counter: Counter,
+
+    /// Block entry evictions from the integrated cache
+    block_entry_evictions_counter: Counter,
+
+    /// Number of times the clock hand has moved
+    clock_iterations_counter: Counter,
 
     // metrics from the hash map
-    block_map_num_buckets: IntGauge,
-    block_map_num_buckets_in_use: IntGauge,
+    /// Allocated size of the block cache hash map
+    block_map_num_buckets: Gauge,
 
-    relsize_cache_num_buckets: IntGauge,
-    relsize_cache_num_buckets_in_use: IntGauge,
+    /// Number of buckets in use in the block cache hash map
+    block_map_num_buckets_in_use: Gauge,
+
+    /// Allocated size of the relsize cache hash map
+    relsize_cache_num_buckets: Gauge,
+
+    /// Number of buckets in use in the relsize cache hash map
+    relsize_cache_num_buckets_in_use: Gauge,
 }
 
 /// Represents read-only access to the integrated cache. Backend processes have this.
-pub struct IntegratedCacheReadAccess {
+pub struct IntegratedCacheReadAccess<'t> {
+    shared: &'t IntegratedCacheShared,
     relsize_cache: neon_shmem::hash::HashMapAccess<RelKey, RelEntry>,
     block_map: neon_shmem::hash::HashMapAccess<BlockKey, BlockEntry>,
 }
 
-impl IntegratedCacheInitStruct {
+impl<'t> IntegratedCacheInitStruct<'t> {
     /// Return the desired size in bytes of the fixed-size shared memory area to reserve for the
     /// integrated cache.
     pub fn shmem_size() -> usize {
         // The relsize cache is fixed-size. The block map is allocated in a separate resizable
         // area.
-        HashMapInit::<RelKey, RelEntry>::estimate_size(RELSIZE_CACHE_SIZE)
+        let mut sz = 0;
+        sz += std::mem::size_of::<IntegratedCacheShared>();
+        sz += HashMapInit::<RelKey, RelEntry>::estimate_size(RELSIZE_CACHE_SIZE);
+
+        sz
     }
 
     /// Initialize the shared memory segment. This runs once in postmaster. Returns a struct which
@@ -92,10 +126,16 @@ impl IntegratedCacheInitStruct {
         shmem_area: &'static mut [MaybeUninit<u8>],
         initial_file_cache_size: u64,
         max_file_cache_size: u64,
-    ) -> IntegratedCacheInitStruct {
-        // Initialize the relsize cache in the fixed-size area
+    ) -> IntegratedCacheInitStruct<'t> {
+        // Initialize the shared struct
+        let (shared, remain_shmem_area) = alloc_from_slice::<IntegratedCacheShared>(shmem_area);
+        let shared = shared.write(IntegratedCacheShared {
+            global_lw_lsn: AtomicU64::new(0),
+        });
+
+        // Use the remaining part of the fixed-size area for the relsize cache
         let relsize_cache_handle =
-            neon_shmem::hash::HashMapInit::with_fixed(RELSIZE_CACHE_SIZE, shmem_area);
+            neon_shmem::hash::HashMapInit::with_fixed(RELSIZE_CACHE_SIZE, remain_shmem_area);
 
         let max_bytes =
             HashMapInit::<BlockKey, BlockEntry>::estimate_size(max_file_cache_size as u32);
@@ -106,6 +146,7 @@ impl IntegratedCacheInitStruct {
         let block_map_handle =
             neon_shmem::hash::HashMapInit::with_shmem(initial_file_cache_size as u32, shmem_handle);
         IntegratedCacheInitStruct {
+            shared,
             relsize_cache_handle,
             block_map_handle,
         }
@@ -116,62 +157,35 @@ impl IntegratedCacheInitStruct {
         self,
         lsn: Lsn,
         file_cache: Option<FileCache>,
-    ) -> IntegratedCacheWriteAccess {
+    ) -> IntegratedCacheWriteAccess<'t> {
         let IntegratedCacheInitStruct {
+            shared,
             relsize_cache_handle,
             block_map_handle,
         } = self;
+
+        shared.global_lw_lsn.store(lsn.0, Ordering::Relaxed);
+
         IntegratedCacheWriteAccess {
+            shared,
             relsize_cache: relsize_cache_handle.attach_writer(),
             block_map: block_map_handle.attach_writer().into(),
-            global_lw_lsn: AtomicU64::new(lsn.0),
             file_cache,
-            clock_hand: std::sync::Mutex::new(0),
-
-            page_evictions_counter: metrics::IntCounter::new(
-                "integrated_cache_evictions",
-                "Page evictions from the Local File Cache",
-            )
-            .unwrap(),
-
-            clock_iterations_counter: metrics::IntCounter::new(
-                "clock_iterations",
-                "Number of times the clock hand has moved",
-            )
-            .unwrap(),
-
-            block_map_num_buckets: metrics::IntGauge::new(
-                "block_map_num_buckets",
-                "Allocated size of the block cache hash map",
-            )
-            .unwrap(),
-            block_map_num_buckets_in_use: metrics::IntGauge::new(
-                "block_map_num_buckets_in_use",
-                "Number of buckets in use in the block cache hash map",
-            )
-            .unwrap(),
-
-            relsize_cache_num_buckets: metrics::IntGauge::new(
-                "relsize_cache_num_buckets",
-                "Allocated size of the relsize cache hash map",
-            )
-            .unwrap(),
-            relsize_cache_num_buckets_in_use: metrics::IntGauge::new(
-                "relsize_cache_num_buckets_in_use",
-                "Number of buckets in use in the relsize cache hash map",
-            )
-            .unwrap(),
+            clock_hand: AtomicUsize::new(0),
+            metrics: IntegratedCacheMetricGroup::new(),
         }
     }
 
     /// Initialize access to the integrated cache for a backend process
-    pub fn backend_init(self) -> IntegratedCacheReadAccess {
+    pub fn backend_init(self) -> IntegratedCacheReadAccess<'t> {
         let IntegratedCacheInitStruct {
+            shared,
             relsize_cache_handle,
             block_map_handle,
         } = self;
 
         IntegratedCacheReadAccess {
+            shared,
             relsize_cache: relsize_cache_handle.attach_reader(),
             block_map: block_map_handle.attach_reader(),
         }
@@ -254,12 +268,25 @@ pub enum CacheResult<V> {
     NotFound(Lsn),
 }
 
-impl IntegratedCacheWriteAccess {
-    pub fn get_rel_size(&self, rel: &RelTag) -> CacheResult<u32> {
+/// Return type of [try_evict_entry]
+enum EvictResult {
+    /// Could not evict page because it was pinned
+    Pinned,
+
+    /// The victim bucket was already vacant
+    Vacant,
+
+    /// Evicted an entry. If it had a cache block associated with it, it's returned
+    /// here, otherwise None
+    Evicted(Option<CacheBlock>),
+}
+
+impl<'t> IntegratedCacheWriteAccess<'t> {
+    pub fn get_rel_size(&'t self, rel: &RelTag) -> CacheResult<u32> {
         if let Some(nblocks) = get_rel_size(&self.relsize_cache, rel) {
             CacheResult::Found(nblocks)
         } else {
-            let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+            let lsn = Lsn(self.shared.global_lw_lsn.load(Ordering::Relaxed));
             CacheResult::NotFound(lsn)
         }
     }
@@ -284,7 +311,7 @@ impl IntegratedCacheWriteAccess {
                 return Ok(CacheResult::NotFound(block_entry.lw_lsn.load()));
             }
         } else {
-            let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+            let lsn = Lsn(self.shared.global_lw_lsn.load(Ordering::Relaxed));
             return Ok(CacheResult::NotFound(lsn));
         };
 
@@ -317,7 +344,7 @@ impl IntegratedCacheWriteAccess {
                 Ok(CacheResult::NotFound(block_entry.lw_lsn.load()))
             }
         } else {
-            let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+            let lsn = Lsn(self.shared.global_lw_lsn.load(Ordering::Relaxed));
             Ok(CacheResult::NotFound(lsn))
         }
     }
@@ -329,7 +356,7 @@ impl IntegratedCacheWriteAccess {
         if let Some(_rel_entry) = self.relsize_cache.get(&RelKey::from(rel)) {
             CacheResult::Found(true)
         } else {
-            let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+            let lsn = Lsn(self.shared.global_lw_lsn.load(Ordering::Relaxed));
             CacheResult::NotFound(lsn)
         }
     }
@@ -340,14 +367,14 @@ impl IntegratedCacheWriteAccess {
         // e.g. psql \l+ command, so the user will feel the latency.
 
         // fixme: is this right lsn?
-        let lsn = Lsn(self.global_lw_lsn.load(Ordering::Relaxed));
+        let lsn = Lsn(self.shared.global_lw_lsn.load(Ordering::Relaxed));
         CacheResult::NotFound(lsn)
     }
 
     pub fn remember_rel_size(& self, rel: &RelTag, nblocks: u32, lsn: Lsn) {
         match self.relsize_cache.entry(RelKey::from(rel)) {
             Entry::Vacant(e) => {
-                tracing::info!("inserting rel entry for {rel:?}, {nblocks} blocks");
+                tracing::trace!("inserting rel entry for {rel:?}, {nblocks} blocks");
                 // FIXME: what to do if we run out of memory? Evict other relation entries?
                 _ = e
                     .insert(RelEntry {
@@ -357,7 +384,7 @@ impl IntegratedCacheWriteAccess {
                     .expect("out of memory");
             }
             Entry::Occupied(e) => {
-                tracing::info!("updating rel entry for {rel:?}, {nblocks} blocks");
+                tracing::trace!("updating rel entry for {rel:?}, {nblocks} blocks");
                 e.get().nblocks.store(nblocks, Ordering::Relaxed);
                 e.get().lw_lsn.store(lsn);
             }
@@ -417,7 +444,7 @@ impl IntegratedCacheWriteAccess {
                     if let Some(x) = file_cache.alloc_block() {
                         break x;
                     }
-                    if let Some(x) = self.try_evict_one_cache_block() {
+                    if let Some(x) = self.try_evict_cache_block() {
                         break x;
                     }
                 }
@@ -432,39 +459,45 @@ impl IntegratedCacheWriteAccess {
             // FIXME: unpin the block entry on error
 
             // Update the block entry
-            let entry = self.block_map.entry(key);
-            assert_eq!(found_existing, matches!(entry, Entry::Occupied(_)));
-            match entry {
-                Entry::Occupied(e) => {
-                    let block_entry = e.get();
-                    // Update the cache block
-                    let old_blk = block_entry.cache_block.compare_exchange(
-                        INVALID_CACHE_BLOCK,
-                        cache_block,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    );
-                    assert!(old_blk == Ok(INVALID_CACHE_BLOCK) || old_blk == Err(cache_block));
+            loop {
+                let entry = self.block_map.entry(key.clone());
+                assert_eq!(found_existing, matches!(entry, Entry::Occupied(_)));
+                match entry {
+                    Entry::Occupied(e) => {
+                        let block_entry = e.get();
+                        // Update the cache block
+                        let old_blk = block_entry.cache_block.compare_exchange(
+                            INVALID_CACHE_BLOCK,
+                            cache_block,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        );
+                        assert!(old_blk == Ok(INVALID_CACHE_BLOCK) || old_blk == Err(cache_block));
 
-                    block_entry.lw_lsn.store(lw_lsn);
+                        block_entry.lw_lsn.store(lw_lsn);
 
-                    block_entry.referenced.store(true, Ordering::Relaxed);
+                        block_entry.referenced.store(true, Ordering::Relaxed);
 
-                    let pin_count = block_entry.pinned.fetch_sub(1, Ordering::Relaxed);
-                    assert!(pin_count > 0);
-                }
-                Entry::Vacant(e) => {
-                    // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
-                    // block entries first?
-                    _ = e
-                        .insert(BlockEntry {
+                        let pin_count = block_entry.pinned.fetch_sub(1, Ordering::Relaxed);
+                        assert!(pin_count > 0);
+                        break;
+                    }
+                    Entry::Vacant(e) => {
+                        if e.insert(BlockEntry {
                             lw_lsn: AtomicLsn::new(lw_lsn.0),
                             cache_block: AtomicU64::new(cache_block),
                             pinned: AtomicU64::new(0),
                             referenced: AtomicBool::new(true),
                         })
-                        .expect("out of memory");
+                        .is_ok()
+                        {
+                            break;
+                        } else {
+                            // The hash map was full. Evict an entry and retry.
+                        }
+                    }
                 }
+                self.try_evict_block_entry();
             }
         } else {
             // !is_write
@@ -479,7 +512,7 @@ impl IntegratedCacheWriteAccess {
                     if let Some(x) = file_cache.alloc_block() {
                         break x;
                     }
-                    if let Some(x) = self.try_evict_one_cache_block() {
+                    if let Some(x) = self.try_evict_cache_block() {
                         break x;
                     }
                 }
@@ -492,43 +525,53 @@ impl IntegratedCacheWriteAccess {
                 .expect("error writing to cache");
             // FIXME: handle errors gracefully.
 
-            match self.block_map.entry(key) {
-                Entry::Occupied(e) => {
-                    let block_entry = e.get();
-                    // FIXME: could there be concurrent readers?
-                    assert!(block_entry.pinned.load(Ordering::Relaxed) == 0);
+            loop {
+                match self.block_map.entry(key.clone()) {
+                    Entry::Occupied(e) => {
+                        let block_entry = e.get();
+                        // FIXME: could there be concurrent readers?
+                        assert!(block_entry.pinned.load(Ordering::Relaxed) == 0);
 
-                    let old_cache_block =
-                        block_entry.cache_block.swap(cache_block, Ordering::Relaxed);
-                    if old_cache_block != INVALID_CACHE_BLOCK {
-                        panic!(
-                            "remember_page called in !is_write mode, but page is already cached at blk {old_cache_block}"
-                        );
+                        let old_cache_block =
+                            block_entry.cache_block.swap(cache_block, Ordering::Relaxed);
+                        if old_cache_block != INVALID_CACHE_BLOCK {
+                            panic!(
+                                "remember_page called in !is_write mode, but page is already cached at blk {old_cache_block}"
+                            );
+                        }
+                        break;
                     }
-                }
-                Entry::Vacant(e) => {
-                    // FIXME: what to do if we run out of memory? Evict other relation entries? Remove
-                    // block entries first?
-                    _ = e
-                        .insert(BlockEntry {
+                    Entry::Vacant(e) => {
+                        if e.insert(BlockEntry {
                             lw_lsn: AtomicLsn::new(lw_lsn.0),
                             cache_block: AtomicU64::new(cache_block),
                             pinned: AtomicU64::new(0),
                             referenced: AtomicBool::new(true),
                         })
-                        .expect("out of memory");
-                }
+                        .is_ok()
+                        {
+                            break;
+                        } else {
+                            // The hash map was full. Evict an entry and retry.
+                        }
+                    }
+                };
+
+                self.try_evict_block_entry();
             }
         }
     }
 
     /// Forget information about given relation in the cache. (For DROP TABLE and such)
-    pub fn forget_rel(& self, rel: &RelTag, _nblocks: Option<u32>, flush_lsn: Lsn) {
-        tracing::info!("forgetting rel entry for {rel:?}");
+    pub fn forget_rel(&'t self, rel: &RelTag, _nblocks: Option<u32>, flush_lsn: Lsn) {
+        tracing::trace!("forgetting rel entry for {rel:?}");
         self.relsize_cache.remove(&RelKey::from(rel));
 
         // update with flush LSN
-        let _ = self.global_lw_lsn.fetch_max(flush_lsn.0, Ordering::Relaxed);
+        let _ = self
+            .shared
+            .global_lw_lsn
+            .fetch_max(flush_lsn.0, Ordering::Relaxed);
 
         // also forget all cached blocks for the relation
         // FIXME
@@ -576,64 +619,142 @@ impl IntegratedCacheWriteAccess {
 
     // Maintenance routines
 
-    /// Evict one block from the file cache. This is used when the file cache fills up
-    /// Returns the evicted block. It's not put to the free list, so it's available for the
-    /// caller to use immediately.
-    pub fn try_evict_one_cache_block(&self) -> Option<CacheBlock> {
-        let mut clock_hand = self.clock_hand.lock().unwrap();
-        for _ in 0..100 {
-            self.clock_iterations_counter.inc();
+    /// Evict one block entry from the cache.
+    ///
+    /// This is called when the hash map is full, to make an entry available for a new
+    /// insertion. There's no guarantee that the entry is free by the time this function
+    /// returns anymore; it can taken by a concurrent thread at any time. So you need to
+    /// call this and retry repeatedly until you succeed.
+    fn try_evict_block_entry(&self) {
+        let num_buckets = self.block_map.get_num_buckets();
+        loop {
+            self.metrics.clock_iterations_counter.inc();
+            let victim_bucket = self.clock_hand.fetch_add(1, Ordering::Relaxed) % num_buckets;
 
-            (*clock_hand) += 1;
-
-            let mut evict_this = false;
-            let num_buckets = self.block_map.get_num_logical_buckets();
-            match self
-                .block_map
-                .get_at_bucket((*clock_hand) % num_buckets)
-                .as_deref()
-            {
+            let evict_this = match self.block_map.get_at_bucket(victim_bucket).as_deref() {
                 None => {
-                    // This bucket was unused
+                    // The caller wants to have a free bucket. If there's one already, we're good.
+                    return;
                 }
                 Some((_, blk_entry)) => {
-                    if !blk_entry.referenced.swap(false, Ordering::Relaxed) {
-                        // Evict this. Maybe.
-                        evict_this = true;
+                    // Clear the 'referenced' flag. If it was already clear,
+                    // release the lock (by exiting this scope), and try to
+                    // evict it.
+                    !blk_entry.referenced.swap(false, Ordering::Relaxed)
+                }
+            };
+            if evict_this {
+                match self.try_evict_entry(victim_bucket) {
+                    EvictResult::Pinned => {
+                        // keep looping
                     }
+                    EvictResult::Vacant => {
+                        // This was released by someone else. Return so that
+                        // the caller will try to use it. (Chances are that it
+                        // will be reused by someone else, but let's try.)
+                        return;
+                    }
+                    EvictResult::Evicted(None) => {
+                        // This is now free.
+                        return;
+                    }
+                    EvictResult::Evicted(Some(cache_block)) => {
+                        // This is now free. We must not leak the cache block, so put it to the freelist
+                        self.file_cache.as_ref().unwrap().dealloc_block(cache_block);
+                        return;
+                    }
+                }
+            }
+            // TODO: add some kind of a backstop to error out if we loop
+            // too many times without finding any unpinned entries
+        }
+    }
+
+    /// Evict one block from the file cache. This is called when the file cache fills up,
+    /// to release a cache block.
+    ///
+    /// Returns the evicted block. It's not put to the free list, so it's available for
+    /// the caller to use immediately.
+    fn try_evict_cache_block(&self) -> Option<CacheBlock> {
+        let num_buckets = self.block_map.get_num_buckets();
+        let mut iterations = 0;
+        while iterations < 100 {
+            self.metrics.clock_iterations_counter.inc();
+            let victim_bucket = self.clock_hand.fetch_add(1, Ordering::Relaxed) % num_buckets;
+
+            let evict_this = match self.block_map.get_at_bucket(victim_bucket).as_deref() {
+                None => {
+                    // This bucket was unused. It's no use for finding a free cache block
+                    continue;
+                }
+                Some((_, blk_entry)) => {
+                    // Clear the 'referenced' flag. If it was already clear,
+                    // release the lock (by exiting this scope), and try to
+                    // evict it.
+                    !blk_entry.referenced.swap(false, Ordering::Relaxed)
                 }
             };
 
             if evict_this {
-                // grab the write lock
-                let mut evicted_cache_block = None;
-                if let Some(e) = self.block_map.entry_at_bucket(*clock_hand % num_buckets) {
-                    let old = e.get();
-                    // note: all the accesses to 'pinned' currently happen
-                    // within update_with_fn(), or while holding ValueReadGuard, which protects from concurrent
-                    // updates. Otherwise, another thread could set the 'pinned'
-                    // flag just after we have checked it here.
-                    if old.pinned.load(Ordering::Relaxed) == 0 {
-                        let _ = self
-                            .global_lw_lsn
-                            .fetch_max(old.lw_lsn.load().0, Ordering::Relaxed);
-                        let cache_block =
-                            old.cache_block.swap(INVALID_CACHE_BLOCK, Ordering::Relaxed);
-                        if cache_block != INVALID_CACHE_BLOCK {
-                            evicted_cache_block = Some(cache_block);
-                        }
-                        e.remove();
+                match self.try_evict_entry(victim_bucket) {
+                    EvictResult::Pinned => {
+                        // keep looping
+                    }
+                    EvictResult::Vacant => {
+                        // This was released by someone else. Keep looping.
+                    }
+                    EvictResult::Evicted(None) => {
+                        // This is now free, but it didn't have a cache block
+                        // associated with it. Keep looping.
+                    }
+                    EvictResult::Evicted(Some(cache_block)) => {
+                        // Reuse this
+                        return Some(cache_block);
                     }
                 }
-
-                if evicted_cache_block.is_some() {
-                    self.page_evictions_counter.inc();
-                    return evicted_cache_block;
-                }
             }
+
+            iterations += 1;
         }
-        // Give up if we didn find anything
+
+        // Reached the max iteration count without finding an entry. Return
+        // to give the caller a chance to do other things
         None
+    }
+
+    /// Returns Err, if the page could not be evicted because it was pinned
+    fn try_evict_entry(&self, victim: usize) -> EvictResult {
+        // grab the write lock
+        if let Some(e) = self.block_map.entry_at_bucket(victim) {
+            let old = e.get();
+            // note: all the accesses to 'pinned' currently happen
+            // within update_with_fn(), or while holding ValueReadGuard, which protects from concurrent
+            // updates. Otherwise, another thread could set the 'pinned'
+            // flag just after we have checked it here.
+            //
+            // FIXME: ^^ outdated comment, update_with_fn() is no more
+
+            if old.pinned.load(Ordering::Relaxed) == 0 {
+                let old_val = e.remove();
+                let _ = self
+                    .shared
+                    .global_lw_lsn
+                    .fetch_max(old_val.lw_lsn.into_inner().0, Ordering::Relaxed);
+                let evicted_cache_block = match old_val.cache_block.into_inner() {
+                    INVALID_CACHE_BLOCK => None,
+                    n => Some(n),
+                };
+                if evicted_cache_block.is_some() {
+                    self.metrics.cache_page_evictions_counter.inc();
+                }
+                self.metrics.block_entry_evictions_counter.inc();
+                EvictResult::Evicted(evicted_cache_block)
+            } else {
+                EvictResult::Pinned
+            }
+        } else {
+            EvictResult::Vacant
+        }
     }
 
     /// Resize the local file cache.
@@ -657,21 +778,23 @@ impl IntegratedCacheWriteAccess {
 			file_cache.grow(remaining);
 			debug_assert!(file_cache.free_space() > remaining);
         } else {
-			let page_evictions = &self.page_evictions_counter;
-			let global_lw_lsn = &self.global_lw_lsn;
+			let page_evictions = &self.metrics.cache_page_evictions_counter;
+			let global_lw_lsn = &self.shared.global_lw_lsn;
 			let block_map = self.block_map.clone();
 			tokio::task::spawn_blocking(move || {
-				// Don't hold clock hand lock any longer than necessary, should be ok to evict in parallel
-				// but we don't want to compete with the eviction logic in the to-be-shrunk region.
-				{
-					let mut clock_hand = self.clock_hand.lock().unwrap();
-
-					block_map.begin_shrink(num_blocks);
-					// Avoid skipping over beginning entries due to modulo shift.
-					if *clock_hand > num_blocks as usize {
-						*clock_hand = num_blocks as usize - 1;
+				block_map.begin_shrink(num_blocks);
+				let mut old_hand = self.clock_hand.load(Ordering::Relaxed);
+				if old_hand > num_blocks as usize {
+					loop {
+						match self.clock_hand.compare_exchange_weak(
+							old_hand, 0, Ordering::Relaxed, Ordering::Relaxed
+						) {
+							Ok(_) => break,
+							Err(x) => old_hand = x,
+						}
 					}
 				}
+
 				// Try and evict everything in to-be-shrinked space
 				// TODO(quantumish): consider moving things ahead of clock hand?
 				let mut file_evictions = 0;
@@ -707,7 +830,7 @@ impl IntegratedCacheWriteAccess {
 				// enough space. Waiting for stragglers at the end of the map could *in theory*
 				// take indefinite amounts of time depending on how long they stay pinned.
 				while file_evictions < difference {
-					if let Some(i) = self.try_evict_one_cache_block() {
+					if let Some(i) = self.try_evict_cache_block() {
 						if i != INVALID_CACHE_BLOCK {
 							file_cache.delete_block(i);
 							file_evictions += 1;
@@ -764,42 +887,31 @@ impl IntegratedCacheWriteAccess {
     }
 }
 
-impl metrics::core::Collector for IntegratedCacheWriteAccess {
-    fn desc(&self) -> Vec<&metrics::core::Desc> {
-        let mut descs = Vec::new();
-        descs.append(&mut self.page_evictions_counter.desc());
-        descs.append(&mut self.clock_iterations_counter.desc());
-
-        descs.append(&mut self.block_map_num_buckets.desc());
-        descs.append(&mut self.block_map_num_buckets_in_use.desc());
-
-        descs.append(&mut self.relsize_cache_num_buckets.desc());
-        descs.append(&mut self.relsize_cache_num_buckets_in_use.desc());
-
-        descs
-    }
-    fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
+impl<T: metric::group::Encoding> MetricGroup<T> for IntegratedCacheWriteAccess<'_>
+where
+    CounterState: MetricEncoding<T>,
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_group_into(&self, enc: &mut T) -> Result<(), <T as metric::group::Encoding>::Err> {
         // Update gauges
-        self.block_map_num_buckets
+        self.metrics
+            .block_map_num_buckets
             .set(self.block_map.get_num_buckets() as i64);
-        self.block_map_num_buckets_in_use
+        self.metrics
+            .block_map_num_buckets_in_use
             .set(self.block_map.get_num_buckets_in_use() as i64);
-        self.relsize_cache_num_buckets
+        self.metrics
+            .relsize_cache_num_buckets
             .set(self.relsize_cache.get_num_buckets() as i64);
-        self.relsize_cache_num_buckets_in_use
+        self.metrics
+            .relsize_cache_num_buckets_in_use
             .set(self.relsize_cache.get_num_buckets_in_use() as i64);
 
-        let mut values = Vec::new();
-        values.append(&mut self.page_evictions_counter.collect());
-        values.append(&mut self.clock_iterations_counter.collect());
+        if let Some(file_cache) = &self.file_cache {
+            file_cache.collect_group_into(enc)?;
+        }
 
-        values.append(&mut self.block_map_num_buckets.collect());
-        values.append(&mut self.block_map_num_buckets_in_use.collect());
-
-        values.append(&mut self.relsize_cache_num_buckets.collect());
-        values.append(&mut self.relsize_cache_num_buckets_in_use.collect());
-
-        values
+        self.metrics.collect_group_into(enc)
     }
 }
 
@@ -833,7 +945,7 @@ pub enum GetBucketResult {
 ///
 /// This allows backends to read pages from the cache directly, on their own, without making a
 /// request to the communicator process.
-impl IntegratedCacheReadAccess {
+impl<'t> IntegratedCacheReadAccess<'t> {
     pub fn get_rel_size(& self, rel: &RelTag) -> Option<u32> {
         get_rel_size(&self.relsize_cache, rel)
     }
@@ -845,11 +957,64 @@ impl IntegratedCacheReadAccess {
         }
     }
 
-    /// Check if the given page is present in the cache
-    pub fn cache_contains_page(& self, rel: &RelTag, block_number: u32) -> bool {
-        self.block_map
-            .get(&BlockKey::from((rel, block_number)))
-            .is_some()
+    /// Check if LFC contains the given buffer, and update its last-written LSN if not.
+    ///
+    /// Returns:
+    ///   true if the block is in the LFC
+    ///   false if it's not.
+    ///
+    /// If the block was not in the LFC (i.e. when this returns false), the last-written LSN
+    /// value on the block is updated to the given 'lsn', so that the next read of the block
+    /// will read the new version. Otherwise the caller is assumed to modify the page and
+    /// to update the last-written LSN later by writing the new page.
+    pub fn update_lw_lsn_for_block_if_not_cached(
+        &'t self,
+        rel: &RelTag,
+        block_number: u32,
+        lsn: Lsn,
+    ) -> bool {
+        let key = BlockKey::from((rel, block_number));
+        let entry = self.block_map.entry(key);
+        match entry {
+            Entry::Occupied(e) => {
+                let block_entry = e.get();
+                if block_entry.cache_block.load(Ordering::Relaxed) != INVALID_CACHE_BLOCK {
+                    block_entry.referenced.store(true, Ordering::Relaxed);
+                    true
+                } else {
+                    let old_lwlsn = block_entry.lw_lsn.fetch_max(lsn);
+                    if old_lwlsn >= lsn {
+                        // shouldn't happen
+                        tracing::warn!(
+                            "attempted to move last-written LSN backwards from {old_lwlsn} to {lsn} for rel {rel} blk {block_number}"
+                        );
+                    }
+                    false
+                }
+            }
+            Entry::Vacant(e) => {
+                if e.insert(BlockEntry {
+                    lw_lsn: AtomicLsn::new(lsn.0),
+                    cache_block: AtomicU64::new(INVALID_CACHE_BLOCK),
+                    pinned: AtomicU64::new(0),
+                    referenced: AtomicBool::new(true),
+                })
+                .is_ok()
+                {
+                    false
+                } else {
+                    // The hash table is full.
+                    //
+                    // TODO: Evict something. But for now, just set the global lw LSN instead.
+                    // That's correct, but not very efficient for future reads
+                    let _ = self
+                        .shared
+                        .global_lw_lsn
+                        .fetch_max(lsn.0, Ordering::Relaxed);
+                    false
+                }
+            }
+        }
     }
 
     pub fn get_bucket(&self, bucket_no: usize) -> GetBucketResult {
@@ -873,7 +1038,7 @@ impl IntegratedCacheReadAccess {
 
 pub struct BackendCacheReadOp<'t> {
     read_guards: Vec<DeferredUnpin>,
-    map_access: &'t IntegratedCacheReadAccess,
+    map_access: &'t IntegratedCacheReadAccess<'t>,
 }
 
 impl<'e> BackendCacheReadOp<'e> {

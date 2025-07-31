@@ -35,6 +35,10 @@ SHLIB_LINK = -lcurl
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S), Darwin)
     SHLIB_LINK += -framework Security -framework CoreFoundation -framework SystemConfiguration
+
+    # Link against object files for the current macOS version, to avoid spurious linker warnings.
+    MACOSX_DEPLOYMENT_TARGET := $(shell xcrun --sdk macosx --show-sdk-version)
+    export MACOSX_DEPLOYMENT_TARGET
 endif
 
 EXTENSION = neon

@@ -1,5 +1,11 @@
+commit 5eb393810cf7c7bafa4e394dad2e349e2a8cb2cb
+Author: Alexey Masterov <alexey.masterov@databricks.com>
+Date:   Mon Jul 28 18:11:02 2025 +0200
+
+    Patch for pg_repack
+
 diff --git a/regress/Makefile b/regress/Makefile
-index bf6edcb..89b4c7f 100644
+index bf6edcb..110e734 100644
 --- a/regress/Makefile
 +++ b/regress/Makefile
 @@ -17,7 +17,7 @@ INTVERSION := $(shell echo $$(($$(echo $(VERSION).0 | sed 's/\([[:digit:]]\{1,\}
@@ -7,18 +13,36 @@ index bf6edcb..89b4c7f 100644
  #
  
 -REGRESS := init-extension repack-setup repack-run error-on-invalid-idx no-error-on-invalid-idx after-schema repack-check nosuper tablespace get_order_by trigger
-+REGRESS := init-extension repack-setup repack-run error-on-invalid-idx no-error-on-invalid-idx after-schema repack-check nosuper get_order_by trigger
++REGRESS := init-extension noautovacuum repack-setup repack-run error-on-invalid-idx no-error-on-invalid-idx after-schema repack-check nosuper get_order_by trigger autovacuum
  
  USE_PGXS = 1	# use pgxs if not in contrib directory
  PGXS := $(shell $(PG_CONFIG) --pgxs)
-diff --git a/regress/expected/init-extension.out b/regress/expected/init-extension.out
-index 9f2e171..f6e4f8d 100644
---- a/regress/expected/init-extension.out
-+++ b/regress/expected/init-extension.out
-@@ -1,3 +1,2 @@
- SET client_min_messages = warning;
- CREATE EXTENSION pg_repack;
--RESET client_min_messages;
+diff --git a/regress/expected/autovacuum.out b/regress/expected/autovacuum.out
+new file mode 100644
+index 0000000..e7f2363
+--- /dev/null
++++ b/regress/expected/autovacuum.out
+@@ -0,0 +1,7 @@
++ALTER SYSTEM SET autovacuum='on';
++SELECT pg_reload_conf();
++ pg_reload_conf 
++----------------
++ t
++(1 row)
++
+diff --git a/regress/expected/noautovacuum.out b/regress/expected/noautovacuum.out
+new file mode 100644
+index 0000000..fc7978e
+--- /dev/null
++++ b/regress/expected/noautovacuum.out
+@@ -0,0 +1,7 @@
++ALTER SYSTEM SET autovacuum='off';
++SELECT pg_reload_conf();
++ pg_reload_conf 
++----------------
++ t
++(1 row)
++
 diff --git a/regress/expected/nosuper.out b/regress/expected/nosuper.out
 index 8d0a94e..63b68bf 100644
 --- a/regress/expected/nosuper.out
@@ -50,14 +74,22 @@ index 8d0a94e..63b68bf 100644
  INFO: repacking table "public.tbl_cluster"
  ERROR: query failed: ERROR:  current transaction is aborted, commands ignored until end of transaction block
  DETAIL: query was: RESET lock_timeout
-diff --git a/regress/sql/init-extension.sql b/regress/sql/init-extension.sql
-index 9f2e171..f6e4f8d 100644
---- a/regress/sql/init-extension.sql
-+++ b/regress/sql/init-extension.sql
-@@ -1,3 +1,2 @@
- SET client_min_messages = warning;
- CREATE EXTENSION pg_repack;
--RESET client_min_messages;
+diff --git a/regress/sql/autovacuum.sql b/regress/sql/autovacuum.sql
+new file mode 100644
+index 0000000..a8eda63
+--- /dev/null
++++ b/regress/sql/autovacuum.sql
+@@ -0,0 +1,2 @@
++ALTER SYSTEM SET autovacuum='on';
++SELECT pg_reload_conf();
+diff --git a/regress/sql/noautovacuum.sql b/regress/sql/noautovacuum.sql
+new file mode 100644
+index 0000000..13d4836
+--- /dev/null
++++ b/regress/sql/noautovacuum.sql
+@@ -0,0 +1,2 @@
++ALTER SYSTEM SET autovacuum='off';
++SELECT pg_reload_conf();
 diff --git a/regress/sql/nosuper.sql b/regress/sql/nosuper.sql
 index 072f0fa..dbe60f8 100644
 --- a/regress/sql/nosuper.sql

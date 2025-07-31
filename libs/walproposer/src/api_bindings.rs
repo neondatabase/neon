@@ -341,6 +341,34 @@ extern "C-unwind" fn log_internal(
     }
 }
 
+/* BEGIN_HADRON */
+extern "C" fn reset_safekeeper_statuses_for_metrics(wp: *mut WalProposer, num_safekeepers: u32) {
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        if api.is_null() {
+            return;
+        }
+        (*api).reset_safekeeper_statuses_for_metrics(&mut (*wp), num_safekeepers);
+    }
+}
+
+extern "C" fn update_safekeeper_status_for_metrics(
+    wp: *mut WalProposer,
+    sk_index: u32,
+    status: u8,
+) {
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        if api.is_null() {
+            return;
+        }
+        (*api).update_safekeeper_status_for_metrics(&mut (*wp), sk_index, status);
+    }
+}
+/* END_HADRON */
+
 #[derive(Debug, PartialEq)]
 pub enum Level {
     Debug5,
@@ -414,6 +442,10 @@ pub(crate) fn create_api() -> walproposer_api {
         finish_sync_safekeepers: Some(finish_sync_safekeepers),
         process_safekeeper_feedback: Some(process_safekeeper_feedback),
         log_internal: Some(log_internal),
+        /* BEGIN_HADRON */
+        reset_safekeeper_statuses_for_metrics: Some(reset_safekeeper_statuses_for_metrics),
+        update_safekeeper_status_for_metrics: Some(update_safekeeper_status_for_metrics),
+        /* END_HADRON */
     }
 }
 
@@ -426,12 +458,15 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         remote_consistent_lsn: 0,
         replytime: 0,
         shard_number: 0,
+        corruption_detected: false,
     };
 
     let empty_wal_rate_limiter = crate::bindings::WalRateLimiter {
+        effective_max_wal_bytes_per_second: crate::bindings::pg_atomic_uint32 { value: 0 },
         should_limit: crate::bindings::pg_atomic_uint32 { value: 0 },
         sent_bytes: 0,
-        last_recorded_time_us: crate::bindings::pg_atomic_uint64 { value: 0 },
+        batch_start_time_us: crate::bindings::pg_atomic_uint64 { value: 0 },
+        batch_end_time_us: crate::bindings::pg_atomic_uint64 { value: 0 },
     };
 
     crate::bindings::WalproposerShmemState {
@@ -448,6 +483,8 @@ pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
         replica_promote: false,
         min_ps_feedback: empty_feedback,
         wal_rate_limiter: empty_wal_rate_limiter,
+        num_safekeepers: 0,
+        safekeeper_status: [0; 32],
     }
 }
 

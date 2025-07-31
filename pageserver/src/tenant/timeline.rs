@@ -70,7 +70,7 @@ use tracing::*;
 use utils::generation::Generation;
 use utils::guard_arc_swap::GuardArcSwap;
 use utils::id::TimelineId;
-use utils::logging::{MonitorSlowFutureCallback, monitor_slow_future};
+use utils::logging::{MonitorSlowFutureCallback, log_slow, monitor_slow_future};
 use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
@@ -287,7 +287,7 @@ pub struct Timeline {
     ancestor_lsn: Lsn,
 
     // The LSN of gc-compaction that was last applied to this timeline.
-    gc_compaction_state: ArcSwap<Option<GcCompactionState>>,
+    gc_compaction_state: ArcSwapOption<GcCompactionState>,
 
     pub(crate) metrics: Arc<TimelineMetrics>,
 
@@ -397,6 +397,11 @@ pub struct Timeline {
     /// If true, the last compaction failed.
     compaction_failed: AtomicBool,
 
+    /// Begin Hadron: If true, the pageserver has likely detected data corruption in the timeline.
+    /// We need to feed this information back to the Safekeeper and postgres for them to take the
+    /// appropriate action.
+    corruption_detected: AtomicBool,
+
     /// Notifies the tenant compaction loop that there is pending L0 compaction work.
     l0_compaction_trigger: Arc<Notify>,
 
@@ -441,7 +446,7 @@ pub struct Timeline {
     /// heatmap on demand.
     heatmap_layers_downloader: Mutex<Option<heatmap_layers_downloader::HeatmapLayersDownloader>>,
 
-    pub(crate) rel_size_v2_status: ArcSwapOption<RelSizeMigration>,
+    pub(crate) rel_size_v2_status: ArcSwap<(Option<RelSizeMigration>, Option<Lsn>)>,
 
     wait_lsn_log_slow: tokio::sync::Semaphore,
 
@@ -450,6 +455,9 @@ pub struct Timeline {
 
     #[expect(dead_code)]
     feature_resolver: Arc<TenantFeatureResolver>,
+
+    /// Basebackup will collect the count and store it here. Used for reldirv2 rollout.
+    pub(crate) db_rel_count: ArcSwapOption<(usize, usize)>,
 }
 
 pub(crate) enum PreviousHeatmap {
@@ -2891,12 +2899,9 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.rel_size_v2_enabled)
     }
 
-    pub(crate) fn get_rel_size_v2_status(&self) -> RelSizeMigration {
-        self.rel_size_v2_status
-            .load()
-            .as_ref()
-            .map(|s| s.as_ref().clone())
-            .unwrap_or(RelSizeMigration::Legacy)
+    pub(crate) fn get_rel_size_v2_status(&self) -> (RelSizeMigration, Option<Lsn>) {
+        let (status, migrated_at) = self.rel_size_v2_status.load().as_ref().clone();
+        (status.unwrap_or(RelSizeMigration::Legacy), migrated_at)
     }
 
     fn get_compaction_upper_limit(&self) -> usize {
@@ -3171,6 +3176,7 @@ impl Timeline {
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
         gc_compaction_state: Option<GcCompactionState>,
         rel_size_v2_status: Option<RelSizeMigration>,
+        rel_size_migrated_at: Option<Lsn>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -3237,7 +3243,7 @@ impl Timeline {
                 }),
                 disk_consistent_lsn: AtomicLsn::new(disk_consistent_lsn.0),
 
-                gc_compaction_state: ArcSwap::new(Arc::new(gc_compaction_state)),
+                gc_compaction_state: ArcSwapOption::from_pointee(gc_compaction_state),
 
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
                 last_freeze_ts: RwLock::new(Instant::now()),
@@ -3309,6 +3315,7 @@ impl Timeline {
 
                 compaction_lock: tokio::sync::Mutex::default(),
                 compaction_failed: AtomicBool::default(),
+                corruption_detected: AtomicBool::default(),
                 l0_compaction_trigger: resources.l0_compaction_trigger,
                 gc_lock: tokio::sync::Mutex::default(),
 
@@ -3335,13 +3342,18 @@ impl Timeline {
 
                 heatmap_layers_downloader: Mutex::new(None),
 
-                rel_size_v2_status: ArcSwapOption::from_pointee(rel_size_v2_status),
+                rel_size_v2_status: ArcSwap::from_pointee((
+                    rel_size_v2_status,
+                    rel_size_migrated_at,
+                )),
 
                 wait_lsn_log_slow: tokio::sync::Semaphore::new(1),
 
                 basebackup_cache: resources.basebackup_cache,
 
                 feature_resolver: resources.feature_resolver.clone(),
+
+                db_rel_count: ArcSwapOption::from_pointee(None),
             };
 
             result.repartition_threshold =
@@ -3413,7 +3425,7 @@ impl Timeline {
         gc_compaction_state: GcCompactionState,
     ) -> anyhow::Result<()> {
         self.gc_compaction_state
-            .store(Arc::new(Some(gc_compaction_state.clone())));
+            .store(Some(Arc::new(gc_compaction_state.clone())));
         self.remote_client
             .schedule_index_upload_for_gc_compaction_state_update(gc_compaction_state)
     }
@@ -3421,15 +3433,24 @@ impl Timeline {
     pub(crate) fn update_rel_size_v2_status(
         &self,
         rel_size_v2_status: RelSizeMigration,
+        rel_size_migrated_at: Option<Lsn>,
     ) -> anyhow::Result<()> {
-        self.rel_size_v2_status
-            .store(Some(Arc::new(rel_size_v2_status.clone())));
+        self.rel_size_v2_status.store(Arc::new((
+            Some(rel_size_v2_status.clone()),
+            rel_size_migrated_at,
+        )));
         self.remote_client
-            .schedule_index_upload_for_rel_size_v2_status_update(rel_size_v2_status)
+            .schedule_index_upload_for_rel_size_v2_status_update(
+                rel_size_v2_status,
+                rel_size_migrated_at,
+            )
     }
 
     pub(crate) fn get_gc_compaction_state(&self) -> Option<GcCompactionState> {
-        self.gc_compaction_state.load_full().as_ref().clone()
+        self.gc_compaction_state
+            .load()
+            .as_ref()
+            .map(|x| x.as_ref().clone())
     }
 
     /// Creates and starts the wal receiver.
@@ -5989,6 +6010,17 @@ impl Timeline {
                 )))
             });
 
+            // Begin Hadron
+            //
+            fail_point!("create-image-layer-fail-simulated-corruption", |_| {
+                self.corruption_detected
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Err(CreateImageLayersError::Other(anyhow::anyhow!(
+                    "failpoint create-image-layer-fail-simulated-corruption"
+                )))
+            });
+            // End Hadron
+
             let io_concurrency = IoConcurrency::spawn_from_conf(
                 self.conf.get_vectored_concurrent_io,
                 self.gate
@@ -6883,7 +6915,13 @@ impl Timeline {
 
             write_guard.store_and_unlock(new_gc_cutoff)
         };
-        waitlist.wait().await;
+        let waitlist_wait_fut = std::pin::pin!(waitlist.wait());
+        log_slow(
+            "applied_gc_cutoff waitlist wait",
+            Duration::from_secs(30),
+            waitlist_wait_fut,
+        )
+        .await;
 
         info!("GC starting");
 
@@ -7128,6 +7166,7 @@ impl Timeline {
                             critical_timeline!(
                                 self.tenant_shard_id,
                                 self.timeline_id,
+                                Some(&self.corruption_detected),
                                 "walredo failure during page reconstruction: {err:?}"
                             );
                         }

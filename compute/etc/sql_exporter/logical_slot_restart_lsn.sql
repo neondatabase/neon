@@ -1,3 +1,3 @@
-SELECT slot_name, (restart_lsn - '0/0')::FLOAT8 as restart_lsn
-FROM pg_replication_slots
+SELECT slot_name, (restart_lsn - '0/0')::pg_catalog.FLOAT8 AS restart_lsn
+FROM pg_catalog.pg_replication_slots
 WHERE slot_type = 'logical';

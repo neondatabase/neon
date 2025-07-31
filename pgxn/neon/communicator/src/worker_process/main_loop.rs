@@ -9,7 +9,7 @@ use crate::file_cache::FileCache;
 use crate::global_allocator::MyAllocatorCollector;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{CacheResult, IntegratedCacheWriteAccess};
-use crate::neon_request::{CGetPageVRequest, CPrefetchVRequest};
+use crate::neon_request::{CGetPageVRequest, CGetPageVUncachedRequest, CPrefetchVRequest};
 use crate::neon_request::{INVALID_BLOCK_NUMBER, NeonIORequest, NeonIOResult};
 use crate::worker_process::control_socket;
 use crate::worker_process::in_progress_ios::{RequestInProgressKey, RequestInProgressTable};
@@ -23,6 +23,7 @@ use uring_common::buf::IoBuf;
 
 use measured::MetricGroup;
 use measured::metric::MetricEncoding;
+use measured::metric::counter::CounterState;
 use measured::metric::gauge::GaugeState;
 use measured::metric::group::Encoding;
 use measured::{Gauge, GaugeVec};
@@ -30,7 +31,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::callbacks::{get_request_lsn, notify_proc};
 
-use tracing::{debug, error, info, info_span, trace};
+use tracing::{error, info, info_span, trace};
 
 use utils::lsn::Lsn;
 
@@ -52,7 +53,7 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     in_progress_table: RequestInProgressTable,
 
     /// Local File Cache, relation size tracking, last-written LSN tracking
-    pub(crate) cache: IntegratedCacheWriteAccess,
+    pub(crate) cache: IntegratedCacheWriteAccess<'a>,
 
     /*** Metrics ***/
     pub(crate) lfc_metrics: LfcMetricsCollector,
@@ -65,7 +66,6 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     // For the requests that affect multiple blocks, have separate counters for the # of blocks affected
     request_nblocks_counters: GaugeVec<RequestTypeLabelGroupSet>,
 
-    #[allow(dead_code)]
     allocator_metrics: MyAllocatorCollector,
 }
 
@@ -144,8 +144,6 @@ pub(super) fn init(
     let cache = cis
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
-
-    debug!("Initialised integrated cache: {cache:?}");
 
     let client = {
         let _guard = runtime.enter();
@@ -266,7 +264,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     // This needs to be removed once more regression tests are passing.
                     // See also similar hack in the backend code, in wait_request_completion()
                     let result = tokio::time::timeout(
-                        tokio::time::Duration::from_secs(30),
+                        tokio::time::Duration::from_secs(60),
                         self.handle_request(slot.get_request()),
                     )
                     .await
@@ -373,7 +371,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 {
                     Ok(Some(nblocks)) => {
                         // update the cache
-                        tracing::info!(
+                        tracing::trace!(
                             "updated relsize for {:?} in cache: {}, lsn {}",
                             rel,
                             nblocks,
@@ -389,8 +387,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         NeonIOResult::RelSize(INVALID_BLOCK_NUMBER)
                     }
                     Err(err) => {
+                        // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                         info!("tonic error: {err:?}");
-                        NeonIOResult::Error(0)
+                        NeonIOResult::Error(libc::EIO)
                     }
                 }
             }
@@ -398,6 +397,12 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 Ok(()) => NeonIOResult::GetPageV,
                 Err(errno) => NeonIOResult::Error(errno),
             },
+            NeonIORequest::GetPageVUncached(req) => {
+                match self.handle_get_pagev_uncached_request(req).await {
+                    Ok(()) => NeonIOResult::GetPageV,
+                    Err(errno) => NeonIOResult::Error(errno),
+                }
+            }
             NeonIORequest::ReadSlruSegment(req) => {
                 let lsn = Lsn(req.request_lsn);
                 let file_path = req.destination_file_path();
@@ -413,7 +418,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 {
                     Ok(slru_bytes) => {
                         if let Err(e) = tokio::fs::write(&file_path, &slru_bytes).await {
-                            info!("could not write slru segment to file {file_path}: {e}");
+                            error!("could not write slru segment to file {file_path}: {e}");
                             return NeonIOResult::Error(e.raw_os_error().unwrap_or(libc::EIO));
                         }
 
@@ -422,8 +427,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         NeonIOResult::ReadSlruSegment(blocks_count as _)
                     }
                     Err(err) => {
+                        // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                         info!("tonic error: {err:?}");
-                        NeonIOResult::Error(0)
+                        NeonIOResult::Error(libc::EIO)
                     }
                 }
             }
@@ -431,6 +437,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.request_nblocks_counters
                     .inc_by(RequestTypeLabelGroup::from_req(request), req.nblocks as i64);
                 let req = *req;
+                // FIXME: handle_request() runs in a separate task already, do we really need to spawn a new one here?
                 tokio::spawn(async move { self.handle_prefetchv_request(&req).await });
                 NeonIOResult::PrefetchVLaunched
             }
@@ -459,8 +466,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 {
                     Ok(db_size) => NeonIOResult::DbSize(db_size),
                     Err(err) => {
+                        // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                         info!("tonic error: {err:?}");
-                        NeonIOResult::Error(0)
+                        NeonIOResult::Error(libc::EIO)
                     }
                 }
             }
@@ -575,7 +583,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     continue;
                 }
                 Ok(CacheResult::NotFound(lsn)) => lsn,
-                Err(_io_error) => return Err(-1), // FIXME errno?
+                Err(_io_error) => return Err(libc::EIO), // FIXME print the error?
             };
             cache_misses.push((blkno, not_modified_since, dest, in_progress_guard));
         }
@@ -599,7 +607,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
             .map(|(blkno, _lsn, _dest, _guard)| *blkno)
             .collect();
         let read_lsn = self.request_lsns(not_modified_since);
-        info!(
+        trace!(
             "sending getpage request for blocks {:?} in rel {:?} lsns {}",
             block_numbers, rel, read_lsn
         );
@@ -623,10 +631,10 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         resp.pages.len(),
                         block_numbers.len(),
                     );
-                    return Err(-1);
+                    return Err(libc::EIO);
                 }
 
-                info!(
+                trace!(
                     "received getpage response for blocks {:?} in rel {:?} lsns {}",
                     block_numbers, rel, read_lsn
                 );
@@ -652,8 +660,75 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 }
             }
             Err(err) => {
+                // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                 info!("tonic error: {err:?}");
-                return Err(-1);
+                return Err(libc::EIO);
+            }
+        }
+        Ok(())
+    }
+
+    /// Subroutine to handle an GetPageVUncached request.
+    ///
+    /// Note: this bypasses the cache, in-progress IO locking, and all other side-effects.
+    /// This request type is only used in tests.
+    async fn handle_get_pagev_uncached_request(
+        &'t self,
+        req: &CGetPageVUncachedRequest,
+    ) -> Result<(), i32> {
+        let rel = req.reltag();
+
+        // Construct a pageserver request
+        let block_numbers: Vec<u32> =
+            (req.block_number..(req.block_number + (req.nblocks as u32))).collect();
+        let read_lsn = page_api::ReadLsn {
+            request_lsn: Lsn(req.request_lsn),
+            not_modified_since_lsn: Some(Lsn(req.not_modified_since)),
+        };
+        trace!(
+            "sending (uncached) getpage request for blocks {:?} in rel {:?} lsns {}",
+            block_numbers, rel, read_lsn
+        );
+        match self
+            .client
+            .get_page(page_api::GetPageRequest {
+                request_id: req.request_id.into(),
+                request_class: page_api::GetPageClass::Normal,
+                read_lsn,
+                rel,
+                block_numbers: block_numbers.clone(),
+            })
+            .await
+        {
+            Ok(resp) => {
+                // Write the received page images directly to the shared memory location
+                // that the backend requested.
+                if resp.pages.len() != block_numbers.len() {
+                    error!(
+                        "received unexpected response with {} page images from pageserver for a request for {} pages",
+                        resp.pages.len(),
+                        block_numbers.len(),
+                    );
+                    return Err(libc::EIO);
+                }
+
+                trace!(
+                    "received getpage response for blocks {:?} in rel {:?} lsns {}",
+                    block_numbers, rel, read_lsn
+                );
+
+                for (page, dest) in resp.pages.into_iter().zip(req.dest) {
+                    let src: &[u8] = page.image.as_ref();
+                    let len = std::cmp::min(src.len(), dest.bytes_total());
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), len);
+                    };
+                }
+            }
+            Err(err) => {
+                // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
+                info!("tonic error: {err:?}");
+                return Err(libc::EIO);
             }
         }
         Ok(())
@@ -684,7 +759,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     continue;
                 }
                 Ok(CacheResult::NotFound(lsn)) => lsn,
-                Err(_io_error) => return Err(-1), // FIXME errno?
+                Err(_io_error) => return Err(libc::EIO), // FIXME print the error?
             };
             cache_misses.push((blkno, not_modified_since, in_progress_guard));
         }
@@ -726,7 +801,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         resp.pages.len(),
                         block_numbers.len(),
                     );
-                    return Err(-1);
+                    return Err(libc::EIO);
                 }
 
                 for (page, (blkno, _lsn, _guard)) in resp.pages.into_iter().zip(cache_misses) {
@@ -736,8 +811,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 }
             }
             Err(err) => {
+                // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                 info!("tonic error: {err:?}");
-                return Err(-1);
+                return Err(libc::EIO);
             }
         }
         Ok(())
@@ -747,6 +823,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 impl<T> MetricGroup<T> for CommunicatorWorkerProcessStruct<'_>
 where
     T: Encoding,
+    CounterState: MetricEncoding<T>,
     GaugeState: MetricEncoding<T>,
 {
     fn collect_group_into(&self, enc: &mut T) -> Result<(), T::Err> {
@@ -754,12 +831,12 @@ where
         use measured::metric::name::MetricName;
 
         self.lfc_metrics.collect_group_into(enc)?;
+        self.cache.collect_group_into(enc)?;
         self.request_counters
             .collect_family_into(MetricName::from_str("request_counters"), enc)?;
         self.request_nblocks_counters
             .collect_family_into(MetricName::from_str("request_nblocks_counters"), enc)?;
-
-        // FIXME: allocator metrics
+        self.allocator_metrics.collect_group_into(enc)?;
 
         Ok(())
     }

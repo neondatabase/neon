@@ -76,7 +76,7 @@ impl<'m> MigrationRunner<'m> {
         self.client
             .simple_query("CREATE SCHEMA IF NOT EXISTS neon_migration")
             .await?;
-        self.client.simple_query("CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key INT NOT NULL PRIMARY KEY, id bigint NOT NULL DEFAULT 0)").await?;
+        self.client.simple_query("CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key pg_catalog.int4 NOT NULL PRIMARY KEY, id pg_catalog.int8 NOT NULL DEFAULT 0)").await?;
         self.client
             .simple_query(
                 "INSERT INTO neon_migration.migration_id VALUES (0, 0) ON CONFLICT DO NOTHING",

@@ -34,7 +34,6 @@ tokio-pipe = { version = "0.2.12" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-metrics.workspace = true
 uring-common = { workspace = true, features = ["bytes"] }
 
 pageserver_client_grpc.workspace = true

@@ -21,6 +21,7 @@ extern int	wal_acceptor_reconnect_timeout;
 extern int	wal_acceptor_connection_timeout;
 extern int	readahead_getpage_pull_timeout_ms;
 extern bool	disable_wal_prev_lsn_checks;
+extern bool	lakebase_mode;
 
 extern bool AmPrewarmWorker;
 
@@ -84,7 +85,8 @@ extern void WalproposerShmemInit(void);
 extern void LwLsnCacheShmemInit(void);
 extern void NeonPerfCountersShmemInit(void);
 
-typedef struct LfcStatsEntry {
+typedef struct LfcStatsEntry
+{
 	const char *metric_name;
 	bool		isnull;
 	uint64		value;

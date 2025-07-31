@@ -110,12 +110,12 @@ typedef struct CommunicatorShmemData
 	 *
 	 * Note that this is not protected by any locks. That's sloppy, but works
 	 * fine in practice. To "add" a value to the HLL state, we just overwrite
-	 * one of the timestamps. Calculating the estimate reads all the values, but
-	 * it also doesn't depend on seeing a consistent snapshot of the values. We
-	 * could get bogus results if accessing the TimestampTz was not atomic, but
-	 * it on any 64-bit platforms we care about it is, and even if we observed a
-	 * torn read every now and then, it wouldn't affect the overall estimate
-	 * much.
+	 * one of the timestamps. Calculating the estimate reads all the values,
+	 * but it also doesn't depend on seeing a consistent snapshot of the
+	 * values. We could get bogus results if accessing the TimestampTz was not
+	 * atomic, but it on any 64-bit platforms we care about it is, and even if
+	 * we observed a torn read every now and then, it wouldn't affect the
+	 * overall estimate much.
 	 */
 	HyperLogLogState wss_estimation;
 
@@ -397,21 +397,23 @@ communicator_new_prefetch_register_bufferv(NRelFileInfo rinfo, ForkNumber forkNu
 }
 
 /*
- * Does the LFC contains the given buffer?
+ * Check if LFC contains the given buffer, and update its last-written LSN if
+ * not.
  *
  * This is used in WAL replay in read replica, to skip updating pages that are
  * not in cache.
  */
 bool
-communicator_new_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
-								BlockNumber blockno)
+communicator_new_update_lwlsn_for_block_if_not_cached(NRelFileInfo rinfo, ForkNumber forkNum,
+													  BlockNumber blockno, XLogRecPtr lsn)
 {
-	return bcomm_cache_contains(my_bs,
-								NInfoGetSpcOid(rinfo),
-								NInfoGetDbOid(rinfo),
-								NInfoGetRelNumber(rinfo),
-								forkNum,
-								blockno);
+	return bcomm_update_lw_lsn_for_block_if_not_cached(my_bs,
+													   NInfoGetSpcOid(rinfo),
+													   NInfoGetDbOid(rinfo),
+													   NInfoGetRelNumber(rinfo),
+													   forkNum,
+													   blockno,
+													   lsn);
 }
 
 /* Dump a list of blocks in the LFC, for use in prewarming later */
@@ -419,8 +421,9 @@ FileCacheState *
 communicator_new_get_lfc_state(size_t max_entries)
 {
 	struct FileCacheIterator iter;
-	FileCacheState* fcs;
+	FileCacheState *fcs;
 	uint8	   *bitmap;
+
 	/* TODO: Max(max_entries, <current # of entries in cache>) */
 	size_t		n_entries = max_entries;
 	size_t		state_size = FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_entries, 1);
@@ -436,14 +439,17 @@ communicator_new_get_lfc_state(size_t max_entries)
 	bcomm_cache_iterate_begin(my_bs, &iter);
 	while (n_pages < max_entries && bcomm_cache_iterate_next(my_bs, &iter))
 	{
-		BufferTag tag;
+		BufferTag	tag;
 
 		BufTagInit(tag, iter.rel_number, iter.fork_number, iter.block_number, iter.spc_oid, iter.db_oid);
 		fcs->chunks[n_pages] = tag;
 		n_pages++;
 	}
 
-	/* fill bitmap. TODO: memset would be more efficient, but this is a silly format anyway */
+	/*
+	 * fill bitmap. TODO: memset would be more efficient, but this is a silly
+	 * format anyway
+	 */
 	for (size_t i = 0; i < n_pages; i++)
 	{
 		BITMAP_SET(bitmap, i);
@@ -526,7 +532,7 @@ start_request(NeonIORequest *request, struct NeonIOResult *immediate_result_p)
 	inflight_requests[num_inflight_requests] = request_idx;
 	num_inflight_requests++;
 
-	elog(LOG, "started communicator request %s at slot %d", print_neon_io_request(request), request_idx);
+	elog(DEBUG5, "started communicator request %s at slot %d", print_neon_io_request(request), request_idx);
 
 	return request_idx;
 }
@@ -550,8 +556,8 @@ wait_request_completion(int request_idx, struct NeonIOResult *result_p)
 		if (poll_res == -1)
 		{
 			/*
-			 * Wake up periodically for CHECK_FOR_INTERRUPTS(). Because
-			 * we wait on MyIOCompletionLatch rather than MyLatch, we won't be
+			 * Wake up periodically for CHECK_FOR_INTERRUPTS(). Because we
+			 * wait on MyIOCompletionLatch rather than MyLatch, we won't be
 			 * woken up for the standard interrupts.
 			 */
 			long		timeout_ms = 1000;
@@ -565,13 +571,14 @@ wait_request_completion(int request_idx, struct NeonIOResult *result_p)
 			CHECK_FOR_INTERRUPTS();
 
 			/*
-			 * FIXME: as a temporary hack, panic if we don't get a response promptly.
-			 * Lots of regression tests are getting stuck and failing at the moment,
-			 * this makes them fail a little faster, which it faster to iterate.
-			 * This needs to be removed once more regression tests are passing.
+			 * FIXME: as a temporary hack, panic if we don't get a response
+			 * promptly. Lots of regression tests are getting stuck and
+			 * failing at the moment, this makes them fail a little faster,
+			 * which it faster to iterate. This needs to be removed once more
+			 * regression tests are passing.
 			 */
 			now = GetCurrentTimestamp();
-			if (now - start_time > 60 * 1000 * 1000)
+			if (now - start_time > 120 * 1000 * 1000)
 			{
 				elog(PANIC, "timed out waiting for response from communicator process at slot %d", request_idx);
 			}
@@ -618,10 +625,11 @@ communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum)
 		case NeonIOResult_RelSize:
 			return result.rel_size != InvalidBlockNumber;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not check existence of rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not check existence of rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for RelSize operation: %d", result.tag);
@@ -633,8 +641,8 @@ communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum)
  * Read N consecutive pages from a relation
  */
 void
-communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blockno,
-							  void **buffers, BlockNumber nblocks)
+communicator_new_readv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blockno,
+					   void **buffers, BlockNumber nblocks)
 {
 	NeonIOResult result;
 	CCachedGetPageVResult cached_result;
@@ -654,7 +662,7 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 	};
 
 	{
-		BufferTag tag;
+		BufferTag	tag;
 
 		CopyNRelFileInfoToBufTag(tag, rinfo);
 		tag.forkNum = forkNum;
@@ -662,7 +670,7 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 		{
 			tag.blockNum = blockno;
 			addSHLL(&communicator_shmem_ptr->wss_estimation,
-					hash_bytes((uint8_t *) &tag, sizeof(tag)));
+					hash_bytes((uint8_t *) & tag, sizeof(tag)));
 		}
 	}
 
@@ -696,8 +704,8 @@ communicator_new_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 				/* Split the vector-request into single page requests */
 				for (int j = 0; j < nblocks; j++)
 				{
-					communicator_new_read_at_lsnv(rinfo, forkNum, blockno + j,
-												  &buffers[j], 1);
+					communicator_new_readv(rinfo, forkNum, blockno + j,
+										   &buffers[j], 1);
 				}
 				return;
 			}
@@ -789,13 +797,75 @@ retry:
 				memcpy(buffers[0], bounce_buf_used, BLCKSZ);
 			return;
 		case NeonIOResult_Error:
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not read block %u in rel %u/%u/%u.%u: %s",
-							blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+			errno = result.error;
+			if (nblocks > 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not read block %u in rel %u/%u/%u.%u: %m",
+								blockno, RelFileInfoFmt(rinfo), forkNum)));
+			else
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not read %u blocks at %u in rel %u/%u/%u.%u: %m",
+								nblocks, blockno, RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
-			elog(ERROR, "unexpected result for GetPage operation: %d", result.tag);
+			elog(ERROR, "unexpected result for GetPageV operation: %d", result.tag);
+			break;
+	}
+}
+
+/*
+ * Read a page at given LSN, bypassing the LFC.
+ *
+ * For tests and debugging purposes only.
+ */
+void
+communicator_new_read_at_lsn_uncached(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blockno,
+									  void *buffer, XLogRecPtr request_lsn, XLogRecPtr not_modified_since)
+{
+	NeonIOResult result;
+	void	   *bounce_buf_used;
+	NeonIORequest request = {
+		.tag = NeonIORequest_GetPageVUncached,
+		.get_page_v_uncached = {
+			.request_id = assign_request_id(),
+			.spc_oid = NInfoGetSpcOid(rinfo),
+			.db_oid = NInfoGetDbOid(rinfo),
+			.rel_number = NInfoGetRelNumber(rinfo),
+			.fork_number = forkNum,
+			.block_number = blockno,
+			.nblocks = 1,
+			.request_lsn = request_lsn,
+			.not_modified_since = not_modified_since,
+		}
+	};
+
+	/*
+	 * This is for tests only and doesn't need to be particularly fast. Always
+	 * use the bounce buffer for simplicity
+	 */
+	request.get_page_v_uncached.dest[0].ptr = bounce_buf_used = bounce_buf();
+
+	/*
+	 * don't use the specialized bcomm_start_get_page_v_request() function
+	 * here, because we want to bypass the LFC
+	 */
+	perform_request(&request, &result);
+	switch (result.tag)
+	{
+		case NeonIOResult_GetPageV:
+			memcpy(buffer, bounce_buf_used, BLCKSZ);
+			return;
+		case NeonIOResult_Error:
+			errno = result.error;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read (uncached) block %u in rel %u/%u/%u.%u: %m",
+							blockno, RelFileInfoFmt(rinfo), forkNum)));
+			break;
+		default:
+			elog(ERROR, "unexpected result for GetPageV operation: %d", result.tag);
 			break;
 	}
 }
@@ -825,10 +895,11 @@ communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forkNum)
 		case NeonIOResult_RelSize:
 			return result.rel_size;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read size of rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not read size of rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for RelSize operation: %d", result.tag);
@@ -857,10 +928,11 @@ communicator_new_dbsize(Oid dbNode)
 		case NeonIOResult_DbSize:
 			return (int64) result.db_size;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read database size of database %u: %s",
-							dbNode, pg_strerror(result.error))));
+					 errmsg("could not read database size of database %u: %m",
+							dbNode)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for DbSize operation: %d", result.tag);
@@ -870,10 +942,10 @@ communicator_new_dbsize(Oid dbNode)
 
 int
 communicator_new_read_slru_segment(
-	SlruKind kind,
-	uint32_t segno,
-	neon_request_lsns *request_lsns,
-	const char* path)
+								   SlruKind kind,
+								   uint32_t segno,
+								   neon_request_lsns * request_lsns,
+								   const char *path)
 {
 	NeonIOResult result = {};
 	NeonIORequest request = {
@@ -885,10 +957,11 @@ communicator_new_read_slru_segment(
 			.request_lsn = request_lsns->request_lsn,
 		}
 	};
-	int nblocks = -1;
-	char *temp_path = bounce_buf();
+	int			nblocks = -1;
+	char	   *temp_path = bounce_buf();
 
-	if (path == NULL) {
+	if (path == NULL)
+	{
 		elog(ERROR, "read_slru_segment called with NULL path");
 		return -1;
 	}
@@ -897,7 +970,7 @@ communicator_new_read_slru_segment(
 	request.read_slru_segment.destination_file_path.ptr = (uint8_t *) temp_path;
 
 	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u, file_path=\"%s\"",
-		kind, segno, request.read_slru_segment.destination_file_path.ptr);
+		 kind, segno, request.read_slru_segment.destination_file_path.ptr);
 
 	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
 	XLogSetAsyncXactLSN(request_lsns->request_lsn);
@@ -910,10 +983,11 @@ communicator_new_read_slru_segment(
 			nblocks = result.read_slru_segment;
 			break;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read slru segment, kind=%u, segno=%u: %s",
-							kind, segno, pg_strerror(result.error))));
+					 errmsg("could not read slru segment, kind=%u, segno=%u: %m",
+							kind, segno)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for read SLRU operation: %d", result.tag);
@@ -953,10 +1027,11 @@ communicator_new_write_page(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber 
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not write block %u in rel %u/%u/%u.%u: %s",
-							blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not write block %u in rel %u/%u/%u.%u: %m",
+							blockno, RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for WritePage operation: %d", result.tag);
@@ -993,10 +1068,11 @@ communicator_new_rel_extend(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber 
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not extend to block %u in rel %u/%u/%u.%u: %s",
-							blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not extend to block %u in rel %u/%u/%u.%u: %m",
+							blockno, RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for Extend operation: %d", result.tag);
@@ -1032,10 +1108,11 @@ communicator_new_rel_zeroextend(NRelFileInfo rinfo, ForkNumber forkNum, BlockNum
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not zeroextend to block %u in rel %u/%u/%u.%u: %s",
-							blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not zeroextend to block %u in rel %u/%u/%u.%u: %m",
+							blockno, RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for ZeroExtend operation: %d", result.tag);
@@ -1068,10 +1145,11 @@ communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr l
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not create rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not create rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for Create operation: %d", result.tag);
@@ -1105,10 +1183,11 @@ communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not truncate rel %u/%u/%u.%u to %u blocks: %s",
-							RelFileInfoFmt(rinfo), forkNum, nblocks, pg_strerror(result.error))));
+					 errmsg("could not truncate rel %u/%u/%u.%u to %u blocks: %m",
+							RelFileInfoFmt(rinfo), forkNum, nblocks)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for Truncate operation: %d", result.tag);
@@ -1141,10 +1220,11 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr l
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not unlink rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not unlink rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for Unlink operation: %d", result.tag);
@@ -1175,10 +1255,11 @@ communicator_new_update_cached_rel_size(NRelFileInfo rinfo, ForkNumber forkNum, 
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not update cached size for rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not update cached size for rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for UpdateCachedRelSize operation: %d", result.tag);
@@ -1213,8 +1294,18 @@ print_neon_io_request(NeonIORequest *request)
 				CGetPageVRequest *r = &request->get_page_v;
 
 				snprintf(buf, sizeof(buf), "GetPageV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+				return buf;
+			}
+		case NeonIORequest_GetPageVUncached:
+			{
+				CGetPageVUncachedRequest *r = &request->get_page_v_uncached;
+
+				snprintf(buf, sizeof(buf), "GetPageVUncached: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %d request_lsn %X/%X not_modified_since %X/%X",
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+						 LSN_FORMAT_ARGS(r->request_lsn), LSN_FORMAT_ARGS(r->not_modified_since));
 				return buf;
 			}
 		case NeonIORequest_ReadSlruSegment:
@@ -1222,11 +1313,11 @@ print_neon_io_request(NeonIORequest *request)
 				CReadSlruSegmentRequest *r = &request->read_slru_segment;
 
 				snprintf(buf, sizeof(buf), "ReadSlruSegment: req " UINT64_FORMAT " slrukind=%u, segno=%u, lsn=%X/%X, file_path=\"%s\"",
-								r->request_id,
-								r->slru_kind,
-								r->segment_number,
-								LSN_FORMAT_ARGS(r->request_lsn),
-								r->destination_file_path.ptr);
+						 r->request_id,
+						 r->slru_kind,
+						 r->segment_number,
+						 LSN_FORMAT_ARGS(r->request_lsn),
+						 r->destination_file_path.ptr);
 				return buf;
 			}
 		case NeonIORequest_PrefetchV:
@@ -1234,8 +1325,8 @@ print_neon_io_request(NeonIORequest *request)
 				CPrefetchVRequest *r = &request->prefetch_v;
 
 				snprintf(buf, sizeof(buf), "PrefetchV: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %d-%d",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks);
 				return buf;
 			}
 		case NeonIORequest_DbSize:
@@ -1243,7 +1334,7 @@ print_neon_io_request(NeonIORequest *request)
 				CDbSizeRequest *r = &request->db_size;
 
 				snprintf(buf, sizeof(buf), "PrefetchV: req " UINT64_FORMAT " db %u",
-								r->request_id, r->db_oid);
+						 r->request_id, r->db_oid);
 				return buf;
 			}
 		case NeonIORequest_WritePage:
@@ -1251,9 +1342,9 @@ print_neon_io_request(NeonIORequest *request)
 				CWritePageRequest *r = &request->write_page;
 
 				snprintf(buf, sizeof(buf), "WritePage: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
-								LSN_FORMAT_ARGS(r->lsn));
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+						 LSN_FORMAT_ARGS(r->lsn));
 				return buf;
 			}
 		case NeonIORequest_RelExtend:
@@ -1261,9 +1352,9 @@ print_neon_io_request(NeonIORequest *request)
 				CRelExtendRequest *r = &request->rel_extend;
 
 				snprintf(buf, sizeof(buf), "RelExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
-								LSN_FORMAT_ARGS(r->lsn));
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+						 LSN_FORMAT_ARGS(r->lsn));
 				return buf;
 			}
 		case NeonIORequest_RelZeroExtend:
@@ -1271,9 +1362,9 @@ print_neon_io_request(NeonIORequest *request)
 				CRelZeroExtendRequest *r = &request->rel_zero_extend;
 
 				snprintf(buf, sizeof(buf), "RelZeroExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u-%u lsn %X/%X",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks,
-								LSN_FORMAT_ARGS(r->lsn));
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks,
+						 LSN_FORMAT_ARGS(r->lsn));
 				return buf;
 			}
 		case NeonIORequest_RelCreate:
@@ -1281,8 +1372,8 @@ print_neon_io_request(NeonIORequest *request)
 				CRelCreateRequest *r = &request->rel_create;
 
 				snprintf(buf, sizeof(buf), "RelCreate: req " UINT64_FORMAT " rel %u/%u/%u.%u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
 				return buf;
 			}
 		case NeonIORequest_RelTruncate:
@@ -1290,8 +1381,8 @@ print_neon_io_request(NeonIORequest *request)
 				CRelTruncateRequest *r = &request->rel_truncate;
 
 				snprintf(buf, sizeof(buf), "RelTruncate: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->nblocks);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->nblocks);
 				return buf;
 			}
 		case NeonIORequest_RelUnlink:
@@ -1299,8 +1390,8 @@ print_neon_io_request(NeonIORequest *request)
 				CRelUnlinkRequest *r = &request->rel_unlink;
 
 				snprintf(buf, sizeof(buf), "RelUnlink: req " UINT64_FORMAT " rel %u/%u/%u.%u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
 				return buf;
 			}
 		case NeonIORequest_UpdateCachedRelSize:
@@ -1308,9 +1399,9 @@ print_neon_io_request(NeonIORequest *request)
 				CUpdateCachedRelSizeRequest *r = &request->update_cached_rel_size;
 
 				snprintf(buf, sizeof(buf), "UpdateCachedRelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u blocks: %u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number,
-					r->nblocks);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number,
+						 r->nblocks);
 				return buf;
 			}
 	}
@@ -1365,49 +1456,109 @@ communicator_new_approximate_working_set_size_seconds(time_t duration, bool rese
 	return dc;
 }
 
-
 /*
  * Return an array of LfcStatsEntrys
  */
 LfcStatsEntry *
-communicator_new_get_lfc_stats(uint32 *num_entries)
+communicator_new_lfc_get_stats(size_t *num_entries)
 {
 	LfcStatsEntry *entries;
-	int			n = 0;
-	uint64		cache_misses = 0;
+	size_t		n = 0;
 	uint64		cache_hits = 0;
+	uint64		cache_misses = 0;
 
 	for (int i = 0; i < MaxProcs; i++)
 	{
-		cache_misses += communicator_shmem_ptr->backends[i].cache_misses;
 		cache_hits += communicator_shmem_ptr->backends[i].cache_hits;
+		cache_misses += communicator_shmem_ptr->backends[i].cache_misses;
 	}
 
 #define NUM_ENTRIES 10
 	entries = palloc(sizeof(LfcStatsEntry) * NUM_ENTRIES);
 
-	entries[n++] = (LfcStatsEntry) {"file_cache_misses", false, cache_misses};
-	entries[n++] = (LfcStatsEntry) {"file_cache_hits", false, cache_hits };
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_hits", false, cache_hits
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_misses", false, cache_misses
+	};
 
-	entries[n++] = (LfcStatsEntry) {"file_cache_used_pages", false,
-									bcomm_cache_get_num_pages_used(my_bs) };
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_used_pages", false,
+			bcomm_cache_get_num_pages_used(my_bs)
+	};
 
 	/* TODO: these stats are exposed by the legacy LFC implementation */
 #if 0
-	entries[n++] = (LfcStatsEntry) {"file_cache_used", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->used : 0 };
-	entries[n++] = (LfcStatsEntry) {"file_cache_writes", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->writes : 0 };
-	entries[n++] = (LfcStatsEntry) {"file_cache_size", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->size : 0 };
-	entries[n++] = (LfcStatsEntry) {"file_cache_evicted_pages", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->evicted_pages : 0 };
-	entries[n++] = (LfcStatsEntry) {"file_cache_limit", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->limit : 0 };
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_used", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->used : 0
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_writes", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->writes : 0
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_size", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->size : 0
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_evicted_pages", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->evicted_pages : 0
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_limit", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->limit : 0
+	};
 #endif
 
 	Assert(n <= NUM_ENTRIES);
 
 	*num_entries = n;
 	return entries;
+}
+
+/*
+ * Get metrics, for the built-in metrics exporter that's part of the
+ * communicator process.
+ *
+ * NB: This is called from a Rust tokio task inside the communicator process.
+ * Acquiring lwlocks, elog(), allocating memory or anything else non-trivial
+ * is strictly prohibited here!
+ */
+struct LfcMetrics
+communicator_new_get_lfc_metrics_unsafe(void)
+{
+	uint64		cache_hits = 0;
+	uint64		cache_misses = 0;
+
+	struct LfcMetrics result = {
+		.lfc_cache_size_limit = (int64) lfc_size_limit * 1024 * 1024,
+		.lfc_used = 0, /* TODO */
+		.lfc_writes = 0, /* TODO */
+	};
+
+	for (int i = 0; i < MaxProcs; i++)
+	{
+		cache_hits += communicator_shmem_ptr->backends[i].cache_hits;
+		cache_misses += communicator_shmem_ptr->backends[i].cache_misses;
+	}
+	result.lfc_hits = cache_hits;
+	result.lfc_misses = cache_misses;
+
+	for (int minutes = 1; minutes <= 60; minutes++)
+	{
+		result.lfc_approximate_working_set_size_windows[minutes - 1] =
+			communicator_new_approximate_working_set_size_seconds(minutes * 60, false);
+	}
+
+	return result;
 }

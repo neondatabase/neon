@@ -49,9 +49,10 @@ use compute_tools::compute::{
     BUILD_TAG, ComputeNode, ComputeNodeParams, forward_termination_signal,
 };
 use compute_tools::extension_server::get_pg_version_string;
-use compute_tools::logger::*;
 use compute_tools::params::*;
+use compute_tools::pg_isready::get_pg_isready_bin;
 use compute_tools::spec::*;
+use compute_tools::{hadron_metrics, installed_extensions, logger::*};
 use rlimit::{Resource, setrlimit};
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -80,6 +81,15 @@ struct Cli {
     /// the neon extension (for installing remote extensions) and local_proxy.
     #[arg(long, default_value_t = 3081)]
     pub internal_http_port: u16,
+
+    /// Backwards-compatible --http-port for Hadron deployments. Functionally the
+    /// same as --external-http-port.
+    #[arg(
+        long,
+        conflicts_with = "external_http_port",
+        conflicts_with = "internal_http_port"
+    )]
+    pub http_port: Option<u16>,
 
     #[arg(short = 'D', long, value_name = "DATADIR")]
     pub pgdata: String,
@@ -180,6 +190,26 @@ impl Cli {
     }
 }
 
+// Hadron helpers to get compatible compute_ctl http ports from Cli. The old `--http-port`
+// arg is used and acts the same as `--external-http-port`. The internal http port is defined
+// to be http_port + 1. Hadron runs in the dblet environment which uses the host network, so
+// we need to be careful with the ports to choose.
+fn get_external_http_port(cli: &Cli) -> u16 {
+    if cli.lakebase_mode {
+        return cli.http_port.unwrap_or(cli.external_http_port);
+    }
+    cli.external_http_port
+}
+fn get_internal_http_port(cli: &Cli) -> u16 {
+    if cli.lakebase_mode {
+        return cli
+            .http_port
+            .map(|p| p + 1)
+            .unwrap_or(cli.internal_http_port);
+    }
+    cli.internal_http_port
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -194,14 +224,27 @@ fn main() -> Result<()> {
         .build()?;
     let _rt_guard = runtime.enter();
 
-    let tracing_provider = init(cli.dev)?;
+    let mut log_dir = None;
+    if cli.lakebase_mode {
+        log_dir = std::env::var("COMPUTE_CTL_LOG_DIRECTORY").ok();
+    }
+
+    let (tracing_provider, _file_logs_guard) = init(cli.dev, log_dir)?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
 
+    if cli.lakebase_mode {
+        installed_extensions::initialize_metrics();
+        hadron_metrics::initialize_metrics();
+    }
+
     let connstr = Url::parse(&cli.connstr).context("cannot parse connstr as a URL")?;
 
     let config = get_config(&cli)?;
+
+    let external_http_port = get_external_http_port(&cli);
+    let internal_http_port = get_internal_http_port(&cli);
 
     let compute_node = ComputeNode::new(
         ComputeNodeParams {
@@ -211,8 +254,8 @@ fn main() -> Result<()> {
             pgdata: cli.pgdata.clone(),
             pgbin: cli.pgbin.clone(),
             pgversion: get_pg_version_string(&cli.pgbin),
-            external_http_port: cli.external_http_port,
-            internal_http_port: cli.internal_http_port,
+            external_http_port,
+            internal_http_port,
             remote_ext_base_url: cli.remote_ext_base_url.clone(),
             resize_swap_on_bind: cli.resize_swap_on_bind,
             set_disk_quota_for_fs: cli.set_disk_quota_for_fs,
@@ -226,20 +269,31 @@ fn main() -> Result<()> {
                 cli.installed_extensions_collection_interval,
             )),
             pg_init_timeout: cli.pg_init_timeout.map(Duration::from_secs),
+            pg_isready_bin: get_pg_isready_bin(&cli.pgbin),
+            instance_id: std::env::var("INSTANCE_ID").ok(),
             lakebase_mode: cli.lakebase_mode,
+            build_tag: BUILD_TAG.to_string(),
+            control_plane_uri: cli.control_plane_uri,
+            config_path_test_only: cli.config,
         },
         config,
     )?;
 
-    let exit_code = compute_node.run()?;
+    let exit_code = compute_node.run().context("running compute node")?;
 
     scenario.teardown();
 
     deinit_and_exit(tracing_provider, exit_code);
 }
 
-fn init(dev_mode: bool) -> Result<Option<tracing_utils::Provider>> {
-    let provider = init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+fn init(
+    dev_mode: bool,
+    log_dir: Option<String>,
+) -> Result<(
+    Option<tracing_utils::Provider>,
+    Option<tracing_appender::non_blocking::WorkerGuard>,
+)> {
+    let (provider, file_logs_guard) = init_tracing_and_logging(DEFAULT_LOG_LEVEL, &log_dir)?;
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT])?;
     thread::spawn(move || {
@@ -250,7 +304,7 @@ fn init(dev_mode: bool) -> Result<Option<tracing_utils::Provider>> {
 
     info!("compute build_tag: {}", &BUILD_TAG.to_string());
 
-    Ok(provider)
+    Ok((provider, file_logs_guard))
 }
 
 fn get_config(cli: &Cli) -> Result<ComputeConfig> {

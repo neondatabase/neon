@@ -6,8 +6,10 @@ use std::os::fd::OwnedFd;
 use crate::backend_comms::NeonIORequestSlot;
 use crate::init::CommunicatorInitStruct;
 use crate::integrated_cache::{BackendCacheReadOp, IntegratedCacheReadAccess};
-use crate::neon_request::{CCachedGetPageVResult, COid};
+use crate::neon_request::{CCachedGetPageVResult, CLsn, COid};
 use crate::neon_request::{NeonIORequest, NeonIOResult};
+
+use utils::lsn::Lsn;
 
 pub struct CommunicatorBackendStruct<'t> {
     my_proc_number: i32,
@@ -18,7 +20,7 @@ pub struct CommunicatorBackendStruct<'t> {
 
     pending_cache_read_op: Option<BackendCacheReadOp<'t>>,
 
-    integrated_cache: &'t IntegratedCacheReadAccess,
+    integrated_cache: &'t IntegratedCacheReadAccess<'t>,
 }
 
 #[unsafe(no_mangle)]
@@ -174,17 +176,21 @@ pub extern "C" fn bcomm_finish_cache_read(bs: &mut CommunicatorBackendStruct) ->
     }
 }
 
-/// Check if the local file cache contians the given block
+/// Check if LFC contains the given buffer, and update its last-written LSN if not.
+///
+/// This is used in WAL replay in read replica, to skip updating pages that are
+/// not in cache.
 #[unsafe(no_mangle)]
-pub extern "C" fn bcomm_cache_contains(
+pub extern "C" fn bcomm_update_lw_lsn_for_block_if_not_cached(
     bs: &mut CommunicatorBackendStruct,
     spc_oid: COid,
     db_oid: COid,
     rel_number: u32,
     fork_number: u8,
     block_number: u32,
+    lsn: CLsn,
 ) -> bool {
-    bs.integrated_cache.cache_contains_page(
+    bs.integrated_cache.update_lw_lsn_for_block_if_not_cached(
         &pageserver_page_api::RelTag {
             spcnode: spc_oid,
             dbnode: db_oid,
@@ -192,6 +198,7 @@ pub extern "C" fn bcomm_cache_contains(
             forknum: fork_number,
         },
         block_number,
+        Lsn(lsn),
     )
 }
 

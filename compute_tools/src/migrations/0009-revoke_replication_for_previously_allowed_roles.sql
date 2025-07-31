@@ -5,9 +5,9 @@ DO $$
 DECLARE
     role_name TEXT;
 BEGIN
-    FOR role_name IN SELECT rolname FROM pg_roles WHERE rolreplication IS TRUE
+    FOR role_name IN SELECT rolname FROM pg_catalog.pg_roles WHERE rolreplication IS TRUE
     LOOP
-        RAISE NOTICE 'EXECUTING ALTER ROLE % NOREPLICATION', quote_ident(role_name);
-        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' NOREPLICATION';
+        RAISE NOTICE 'EXECUTING ALTER ROLE % NOREPLICATION', pg_catalog.quote_ident(role_name);
+        EXECUTE pg_catalog.format('ALTER ROLE %I NOREPLICATION;', role_name);
     END LOOP;
 END $$;
