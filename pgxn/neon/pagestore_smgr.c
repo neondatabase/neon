@@ -49,6 +49,7 @@
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
 #include "catalog/pg_class.h"
+#include "common/file_utils.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/interrupt.h"
@@ -56,6 +57,7 @@
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
 #include "storage/buf_internals.h"
+#include "storage/fd.h"
 #include "storage/fsm_internals.h"
 #include "storage/md.h"
 #include "storage/smgr.h"
@@ -2127,13 +2129,20 @@ neon_end_unlogged_build(SMgrRelation reln)
 
 #define STRPREFIX(str, prefix) (strncmp(str, prefix, strlen(prefix)) == 0)
 
-static int
-neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buffer)
+/*
+ * Attempt to download the given SLRU segment file from the pageserver.
+ *
+ * Returns:
+ *   true if the file was successfully downloaded
+ *   false if the file was not found in pageserver
+ *   ereports if some other error happened
+ */
+static bool
+neon_read_slru_segment(SMgrRelation reln, const char* path, int segno)
 {
 	XLogRecPtr	request_lsn,
 				not_modified_since;
 	SlruKind	kind;
-	int			n_blocks;
 	neon_request_lsns request_lsns;
 
 	/*
@@ -2164,6 +2173,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	 */
 	not_modified_since = nm_adjust_lsn(GetRedoStartLsn());
 
+	/* Only these SLRUs are stored in the pageserver */
 	if (STRPREFIX(path, "pg_xact"))
 		kind = SLRU_CLOG;
 	else if (STRPREFIX(path, "pg_multixact/members"))
@@ -2171,15 +2181,58 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	else if (STRPREFIX(path, "pg_multixact/offsets"))
 		kind = SLRU_MULTIXACT_OFFSETS;
 	else
-		return -1;
+		return false;
 
 	request_lsns.request_lsn = request_lsn;
 	request_lsns.not_modified_since = not_modified_since;
 	request_lsns.effective_request_lsn = request_lsn;
 
-	n_blocks = communicator_read_slru_segment(kind, segno, &request_lsns, buffer);
+	{
+		read_slru_segment_result result;
+		int			fd;
+		struct iovec iov[1];
 
-	return n_blocks;
+		/* Call the pageserver */
+		result = communicator_read_slru_segment(kind, segno, &request_lsns);
+		if (result.n_blocks == 0)
+		{
+			/* "File not found" from pageserver */
+			if (result.buf)
+				pfree(result.buf);
+			return false;
+		}
+
+		/* Success! Write the contents to the file */
+		fd = OpenTransientFile(path, O_WRONLY | O_EXCL | O_CREAT | PG_BINARY);
+		if (fd < 0)
+		{
+			ereport(ERROR,
+					errcode_for_file_access(),
+					errmsg("could not create SLRU file \"%s\" to write downloaded contents: %m",
+						   path));
+		}
+
+		errno = 0;
+		iov[0].iov_base = result.slru_data;
+		iov[0].iov_len = result.n_blocks * BLCKSZ;
+		pgstat_report_wait_start(WAIT_EVENT_SLRU_WRITE);
+		if (pg_pwritev_with_retry(fd, iov, 1, 0) != result.n_blocks * BLCKSZ)
+		{
+			pgstat_report_wait_end();
+			/* if write didn't set errno, assume problem is no disk space */
+			if (errno == 0)
+				errno = ENOSPC;
+			ereport(ERROR,
+					errcode_for_file_access(),
+					errmsg("could not write downloaded contents to SLRU file \"%s\": %m",
+						   path));
+		}
+		pgstat_report_wait_end();
+		pfree(result.buf);
+		CloseTransientFile(fd);
+
+		return true;
+	}
 }
 
 static void

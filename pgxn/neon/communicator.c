@@ -2398,11 +2398,16 @@ communicator_dbsize(Oid dbNode, neon_request_lsns *request_lsns)
 	return db_size;
 }
 
-int
-communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *request_lsns,
-							   void *buffer)
+/*
+ * Download the given SLRU segment from the pageserver.
+ *
+ * See comments on read_slru_segment_result for the result.
+ */
+read_slru_segment_result
+communicator_read_slru_segment(SlruKind kind, int64 segno,
+							   neon_request_lsns *request_lsns)
 {
-	int			n_blocks;
+	read_slru_segment_result result = { NULL, 0, NULL };
 	shardno_t	shard_no = 0; /* All SLRUs are at shard 0 */
 	NeonResponse *resp = NULL;
 	NeonGetSlruSegmentRequest request;
@@ -2456,8 +2461,9 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 												request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), kind, (unsigned long long) segno);
 				}
 			}
-			n_blocks = slru_resp->n_blocks;
-			memcpy(buffer, slru_resp->data, n_blocks*BLCKSZ);
+			result.slru_data = slru_resp->data;
+			result.n_blocks = slru_resp->n_blocks;
+			result.buf = slru_resp;
 			break;
 		}
 		case T_NeonErrorResponse:
@@ -2486,10 +2492,10 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 										"Expected GetSlruSegment (0x%02x) or Error (0x%02x) response to GetSlruSegmentRequest, but got 0x%02x",
 										T_NeonGetSlruSegmentResponse, T_NeonErrorResponse, resp->tag);
 	}
-	pfree(resp);
+	/* do not pfree(resp) here. The caller is responsible for it */
 
 	communicator_reconfigure_timeout_if_needed();
-	return n_blocks;
+	return result;
 }
 
 void
