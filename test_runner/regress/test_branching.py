@@ -195,7 +195,10 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
 
         env.neon_cli.mappings_map_branch(initial_branch, env.initial_tenant, env.initial_timeline)
 
-        with pytest.raises(RuntimeError, match=f"Timeline {env.initial_tenant}/{env.initial_timeline} is not active"):
+        with pytest.raises(
+            RuntimeError,
+            match=f"Timeline {env.initial_tenant}/{env.initial_timeline} is not active",
+        ):
             env.endpoints.create_start(
                 initial_branch, tenant_id=env.initial_tenant, basebackup_request_tries=2
             )
