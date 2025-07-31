@@ -68,11 +68,15 @@ pub enum LfcPrewarmState {
     /// We tried to fetch the corresponding LFC state from the endpoint storage,
     /// but received `Not Found 404`. This should normally happen only during the
     /// first endpoint start after creation with `autoprewarm: true`.
+    /// This may also happen if LFC is turned off or not initialized
     ///
     /// During the orchestrated prewarm via API, when a caller explicitly
     /// provides the LFC state key to prewarm from, it's the caller responsibility
     /// to handle this status as an error state in this case.
     Skipped,
+    /// LFC prewarm was cancelled. Some pages in LFC cache may be prewarmed if query
+    /// has started working before cancellation
+    Cancelled,
 }
 
 impl Display for LfcPrewarmState {
@@ -83,6 +87,7 @@ impl Display for LfcPrewarmState {
             LfcPrewarmState::Completed => f.write_str("Completed"),
             LfcPrewarmState::Skipped => f.write_str("Skipped"),
             LfcPrewarmState::Failed { error } => write!(f, "Error({error})"),
+            LfcPrewarmState::Cancelled => f.write_str("Cancelled"),
         }
     }
 }
@@ -97,6 +102,7 @@ pub enum LfcOffloadState {
     Failed {
         error: String,
     },
+    Skipped,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -108,11 +114,10 @@ pub enum PromoteState {
     Failed { error: String },
 }
 
-#[derive(Deserialize, Serialize, Default, Debug, Clone)]
+#[derive(Deserialize, Default, Debug)]
 #[serde(rename_all = "snake_case")]
-/// Result of /safekeepers_lsn
-pub struct SafekeepersLsn {
-    pub safekeepers: String,
+pub struct PromoteConfig {
+    pub spec: ComputeSpec,
     pub wal_flush_lsn: utils::lsn::Lsn,
 }
 
@@ -173,6 +178,11 @@ pub enum ComputeStatus {
     TerminationPendingImmediate,
     // Terminated Postgres
     Terminated,
+    // A spec refresh is being requested
+    RefreshConfigurationPending,
+    // A spec refresh is being applied. We cannot refresh configuration again until the current
+    // refresh is done, i.e., signal_refresh_configuration() will return 500 error.
+    RefreshConfiguration,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -185,6 +195,10 @@ impl Display for ComputeStatus {
         match self {
             ComputeStatus::Empty => f.write_str("empty"),
             ComputeStatus::ConfigurationPending => f.write_str("configuration-pending"),
+            ComputeStatus::RefreshConfiguration => f.write_str("refresh-configuration"),
+            ComputeStatus::RefreshConfigurationPending => {
+                f.write_str("refresh-configuration-pending")
+            }
             ComputeStatus::Init => f.write_str("init"),
             ComputeStatus::Running => f.write_str("running"),
             ComputeStatus::Configuration => f.write_str("configuration"),

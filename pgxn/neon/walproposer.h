@@ -374,6 +374,8 @@ typedef struct PageserverFeedback
 	XLogRecPtr	remote_consistent_lsn;
 	TimestampTz replytime;
 	uint32		shard_number;
+	/* true if the pageserver has detected data corruption in the timeline */
+	bool		corruption_detected;
 } PageserverFeedback;
 
 /* BEGIN_HADRON */
@@ -389,12 +391,21 @@ typedef struct PageserverFeedback
  */
 typedef struct WalRateLimiter
 {
-	/* If the value is 1, PG backends will hit backpressure. */
+	/* The effective wal write rate. Could be changed dynamically
+	based on whether PG has backpressure or not.*/
+	pg_atomic_uint32 effective_max_wal_bytes_per_second;
+	/* If the value is 1, PG backends will hit backpressure until the time has past batch_end_time_us. */
 	pg_atomic_uint32 should_limit;
 	/* The number of bytes sent in the current second. */
 	uint64		sent_bytes;
-	/* The last recorded time in microsecond. */
-	pg_atomic_uint64 last_recorded_time_us;
+	/* The timestamp when the write starts in the current batch. A batch is a time interval (e.g., )that we 
+	track and throttle writes. Most times a batch is 1s, but it could become larger if the PG overwrites the WALs
+	and we will adjust the batch accordingly to compensate (e.g., if PG writes 10MB at once and max WAL write rate
+	is 1MB/s, then the current batch will become 10s). */
+	pg_atomic_uint64 batch_start_time_us;
+	/* The timestamp (in the future) that the current batch should end and accept more writes
+	(after should_limit is set to 1). */
+	pg_atomic_uint64 batch_end_time_us;
 } WalRateLimiter;
 /* END_HADRON */
 
@@ -421,6 +432,10 @@ typedef struct WalproposerShmemState
 	/* BEGIN_HADRON */
 	/* The WAL rate limiter */
 	WalRateLimiter wal_rate_limiter;
+	/* Number of safekeepers in the config */
+	uint32 num_safekeepers;
+	/* Per-safekeeper status flags: 0=inactive, 1=active */
+	uint8 safekeeper_status[MAX_SAFEKEEPERS];
 	/* END_HADRON */
 } WalproposerShmemState;
 
@@ -471,6 +486,11 @@ typedef struct Safekeeper
 
 	char const *host;
 	char const *port;
+
+	/* BEGIN_HADRON */
+	/* index of this safekeeper in the WalProposer array */
+	uint32 index;
+	/* END_HADRON */
 
 	/*
 	 * connection string for connecting/reconnecting.
@@ -720,6 +740,23 @@ typedef struct walproposer_api
 	 * handled by elog().
 	 */
 	void		(*log_internal) (WalProposer *wp, int level, const char *line);
+
+	/*
+	 * BEGIN_HADRON
+	 * APIs manipulating shared memory state used for Safekeeper quorum health metrics.
+	 */
+
+	/*
+	 * Reset the safekeeper statuses in shared memory for metric purposes.
+	 */
+	void		(*reset_safekeeper_statuses_for_metrics) (WalProposer *wp, uint32 num_safekeepers);
+
+	/*
+	 * Update the safekeeper status in shared memory for metric purposes.
+	 */
+	void		(*update_safekeeper_status_for_metrics) (WalProposer *wp, uint32 sk_index, uint8 status);
+
+	/* END_HADRON */
 } walproposer_api;
 
 /*

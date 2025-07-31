@@ -471,11 +471,17 @@ impl Persistence {
         &self,
         input_node_id: NodeId,
         input_https_port: Option<u16>,
+        input_grpc_addr: Option<String>,
+        input_grpc_port: Option<u16>,
     ) -> DatabaseResult<()> {
         use crate::schema::nodes::dsl::*;
         self.update_node(
             input_node_id,
-            listen_https_port.eq(input_https_port.map(|x| x as i32)),
+            (
+                listen_https_port.eq(input_https_port.map(|x| x as i32)),
+                listen_grpc_addr.eq(input_grpc_addr),
+                listen_grpc_port.eq(input_grpc_port.map(|x| x as i32)),
+            ),
         )
         .await
     }

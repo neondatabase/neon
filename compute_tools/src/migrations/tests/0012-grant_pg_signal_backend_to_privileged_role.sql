@@ -2,10 +2,10 @@ DO $$
 DECLARE
     signal_backend record;
 BEGIN
-    SELECT pg_has_role('neon_superuser', 'pg_signal_backend', 'member') AS member,
+    SELECT pg_catalog.pg_has_role('neon_superuser', 'pg_signal_backend', 'member') AS member,
             admin_option AS admin
         INTO signal_backend
-        FROM pg_auth_members
+        FROM pg_catalog.pg_auth_members
         WHERE roleid = 'pg_signal_backend'::regrole
             AND member = 'neon_superuser'::regrole;
 

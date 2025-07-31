@@ -78,18 +78,36 @@ class EndpointHttpClient(requests.Session):
         json: dict[str, str] = res.json()
         return json
 
-    def prewarm_lfc(self, from_endpoint_id: str | None = None):
+    def prewarm_lfc(self, from_endpoint_id: str | None = None) -> dict[str, str]:
+        """
+        Prewarm LFC cache from given endpoint and wait till it finishes or errors
+        """
         params = {"from_endpoint": from_endpoint_id} if from_endpoint_id else dict()
         self.post(self.prewarm_url, params=params).raise_for_status()
-        self.prewarm_lfc_wait()
+        return self.prewarm_lfc_wait()
 
-    def prewarm_lfc_wait(self):
+    def cancel_prewarm_lfc(self):
+        """
+        Cancel LFC prewarm if any is ongoing
+        """
+        self.delete(self.prewarm_url).raise_for_status()
+
+    def prewarm_lfc_wait(self) -> dict[str, str]:
+        """
+        Wait till LFC prewarm returns with error or success.
+        If prewarm was not requested before calling this function, it will error
+        """
+        statuses = "failed", "completed", "skipped", "cancelled"
+
         def prewarmed():
             json = self.prewarm_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"{status}, {err=}"
+            assert status in statuses, f"{status}, {err=}"
 
         wait_until(prewarmed, timeout=60)
+        res = self.prewarm_lfc_status()
+        assert res["status"] != "failed", res
+        return res
 
     def offload_lfc_status(self) -> dict[str, str]:
         res = self.get(self.offload_url)
@@ -97,27 +115,38 @@ class EndpointHttpClient(requests.Session):
         json: dict[str, str] = res.json()
         return json
 
-    def offload_lfc(self):
+    def offload_lfc(self) -> dict[str, str]:
+        """
+        Offload LFC cache to endpoint storage and wait till offload finishes or errors
+        """
         self.post(self.offload_url).raise_for_status()
-        self.offload_lfc_wait()
+        return self.offload_lfc_wait()
 
-    def offload_lfc_wait(self):
+    def offload_lfc_wait(self) -> dict[str, str]:
+        """
+        Wait till LFC offload returns with error or success.
+        If offload was not requested before calling this function, it will error
+        """
+        statuses = "failed", "completed", "skipped"
+
         def offloaded():
             json = self.offload_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"{status}, {err=}"
+            assert status in statuses, f"{status}, {err=}"
 
-        wait_until(offloaded)
+        wait_until(offloaded, timeout=60)
+        res = self.offload_lfc_status()
+        assert res["status"] != "failed", res
+        return res
 
-    def promote(self, safekeepers_lsn: dict[str, Any], disconnect: bool = False):
+    def promote(self, promote_spec: dict[str, Any], disconnect: bool = False) -> dict[str, str]:
         url = f"http://localhost:{self.external_port}/promote"
         if disconnect:
             try:  # send first request to start promote and disconnect
-                self.post(url, data=safekeepers_lsn, timeout=0.001)
+                self.post(url, json=promote_spec, timeout=0.001)
             except ReadTimeout:
                 pass  # wait on second request which returns on promotion finish
-        res = self.post(url, data=safekeepers_lsn)
-        res.raise_for_status()
+        res = self.post(url, json=promote_spec)
         json: dict[str, str] = res.json()
         return json
 

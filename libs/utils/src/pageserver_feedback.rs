@@ -32,6 +32,9 @@ pub struct PageserverFeedback {
     pub replytime: SystemTime,
     /// Used to track feedbacks from different shards. Always zero for unsharded tenants.
     pub shard_number: u32,
+    /// If true, the pageserver has detected corruption and the safekeeper and postgres
+    /// should stop sending WAL.
+    pub corruption_detected: bool,
 }
 
 impl PageserverFeedback {
@@ -43,6 +46,7 @@ impl PageserverFeedback {
             disk_consistent_lsn: Lsn::INVALID,
             replytime: *PG_EPOCH,
             shard_number: 0,
+            corruption_detected: false,
         }
     }
 
@@ -101,6 +105,13 @@ impl PageserverFeedback {
             buf.put_u32(self.shard_number);
         }
 
+        if self.corruption_detected {
+            nkeys += 1;
+            buf.put_slice(b"corruption_detected\0");
+            buf.put_i32(1);
+            buf.put_u8(1);
+        }
+
         buf[buf_ptr] = nkeys;
     }
 
@@ -146,6 +157,11 @@ impl PageserverFeedback {
                     let len = buf.get_i32();
                     assert_eq!(len, 4);
                     rf.shard_number = buf.get_u32();
+                }
+                b"corruption_detected" => {
+                    let len = buf.get_i32();
+                    assert_eq!(len, 1);
+                    rf.corruption_detected = buf.get_u8() != 0;
                 }
                 _ => {
                     let len = buf.get_i32();
@@ -199,6 +215,26 @@ mod tests {
         // Set rounded time to be able to compare it with deserialized value,
         // because it is rounded up to microseconds during serialization.
         rf.replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        let mut data = BytesMut::new();
+        rf.serialize(&mut data);
+
+        let rf_parsed = PageserverFeedback::parse(data.freeze());
+        assert_eq!(rf, rf_parsed);
+    }
+
+    // Test that databricks-specific fields added to the PageserverFeedback message are serialized
+    // and deserialized correctly, in addition to the existing fields from upstream.
+    #[test]
+    fn test_replication_feedback_databricks_fields() {
+        let mut rf = PageserverFeedback::empty();
+        rf.current_timeline_size = 12345678;
+        rf.last_received_lsn = Lsn(23456789);
+        rf.disk_consistent_lsn = Lsn(34567890);
+        rf.remote_consistent_lsn = Lsn(45678901);
+        rf.replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        rf.shard_number = 1;
+        rf.corruption_detected = true;
+
         let mut data = BytesMut::new();
         rf.serialize(&mut data);
 
