@@ -625,10 +625,11 @@ communicator_new_rel_exists(NRelFileInfo rinfo, ForkNumber forkNum)
 		case NeonIOResult_RelSize:
 			return result.rel_size != InvalidBlockNumber;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not check existence of rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not check existence of rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for RelSize operation: %d", result.tag);
@@ -796,16 +797,17 @@ retry:
 				memcpy(buffers[0], bounce_buf_used, BLCKSZ);
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			if (nblocks > 0)
 				ereport(ERROR,
 						(errcode_for_file_access(),
-						 errmsg("could not read block %u in rel %u/%u/%u.%u: %s",
-								blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+						 errmsg("could not read block %u in rel %u/%u/%u.%u: %m",
+								blockno, RelFileInfoFmt(rinfo), forkNum)));
 			else
 				ereport(ERROR,
 						(errcode_for_file_access(),
-						 errmsg("could not read %u blocks at %u in rel %u/%u/%u.%u: %s",
-								nblocks, blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+						 errmsg("could not read %u blocks at %u in rel %u/%u/%u.%u: %m",
+								nblocks, blockno, RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for GetPageV operation: %d", result.tag);
@@ -856,10 +858,11 @@ communicator_new_read_at_lsn_uncached(NRelFileInfo rinfo, ForkNumber forkNum, Bl
 			memcpy(buffer, bounce_buf_used, BLCKSZ);
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read (uncached) block %u in rel %u/%u/%u.%u: %s",
-							blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not read (uncached) block %u in rel %u/%u/%u.%u: %m",
+							blockno, RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for GetPageV operation: %d", result.tag);
@@ -892,10 +895,11 @@ communicator_new_rel_nblocks(NRelFileInfo rinfo, ForkNumber forkNum)
 		case NeonIOResult_RelSize:
 			return result.rel_size;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read size of rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not read size of rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for RelSize operation: %d", result.tag);
@@ -924,10 +928,11 @@ communicator_new_dbsize(Oid dbNode)
 		case NeonIOResult_DbSize:
 			return (int64) result.db_size;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read database size of database %u: %s",
-							dbNode, pg_strerror(result.error))));
+					 errmsg("could not read database size of database %u: %m",
+							dbNode)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for DbSize operation: %d", result.tag);
@@ -978,10 +983,11 @@ communicator_new_read_slru_segment(
 			nblocks = result.read_slru_segment;
 			break;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read slru segment, kind=%u, segno=%u: %s",
-							kind, segno, pg_strerror(result.error))));
+					 errmsg("could not read slru segment, kind=%u, segno=%u: %m",
+							kind, segno)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for read SLRU operation: %d", result.tag);
@@ -1021,10 +1027,11 @@ communicator_new_write_page(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber 
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not write block %u in rel %u/%u/%u.%u: %s",
-							blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not write block %u in rel %u/%u/%u.%u: %m",
+							blockno, RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for WritePage operation: %d", result.tag);
@@ -1061,10 +1068,11 @@ communicator_new_rel_extend(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber 
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not extend to block %u in rel %u/%u/%u.%u: %s",
-							blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not extend to block %u in rel %u/%u/%u.%u: %m",
+							blockno, RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for Extend operation: %d", result.tag);
@@ -1100,10 +1108,11 @@ communicator_new_rel_zeroextend(NRelFileInfo rinfo, ForkNumber forkNum, BlockNum
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not zeroextend to block %u in rel %u/%u/%u.%u: %s",
-							blockno, RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not zeroextend to block %u in rel %u/%u/%u.%u: %m",
+							blockno, RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for ZeroExtend operation: %d", result.tag);
@@ -1136,10 +1145,11 @@ communicator_new_rel_create(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr l
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not create rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not create rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for Create operation: %d", result.tag);
@@ -1173,10 +1183,11 @@ communicator_new_rel_truncate(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumbe
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not truncate rel %u/%u/%u.%u to %u blocks: %s",
-							RelFileInfoFmt(rinfo), forkNum, nblocks, pg_strerror(result.error))));
+					 errmsg("could not truncate rel %u/%u/%u.%u to %u blocks: %m",
+							RelFileInfoFmt(rinfo), forkNum, nblocks)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for Truncate operation: %d", result.tag);
@@ -1209,10 +1220,11 @@ communicator_new_rel_unlink(NRelFileInfo rinfo, ForkNumber forkNum, XLogRecPtr l
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not unlink rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not unlink rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for Unlink operation: %d", result.tag);
@@ -1243,10 +1255,11 @@ communicator_new_update_cached_rel_size(NRelFileInfo rinfo, ForkNumber forkNum, 
 		case NeonIOResult_WriteOK:
 			return;
 		case NeonIOResult_Error:
+			errno = result.error;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not update cached size for rel %u/%u/%u.%u: %s",
-							RelFileInfoFmt(rinfo), forkNum, pg_strerror(result.error))));
+					 errmsg("could not update cached size for rel %u/%u/%u.%u: %m",
+							RelFileInfoFmt(rinfo), forkNum)));
 			break;
 		default:
 			elog(ERROR, "unexpected result for UpdateCachedRelSize operation: %d", result.tag);

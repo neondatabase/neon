@@ -387,8 +387,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         NeonIOResult::RelSize(INVALID_BLOCK_NUMBER)
                     }
                     Err(err) => {
+                        // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                         info!("tonic error: {err:?}");
-                        NeonIOResult::Error(0)
+                        NeonIOResult::Error(libc::EIO)
                     }
                 }
             }
@@ -426,8 +427,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         NeonIOResult::ReadSlruSegment(blocks_count as _)
                     }
                     Err(err) => {
+                        // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                         info!("tonic error: {err:?}");
-                        NeonIOResult::Error(0)
+                        NeonIOResult::Error(libc::EIO)
                     }
                 }
             }
@@ -435,6 +437,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 self.request_nblocks_counters
                     .inc_by(RequestTypeLabelGroup::from_req(request), req.nblocks as i64);
                 let req = *req;
+                // FIXME: handle_request() runs in a separate task already, do we really need to spawn a new one here?
                 tokio::spawn(async move { self.handle_prefetchv_request(&req).await });
                 NeonIOResult::PrefetchVLaunched
             }
@@ -463,8 +466,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 {
                     Ok(db_size) => NeonIOResult::DbSize(db_size),
                     Err(err) => {
+                        // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                         info!("tonic error: {err:?}");
-                        NeonIOResult::Error(0)
+                        NeonIOResult::Error(libc::EIO)
                     }
                 }
             }
@@ -579,7 +583,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     continue;
                 }
                 Ok(CacheResult::NotFound(lsn)) => lsn,
-                Err(_io_error) => return Err(-1), // FIXME errno?
+                Err(_io_error) => return Err(libc::EIO), // FIXME print the error?
             };
             cache_misses.push((blkno, not_modified_since, dest, in_progress_guard));
         }
@@ -627,7 +631,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         resp.pages.len(),
                         block_numbers.len(),
                     );
-                    return Err(-1);
+                    return Err(libc::EIO);
                 }
 
                 trace!(
@@ -656,8 +660,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 }
             }
             Err(err) => {
+                // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                 info!("tonic error: {err:?}");
-                return Err(-1);
+                return Err(libc::EIO);
             }
         }
         Ok(())
@@ -704,7 +709,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         resp.pages.len(),
                         block_numbers.len(),
                     );
-                    return Err(-1);
+                    return Err(libc::EIO);
                 }
 
                 trace!(
@@ -721,8 +726,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 }
             }
             Err(err) => {
+                // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                 info!("tonic error: {err:?}");
-                return Err(-1);
+                return Err(libc::EIO);
             }
         }
         Ok(())
@@ -753,7 +759,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                     continue;
                 }
                 Ok(CacheResult::NotFound(lsn)) => lsn,
-                Err(_io_error) => return Err(-1), // FIXME errno?
+                Err(_io_error) => return Err(libc::EIO), // FIXME print the error?
             };
             cache_misses.push((blkno, not_modified_since, in_progress_guard));
         }
@@ -795,7 +801,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                         resp.pages.len(),
                         block_numbers.len(),
                     );
-                    return Err(-1);
+                    return Err(libc::EIO);
                 }
 
                 for (page, (blkno, _lsn, _guard)) in resp.pages.into_iter().zip(cache_misses) {
@@ -805,8 +811,9 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
                 }
             }
             Err(err) => {
+                // FIXME: Could we map the tonic StatusCode to a libc errno in a more fine-grained way? Or pass the error message to the backend
                 info!("tonic error: {err:?}");
-                return Err(-1);
+                return Err(libc::EIO);
             }
         }
         Ok(())
