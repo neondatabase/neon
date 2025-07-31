@@ -357,7 +357,6 @@ impl SharedState {
         &self,
         ttid: &TenantTimelineId,
         conf: &SafeKeeperConf,
-        standby_apply_lsn: Lsn,
     ) -> SafekeeperTimelineInfo {
         SafekeeperTimelineInfo {
             safekeeper_id: conf.my_id.0,
@@ -381,7 +380,6 @@ impl SharedState {
             backup_lsn: self.sk.state().inmem.backup_lsn.0,
             local_start_lsn: self.sk.state().local_start_lsn.0,
             availability_zone: conf.availability_zone.clone(),
-            standby_horizon: standby_apply_lsn.0,
         }
     }
 
@@ -794,9 +792,8 @@ impl Timeline {
 
     /// Get safekeeper info for broadcasting to broker and other peers.
     pub async fn get_safekeeper_info(&self, conf: &SafeKeeperConf) -> SafekeeperTimelineInfo {
-        let standby_apply_lsn = self.walsenders.get_hotstandby().reply.apply_lsn;
         let shared_state = self.read_shared_state().await;
-        shared_state.get_safekeeper_info(&self.ttid, conf, standby_apply_lsn)
+        shared_state.get_safekeeper_info(&self.ttid, conf)
     }
 
     /// Update timeline state with peer safekeeper data.
@@ -1127,7 +1124,7 @@ impl WalResidentTimeline {
 
             // if this is AppendResponse, fill in proper hot standby feedback.
             if let Some(AcceptorProposerMessage::AppendResponse(ref mut resp)) = rmsg {
-                resp.hs_feedback = self.walsenders.get_hotstandby().hs_feedback;
+                resp.hs_feedback = self.walsenders.get_hotstandby();
             }
         }
         Ok(rmsg)

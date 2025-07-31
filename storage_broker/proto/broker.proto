@@ -25,6 +25,7 @@ message SubscribeSafekeeperInfoRequest {
     }
 }
 
+// Next ID: 16
 message SafekeeperTimelineInfo {
     uint64 safekeeper_id = 1;
     TenantTimelineId tenant_timeline_id = 2;
@@ -42,7 +43,6 @@ message SafekeeperTimelineInfo {
     uint64 remote_consistent_lsn = 7;
     uint64 peer_horizon_lsn = 8;
     uint64 local_start_lsn = 9;
-    uint64 standby_horizon = 14;
     // A connection string to use for WAL receiving.
     string safekeeper_connstr = 10;
     // HTTP endpoint connection string.
@@ -99,6 +99,7 @@ message SafekeeperDiscoveryRequest {
 }
 
 // Shorter version of SafekeeperTimelineInfo, contains only necessary fields.
+// Next ID: 7
 message SafekeeperDiscoveryResponse {
     uint64 safekeeper_id = 1;
     TenantTimelineId tenant_timeline_id = 2;
@@ -108,6 +109,4 @@ message SafekeeperDiscoveryResponse {
     string safekeeper_connstr = 4;
     // Availability zone of a safekeeper.
     optional string availability_zone = 5;
-    // Replica apply LSN
-    uint64 standby_horizon = 6;
 }
