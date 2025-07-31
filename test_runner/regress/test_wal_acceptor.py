@@ -2963,10 +2963,8 @@ def test_max_active_safekeeper_commit_lag(neon_env_builder: NeonEnvBuilder):
     # Create branch and start endpoint
     env.create_branch("test_commit_lsn_lag_failpoint")
     endpoint = env.endpoints.create_start(
-        "test_commit_lsn_lag_failpoint",
-        config_lines=[
-            "neon.lakebase_mode=true"
-        ])
+        "test_commit_lsn_lag_failpoint", config_lines=["neon.lakebase_mode=true"]
+    )
     # Enable neon extension and table
     endpoint.safe_psql("CREATE EXTENSION IF NOT EXISTS neon")
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
