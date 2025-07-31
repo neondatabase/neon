@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.timeout(600)
-@skip_in_debug_build("only run with release build")
+@skip_in_debug_build("this test is slow so only run with release build")
 def test_unlogged_build(neon_env_builder: NeonEnvBuilder):
     """
     Check for race conditions between end of unlogged build and backends
