@@ -23,6 +23,7 @@ use uring_common::buf::IoBuf;
 
 use measured::MetricGroup;
 use measured::metric::MetricEncoding;
+use measured::metric::counter::CounterState;
 use measured::metric::gauge::GaugeState;
 use measured::metric::group::Encoding;
 use measured::{Gauge, GaugeVec};
@@ -30,7 +31,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::callbacks::{get_request_lsn, notify_proc};
 
-use tracing::{debug, error, info, info_span, trace};
+use tracing::{error, info, info_span, trace};
 
 use utils::lsn::Lsn;
 
@@ -65,7 +66,6 @@ pub struct CommunicatorWorkerProcessStruct<'a> {
     // For the requests that affect multiple blocks, have separate counters for the # of blocks affected
     request_nblocks_counters: GaugeVec<RequestTypeLabelGroupSet>,
 
-    #[allow(dead_code)]
     allocator_metrics: MyAllocatorCollector,
 }
 
@@ -144,8 +144,6 @@ pub(super) fn init(
     let cache = cis
         .integrated_cache_init_struct
         .worker_process_init(last_lsn, file_cache);
-
-    debug!("Initialised integrated cache: {cache:?}");
 
     let client = {
         let _guard = runtime.enter();
@@ -818,6 +816,7 @@ impl<'t> CommunicatorWorkerProcessStruct<'t> {
 impl<T> MetricGroup<T> for CommunicatorWorkerProcessStruct<'_>
 where
     T: Encoding,
+    CounterState: MetricEncoding<T>,
     GaugeState: MetricEncoding<T>,
 {
     fn collect_group_into(&self, enc: &mut T) -> Result<(), T::Err> {
@@ -825,12 +824,12 @@ where
         use measured::metric::name::MetricName;
 
         self.lfc_metrics.collect_group_into(enc)?;
+        self.cache.collect_group_into(enc)?;
         self.request_counters
             .collect_family_into(MetricName::from_str("request_counters"), enc)?;
         self.request_nblocks_counters
             .collect_family_into(MetricName::from_str("request_nblocks_counters"), enc)?;
-
-        // FIXME: allocator metrics
+        self.allocator_metrics.collect_group_into(enc)?;
 
         Ok(())
     }

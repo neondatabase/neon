@@ -32,7 +32,11 @@ use crate::file_cache::{CacheBlock, FileCache};
 use crate::init::alloc_from_slice;
 use pageserver_page_api::RelTag;
 
-use metrics::{IntCounter, IntGauge};
+use measured::{Counter, Gauge, MetricGroup};
+use measured::metric::counter::CounterState;
+use measured::metric::gauge::GaugeState;
+use measured::metric::MetricEncoding;
+use measured::metric;
 
 use neon_shmem::hash::{HashMapInit, entry::Entry};
 use neon_shmem::shmem::ShmemHandle;
@@ -55,7 +59,6 @@ pub struct IntegratedCacheShared {
 }
 
 /// Represents write-access to the integrated cache. This is used by the communicator process.
-#[derive(Debug)]
 pub struct IntegratedCacheWriteAccess<'t> {
     shared: &'t IntegratedCacheShared,
     relsize_cache: neon_shmem::hash::HashMapAccess<'t, RelKey, RelEntry>,
@@ -66,17 +69,34 @@ pub struct IntegratedCacheWriteAccess<'t> {
     // Fields for eviction
     clock_hand: AtomicUsize,
 
-    // Metrics
-    cache_page_evictions_counter: IntCounter,
-    block_entry_evictions_counter: IntCounter,
-    clock_iterations_counter: IntCounter,
+    metrics: IntegratedCacheMetricGroup,
+}
+
+#[derive(MetricGroup)]
+#[metric(new())]
+struct IntegratedCacheMetricGroup {
+    /// Page evictions from the Local File Cache
+    cache_page_evictions_counter: Counter,
+
+    /// Block entry evictions from the integrated cache
+    block_entry_evictions_counter: Counter,
+
+    /// Number of times the clock hand has moved
+    clock_iterations_counter: Counter,
 
     // metrics from the hash map
-    block_map_num_buckets: IntGauge,
-    block_map_num_buckets_in_use: IntGauge,
 
-    relsize_cache_num_buckets: IntGauge,
-    relsize_cache_num_buckets_in_use: IntGauge,
+    /// Allocated size of the block cache hash map
+    block_map_num_buckets: Gauge,
+
+    /// Number of buckets in use in the block cache hash map
+    block_map_num_buckets_in_use: Gauge,
+
+    /// Allocated size of the relsize cache hash map
+    relsize_cache_num_buckets: Gauge,
+
+    /// Number of buckets in use in the relsize cache hash map
+    relsize_cache_num_buckets_in_use: Gauge,
 }
 
 /// Represents read-only access to the integrated cache. Backend processes have this.
@@ -151,46 +171,7 @@ impl<'t> IntegratedCacheInitStruct<'t> {
             block_map: block_map_handle.attach_writer(),
             file_cache,
             clock_hand: AtomicUsize::new(0),
-
-            cache_page_evictions_counter: metrics::IntCounter::new(
-                "integrated_cache_page_evictions",
-                "Page evictions from the Local File Cache",
-            )
-            .unwrap(),
-
-            block_entry_evictions_counter: metrics::IntCounter::new(
-                "integrated_cache_block_entry_evictions",
-                "Block entry evictions from the integrated cache",
-            )
-            .unwrap(),
-
-            clock_iterations_counter: metrics::IntCounter::new(
-                "clock_iterations",
-                "Number of times the clock hand has moved",
-            )
-            .unwrap(),
-
-            block_map_num_buckets: metrics::IntGauge::new(
-                "block_map_num_buckets",
-                "Allocated size of the block cache hash map",
-            )
-            .unwrap(),
-            block_map_num_buckets_in_use: metrics::IntGauge::new(
-                "block_map_num_buckets_in_use",
-                "Number of buckets in use in the block cache hash map",
-            )
-            .unwrap(),
-
-            relsize_cache_num_buckets: metrics::IntGauge::new(
-                "relsize_cache_num_buckets",
-                "Allocated size of the relsize cache hash map",
-            )
-            .unwrap(),
-            relsize_cache_num_buckets_in_use: metrics::IntGauge::new(
-                "relsize_cache_num_buckets_in_use",
-                "Number of buckets in use in the relsize cache hash map",
-            )
-            .unwrap(),
+            metrics: IntegratedCacheMetricGroup::new(),
         }
     }
 
@@ -642,7 +623,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     fn try_evict_block_entry(&self) {
         let num_buckets = self.block_map.get_num_buckets();
         loop {
-            self.clock_iterations_counter.inc();
+            self.metrics.clock_iterations_counter.inc();
             let victim_bucket = self.clock_hand.fetch_add(1, Ordering::Relaxed) % num_buckets;
 
             let evict_this = match self.block_map.get_at_bucket(victim_bucket).as_deref() {
@@ -693,7 +674,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
         let num_buckets = self.block_map.get_num_buckets();
         let mut iterations = 0;
         while iterations < 100 {
-            self.clock_iterations_counter.inc();
+            self.metrics.clock_iterations_counter.inc();
             let victim_bucket = self.clock_hand.fetch_add(1, Ordering::Relaxed) % num_buckets;
 
             let evict_this = match self.block_map.get_at_bucket(victim_bucket).as_deref() {
@@ -759,9 +740,9 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     n => Some(n),
                 };
                 if evicted_cache_block.is_some() {
-                    self.cache_page_evictions_counter.inc();
+                    self.metrics.cache_page_evictions_counter.inc();
                 }
-                self.block_entry_evictions_counter.inc();
+                self.metrics.block_entry_evictions_counter.inc();
                 EvictResult::Evicted(evicted_cache_block)
             } else {
                 EvictResult::Pinned
@@ -794,44 +775,27 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     }
 }
 
-impl metrics::core::Collector for IntegratedCacheWriteAccess<'_> {
-    fn desc(&self) -> Vec<&metrics::core::Desc> {
-        let mut descs = Vec::new();
-        descs.append(&mut self.cache_page_evictions_counter.desc());
-        descs.append(&mut self.block_entry_evictions_counter.desc());
-        descs.append(&mut self.clock_iterations_counter.desc());
-
-        descs.append(&mut self.block_map_num_buckets.desc());
-        descs.append(&mut self.block_map_num_buckets_in_use.desc());
-
-        descs.append(&mut self.relsize_cache_num_buckets.desc());
-        descs.append(&mut self.relsize_cache_num_buckets_in_use.desc());
-
-        descs
-    }
-    fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
+impl <T: metric::group::Encoding> MetricGroup<T> for IntegratedCacheWriteAccess<'_>
+where
+    CounterState: MetricEncoding<T>,
+    GaugeState: MetricEncoding<T>,
+{
+    fn collect_group_into(&self, enc: &mut T) -> Result<(), <T as metric::group::Encoding>::Err> {
         // Update gauges
-        self.block_map_num_buckets
+        self.metrics.block_map_num_buckets
             .set(self.block_map.get_num_buckets() as i64);
-        self.block_map_num_buckets_in_use
+        self.metrics.block_map_num_buckets_in_use
             .set(self.block_map.get_num_buckets_in_use() as i64);
-        self.relsize_cache_num_buckets
+        self.metrics.relsize_cache_num_buckets
             .set(self.relsize_cache.get_num_buckets() as i64);
-        self.relsize_cache_num_buckets_in_use
+        self.metrics.relsize_cache_num_buckets_in_use
             .set(self.relsize_cache.get_num_buckets_in_use() as i64);
 
-        let mut values = Vec::new();
-        values.append(&mut self.cache_page_evictions_counter.collect());
-        values.append(&mut self.block_entry_evictions_counter.collect());
-        values.append(&mut self.clock_iterations_counter.collect());
+        if let Some(file_cache) = &self.file_cache {
+            file_cache.collect_group_into(enc)?;
+        }
 
-        values.append(&mut self.block_map_num_buckets.collect());
-        values.append(&mut self.block_map_num_buckets_in_use.collect());
-
-        values.append(&mut self.relsize_cache_num_buckets.collect());
-        values.append(&mut self.relsize_cache_num_buckets_in_use.collect());
-
-        values
+        self.metrics.collect_group_into(enc)
     }
 }
 
