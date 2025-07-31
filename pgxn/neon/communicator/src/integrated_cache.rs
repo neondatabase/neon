@@ -486,7 +486,9 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                             cache_block: AtomicU64::new(cache_block),
                             pinned: AtomicU64::new(0),
                             referenced: AtomicBool::new(true),
-                        }).is_ok() {
+                        })
+                        .is_ok()
+                        {
                             break;
                         } else {
                             // The hash map was full. Evict an entry and retry.
@@ -543,7 +545,9 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                             cache_block: AtomicU64::new(cache_block),
                             pinned: AtomicU64::new(0),
                             referenced: AtomicBool::new(true),
-                        }).is_ok() {
+                        })
+                        .is_ok()
+                        {
                             break;
                         } else {
                             // The hash map was full. Evict an entry and retry.
@@ -885,7 +889,9 @@ impl<'t> IntegratedCacheReadAccess<'t> {
                     cache_block: AtomicU64::new(INVALID_CACHE_BLOCK),
                     pinned: AtomicU64::new(0),
                     referenced: AtomicBool::new(true),
-                }).is_ok() {
+                })
+                .is_ok()
+                {
                     false
                 } else {
                     // The hash table is full.
