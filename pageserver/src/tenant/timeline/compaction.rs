@@ -1397,6 +1397,7 @@ impl Timeline {
                             critical_timeline!(
                                 self.tenant_shard_id,
                                 self.timeline_id,
+                                Some(&self.corruption_detected),
                                 "missing key during compaction: {err:?}"
                             );
                         }
@@ -1441,6 +1442,7 @@ impl Timeline {
                 critical_timeline!(
                     self.tenant_shard_id,
                     self.timeline_id,
+                    Some(&self.corruption_detected),
                     "could not compact, repartitioning keyspace failed: {e:?}"
                 );
             }

@@ -122,8 +122,11 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
                         // into the type system.
                         assert_eq!(state.status, ComputeStatus::RefreshConfiguration);
 
-                        if state.pspec.as_ref().map(|ps| ps.pageserver_connstr.clone())
-                            == Some(pspec.pageserver_connstr.clone())
+                        if state
+                            .pspec
+                            .as_ref()
+                            .map(|ps| ps.pageserver_conninfo.clone())
+                            == Some(pspec.pageserver_conninfo.clone())
                         {
                             info!(
                                 "Refresh configuration: Retrieved spec is the same as the current spec. Waiting for control plane to update the spec before attempting reconfiguration."

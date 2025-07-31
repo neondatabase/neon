@@ -177,5 +177,24 @@ extern void inc_query_time(uint64 elapsed);
 extern Size NeonPerfCountersShmemSize(void);
 extern void NeonPerfCountersShmemInit(void);
 
+/* BEGIN_HADRON */
+typedef struct
+{
+	pg_atomic_uint32 index_corruption_count;
+	pg_atomic_uint32 data_corruption_count;
+	pg_atomic_uint32 internal_error_count;
+	pg_atomic_uint32 ps_corruption_detected;
+} databricks_metrics;
+
+extern databricks_metrics *databricks_metrics_shared;
+
+extern Size DatabricksMetricsShmemSize(void);
+extern void DatabricksMetricsShmemInit(void);
+
+extern int databricks_test_hook;
+
+static const int TestHookCorruption = 1;
+/* END_HADRON */
+
 
 #endif							/* NEON_PERF_COUNTERS_H */

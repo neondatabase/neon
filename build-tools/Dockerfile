@@ -299,6 +299,7 @@ WORKDIR /home/nonroot
 ENV RUSTC_VERSION=1.88.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
+ARG CARGO_AUDITABLE_VERSION=0.7.0
 ARG RUSTFILT_VERSION=0.2.1
 ARG CARGO_HAKARI_VERSION=0.9.36
 ARG CARGO_DENY_VERSION=0.18.2
@@ -314,14 +315,16 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
     rustup component add llvm-tools rustfmt clippy && \
-    cargo install rustfilt      --locked --version "${RUSTFILT_VERSION}" && \
-    cargo install cargo-hakari  --locked --version "${CARGO_HAKARI_VERSION}" && \
-    cargo install cargo-deny    --locked --version "${CARGO_DENY_VERSION}" && \
-    cargo install cargo-hack    --locked --version "${CARGO_HACK_VERSION}" && \
-    cargo install cargo-nextest --locked --version "${CARGO_NEXTEST_VERSION}" && \
-    cargo install cargo-chef    --locked --version "${CARGO_CHEF_VERSION}" && \
-    cargo install diesel_cli    --locked --version "${CARGO_DIESEL_CLI_VERSION}" \
-                                --features postgres-bundled --no-default-features && \
+    cargo install cargo-auditable           --locked --version "${CARGO_AUDITABLE_VERSION}" && \
+    cargo auditable install cargo-auditable --locked --version "${CARGO_AUDITABLE_VERSION}" --force && \
+    cargo auditable install rustfilt                 --version "${RUSTFILT_VERSION}" && \
+    cargo auditable install cargo-hakari    --locked --version "${CARGO_HAKARI_VERSION}" && \
+    cargo auditable install cargo-deny      --locked --version "${CARGO_DENY_VERSION}" && \
+    cargo auditable install cargo-hack      --locked --version "${CARGO_HACK_VERSION}" && \
+    cargo auditable install cargo-nextest   --locked --version "${CARGO_NEXTEST_VERSION}" && \
+    cargo auditable install cargo-chef      --locked --version "${CARGO_CHEF_VERSION}" && \
+    cargo auditable install diesel_cli      --locked --version "${CARGO_DIESEL_CLI_VERSION}" \
+                                            --features postgres-bundled --no-default-features && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 

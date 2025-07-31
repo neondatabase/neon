@@ -80,7 +80,7 @@ use crate::id_lock_map::{
 use crate::leadership::Leadership;
 use crate::metrics;
 use crate::node::{AvailabilityTransition, Node};
-use crate::operation_utils::{self, TenantShardDrain};
+use crate::operation_utils::{self, TenantShardDrain, TenantShardDrainAction};
 use crate::pageserver_client::PageserverClient;
 use crate::peer_client::GlobalObservedState;
 use crate::persistence::split_state::SplitState;
@@ -1280,7 +1280,7 @@ impl Service {
                 // Always attempt autosplits. Sharding is crucial for bulk ingest performance, so we
                 // must be responsive when new projects begin ingesting and reach the threshold.
                 self.autosplit_tenants().await;
-            }
+              },
               _ = self.reconcilers_cancel.cancelled() => return
             }
         }
@@ -7824,7 +7824,7 @@ impl Service {
             register_req.listen_https_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
-            register_req.listen_grpc_addr,
+            register_req.listen_grpc_addr.clone(),
             register_req.listen_grpc_port,
             register_req.availability_zone_id.clone(),
             self.config.use_https_pageserver_api,
@@ -7859,6 +7859,8 @@ impl Service {
                     .update_node_on_registration(
                         register_req.node_id,
                         register_req.listen_https_port,
+                        register_req.listen_grpc_addr,
+                        register_req.listen_grpc_port,
                     )
                     .await?
             }
@@ -8887,6 +8889,9 @@ impl Service {
         for (_tenant_id, schedule_context, shards) in
             TenantShardExclusiveIterator::new(tenants, ScheduleMode::Speculative)
         {
+            if work.len() >= MAX_OPTIMIZATIONS_PLAN_PER_PASS {
+                break;
+            }
             for shard in shards {
                 if work.len() >= MAX_OPTIMIZATIONS_PLAN_PER_PASS {
                     break;
@@ -9651,16 +9656,16 @@ impl Service {
                     tenant_shard_id: tid,
                 };
 
-                let dest_node_id = {
+                let drain_action = {
                     let locked = self.inner.read().unwrap();
+                    tid_drain.tenant_shard_eligible_for_drain(&locked.tenants, &locked.scheduler)
+                };
 
-                    match tid_drain
-                        .tenant_shard_eligible_for_drain(&locked.tenants, &locked.scheduler)
-                    {
-                        Some(node_id) => node_id,
-                        None => {
-                            continue;
-                        }
+                let dest_node_id = match drain_action {
+                    TenantShardDrainAction::RescheduleToSecondary(dest_node_id) => dest_node_id,
+                    TenantShardDrainAction::Reconcile(intent_node_id) => intent_node_id,
+                    TenantShardDrainAction::Skip => {
+                        continue;
                     }
                 };
 
@@ -9695,14 +9700,16 @@ impl Service {
                 {
                     let mut locked = self.inner.write().unwrap();
                     let (nodes, tenants, scheduler) = locked.parts_mut();
-                    let rescheduled = tid_drain.reschedule_to_secondary(
-                        dest_node_id,
-                        tenants,
-                        scheduler,
-                        nodes,
-                    )?;
 
-                    if let Some(tenant_shard) = rescheduled {
+                    let tenant_shard = match drain_action {
+                        TenantShardDrainAction::RescheduleToSecondary(dest_node_id) => tid_drain
+                            .reschedule_to_secondary(dest_node_id, tenants, scheduler, nodes)?,
+                        TenantShardDrainAction::Reconcile(_) => tenants.get_mut(&tid),
+                        // Note: Unreachable, handled above.
+                        TenantShardDrainAction::Skip => None,
+                    };
+
+                    if let Some(tenant_shard) = tenant_shard {
                         let waiter = self.maybe_configured_reconcile_shard(
                             tenant_shard,
                             nodes,

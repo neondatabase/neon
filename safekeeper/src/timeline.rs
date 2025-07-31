@@ -195,12 +195,14 @@ impl StateSK {
         to: Configuration,
     ) -> Result<TimelineMembershipSwitchResponse> {
         let result = self.state_mut().membership_switch(to).await?;
+        let flush_lsn = self.flush_lsn();
+        let last_log_term = self.state().acceptor_state.get_last_log_term(flush_lsn);
 
         Ok(TimelineMembershipSwitchResponse {
             previous_conf: result.previous_conf,
             current_conf: result.current_conf,
-            last_log_term: self.state().acceptor_state.term,
-            flush_lsn: self.flush_lsn(),
+            last_log_term,
+            flush_lsn,
         })
     }
 
@@ -839,6 +841,7 @@ impl Timeline {
 
         let WalSendersTimelineMetricValues {
             ps_feedback_counter,
+            ps_corruption_detected,
             last_ps_feedback,
             interpreted_wal_reader_tasks,
         } = self.walsenders.info_for_metrics();
@@ -847,6 +850,7 @@ impl Timeline {
         Some(FullTimelineInfo {
             ttid: self.ttid,
             ps_feedback_count: ps_feedback_counter,
+            ps_corruption_detected,
             last_ps_feedback,
             wal_backup_active: self.wal_backup_active.load(Ordering::Relaxed),
             timeline_is_active: self.broker_active.load(Ordering::Relaxed),

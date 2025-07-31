@@ -72,9 +72,10 @@ jobs:
       options: --init --user root
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:24.8
+        image: clickhouse/clickhouse-server:25.6
         env:
           CLICKHOUSE_PASSWORD: ${{ needs.generate-ch-tmppw.outputs.tmp_val }}
+          PGSSLCERT: /tmp/postgresql.crt
         ports:
           - 9000:9000
           - 8123:8123

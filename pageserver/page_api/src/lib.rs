@@ -19,7 +19,9 @@ pub mod proto {
 }
 
 mod client;
-pub use client::Client;
 mod model;
+mod split;
 
+pub use client::Client;
 pub use model::*;
+pub use split::{GetPageSplitter, SplitError};
