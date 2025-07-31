@@ -101,20 +101,37 @@ def check_prewarmed_contains(
 
 
 @pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+@pytest.mark.parametrize("grpc", [True, False])
 @pytest.mark.parametrize("method", METHOD_VALUES, ids=METHOD_IDS)
-def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
+def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod, grpc: bool):
     """
     Test we can offload endpoint's LFC cache to endpoint storage.
     Test we can prewarm endpoint with LFC cache loaded from endpoint storage.
     """
     env = neon_simple_env
     n_records = 1000000
+
+    # The `neon.file_cache_prewarm_limit` GUC sets the max number of *chunks* to
+    # load. So the number of *pages* loaded depends on the chunk size. With the
+    # new communicator, the new LFC implementation doesn't do chunking so the
+    # limit is the number of pages, while with the old implementation, the
+    # default chunk size 1 MB chunks.
+    #
+    # Therefore with the old implementation, 1000 chunks equals 128000 pages, if
+    # all the chunks are fully dense. In practice they are sparse, but should
+    # amount to > 10000 pages anyway. (We have an assertion below that at least
+    # 10000 LFC pages are in use after prewarming)
+    if grpc:
+        prewarm_limit = 15000
+    else:
+        prewarm_limit = 1000
+
     cfg = [
         "autovacuum = off",
         "shared_buffers=1MB",
         "neon.max_file_cache_size=1GB",
         "neon.file_cache_size_limit=1GB",
-        "neon.file_cache_prewarm_limit=1000",
+        f"neon.file_cache_prewarm_limit={prewarm_limit}",
     ]
 
     if method == PrewarmMethod.AUTOPREWARM:
@@ -125,7 +142,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
             offload_lfc_interval_seconds=AUTOOFFLOAD_INTERVAL_SECS,
         )
     else:
-        endpoint = env.endpoints.create_start(branch_name="main", config_lines=cfg)
+        endpoint = env.endpoints.create_start(branch_name="main", config_lines=cfg, grpc=grpc)
 
     pg_conn = endpoint.connect()
     pg_cur = pg_conn.cursor()
@@ -162,7 +179,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
     log.info(f"Used LFC size: {lfc_used_pages}")
     pg_cur.execute("select * from neon.get_prewarm_info()")
     total, prewarmed, skipped, _ = pg_cur.fetchall()[0]
-    assert lfc_used_pages > 10000
+    assert lfc_used_pages >= 10000
     assert total > 0
     assert prewarmed > 0
     assert total == prewarmed + skipped

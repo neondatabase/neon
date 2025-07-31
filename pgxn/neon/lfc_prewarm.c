@@ -623,7 +623,7 @@ get_prewarm_info(PG_FUNCTION_ARGS)
 	{
 		total_pages = prewarm_ctl->total_prewarm_pages;
 		prewarmed_pages = prewarm_ctl->prewarmed_pages;
-		skipped_pages = prewarm_ctl->prewarmed_pages;
+		skipped_pages = prewarm_ctl->skipped_pages;
 		active_workers = 1;
 	}
 	else
