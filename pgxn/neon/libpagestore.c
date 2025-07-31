@@ -315,6 +315,27 @@ AssignShardMap(const char *newval)
 	}
 }
 
+/*
+ * Set the 'num_shards' variable in shared memory.
+ *
+ * This is only used with the new communicator. The new communicator doesn't
+ * use the shard_map in shared memory, except for the shard count, which is
+ * needed by get_num_shards() calls in the walproposer. This is called to set
+ * that. This is only called from the communicator process, at process startup
+ * or if the configuration is reloaded.
+ */
+void
+AssignNumShards(shardno_t num_shards)
+{
+	Assert(neon_use_communicator_worker);
+
+	pg_atomic_add_fetch_u64(&pagestore_shared->begin_update_counter, 1);
+	pg_write_barrier();
+	pagestore_shared->shard_map.num_shards = num_shards;
+	pg_write_barrier();
+	pg_atomic_add_fetch_u64(&pagestore_shared->end_update_counter, 1);
+}
+
 /* BEGIN_HADRON */
 /**
  * Return the total number of shards seen in the shard map.

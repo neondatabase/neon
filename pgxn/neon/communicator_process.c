@@ -134,6 +134,7 @@ communicator_new_bgworker_main(Datum main_arg)
 		connstrings = palloc(shard_map.num_shards * sizeof(char *));
 		for (int i = 0; i < shard_map.num_shards; i++)
 			connstrings[i] = shard_map.connstring[i];
+		AssignNumShards(shard_map.num_shards);
 		proc_handle = communicator_worker_process_launch(
 			cis,
 			neon_tenant,
@@ -232,6 +233,7 @@ communicator_new_bgworker_main(Datum main_arg)
 				for (int i = 0; i < shard_map.num_shards; i++)
 					connstrings[i] = shard_map.connstring[i];
 
+				AssignNumShards(shard_map.num_shards);
 				communicator_worker_config_reload(proc_handle,
 												  file_cache_size,
 												  connstrings,
