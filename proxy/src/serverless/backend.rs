@@ -458,7 +458,7 @@ pub(crate) enum LocalProxyConnError {
 impl ReportableError for HttpConnError {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
-            HttpConnError::ConnectError(_) => ErrorKind::Compute,
+            HttpConnError::ConnectError(e) => e.get_error_kind(),
             HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
             HttpConnError::PostgresConnectionError(p) => match p.as_db_error() {
                 // user provided a wrong database name

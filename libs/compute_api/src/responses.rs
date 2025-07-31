@@ -68,11 +68,15 @@ pub enum LfcPrewarmState {
     /// We tried to fetch the corresponding LFC state from the endpoint storage,
     /// but received `Not Found 404`. This should normally happen only during the
     /// first endpoint start after creation with `autoprewarm: true`.
+    /// This may also happen if LFC is turned off or not initialized
     ///
     /// During the orchestrated prewarm via API, when a caller explicitly
     /// provides the LFC state key to prewarm from, it's the caller responsibility
     /// to handle this status as an error state in this case.
     Skipped,
+    /// LFC prewarm was cancelled. Some pages in LFC cache may be prewarmed if query
+    /// has started working before cancellation
+    Cancelled,
 }
 
 impl Display for LfcPrewarmState {
@@ -83,6 +87,7 @@ impl Display for LfcPrewarmState {
             LfcPrewarmState::Completed => f.write_str("Completed"),
             LfcPrewarmState::Skipped => f.write_str("Skipped"),
             LfcPrewarmState::Failed { error } => write!(f, "Error({error})"),
+            LfcPrewarmState::Cancelled => f.write_str("Cancelled"),
         }
     }
 }
@@ -97,6 +102,7 @@ pub enum LfcOffloadState {
     Failed {
         error: String,
     },
+    Skipped,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
