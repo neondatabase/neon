@@ -32,11 +32,11 @@ use crate::file_cache::{CacheBlock, FileCache};
 use crate::init::alloc_from_slice;
 use pageserver_page_api::RelTag;
 
-use measured::{Counter, Gauge, MetricGroup};
+use measured::metric;
+use measured::metric::MetricEncoding;
 use measured::metric::counter::CounterState;
 use measured::metric::gauge::GaugeState;
-use measured::metric::MetricEncoding;
-use measured::metric;
+use measured::{Counter, Gauge, MetricGroup};
 
 use neon_shmem::hash::{HashMapInit, entry::Entry};
 use neon_shmem::shmem::ShmemHandle;
@@ -85,7 +85,6 @@ struct IntegratedCacheMetricGroup {
     clock_iterations_counter: Counter,
 
     // metrics from the hash map
-
     /// Allocated size of the block cache hash map
     block_map_num_buckets: Gauge,
 
@@ -775,20 +774,24 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
     }
 }
 
-impl <T: metric::group::Encoding> MetricGroup<T> for IntegratedCacheWriteAccess<'_>
+impl<T: metric::group::Encoding> MetricGroup<T> for IntegratedCacheWriteAccess<'_>
 where
     CounterState: MetricEncoding<T>,
     GaugeState: MetricEncoding<T>,
 {
     fn collect_group_into(&self, enc: &mut T) -> Result<(), <T as metric::group::Encoding>::Err> {
         // Update gauges
-        self.metrics.block_map_num_buckets
+        self.metrics
+            .block_map_num_buckets
             .set(self.block_map.get_num_buckets() as i64);
-        self.metrics.block_map_num_buckets_in_use
+        self.metrics
+            .block_map_num_buckets_in_use
             .set(self.block_map.get_num_buckets_in_use() as i64);
-        self.metrics.relsize_cache_num_buckets
+        self.metrics
+            .relsize_cache_num_buckets
             .set(self.relsize_cache.get_num_buckets() as i64);
-        self.metrics.relsize_cache_num_buckets_in_use
+        self.metrics
+            .relsize_cache_num_buckets_in_use
             .set(self.relsize_cache.get_num_buckets_in_use() as i64);
 
         if let Some(file_cache) = &self.file_cache {

@@ -18,10 +18,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use measured::{Gauge, MetricGroup};
-use measured::metric::gauge::GaugeState;
-use measured::metric::MetricEncoding;
 use measured::metric;
+use measured::metric::MetricEncoding;
+use measured::metric::gauge::GaugeState;
+use measured::{Gauge, MetricGroup};
 
 pub(crate) struct MyAllocator {
     allocations: AtomicU64,
@@ -83,19 +83,24 @@ impl MyAllocatorCollector {
     }
 }
 
-impl <T: metric::group::Encoding> MetricGroup<T> for MyAllocatorCollector
+impl<T: metric::group::Encoding> MetricGroup<T> for MyAllocatorCollector
 where
     GaugeState: MetricEncoding<T>,
 {
     fn collect_group_into(&self, enc: &mut T) -> Result<(), <T as metric::group::Encoding>::Err> {
         // Update the gauges with fresh values first
-        self.metrics.communicator_mem_allocations
+        self.metrics
+            .communicator_mem_allocations
             .set(GLOBAL.allocations.load(Ordering::Relaxed) as i64);
-        self.metrics.communicator_mem_deallocations
+        self.metrics
+            .communicator_mem_deallocations
             .set(GLOBAL.allocations.load(Ordering::Relaxed) as i64);
-        self.metrics.communicator_mem_allocated
+        self.metrics
+            .communicator_mem_allocated
             .set(GLOBAL.allocated.load(Ordering::Relaxed) as i64);
-        self.metrics.communicator_mem_high.set(GLOBAL.high.load(Ordering::Relaxed) as i64);
+        self.metrics
+            .communicator_mem_high
+            .set(GLOBAL.high.load(Ordering::Relaxed) as i64);
 
         self.metrics.collect_group_into(enc)
     }

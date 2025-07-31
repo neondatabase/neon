@@ -14,10 +14,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use measured::{Gauge, MetricGroup};
-use measured::metric::gauge::GaugeState;
-use measured::metric::MetricEncoding;
 use measured::metric;
+use measured::metric::MetricEncoding;
+use measured::metric::gauge::GaugeState;
+use measured::{Gauge, MetricGroup};
 
 use crate::BLCKSZ;
 
@@ -136,7 +136,7 @@ impl FileCache {
     }
 }
 
-impl <T: metric::group::Encoding> MetricGroup<T> for FileCache
+impl<T: metric::group::Encoding> MetricGroup<T> for FileCache
 where
     GaugeState: MetricEncoding<T>,
 {
