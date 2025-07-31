@@ -8,7 +8,7 @@ use http::Method;
 use http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
     ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE, ACCESS_CONTROL_REQUEST_HEADERS, ALLOW,
-    AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN,
+    AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN, VARY,
 };
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
@@ -81,6 +81,7 @@ const ACCESS_CONTROL_EXPOSE_HEADERS_VALUE: HeaderValue = HeaderValue::from_stati
     "Content-Encoding, Content-Location, Content-Range, Content-Type, Date, Location, Server, Transfer-Encoding, Range-Unit",
 );
 const ACCESS_CONTROL_ALLOW_HEADERS_VALUE: HeaderValue = HeaderValue::from_static("Authorization");
+const ACCESS_CONTROL_VARY_VALUE: HeaderValue = HeaderValue::from_static("Origin");
 
 // A wrapper around the DbSchema that allows for self-referencing
 #[self_referencing]
@@ -763,6 +764,9 @@ fn apply_common_cors_headers(
         );
         if let Some(origin) = response_allow_origin {
             h.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+            if origin != HEADER_VALUE_ALLOW_ALL_ORIGINS {
+                h.insert(VARY, ACCESS_CONTROL_VARY_VALUE);
+            }
         }
     }
 }
