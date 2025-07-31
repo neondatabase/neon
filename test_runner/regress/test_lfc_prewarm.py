@@ -140,6 +140,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod, grpc: bool
             config_lines=cfg,
             autoprewarm=True,
             offload_lfc_interval_seconds=AUTOOFFLOAD_INTERVAL_SECS,
+            grpc=grpc,
         )
     else:
         endpoint = env.endpoints.create_start(branch_name="main", config_lines=cfg, grpc=grpc)
