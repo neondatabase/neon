@@ -765,10 +765,10 @@ fn apply_common_cors_headers(
             ACCESS_CONTROL_EXPOSE_HEADERS_VALUE,
         );
         if let Some(origin) = response_allow_origin {
-            h.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
             if origin != HEADER_VALUE_ALLOW_ALL_ORIGINS {
                 h.insert(VARY, ACCESS_CONTROL_VARY_VALUE);
             }
+            h.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
         }
     }
 }
