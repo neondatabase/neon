@@ -754,6 +754,8 @@ fn apply_common_cors_headers(
                 None
             }
         }
+        // FIXME!: on the first request, when we don't have a cached entry for the config,
+        // allowed_origins is None, so we allow all origins for now but we should fix this
         (Some(_), None) => Some(HEADER_VALUE_ALLOW_ALL_ORIGINS),
         _ => None,
     };
