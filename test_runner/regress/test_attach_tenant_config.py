@@ -183,7 +183,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "lsn_lease_length": "1m",
         "lsn_lease_length_for_ts": "5s",
         "timeline_offloading": False,
-        "rel_size_v2_enabled": True,
+        "rel_size_v2_enabled": False,
         "relsize_snapshot_cache_capacity": 10000,
         "gc_compaction_enabled": False,
         "gc_compaction_verification": False,
