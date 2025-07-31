@@ -1542,6 +1542,8 @@ impl Service {
         timeline_id: TimelineId,
         timeline: &TimelinePersistence,
     ) -> Result<(), ApiError> {
+        tracing::info!(generation=?timeline.generation, sk_set=?timeline.sk_set, new_sk_set=?timeline.new_sk_set, "retrying finish safekeeper migration");
+
         if timeline.new_sk_set.is_some() {
             // Logical error, should never happen.
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
