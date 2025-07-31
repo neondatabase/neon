@@ -1,6 +1,7 @@
 use crate::compute::ComputeNode;
 use anyhow::{Context, bail};
 use compute_api::responses::{LfcPrewarmState, PromoteConfig, PromoteState};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
 
@@ -9,7 +10,7 @@ impl ComputeNode {
     /// disconnects, this does not stop promotion, and subsequent calls block until promote finishes.
     /// Called by control plane on secondary after primary endpoint is terminated
     /// Has a failpoint "compute-promotion"
-    pub async fn promote(self: &std::sync::Arc<Self>, cfg: PromoteConfig) -> PromoteState {
+    pub async fn promote(self: &Arc<Self>, cfg: PromoteConfig) -> PromoteState {
         let this = self.clone();
         let promote_fn = async move || match this.promote_impl(cfg).await {
             Ok(state) => state,
@@ -38,7 +39,12 @@ impl ComputeNode {
         task.borrow().clone()
     }
 
-    async fn promote_impl(&self, cfg: PromoteConfig) -> anyhow::Result<PromoteState> {
+    async fn promote_impl(self: &Arc<Self>, cfg: PromoteConfig) -> anyhow::Result<PromoteState> {
+        let safekeepers_str = cfg.spec.safekeeper_connstrings.join(",");
+        if safekeepers_str.is_empty() {
+            bail!("empty safekeepers list");
+        }
+
         {
             let state = self.state.lock().unwrap();
             let mode = &state.pspec.as_ref().unwrap().spec.mode;
@@ -83,11 +89,8 @@ impl ComputeNode {
         let lsn_wait_time_ms = now.elapsed().as_millis() as u32;
         now = Instant::now();
 
-        // using $1 doesn't work with ALTER SYSTEM SET
-        let safekeepers_sql = format!(
-            "ALTER SYSTEM SET neon.safekeepers='{}'",
-            cfg.spec.safekeeper_connstrings.join(",")
-        );
+        // $1 doesn't work with ALTER SYSTEM SET
+        let safekeepers_sql = format!("ALTER SYSTEM SET neon.safekeepers='{safekeepers_str}'");
         client
             .query(&safekeepers_sql, &[])
             .await
@@ -161,7 +164,10 @@ impl ComputeNode {
         }
 
         info!("applied new spec, reconfiguring as primary");
-        self.reconfigure()?;
+        // reconfigure calls apply_spec_sql which blocks on a current runtime. To avoid panicking
+        // due to nested runtimes, wait on this task in a blocking way
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.reconfigure()).await??;
         let reconfigure_time_ms = now.elapsed().as_millis() as u32;
 
         Ok(PromoteState::Completed {

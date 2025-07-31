@@ -184,11 +184,14 @@ def test_replica_promote_handler_disconnects(neon_simple_env: NeonEnv):
     once, and no error is thrown
     """
     env: NeonEnv = neon_simple_env
-    primary: Endpoint = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
+    primary: Endpoint = env.endpoints.create(branch_name="main", endpoint_id="primary")
+    # Also test catalog updates don't trigger any issues
+    primary.respec(skip_pg_catalog_updates=False)
+    primary.start()
+
     secondary: Endpoint = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
 
     with primary.connect() as conn, conn.cursor() as cur:
-        cur.execute("create schema neon;create extension neon with schema neon")
         cur.execute("create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)")
         cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
 
