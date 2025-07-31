@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS timelines CASCADE;
+DROP TABLE IF EXISTS timeline_imports CASCADE;
+DROP TABLE IF EXISTS tenant_shards CASCADE;
+DROP TABLE IF EXISTS safekeepers CASCADE;
+DROP TABLE IF EXISTS safekeeper_timeline_pending_ops CASCADE;
+DROP TABLE IF EXISTS nodes CASCADE;
+DROP TABLE IF EXISTS metadata_health CASCADE;
+DROP TABLE IF EXISTS hadron_timeline_safekeepers CASCADE;
+DROP TABLE IF EXISTS hadron_safekeepers CASCADE;
+DROP TABLE IF EXISTS controllers CASCADE;
