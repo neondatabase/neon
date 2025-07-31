@@ -423,11 +423,20 @@ communicator_new_get_lfc_state(size_t max_entries)
 	struct FileCacheIterator iter;
 	FileCacheState *fcs;
 	uint8	   *bitmap;
+	uint64_t	num_pages_used;
+	size_t		n_entries;
+	size_t		state_size;
+	size_t		n_pages;
 
-	/* TODO: Max(max_entries, <current # of entries in cache>) */
-	size_t		n_entries = max_entries;
-	size_t		state_size = FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_entries, 1);
-	size_t		n_pages = 0;
+	/*
+	 * Calculate the size of the returned state.
+	 *
+	 * FIXME: if the LFC is very large, this can exceed 1 GB, resulting in a
+	 * palloc error.
+	 */
+	num_pages_used = bcomm_cache_get_num_pages_used(my_bs);
+	n_entries = Min(num_pages_used, max_entries);
+	state_size = FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_entries, 1);
 
 	fcs = (FileCacheState *) palloc0(state_size);
 	SET_VARSIZE(fcs, state_size);
@@ -437,6 +446,7 @@ communicator_new_get_lfc_state(size_t max_entries)
 	bitmap = FILE_CACHE_STATE_BITMAP(fcs);
 
 	bcomm_cache_iterate_begin(my_bs, &iter);
+	n_pages = 0;
 	while (n_pages < max_entries && bcomm_cache_iterate_next(my_bs, &iter))
 	{
 		BufferTag	tag;
@@ -455,6 +465,7 @@ communicator_new_get_lfc_state(size_t max_entries)
 		BITMAP_SET(bitmap, i);
 	}
 	fcs->n_pages = n_pages;
+	fcs->n_chunks = n_pages;
 
 	return fcs;
 }
