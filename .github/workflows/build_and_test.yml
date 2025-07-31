@@ -534,6 +534,11 @@ jobs:
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/lcov/summary.json
           echo "summary-json=${REPORT_URL}" >> $GITHUB_OUTPUT
 
+      - name: Sleep for debug
+        if: always() && steps.upload-coverage-report-new.conclusion == 'failure'
+        run: |
+          sleep 3600
+
       - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
           REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
