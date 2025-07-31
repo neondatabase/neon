@@ -442,7 +442,7 @@ jobs:
       id-token: write # aws-actions/configure-aws-credentials
       statuses: write
       contents: write
-    runs-on: [ self-hosted, small ]
+    runs-on: [ self-hosted, small-debug ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
