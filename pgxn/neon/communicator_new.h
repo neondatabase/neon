@@ -39,12 +39,12 @@ extern void communicator_new_prefetch_register_bufferv(NRelFileInfo rinfo, ForkN
 													   BlockNumber blockno,
 													   BlockNumber nblocks);
 extern bool communicator_new_update_lwlsn_for_block_if_not_cached(NRelFileInfo rinfo, ForkNumber forkNum,
-													BlockNumber blockno, XLogRecPtr lsn);
-extern int communicator_new_read_slru_segment(
-	SlruKind kind,
-	uint32_t segno,
-	neon_request_lsns *request_lsns,
-	const char *path
+																  BlockNumber blockno, XLogRecPtr lsn);
+extern int	communicator_new_read_slru_segment(
+											   SlruKind kind,
+											   uint32_t segno,
+											   neon_request_lsns * request_lsns,
+											   const char *path
 );
 
 /* Write requests, to keep the caches up-to-date */

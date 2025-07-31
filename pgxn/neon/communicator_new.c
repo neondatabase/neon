@@ -110,12 +110,12 @@ typedef struct CommunicatorShmemData
 	 *
 	 * Note that this is not protected by any locks. That's sloppy, but works
 	 * fine in practice. To "add" a value to the HLL state, we just overwrite
-	 * one of the timestamps. Calculating the estimate reads all the values, but
-	 * it also doesn't depend on seeing a consistent snapshot of the values. We
-	 * could get bogus results if accessing the TimestampTz was not atomic, but
-	 * it on any 64-bit platforms we care about it is, and even if we observed a
-	 * torn read every now and then, it wouldn't affect the overall estimate
-	 * much.
+	 * one of the timestamps. Calculating the estimate reads all the values,
+	 * but it also doesn't depend on seeing a consistent snapshot of the
+	 * values. We could get bogus results if accessing the TimestampTz was not
+	 * atomic, but it on any 64-bit platforms we care about it is, and even if
+	 * we observed a torn read every now and then, it wouldn't affect the
+	 * overall estimate much.
 	 */
 	HyperLogLogState wss_estimation;
 
@@ -421,8 +421,9 @@ FileCacheState *
 communicator_new_get_lfc_state(size_t max_entries)
 {
 	struct FileCacheIterator iter;
-	FileCacheState* fcs;
+	FileCacheState *fcs;
 	uint8	   *bitmap;
+
 	/* TODO: Max(max_entries, <current # of entries in cache>) */
 	size_t		n_entries = max_entries;
 	size_t		state_size = FILE_CACHE_STATE_SIZE_FOR_CHUNKS(n_entries, 1);
@@ -438,14 +439,17 @@ communicator_new_get_lfc_state(size_t max_entries)
 	bcomm_cache_iterate_begin(my_bs, &iter);
 	while (n_pages < max_entries && bcomm_cache_iterate_next(my_bs, &iter))
 	{
-		BufferTag tag;
+		BufferTag	tag;
 
 		BufTagInit(tag, iter.rel_number, iter.fork_number, iter.block_number, iter.spc_oid, iter.db_oid);
 		fcs->chunks[n_pages] = tag;
 		n_pages++;
 	}
 
-	/* fill bitmap. TODO: memset would be more efficient, but this is a silly format anyway */
+	/*
+	 * fill bitmap. TODO: memset would be more efficient, but this is a silly
+	 * format anyway
+	 */
 	for (size_t i = 0; i < n_pages; i++)
 	{
 		BITMAP_SET(bitmap, i);
@@ -552,8 +556,8 @@ wait_request_completion(int request_idx, struct NeonIOResult *result_p)
 		if (poll_res == -1)
 		{
 			/*
-			 * Wake up periodically for CHECK_FOR_INTERRUPTS(). Because
-			 * we wait on MyIOCompletionLatch rather than MyLatch, we won't be
+			 * Wake up periodically for CHECK_FOR_INTERRUPTS(). Because we
+			 * wait on MyIOCompletionLatch rather than MyLatch, we won't be
 			 * woken up for the standard interrupts.
 			 */
 			long		timeout_ms = 1000;
@@ -567,10 +571,11 @@ wait_request_completion(int request_idx, struct NeonIOResult *result_p)
 			CHECK_FOR_INTERRUPTS();
 
 			/*
-			 * FIXME: as a temporary hack, panic if we don't get a response promptly.
-			 * Lots of regression tests are getting stuck and failing at the moment,
-			 * this makes them fail a little faster, which it faster to iterate.
-			 * This needs to be removed once more regression tests are passing.
+			 * FIXME: as a temporary hack, panic if we don't get a response
+			 * promptly. Lots of regression tests are getting stuck and
+			 * failing at the moment, this makes them fail a little faster,
+			 * which it faster to iterate. This needs to be removed once more
+			 * regression tests are passing.
 			 */
 			now = GetCurrentTimestamp();
 			if (now - start_time > 120 * 1000 * 1000)
@@ -656,7 +661,7 @@ communicator_new_readv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber block
 	};
 
 	{
-		BufferTag tag;
+		BufferTag	tag;
 
 		CopyNRelFileInfoToBufTag(tag, rinfo);
 		tag.forkNum = forkNum;
@@ -664,7 +669,7 @@ communicator_new_readv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber block
 		{
 			tag.blockNum = blockno;
 			addSHLL(&communicator_shmem_ptr->wss_estimation,
-					hash_bytes((uint8_t *) &tag, sizeof(tag)));
+					hash_bytes((uint8_t *) & tag, sizeof(tag)));
 		}
 	}
 
@@ -834,10 +839,16 @@ communicator_new_read_at_lsn_uncached(NRelFileInfo rinfo, ForkNumber forkNum, Bl
 		}
 	};
 
-	/* This is for tests only and doesn't need to be particularly fast. Always use the bounce buffer for simplicity */
+	/*
+	 * This is for tests only and doesn't need to be particularly fast. Always
+	 * use the bounce buffer for simplicity
+	 */
 	request.get_page_v_uncached.dest[0].ptr = bounce_buf_used = bounce_buf();
 
-	/* don't use the specialized bcomm_start_get_page_v_request() function here, because we want to bypass the LFC */
+	/*
+	 * don't use the specialized bcomm_start_get_page_v_request() function
+	 * here, because we want to bypass the LFC
+	 */
 	perform_request(&request, &result);
 	switch (result.tag)
 	{
@@ -926,10 +937,10 @@ communicator_new_dbsize(Oid dbNode)
 
 int
 communicator_new_read_slru_segment(
-	SlruKind kind,
-	uint32_t segno,
-	neon_request_lsns *request_lsns,
-	const char* path)
+								   SlruKind kind,
+								   uint32_t segno,
+								   neon_request_lsns * request_lsns,
+								   const char *path)
 {
 	NeonIOResult result = {};
 	NeonIORequest request = {
@@ -941,10 +952,11 @@ communicator_new_read_slru_segment(
 			.request_lsn = request_lsns->request_lsn,
 		}
 	};
-	int nblocks = -1;
-	char *temp_path = bounce_buf();
+	int			nblocks = -1;
+	char	   *temp_path = bounce_buf();
 
-	if (path == NULL) {
+	if (path == NULL)
+	{
 		elog(ERROR, "read_slru_segment called with NULL path");
 		return -1;
 	}
@@ -953,7 +965,7 @@ communicator_new_read_slru_segment(
 	request.read_slru_segment.destination_file_path.ptr = (uint8_t *) temp_path;
 
 	elog(DEBUG5, "readslrusegment called for kind=%u, segno=%u, file_path=\"%s\"",
-		kind, segno, request.read_slru_segment.destination_file_path.ptr);
+		 kind, segno, request.read_slru_segment.destination_file_path.ptr);
 
 	/* FIXME: see `request_lsns` in main_loop.rs for why this is needed */
 	XLogSetAsyncXactLSN(request_lsns->request_lsn);
@@ -1288,11 +1300,11 @@ print_neon_io_request(NeonIORequest *request)
 				CReadSlruSegmentRequest *r = &request->read_slru_segment;
 
 				snprintf(buf, sizeof(buf), "ReadSlruSegment: req " UINT64_FORMAT " slrukind=%u, segno=%u, lsn=%X/%X, file_path=\"%s\"",
-								r->request_id,
-								r->slru_kind,
-								r->segment_number,
-								LSN_FORMAT_ARGS(r->request_lsn),
-								r->destination_file_path.ptr);
+						 r->request_id,
+						 r->slru_kind,
+						 r->segment_number,
+						 LSN_FORMAT_ARGS(r->request_lsn),
+						 r->destination_file_path.ptr);
 				return buf;
 			}
 		case NeonIORequest_PrefetchV:
@@ -1327,9 +1339,9 @@ print_neon_io_request(NeonIORequest *request)
 				CRelExtendRequest *r = &request->rel_extend;
 
 				snprintf(buf, sizeof(buf), "RelExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blk %u lsn %X/%X",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
-								LSN_FORMAT_ARGS(r->lsn));
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number,
+						 LSN_FORMAT_ARGS(r->lsn));
 				return buf;
 			}
 		case NeonIORequest_RelZeroExtend:
@@ -1337,9 +1349,9 @@ print_neon_io_request(NeonIORequest *request)
 				CRelZeroExtendRequest *r = &request->rel_zero_extend;
 
 				snprintf(buf, sizeof(buf), "RelZeroExtend: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u-%u lsn %X/%X",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks,
-								LSN_FORMAT_ARGS(r->lsn));
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->block_number, r->block_number + r->nblocks,
+						 LSN_FORMAT_ARGS(r->lsn));
 				return buf;
 			}
 		case NeonIORequest_RelCreate:
@@ -1347,8 +1359,8 @@ print_neon_io_request(NeonIORequest *request)
 				CRelCreateRequest *r = &request->rel_create;
 
 				snprintf(buf, sizeof(buf), "RelCreate: req " UINT64_FORMAT " rel %u/%u/%u.%u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
 				return buf;
 			}
 		case NeonIORequest_RelTruncate:
@@ -1356,8 +1368,8 @@ print_neon_io_request(NeonIORequest *request)
 				CRelTruncateRequest *r = &request->rel_truncate;
 
 				snprintf(buf, sizeof(buf), "RelTruncate: req " UINT64_FORMAT " rel %u/%u/%u.%u blks %u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->nblocks);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number, r->nblocks);
 				return buf;
 			}
 		case NeonIORequest_RelUnlink:
@@ -1365,8 +1377,8 @@ print_neon_io_request(NeonIORequest *request)
 				CRelUnlinkRequest *r = &request->rel_unlink;
 
 				snprintf(buf, sizeof(buf), "RelUnlink: req " UINT64_FORMAT " rel %u/%u/%u.%u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number);
 				return buf;
 			}
 		case NeonIORequest_UpdateCachedRelSize:
@@ -1374,9 +1386,9 @@ print_neon_io_request(NeonIORequest *request)
 				CUpdateCachedRelSizeRequest *r = &request->update_cached_rel_size;
 
 				snprintf(buf, sizeof(buf), "UpdateCachedRelSize: req " UINT64_FORMAT " rel %u/%u/%u.%u blocks: %u",
-								r->request_id,
-								r->spc_oid, r->db_oid, r->rel_number, r->fork_number,
-					r->nblocks);
+						 r->request_id,
+						 r->spc_oid, r->db_oid, r->rel_number, r->fork_number,
+						 r->nblocks);
 				return buf;
 			}
 	}
@@ -1452,24 +1464,48 @@ communicator_new_lfc_get_stats(size_t *num_entries)
 #define NUM_ENTRIES 10
 	entries = palloc(sizeof(LfcStatsEntry) * NUM_ENTRIES);
 
-	entries[n++] = (LfcStatsEntry) {"file_cache_misses", false, cache_misses};
-	entries[n++] = (LfcStatsEntry) {"file_cache_hits", false, cache_hits };
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_misses", false, cache_misses
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_hits", false, cache_hits
+	};
 
-	entries[n++] = (LfcStatsEntry) {"file_cache_used_pages", false,
-									bcomm_cache_get_num_pages_used(my_bs) };
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_used_pages", false,
+			bcomm_cache_get_num_pages_used(my_bs)
+	};
 
 	/* TODO: these stats are exposed by the legacy LFC implementation */
 #if 0
-	entries[n++] = (LfcStatsEntry) {"file_cache_used", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->used : 0 };
-	entries[n++] = (LfcStatsEntry) {"file_cache_writes", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->writes : 0 };
-	entries[n++] = (LfcStatsEntry) {"file_cache_size", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->size : 0 };
-	entries[n++] = (LfcStatsEntry) {"file_cache_evicted_pages", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->evicted_pages : 0 };
-	entries[n++] = (LfcStatsEntry) {"file_cache_limit", lfc_ctl == NULL,
-									lfc_ctl ? lfc_ctl->limit : 0 };
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_used", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->used : 0
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_writes", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->writes : 0
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_size", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->size : 0
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_evicted_pages", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->evicted_pages : 0
+	};
+	entries[n++] = (LfcStatsEntry)
+	{
+		"file_cache_limit", lfc_ctl == NULL,
+			lfc_ctl ? lfc_ctl->limit : 0
+	};
 #endif
 
 	Assert(n <= NUM_ENTRIES);
