@@ -82,7 +82,7 @@ pub fn write_postgres_conf(
         if let Some(stripe_size) = conninfo.stripe_size {
             writeln!(
                 file,
-                "# from compute spec's pageserver_conninfo.stripe_size field"
+                "# from compute spec's pageserver_connection_info.stripe_size field"
             )?;
             writeln!(file, "neon.stripe_size={stripe_size}")?;
         }
@@ -133,7 +133,7 @@ pub fn write_postgres_conf(
         if let Some(libpq_urls) = libpq_urls {
             writeln!(
                 file,
-                "# derived from compute spec's pageserver_conninfo field"
+                "# derived from compute spec's pageserver_connection_info field"
             )?;
             writeln!(
                 file,
