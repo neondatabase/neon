@@ -4,6 +4,7 @@ self-hosted-runner:
     - large
     - large-arm64
     - small
+    - small-debug
     - small-metal
     - small-arm64
     - unit-perf
