@@ -102,7 +102,7 @@ impl SafekeeperNode {
     /// Initializes a safekeeper node by creating all necessary files,
     /// e.g. SSL certificates and JWT token file.
     pub fn initialize(&self) -> anyhow::Result<()> {
-        if self.env.generate_local_ssl_certs {
+        if self.env.generate_local_tls_certs {
             self.env.generate_ssl_cert(
                 &self.datadir_path().join("server.crt"),
                 &self.datadir_path().join("server.key"),

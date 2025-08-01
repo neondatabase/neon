@@ -505,6 +505,8 @@ class NeonEnvBuilder:
         # Flag to use https listener in storage broker, generate local ssl certs,
         # and force pageservers and safekeepers to use https for storage broker api.
         self.use_https_storage_broker_api: bool = False
+        # Flag to enable TLS for computes
+        self.use_compute_tls: bool = False
 
         self.pageserver_virtual_file_io_engine: str | None = pageserver_virtual_file_io_engine
         self.pageserver_get_vectored_concurrent_io: str | None = (
@@ -1111,14 +1113,16 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        self.generate_local_ssl_certs = (
+        self.generate_compute_tls_certs = config.use_compute_tls
+        self.generate_local_tls_certs = (
             config.use_https_pageserver_api
             or config.use_https_safekeeper_api
             or config.use_https_storage_controller_api
             or config.use_https_storage_broker_api
+            or config.use_compute_tls
         )
-        self.ssl_ca_file = (
-            self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None
+        self.tls_ca_file = (
+            self.repo_dir.joinpath("rootCA.crt") if self.generate_local_tls_certs else None
         )
 
         neon_local_env_vars = {}
@@ -1197,7 +1201,8 @@ class NeonEnv:
             "endpoint_storage": {
                 "listen_addr": f"127.0.0.1:{self.port_distributor.get_port()}",
             },
-            "generate_local_ssl_certs": self.generate_local_ssl_certs,
+            "generate_local_tls_certs": self.generate_local_tls_certs,
+            "generate_compute_tls_certs": self.generate_compute_tls_certs,
         }
 
         if config.use_https_storage_broker_api:
@@ -1941,7 +1946,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.auth_enabled = auth_enabled
         self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
         self.logfile = self.env.repo_dir / "storage_controller_1" / "storage_controller.log"
-        self.ssl_ca_file = env.ssl_ca_file
+        self.tls_ca_file = env.tls_ca_file
 
     def start(
         self,
@@ -2014,8 +2019,8 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return PageserverHttpClient(self.port, lambda: True, auth_token, *args, **kwargs)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
-        if self.ssl_ca_file is not None:
-            kwargs["verify"] = self.ssl_ca_file
+        if self.tls_ca_file is not None:
+            kwargs["verify"] = self.tls_ca_file
         resp = requests.request(method, *args, **kwargs)
         NeonStorageController.raise_api_exception(resp)
 
