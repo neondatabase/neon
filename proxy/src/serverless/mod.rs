@@ -459,6 +459,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response.map(|b| b.map_err(|x| match x {}).boxed()))
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
+        // Path used by SQL-over-HTTP proxy, auth broker and local_proxy
         let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
         let span = ctx.span();
 
