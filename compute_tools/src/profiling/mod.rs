@@ -327,7 +327,7 @@ fn get_override_path_env() -> String {
 ///
 /// The generator tools have the path to the binary
 /// that will be used to generate the profile.
-/// If the path is `None`, the tool will be searched
+/// If the path is [`None`], the tool will be searched
 /// in the system's `PATH` using the default name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProfileGenerator {
