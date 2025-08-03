@@ -139,24 +139,47 @@ impl FileCache {
         free_list.free_blocks.push(cache_block);
     }
 
+	pub fn reclaim_blocks(&self, num_blocks: u64) -> u64 {
+		let mut free_list = self.free_list.lock().unwrap();
+		let mut removed = 0;
+		while let Some(block) = free_list.free_blocks.pop() {
+			self.delete_block(block);
+			removed += 1;
+		}
+
+		let block_space = (num_blocks - removed)
+			.min(free_list.max_blocks - free_list.next_free_block);
+		if block_space > 0 {
+			self.delete_blocks(free_list.max_blocks - block_space, block_space);
+			free_list.max_blocks -= block_space;
+		}
+
+		num_blocks - removed - block_space
+	}
+	
 	/// "Delete" a block via fallocate's hole punching feature.
 	// TODO(quantumish): possibly implement some batching? lots of syscalls...
 	// unfortunately should be at odds with our access pattern as entries in the hashmap
 	// should have no correlation with the location of blocks in the actual LFC file.
-	pub fn delete_block(&self, cache_block: CacheBlock) {
+	pub fn delete_block(&self, cache_block: CacheBlock) {		
+		self.delete_blocks(cache_block, 1);
+	}
+
+	pub fn delete_blocks(&self, start: CacheBlock, amt: u64) {		
 		use nix::fcntl as nix;
 		if let Err(e) = nix::fallocate(
 			self.file.clone(),
 			nix::FallocateFlags::FALLOC_FL_PUNCH_HOLE
 				.union(nix::FallocateFlags::FALLOC_FL_KEEP_SIZE),
-			(cache_block as usize * BLCKSZ) as libc::off_t,
-			BLCKSZ as libc::off_t
+			(start as usize * BLCKSZ) as libc::off_t,
+			(amt as usize * BLCKSZ) as libc::off_t
 		) {
-			tracing::error!("failed to punch hole in LFC at block {cache_block}: {e}");
+			tracing::error!("failed to punch {amt} hole(s) in LFC at block {start}: {e}");
 			return;
 		}
 	}
 
+	
 	/// Attempt to reclaim `num_blocks` of previously hole-punched blocks.
 	#[cfg(target_os = "linux")]
 	pub fn undelete_blocks(&self, num_blocks: u64) -> u64 {
