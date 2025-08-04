@@ -106,6 +106,7 @@ class NeonAPI:
         branch_name: str | None = None,
         branch_role_name: str | None = None,
         branch_database_name: str | None = None,
+        project_settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "project": {
@@ -122,6 +123,8 @@ class NeonAPI:
             data["project"]["branch"]["role_name"] = branch_role_name
         if branch_database_name:
             data["project"]["branch"]["database_name"] = branch_database_name
+        if project_settings:
+            data["project"]["settings"] = project_settings
 
         resp = self.__request(
             "POST",
