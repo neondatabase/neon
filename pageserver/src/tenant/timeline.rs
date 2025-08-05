@@ -6593,7 +6593,7 @@ impl Timeline {
         );
         let min_standby_horizon = if cfg!(test) || cfg!(feature = "testing") {
             // TODO: parametrize rust test / test suite over the feature flag?
-            // For now, test the new feature.
+            // For now, test the new feature. Fix this.
             min_standby_horizon.leases
         } else {
             match flag_evaluation_result.as_deref() {

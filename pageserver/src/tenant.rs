@@ -9605,7 +9605,7 @@ mod tests {
             );
         });
 
-        // Test leasing same standby_horizon by different ID yields a fresh lease.
+        // Test leasing same LSN by different ID yields a fresh lease.
         // NB: leases are tracked by SystemTime, which is not monotonic, but we want to assert monotonicity of the lease below.
         // Sleep a second to make flakiness less likely.
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -9652,12 +9652,18 @@ mod tests {
         // Verify standby horizons did hold up GC
         //
 
-        // 0x20 was the lowest horizon
-        assert_eq!(*timeline.get_applied_gc_cutoff_lsn(), Lsn(0x20));
+        // 0x20 was the lowest horizon but
+        // TODO cfg(test) forces the new feature right now for coverage.
+        let expected_cutoff = if cfg!(test) || cfg!(feature = "testing") {
+            leases.iter().map(|(lsn, _)| *lsn).min().unwrap()
+        } else {
+            legacy
+        };
+        assert_eq!(*timeline.get_applied_gc_cutoff_lsn(), expected_cutoff);
 
         // Legacy propagation mechanism gets cleared by gc
         assert_eq!(timeline.standby_horizons.legacy(), None);
-        // Leases do not hold up GC
+        // Leases are unaffected.
         assert_eq!(timeline.standby_horizons.get_leases().len(), 4);
 
         assert_eq!(
