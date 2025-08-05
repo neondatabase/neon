@@ -1623,6 +1623,7 @@ pub struct TimelineInfo {
     /// Whether the timeline is invisible in synthetic size calculations.
     pub is_invisible: Option<bool>,
 
+    #[serde(default)]
     pub standby_horizon: serde_json::Value,
 }
 
