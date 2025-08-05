@@ -1868,22 +1868,24 @@ impl Timeline {
     }
 
     /// Logs return value at info level and errors at warn level in Debug::fmt.
-    #[instrument(skip(_ctx), ret(level = tracing::Level::INFO, Debug), err(level = tracing::Level::WARN, Debug))]
+    #[instrument(skip_all, fields(?lease_id, %lsn), ret(level = tracing::Level::INFO, Debug), err(level = tracing::Level::WARN, Debug))]
     pub(crate) fn lease_standby_horizon(
         &self,
         lease_id: String,
         lsn: Lsn,
         _ctx: &RequestContext,
-    ) -> anyhow::Result<SystemTime> {
+    ) -> anyhow::Result<standby_horizon::LeaseInfo> {
         if self
             .feature_resolver
             .evaluate_boolean("standby-horizon-leases-track-disable")
             .is_ok()
         {
-            // Use feature-flagging as a fail-safe in case something is wrong with the data structure (memory consumption, etc.)
-            return Ok(SystemTime::now()
-                .checked_add(Duration::from_secs(5 * 60))
-                .unwrap());
+            // Use feature-flagging as an emergency switch in case something is wrong with the data structure (memory consumption, etc.)
+            self.standby_horizons
+                .emergency_forget_all_leases_immediately();
+            return Ok(standby_horizon::LeaseInfo {
+                valid_until: Utc::now() + self.get_standby_horizon_lease_length(),
+            });
         }
         let applied_gc_cutoff_lsn_guard = self.get_applied_gc_cutoff_lsn();
         if lsn < *applied_gc_cutoff_lsn_guard {
@@ -1894,9 +1896,7 @@ impl Timeline {
             );
         }
         let length = self.get_standby_horizon_lease_length();
-        self.standby_horizons
-            .upsert_lease(lease_id, lsn, length)
-            .map(|lease| lease.valid_until)
+        self.standby_horizons.upsert_lease(lease_id, lsn, length)
     }
 
     /// Freeze the current open in-memory layer. It will be written to disk on next iteration.

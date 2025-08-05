@@ -84,7 +84,7 @@ use crate::tenant::mgr::{
 };
 use crate::tenant::storage_layer::IoConcurrency;
 use crate::tenant::timeline::handle::{Handle, HandleUpgradeError, WeakHandle};
-use crate::tenant::timeline::{self, WaitLsnError, WaitLsnTimeout, WaitLsnWaiter};
+use crate::tenant::timeline::{self, WaitLsnError, WaitLsnTimeout, WaitLsnWaiter, standby_horizon};
 use crate::tenant::{GetTimelineError, PageReconstructError, Timeline};
 use crate::{CancellableTask, PERF_TRACE_TARGET, timed_after_cancellation};
 
@@ -2236,7 +2236,7 @@ impl PageServerHandler {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(shard_id, %lsn), ret)]
+    #[instrument(skip_all, fields(shard_id, %lsn))]
     async fn handle_lease_standby_horizon<IO>(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
@@ -2263,26 +2263,17 @@ impl PageServerHandler {
             .await?;
         set_tracing_field_shard_id(&timeline);
 
-        let result: Option<SystemTime> = timeline
-            .lease_standby_horizon(lease_id, lsn, ctx) // logs errors internally
+        let result = timeline
+            // logs both Ok() and Err() internally, no need to do it here
+            .lease_standby_horizon(lease_id, lsn, ctx)
             .ok();
-        debug!(
-            result = result.map(|x| chrono::DateTime::<Utc>::from(x).to_rfc3339()),
-            "result"
-        ); // XXX better observability isn't great
 
-        // Encode result as Option<millis since epoch>
-        let bytes = result.map(|t| {
-            t.duration_since(SystemTime::UNIX_EPOCH)
-                .expect("we wouldn't allow a lease at epoch, system time would be horribly off")
-                .as_millis()
-                .to_string()
-                .into_bytes()
-        });
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
             b"expiration",
         )]))?
-        .write_message_noflush(&BeMessage::DataRow(&[bytes.as_deref()]))?;
+        .write_message_noflush(&BeMessage::DataRow(&[result
+            .map(|standby_horizon::LeaseInfo { valid_until }| valid_until.to_rfc3339().into_bytes())
+            .as_deref()]))?;
 
         Ok(())
     }
@@ -3952,12 +3943,17 @@ impl proto::PageService for GrpcPageServiceHandler {
         span_record!(lease_id=%lease_id, lsn=%lsn);
 
         // Attempt to acquire a lease. Return FailedPrecondition if the lease could not be granted.
-        let expiration = match timeline.lease_standby_horizon(lease_id, lsn, &ctx) {
+        let standby_horizon::LeaseInfo {
+            valid_until: expiration,
+        } = match timeline.lease_standby_horizon(lease_id, lsn, &ctx) {
             Ok(expiration) => expiration,
+            // Use Display so the error towards the client is crisp; the function already logged the error with backtrace.
             Err(err) => return Err(tonic::Status::failed_precondition(format!("{err}"))),
         };
 
-        Ok(tonic::Response::new(expiration.into()))
+        Ok(tonic::Response::new(
+            page_api::LeaseStandbyHorizonResponse { expiration }.into(),
+        ))
     }
 }
 

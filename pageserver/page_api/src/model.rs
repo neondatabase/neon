@@ -15,10 +15,10 @@
 //! receivers should expect all sorts of junk from senders. This also allows the sender to use e.g.
 //! stream combinators without dealing with errors, and avoids validating the same message twice.
 
-use std::fmt::Display;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fmt::Display, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 use bytes::Bytes;
+use chrono::Utc;
 use postgres_ffi_types::Oid;
 // TODO: split out Lsn, RelTag, SlruKind and other basic types to a separate crate, to avoid
 // pulling in all of their other crate dependencies when building the client.
@@ -789,29 +789,35 @@ impl From<LeaseStandbyHorizonRequest> for proto::LeaseStandbyHorizonRequest {
 
 /// Lease expiration time. If the lease could not be granted because the LSN has already been
 /// garbage collected, a FailedPrecondition status will be returned instead.
-pub type LeaseStandbyHorizonResponse = SystemTime;
+pub struct LeaseStandbyHorizonResponse {
+    pub expiration: chrono::DateTime<Utc>,
+}
 
 impl TryFrom<proto::LeaseStandbyHorizonResponse> for LeaseStandbyHorizonResponse {
     type Error = ProtocolError;
 
     fn try_from(pb: proto::LeaseStandbyHorizonResponse) -> Result<Self, Self::Error> {
         let expiration = pb.expiration.ok_or(ProtocolError::Missing("expiration"))?;
-        UNIX_EPOCH
-            .checked_add(Duration::new(
-                expiration.seconds as u64,
-                expiration.nanos as u32,
-            ))
-            .ok_or_else(|| ProtocolError::invalid("expiration", expiration))
+        Ok(Self {
+            // TODO: upgrade prost-type to 0.14.1 and use `chrono` feature?
+            expiration: chrono::DateTime::<Utc>::from_timestamp(
+                expiration.seconds,
+                expiration
+                    .nanos
+                    .try_into()
+                    .map_err(|_| ProtocolError::invalid("expiration.nanos", expiration.nanos))?,
+            )
+            .ok_or_else(|| ProtocolError::invalid("expiration", expiration))?,
+        })
     }
 }
 
 impl From<LeaseStandbyHorizonResponse> for proto::LeaseStandbyHorizonResponse {
     fn from(response: LeaseStandbyHorizonResponse) -> Self {
-        let expiration = response.duration_since(UNIX_EPOCH).unwrap_or_default();
         Self {
             expiration: Some(prost_types::Timestamp {
-                seconds: expiration.as_secs() as i64,
-                nanos: expiration.subsec_nanos() as i32,
+                seconds: response.expiration.timestamp() as i64,
+                nanos: response.expiration.timestamp_subsec_nanos() as i32,
             }),
         }
     }

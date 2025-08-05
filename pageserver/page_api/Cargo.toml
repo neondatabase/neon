@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 bytes.workspace = true
 futures.workspace = true
 pageserver_api.workspace = true

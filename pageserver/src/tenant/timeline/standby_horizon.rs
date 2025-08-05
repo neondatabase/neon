@@ -12,10 +12,12 @@
 
 use std::{
     collections::{HashMap, hash_map},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
+use chrono::Utc;
 use metrics::{IntGauge, UIntGauge};
+use tokio::time::Instant;
 use tracing::{instrument, warn};
 use utils::lsn::Lsn;
 
@@ -43,7 +45,7 @@ pub struct Metrics {
 
 #[derive(Debug)]
 struct Lease {
-    valid_until: SystemTime,
+    valid_until: tokio::time::Instant,
     lsn: Lsn,
 }
 
@@ -62,7 +64,7 @@ impl Lease {
 
 #[derive(Debug)]
 pub struct LeaseInfo {
-    pub valid_until: SystemTime,
+    pub valid_until: chrono::DateTime<Utc>,
 }
 
 /// Returned by [`Self::min_and_clear_legacy`].
@@ -129,6 +131,8 @@ impl Horizons {
         }
     }
 
+    /// Renew a lease. Due to their nonpersistent nature we can't tell the difference between
+    /// a renewal and an initial lease, so, let's call this `upsert` as a neutral term.
     pub fn upsert_lease(
         &self,
         id: String,
@@ -136,7 +140,8 @@ impl Horizons {
         length: Duration,
     ) -> anyhow::Result<LeaseInfo> {
         let mut inner = self.inner.lock().unwrap();
-        let valid_until = SystemTime::now() + length;
+        let now = Instant::now();
+        let valid_until = now + length;
         let update = Lease { valid_until, lsn };
         let updated = match inner.leases_by_id.entry(id) {
             hash_map::Entry::Occupied(mut entry) => {
@@ -145,18 +150,26 @@ impl Horizons {
             }
             hash_map::Entry::Vacant(entry) => entry.insert(update),
         };
-        let res = LeaseInfo {
-            valid_until: updated.valid_until,
+        // Convert the internal expiration time to a wallclock time to return it to the caller.
+        let lease_info = LeaseInfo {
+            valid_until: Utc::now()
+                + updated
+                    .valid_until
+                    // reuse now as the upsert is assumed to be fast
+                    .checked_duration_since(now)
+                    .expect("reuse of now() + guarantee of monotonicity in try_update"),
         };
+
         let new_count = inner.leases_by_id.len().into_u64();
         inner.metrics.leases_count.set(new_count);
         let leases_min = inner.leases_by_id.values().map(|v| v.lsn).min();
         inner.leases_min = leases_min;
         inner.metrics.leases_min.set(leases_min.unwrap_or(Lsn(0)).0);
-        Ok(res)
+
+        Ok(lease_info)
     }
 
-    pub fn cull_leases(&self, now: SystemTime) {
+    pub fn cull_leases(&self, now: Instant) {
         let mut inner = self.inner.lock().unwrap();
         let mut min = None;
         inner.leases_by_id.retain(|_, l| {
@@ -174,6 +187,23 @@ impl Horizons {
             .set(inner.leases_by_id.len().into_u64());
         inner.leases_min = min;
         inner.metrics.leases_min.set(min.unwrap_or(Lsn(0)).0);
+    }
+
+    #[instrument(skip_all)]
+    pub fn emergency_forget_all_leases_immediately(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        for (lease_id, _) in inner.leases_by_id.drain() {
+            warn!("dropping lease early {}", lease_id);
+        }
+        inner
+            .metrics
+            .leases_count
+            .set(inner.leases_by_id.len().into_u64());
+        inner.leases_min = None;
+        inner
+            .metrics
+            .leases_min
+            .set(inner.leases_min.unwrap_or(Lsn(0)).0);
     }
 
     pub fn dump(&self) -> serde_json::Value {
@@ -252,7 +282,7 @@ impl Horizons {
     }
 
     #[cfg(test)]
-    pub fn get_leases(&self) -> Vec<(Lsn, SystemTime)> {
+    pub fn get_leases(&self) -> Vec<(Lsn, tokio::time::Instant)> {
         let inner = self.inner.lock().unwrap();
         inner
             .leases_by_id

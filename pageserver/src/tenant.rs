@@ -4880,7 +4880,9 @@ impl TenantShard {
                 // Cull any expired leases
                 let now = SystemTime::now();
                 target.lsn_leases.retain(|_, lease| !lease.is_expired(&now));
-                timeline.standby_horizons.cull_leases(now);
+                timeline
+                    .standby_horizons
+                    .cull_leases(tokio::time::Instant::now());
 
                 timeline
                     .metrics
@@ -6218,6 +6220,7 @@ mod tests {
     use crate::keyspace::KeySpaceAccum;
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
+    use crate::tenant::timeline::standby_horizon::LeaseInfo;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -9609,11 +9612,13 @@ mod tests {
         // NB: leases are tracked by SystemTime, which is not monotonic, but we want to assert monotonicity of the lease below.
         // Sleep a second to make flakiness less likely.
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let renewed_lease = timeline
+        let LeaseInfo {
+            valid_until: renewed_lease,
+        } = timeline
             .lease_standby_horizon("renewed_lease_0".to_string(), Lsn(initial_leases[0]), &ctx)
             .expect("standby horizon lease renewal should succeed");
         assert!(
-            renewed_lease >= expirations[0],
+            renewed_lease >= expirations[0].valid_until,
             "New lease should have expiration time at least as good as original"
         );
 
@@ -9696,7 +9701,7 @@ mod tests {
         //
         timeline
             .standby_horizons
-            .cull_leases(SystemTime::now() + lease_length + Duration::from_secs(1));
+            .cull_leases(tokio::time::Instant::now() + lease_length + Duration::from_secs(1));
 
         assert_eq!(timeline.standby_horizons.get_leases().len(), 0);
 
@@ -9842,6 +9847,46 @@ mod tests {
         timeline.standby_horizons.validate_invariants(&timeline);
         timeline.standby_horizons.register_legacy_update(Lsn(0x30));
         timeline.standby_horizons.validate_invariants(&timeline);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_standby_horizon_emergency_forget_all_leases() -> anyhow::Result<()> {
+        let (tenant, ctx) =
+            TenantHarness::create("test_standby_horizon_emergency_forget_all_leases")
+                .await
+                .unwrap()
+                .load()
+                .await;
+
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        //
+        // Empty call works
+        //
+        timeline.standby_horizons.validate_invariants(&timeline);
+        timeline
+            .standby_horizons
+            .emergency_forget_all_leases_immediately();
+        timeline.standby_horizons.validate_invariants(&timeline);
+
+        //
+        // Leases are cleared but legacy remains
+        //
+        let legacy_lsn = Lsn(0x10);
+        timeline.standby_horizons.register_legacy_update(legacy_lsn);
+        timeline.lease_standby_horizon("mylease".to_string(), Lsn(0x20), &ctx)?;
+        timeline.lease_standby_horizon("otherlease".to_string(), Lsn(0x30), &ctx)?;
+        timeline.standby_horizons.validate_invariants(&timeline);
+        timeline
+            .standby_horizons
+            .emergency_forget_all_leases_immediately();
+        timeline.standby_horizons.validate_invariants(&timeline);
+        assert_eq!(timeline.standby_horizons.get_leases().len(), 0);
+        assert_eq!(timeline.standby_horizons.legacy(), Some(legacy_lsn));
 
         Ok(())
     }

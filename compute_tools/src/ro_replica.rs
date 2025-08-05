@@ -1,10 +1,7 @@
-use std::{
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
+use anyhow::Context;
+use chrono::Utc;
 use compute_api::spec::PageserverProtocol;
 use futures::{StreamExt, stream::FuturesUnordered};
 use postgres::SimpleQueryMessage;
@@ -90,12 +87,15 @@ async fn bg_task(compute: Arc<ComputeNode>) {
 
     let mut obtained = ObtainedLease {
         lsn: Lsn(0),
-        nearest_expiration: SystemTime::UNIX_EPOCH,
+        nearest_expiration: Utc::now(),
     };
     loop {
-        let valid_duration = obtained
+        let valid_duration: Duration = obtained
             .nearest_expiration
-            .duration_since(SystemTime::now())
+            .signed_duration_since(Utc::now())
+            .to_std()
+            // to_std() errors if the duration is less than zero, i.e,. if the lease already expired;
+            // try to renew anyway in that case;
             .unwrap_or_default();
         // Sleep for 60 seconds less than the valid duration but no more than half of the valid duration.
         let sleep_duration = valid_duration
@@ -139,7 +139,7 @@ async fn bg_task(compute: Arc<ComputeNode>) {
 
 struct ObtainedLease {
     lsn: Lsn,
-    nearest_expiration: SystemTime,
+    nearest_expiration: chrono::DateTime<Utc>,
 }
 
 async fn attempt(lease_id: String, compute: &Arc<ComputeNode>) -> anyhow::Result<ObtainedLease> {
@@ -164,7 +164,7 @@ async fn attempt(lease_id: String, compute: &Arc<ComputeNode>) -> anyhow::Result
             timeline_id=%timeline_id,
         );
         let logging_wrapper =
-            |fut: Pin<Box<dyn Future<Output = anyhow::Result<Option<SystemTime>>>>>| {
+            |fut: Pin<Box<dyn Future<Output = anyhow::Result<Option<chrono::DateTime<Utc>>>>>>| {
                 async move {
                     // TODO: timeout?
                     match fut.await {
@@ -233,7 +233,7 @@ async fn attempt_one_libpq(
     timeline_id: TimelineId,
     lease_id: String,
     lsn: Lsn,
-) -> anyhow::Result<Option<SystemTime>> {
+) -> anyhow::Result<Option<chrono::DateTime<Utc>>> {
     let ConnectInfo {
         tenant_shard_id,
         connstring,
@@ -256,14 +256,12 @@ async fn attempt_one_libpq(
         _ => anyhow::bail!("expected row message type"),
     };
 
-    // Note: this will be None if a lease is explicitly not granted.
-    let Some(expiration) = row.get("expiration") else {
-        return Ok(None);
-    };
-
-    let expiration =
-        SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(u64::from_str(expiration)?));
-    Ok(expiration)
+    // Note: this will be NULL (=> None) if a lease is explicitly not granted.
+    row.get("expiration")
+        .map(|s| {
+            chrono::DateTime::<Utc>::from_str(s).with_context(|| format!("parse expiration: {s:?}"))
+        })
+        .transpose()
 }
 
 async fn attempt_one_grpc(
@@ -271,7 +269,7 @@ async fn attempt_one_grpc(
     timeline_id: TimelineId,
     lease_id: String,
     lsn: Lsn,
-) -> anyhow::Result<Option<SystemTime>> {
+) -> anyhow::Result<Option<chrono::DateTime<Utc>>> {
     let ConnectInfo {
         tenant_shard_id,
         connstring,
@@ -289,7 +287,7 @@ async fn attempt_one_grpc(
 
     let req = pageserver_page_api::LeaseStandbyHorizonRequest { lease_id, lsn };
     match client.lease_standby_horizon(req).await {
-        Ok(expires) => Ok(Some(expires)),
+        Ok(pageserver_page_api::LeaseStandbyHorizonResponse { expiration }) => Ok(Some(expiration)),
         // Lease couldn't be acquired
         Err(err) if err.code() == tonic::Code::FailedPrecondition => Ok(None),
         Err(err) => Err(err.into()),
