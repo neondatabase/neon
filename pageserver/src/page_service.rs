@@ -76,7 +76,6 @@ use crate::pgdatadir_mapping::{LsnRange, Version};
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
     debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id,
-    debug_assert_current_span_has_tenant_id,
 };
 use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME, TaskKind};
 use crate::tenant::mgr::{
@@ -2194,6 +2193,8 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
+
         let timeline = self
             .timeline_handles
             .as_mut()
@@ -2249,7 +2250,7 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        debug_assert_current_span_has_tenant_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         let timeline = self
             .timeline_handles
@@ -3224,7 +3225,7 @@ where
                 lsn,
             }) => {
                 tracing::Span::current()
-                    .record("tenant_id", field::display(tenant_shard_id))
+                    .record("tenant_id", field::display(tenant_shard_id.tenant_id))
                     .record("timeline_id", field::display(timeline_id));
 
                 self.check_permission(Some(tenant_shard_id.tenant_id))?;
@@ -3256,7 +3257,7 @@ where
                 lsn,
             }) => {
                 tracing::Span::current()
-                    .record("tenant_id", field::display(tenant_shard_id))
+                    .record("tenant_id", field::display(tenant_shard_id.tenant_id))
                     .record("timeline_id", field::display(timeline_id));
 
                 self.check_permission(Some(tenant_shard_id.tenant_id))?;
