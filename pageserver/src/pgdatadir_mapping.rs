@@ -8,6 +8,7 @@
 //!
 use std::collections::{HashMap, HashSet, hash_map};
 use std::ops::{ControlFlow, Range};
+use std::sync::Arc;
 
 use crate::walingest::{WalIngestError, WalIngestErrorKind};
 use crate::{PERF_TRACE_TARGET, ensure_walingest};
@@ -1254,11 +1255,16 @@ impl Timeline {
         let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: u64 = 0;
+        let mut dbdir_cnt = 0;
+        let mut rel_cnt = 0;
+
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
+            dbdir_cnt += 1;
             for rel in self
                 .list_rels(*spcnode, *dbnode, Version::at(lsn), ctx)
                 .await?
             {
+                rel_cnt += 1;
                 if self.cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
@@ -1269,6 +1275,10 @@ impl Timeline {
                 total_size += relsize as u64;
             }
         }
+
+        self.db_rel_count
+            .store(Some(Arc::new((dbdir_cnt, rel_cnt))));
+
         Ok(total_size * BLCKSZ as u64)
     }
 
