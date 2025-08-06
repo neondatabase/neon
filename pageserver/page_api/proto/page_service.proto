@@ -17,11 +17,11 @@
 //    grpcurl \
 //      -plaintext \
 //      -H "neon-tenant-id: 7c4a1f9e3bd6470c8f3e21a65bd2e980" \
-//      -H "neon-shard-id: 0b10" \
+//      -H "neon-shard-id: 0000" \
 //      -H "neon-timeline-id: f08c4e9a2d5f76b1e3a7c2d8910f4b3e" \
 //      -H "authorization: Bearer $JWT" \
-//      -d '{"read_lsn": {"request_lsn": 1234567890}, "rel": {"spc_oid": 1663, "db_oid": 1234, "rel_number": 5678, "fork_number": 0}}'
-//      localhost:51051 page_api.PageService/CheckRelExists
+//      -d '{"read_lsn": {"request_lsn": 100000000, "not_modified_since_lsn": 1}, "db_oid": 1}' \
+//      localhost:51051 page_api.PageService/GetDbSize
 //    ```
 //
 // TODO: consider adding neon-compute-mode ("primary", "static", "replica").
@@ -38,8 +38,8 @@ package page_api;
 import "google/protobuf/timestamp.proto";
 
 service PageService {
-  // Returns whether a relation exists.
-  rpc CheckRelExists(CheckRelExistsRequest) returns (CheckRelExistsResponse);
+  // NB: unlike libpq, there is no CheckRelExists in gRPC, at the compute team's request. Instead,
+  // use GetRelSize with allow_missing=true to check existence.
 
   // Fetches a base backup.
   rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
@@ -107,17 +107,6 @@ message RelTag {
     uint32 db_oid = 2;
     uint32 rel_number = 3;
     uint32 fork_number = 4;
-}
-
-// Checks whether a relation exists, at the given LSN. Only valid on shard 0,
-// other shards will error.
-message CheckRelExistsRequest {
-  ReadLsn read_lsn = 1;
-  RelTag rel = 2;
-}
-
-message CheckRelExistsResponse {
-  bool exists = 1;
 }
 
 // Requests a base backup.
@@ -272,10 +261,15 @@ enum GetPageStatusCode {
 message GetRelSizeRequest {
   ReadLsn read_lsn = 1;
   RelTag rel = 2;
+  // If true, return missing=true for missing relations instead of a NotFound error.
+  bool allow_missing = 3;
 }
 
 message GetRelSizeResponse {
+  // The number of blocks in the relation.
   uint32 num_blocks = 1;
+  // If allow_missing=true, this is true for missing relations.
+  bool missing = 2;
 }
 
 // Requests an SLRU segment. Only valid on shard 0, other shards will error.

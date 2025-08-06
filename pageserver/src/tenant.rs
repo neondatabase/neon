@@ -9270,7 +9270,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -9353,7 +9357,11 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -10225,7 +10233,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -10260,7 +10272,11 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -10835,7 +10851,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     flags: dryrun_flags,
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -10846,14 +10862,22 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -10872,14 +10896,22 @@ mod tests {
             guard.cutoffs.space = Lsn(0x38);
         }
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await; // no wals between 0x30 and 0x38, so we should obtain the same result
 
         // not increasing the GC horizon and compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -11084,7 +11116,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     flags: dryrun_flags,
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11095,14 +11127,22 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -11302,7 +11342,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         branch_tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
 
@@ -11315,7 +11359,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     compact_lsn_range: Some(CompactLsnRange::above(Lsn(0x40))),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -11983,7 +12027,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(0)..get_key(2)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12030,7 +12074,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(2)..get_key(4)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12082,7 +12126,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(4)..get_key(9)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12133,7 +12177,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(9)..get_key(10)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12189,7 +12233,7 @@ mod tests {
                 CompactOptions {
                     flags: EnumSet::new(),
                     compact_key_range: Some((get_key(0)..get_key(10)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12460,7 +12504,7 @@ mod tests {
                 &cancel,
                 CompactOptions {
                     compact_lsn_range: Some(CompactLsnRange::above(Lsn(0x28))),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12495,7 +12539,11 @@ mod tests {
 
         // compact again
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -12714,7 +12762,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: Some((get_key(0)..get_key(2)).into()),
                     compact_lsn_range: Some((Lsn(0x20)..Lsn(0x28)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12760,7 +12808,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: Some((get_key(3)..get_key(8)).into()),
                     compact_lsn_range: Some((Lsn(0x28)..Lsn(0x40)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12808,7 +12856,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: Some((get_key(0)..get_key(5)).into()),
                     compact_lsn_range: Some((Lsn(0x20)..Lsn(0x50)).into()),
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )
@@ -12843,7 +12891,11 @@ mod tests {
 
         // final full compaction
         tline
-            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions::default_for_gc_compaction_unit_tests(),
+                &ctx,
+            )
             .await
             .unwrap();
         verify_result().await;
@@ -12953,7 +13005,7 @@ mod tests {
                 CompactOptions {
                     compact_key_range: None,
                     compact_lsn_range: None,
-                    ..Default::default()
+                    ..CompactOptions::default_for_gc_compaction_unit_tests()
                 },
                 &ctx,
             )

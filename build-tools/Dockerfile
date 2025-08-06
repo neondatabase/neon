@@ -317,14 +317,14 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
     rustup component add llvm-tools rustfmt clippy && \
-    cargo install rustfilt            --version ${RUSTFILT_VERSION} --locked && \
-    cargo install cargo-hakari        --version ${CARGO_HAKARI_VERSION} --locked && \
-    cargo install cargo-deny          --version ${CARGO_DENY_VERSION} --locked && \
-    cargo install cargo-hack          --version ${CARGO_HACK_VERSION} --locked && \
-    cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} --locked && \
-    cargo install cargo-chef          --version ${CARGO_CHEF_VERSION} --locked && \
-    cargo install diesel_cli          --version ${CARGO_DIESEL_CLI_VERSION} --locked \
-                                      --features postgres-bundled --no-default-features && \
+    cargo install rustfilt      --locked --version ${RUSTFILT_VERSION} && \
+    cargo install cargo-hakari  --locked --version ${CARGO_HAKARI_VERSION} && \
+    cargo install cargo-deny    --locked --version ${CARGO_DENY_VERSION} && \
+    cargo install cargo-hack    --locked --version ${CARGO_HACK_VERSION} && \
+    cargo install cargo-nextest --locked --version ${CARGO_NEXTEST_VERSION} && \
+    cargo install cargo-chef    --locked --version ${CARGO_CHEF_VERSION} && \
+    cargo install diesel_cli    --locked --version ${CARGO_DIESEL_CLI_VERSION} \
+                                --features postgres-bundled --no-default-features && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 

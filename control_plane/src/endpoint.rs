@@ -65,7 +65,6 @@ use jsonwebtoken::jwk::{
     OctetKeyPairParameters, OctetKeyPairType, PublicKeyUse,
 };
 use nix::sys::signal::{Signal, kill};
-use pageserver_api::shard::ShardStripeSize;
 use pem::Pem;
 use reqwest::header::CONTENT_TYPE;
 use safekeeper_api::PgMajorVersion;
@@ -77,6 +76,7 @@ use spki::{SubjectPublicKeyInfo, SubjectPublicKeyInfoRef};
 use tracing::debug;
 use url::Host;
 use utils::id::{NodeId, TenantId, TimelineId};
+use utils::shard::ShardStripeSize;
 
 use crate::local_env::LocalEnv;
 use crate::postgresql_conf::PostgresConf;

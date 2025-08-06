@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::{env, io};
 
 use chrono::{DateTime, Utc};
@@ -211,6 +210,9 @@ struct JsonLoggingLayer<C: Clock, W: MakeWriter> {
     /// tracks which fields of each **event** are duplicates
     skipped_field_indices: CallsiteMap<SkippedFieldIndices>,
 
+    /// tracks callsite names to an ID.
+    callsite_name_ids: papaya::HashMap<&'static str, u32, ahash::RandomState>,
+
     span_info: CallsiteMap<CallsiteSpanInfo>,
 
     /// Fields we want to keep track of in a separate json object.
@@ -223,6 +225,7 @@ impl<C: Clock, W: MakeWriter> JsonLoggingLayer<C, W> {
             clock,
             skipped_field_indices: CallsiteMap::default(),
             span_info: CallsiteMap::default(),
+            callsite_name_ids: papaya::HashMap::default(),
             writer,
             extract_fields,
         }
@@ -233,7 +236,7 @@ impl<C: Clock, W: MakeWriter> JsonLoggingLayer<C, W> {
         self.span_info
             .pin()
             .get_or_insert_with(metadata.callsite(), || {
-                CallsiteSpanInfo::new(metadata, self.extract_fields)
+                CallsiteSpanInfo::new(&self.callsite_name_ids, metadata, self.extract_fields)
             })
             .clone()
     }
@@ -345,10 +348,11 @@ struct CallsiteSpanInfo {
 }
 
 impl CallsiteSpanInfo {
-    fn new(metadata: &'static Metadata<'static>, extract_fields: &[&'static str]) -> Self {
-        // Start at 1 to reserve 0 for default.
-        static COUNTER: AtomicU32 = AtomicU32::new(1);
-
+    fn new(
+        callsite_name_ids: &papaya::HashMap<&'static str, u32, ahash::RandomState>,
+        metadata: &'static Metadata<'static>,
+        extract_fields: &[&'static str],
+    ) -> Self {
         let names: Vec<&'static str> = metadata.fields().iter().map(|f| f.name()).collect();
 
         // get all the indices of span fields we want to focus
@@ -361,8 +365,18 @@ impl CallsiteSpanInfo {
         // normalized_name is unique for each callsite, but it is not
         // unified across separate proxy instances.
         // todo: can we do better here?
-        let cid = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let normalized_name = format!("{}#{cid}", metadata.name()).into();
+        let cid = *callsite_name_ids
+            .pin()
+            .update_or_insert(metadata.name(), |&cid| cid + 1, 0);
+
+        // we hope that most span names are unique, in which case this will always be 0
+        let normalized_name = if cid == 0 {
+            metadata.name().into()
+        } else {
+            // if the span name is not unique, add the numeric ID to span name to distinguish it.
+            // sadly this is non-determinstic, across restarts but we should fix it by disambiguating re-used span names instead.
+            format!("{}#{cid}", metadata.name()).into()
+        };
 
         Self {
             extract,
@@ -914,6 +928,7 @@ mod tests {
             clock: clock.clone(),
             skipped_field_indices: papaya::HashMap::default(),
             span_info: papaya::HashMap::default(),
+            callsite_name_ids: papaya::HashMap::default(),
             writer: buffer.clone(),
             extract_fields: &["x"],
         };
@@ -922,14 +937,16 @@ mod tests {
 
         tracing::subscriber::with_default(registry, || {
             info_span!("some_span", x = 24).in_scope(|| {
-                info_span!("some_span", x = 40, x = 41, x = 42).in_scope(|| {
-                    tracing::error!(
-                        a = 1,
-                        a = 2,
-                        a = 3,
-                        message = "explicit message field",
-                        "implicit message field"
-                    );
+                info_span!("some_other_span", y = 30).in_scope(|| {
+                    info_span!("some_span", x = 40, x = 41, x = 42).in_scope(|| {
+                        tracing::error!(
+                            a = 1,
+                            a = 2,
+                            a = 3,
+                            message = "explicit message field",
+                            "implicit message field"
+                        );
+                    });
                 });
             });
         });
@@ -948,12 +965,15 @@ mod tests {
                     "a": 3,
                 },
                 "spans": {
-                    "some_span#1":{
+                    "some_span":{
                         "x": 24,
                     },
-                    "some_span#2": {
+                    "some_other_span": {
+                        "y": 30,
+                    },
+                    "some_span#1": {
                         "x": 42,
-                    }
+                    },
                 },
                 "extract": {
                     "x": 42,

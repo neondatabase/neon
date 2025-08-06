@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
-from fixtures.common_types import TenantId, TenantShardId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_AZ_ID,
@@ -47,6 +47,7 @@ from fixtures.utils import (
     wait_until,
 )
 from fixtures.workload import Workload
+from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 from werkzeug.wrappers.response import Response
 
@@ -70,6 +71,12 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
         for shard in env.storage_controller.locate(tid):
             counts[shard["node_id"]] += 1
     return counts
+
+
+class DeletionAPIKind(Enum):
+    OLD = "old"
+    FORCE = "force"
+    GRACEFUL = "graceful"
 
 
 @pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
@@ -990,7 +997,7 @@ def test_storage_controller_compute_hook_retry(
 
 
 @run_only_on_default_postgres("postgres behavior is not relevant")
-def test_storage_controller_compute_hook_keep_failing(
+def test_storage_controller_compute_hook_stuck_reconciles(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
     httpserver_listen_address: ListenAddress,
@@ -1040,7 +1047,7 @@ def test_storage_controller_compute_hook_keep_failing(
     env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
     env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
     env.storage_controller.allowed_errors.append(".*Keeping extra secondaries.*")
-    env.storage_controller.allowed_errors.append(".*Shard reconciliation is keep-failing.*")
+    env.storage_controller.allowed_errors.append(".*Shard reconciliation is stuck.*")
     env.storage_controller.node_configure(banned_tenant_ps.id, {"availability": "Offline"})
 
     # Migrate all allowed tenant shards to the first alive pageserver
@@ -1055,7 +1062,7 @@ def test_storage_controller_compute_hook_keep_failing(
 
     # Make some reconcile_all calls to trigger optimizations
     # RECONCILE_COUNT must be greater than storcon's MAX_CONSECUTIVE_RECONCILIATION_ERRORS
-    RECONCILE_COUNT = 12
+    RECONCILE_COUNT = 20
     for i in range(RECONCILE_COUNT):
         try:
             n = env.storage_controller.reconcile_all()
@@ -1067,6 +1074,8 @@ def test_storage_controller_compute_hook_keep_failing(
         banned_descr = env.storage_controller.tenant_describe(banned_tenant)
         assert banned_descr["shards"][0]["is_pending_compute_notification"] is True
         time.sleep(2)
+
+    env.storage_controller.assert_log_contains(".*Shard reconciliation is stuck.*")
 
     # Check that the allowed tenant shards are optimized due to affinity rules
     locations = alive_pageservers[0].http_client().tenant_list_locations()["tenant_shards"]
@@ -2572,9 +2581,11 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
 
 
 @pytest.mark.parametrize("while_offline", [True, False])
+@pytest.mark.parametrize("deletion_api", [DeletionAPIKind.OLD, DeletionAPIKind.FORCE])
 def test_storage_controller_node_deletion(
     neon_env_builder: NeonEnvBuilder,
     while_offline: bool,
+    deletion_api: DeletionAPIKind,
 ):
     """
     Test that deleting a node works & properly reschedules everything that was on the node.
@@ -2598,6 +2609,8 @@ def test_storage_controller_node_deletion(
     assert env.storage_controller.reconcile_all() == 0
 
     victim = env.pageservers[-1]
+    if deletion_api == DeletionAPIKind.FORCE and not while_offline:
+        victim.allowed_errors.append(".*request was dropped before completing.*")
 
     # The procedure a human would follow is:
     # 1. Mark pageserver scheduling=pause
@@ -2621,7 +2634,12 @@ def test_storage_controller_node_deletion(
         wait_until(assert_shards_migrated)
 
     log.info(f"Deleting pageserver {victim.id}")
-    env.storage_controller.node_delete_old(victim.id)
+    if deletion_api == DeletionAPIKind.FORCE:
+        env.storage_controller.node_delete(victim.id, force=True)
+    elif deletion_api == DeletionAPIKind.OLD:
+        env.storage_controller.node_delete_old(victim.id)
+    else:
+        raise AssertionError(f"Invalid deletion API: {deletion_api}")
 
     if not while_offline:
 
@@ -2634,7 +2652,15 @@ def test_storage_controller_node_deletion(
         wait_until(assert_victim_evacuated)
 
     # The node should be gone from the list API
-    assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+    def assert_node_is_gone():
+        assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+
+    if deletion_api == DeletionAPIKind.FORCE:
+        wait_until(assert_node_is_gone)
+    elif deletion_api == DeletionAPIKind.OLD:
+        assert_node_is_gone()
+    else:
+        raise AssertionError(f"Invalid deletion API: {deletion_api}")
 
     # No tenants should refer to the node in their intent
     for tenant_id in tenant_ids:
@@ -2656,7 +2682,11 @@ def test_storage_controller_node_deletion(
     env.storage_controller.consistency_check()
 
 
-def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("deletion_api", [DeletionAPIKind.FORCE, DeletionAPIKind.GRACEFUL])
+def test_storage_controller_node_delete_cancellation(
+    neon_env_builder: NeonEnvBuilder,
+    deletion_api: DeletionAPIKind,
+):
     neon_env_builder.num_pageservers = 3
     neon_env_builder.num_azs = 3
     env = neon_env_builder.init_configs()
@@ -2680,12 +2710,16 @@ def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBu
     assert len(nodes) == 3
 
     env.storage_controller.configure_failpoints(("sleepy-delete-loop", "return(10000)"))
+    env.storage_controller.configure_failpoints(("delete-node-after-reconciles-spawned", "pause"))
 
     ps_id_to_delete = env.pageservers[0].id
 
     env.storage_controller.warm_up_all_secondaries()
+
+    assert deletion_api in [DeletionAPIKind.FORCE, DeletionAPIKind.GRACEFUL]
+    force = deletion_api == DeletionAPIKind.FORCE
     env.storage_controller.retryable_node_operation(
-        lambda ps_id: env.storage_controller.node_delete(ps_id),
+        lambda ps_id: env.storage_controller.node_delete(ps_id, force),
         ps_id_to_delete,
         max_attempts=3,
         backoff=2,
@@ -2700,6 +2734,8 @@ def test_storage_controller_node_delete_cancellation(neon_env_builder: NeonEnvBu
     )
 
     env.storage_controller.cancel_node_delete(ps_id_to_delete)
+
+    env.storage_controller.configure_failpoints(("delete-node-after-reconciles-spawned", "off"))
 
     env.storage_controller.poll_node_status(
         ps_id_to_delete,
@@ -3252,7 +3288,10 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
     wait_until(reconfigure_node_again)
 
 
-def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("deletion_api", [DeletionAPIKind.OLD, DeletionAPIKind.FORCE])
+def test_ps_unavailable_after_delete(
+    neon_env_builder: NeonEnvBuilder, deletion_api: DeletionAPIKind
+):
     neon_env_builder.num_pageservers = 3
 
     env = neon_env_builder.init_start()
@@ -3265,10 +3304,16 @@ def test_ps_unavailable_after_delete(neon_env_builder: NeonEnvBuilder):
     assert_nodes_count(3)
 
     ps = env.pageservers[0]
-    env.storage_controller.node_delete_old(ps.id)
 
-    # After deletion, the node count must be reduced
-    assert_nodes_count(2)
+    if deletion_api == DeletionAPIKind.FORCE:
+        ps.allowed_errors.append(".*request was dropped before completing.*")
+        env.storage_controller.node_delete(ps.id, force=True)
+        wait_until(lambda: assert_nodes_count(2))
+    elif deletion_api == DeletionAPIKind.OLD:
+        env.storage_controller.node_delete_old(ps.id)
+        assert_nodes_count(2)
+    else:
+        raise AssertionError(f"Invalid deletion API: {deletion_api}")
 
     # Running pageserver CLI init in a separate thread
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -4814,3 +4859,103 @@ def test_storage_controller_migrate_with_pageserver_restart(
         "shards": [{"node_id": int(secondary.id), "shard_number": 0}],
         "preferred_az": DEFAULT_AZ_ID,
     }
+
+
+@run_only_on_default_postgres("PG version is not important for this test")
+def test_storage_controller_forward_404(neon_env_builder: NeonEnvBuilder):
+    """
+    Ensures that the storage controller correctly forwards 404s and converts some of them
+    into 503s before forwarding to the client.
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.num_azs = 2
+
+    env = neon_env_builder.init_start()
+    env.storage_controller.allowed_errors.append(".*Reconcile error.*")
+    env.storage_controller.allowed_errors.append(".*Timed out.*")
+
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
+    env.storage_controller.reconcile_until_idle()
+
+    # 404s on tenants and timelines are forwarded as-is when reconciler is not running.
+
+    # Access a non-existing timeline -> 404
+    with pytest.raises(PageserverApiException) as e:
+        env.storage_controller.pageserver_api().timeline_detail(
+            env.initial_tenant, TimelineId.generate()
+        )
+    assert e.value.status_code == 404
+    with pytest.raises(PageserverApiException) as e:
+        env.storage_controller.pageserver_api().timeline_lsn_lease(
+            env.initial_tenant, TimelineId.generate(), Lsn(0)
+        )
+    assert e.value.status_code == 404
+
+    # Access a non-existing tenant when reconciler is not running -> 404
+    with pytest.raises(PageserverApiException) as e:
+        env.storage_controller.pageserver_api().timeline_detail(
+            TenantId.generate(), env.initial_timeline
+        )
+    assert e.value.status_code == 404
+    with pytest.raises(PageserverApiException) as e:
+        env.storage_controller.pageserver_api().timeline_lsn_lease(
+            TenantId.generate(), env.initial_timeline, Lsn(0)
+        )
+    assert e.value.status_code == 404
+
+    # Normal requests should succeed
+    detail = env.storage_controller.pageserver_api().timeline_detail(
+        env.initial_tenant, env.initial_timeline
+    )
+    last_record_lsn = Lsn(detail["last_record_lsn"])
+    env.storage_controller.pageserver_api().timeline_lsn_lease(
+        env.initial_tenant, env.initial_timeline, last_record_lsn
+    )
+
+    # Get into a situation where the intent state is not the same as the observed state.
+    describe = env.storage_controller.tenant_describe(env.initial_tenant)["shards"][0]
+    current_primary = describe["node_attached"]
+    current_secondary = describe["node_secondary"][0]
+    assert current_primary != current_secondary
+
+    # Pause the reconciler so that the generation number won't be updated.
+    env.storage_controller.configure_failpoints(
+        ("reconciler-live-migrate-post-generation-inc", "pause")
+    )
+
+    # Do the migration in another thread; the request will be dropped as we don't wait.
+    shard_zero = TenantShardId(env.initial_tenant, 0, 0)
+    concurrent.futures.ThreadPoolExecutor(max_workers=1).submit(
+        env.storage_controller.tenant_shard_migrate,
+        shard_zero,
+        current_secondary,
+        StorageControllerMigrationConfig(override_scheduler=True),
+    )
+    # Not the best way to do this, we should wait until the migration gets started.
+    time.sleep(1)
+    placement = env.storage_controller.get_tenants_placement()[str(shard_zero)]
+    assert placement["observed"] != placement["intent"]
+    assert placement["observed"]["attached"] == current_primary
+    assert placement["intent"]["attached"] == current_secondary
+
+    # Now we issue requests that would cause 404 again
+    retry_strategy = Retry(total=0)
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+
+    no_retry_api = env.storage_controller.pageserver_api()
+    no_retry_api.mount("http://", adapter)
+    no_retry_api.mount("https://", adapter)
+
+    # As intent state != observed state, tenant not found error should return 503,
+    # so that the client can retry once we've successfully migrated.
+    with pytest.raises(PageserverApiException) as e:
+        no_retry_api.timeline_detail(env.initial_tenant, TimelineId.generate())
+    assert e.value.status_code == 503, f"unexpected status code and error: {e.value}"
+    with pytest.raises(PageserverApiException) as e:
+        no_retry_api.timeline_lsn_lease(env.initial_tenant, TimelineId.generate(), Lsn(0))
+    assert e.value.status_code == 503, f"unexpected status code and error: {e.value}"
+
+    # Unblock reconcile operations
+    env.storage_controller.configure_failpoints(
+        ("reconciler-live-migrate-post-generation-inc", "off")
+    )

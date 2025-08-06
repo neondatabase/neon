@@ -2455,14 +2455,31 @@ LIMIT 100",
     pub fn spawn_lfc_offload_task(self: &Arc<Self>, interval: Duration) {
         self.terminate_lfc_offload_task();
         let secs = interval.as_secs();
-        info!("spawning lfc offload worker with {secs}s interval");
         let this = self.clone();
+
+        info!("spawning LFC offload worker with {secs}s interval");
         let handle = spawn(async move {
             let mut interval = time::interval(interval);
             interval.tick().await; // returns immediately
             loop {
                 interval.tick().await;
-                this.offload_lfc_async().await;
+
+                let prewarm_state = this.state.lock().unwrap().lfc_prewarm_state.clone();
+                // Do not offload LFC state if we are currently prewarming or any issue occurred.
+                // If we'd do that, we might override the LFC state in endpoint storage with some
+                // incomplete state. Imagine a situation:
+                // 1. Endpoint started with `autoprewarm: true`
+                // 2. While prewarming is not completed, we upload the new incomplete state
+                // 3. Compute gets interrupted and restarts
+                // 4. We start again and try to prewarm with the state from 2. instead of the previous complete state
+                if matches!(
+                    prewarm_state,
+                    LfcPrewarmState::Completed
+                        | LfcPrewarmState::NotPrewarmed
+                        | LfcPrewarmState::Skipped
+                ) {
+                    this.offload_lfc_async().await;
+                }
             }
         });
         *self.lfc_offload_task.lock().unwrap() = Some(handle);

@@ -940,6 +940,20 @@ pub(crate) struct CompactOptions {
     /// Set job size for the GC compaction.
     /// This option is only used by GC compaction.
     pub sub_compaction_max_job_size_mb: Option<u64>,
+    /// Only for GC compaction.
+    /// If set, the compaction will compact the metadata layers. Should be only set to true in unit tests
+    /// because metadata compaction is not fully supported yet.
+    pub gc_compaction_do_metadata_compaction: bool,
+}
+
+impl CompactOptions {
+    #[cfg(test)]
+    pub fn default_for_gc_compaction_unit_tests() -> Self {
+        Self {
+            gc_compaction_do_metadata_compaction: true,
+            ..Default::default()
+        }
+    }
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1311,6 +1325,9 @@ impl Timeline {
     ///
     /// This naive implementation will be replaced with a more efficient one
     /// which actually vectorizes the read path.
+    ///
+    /// NB: the read path must be cancellation-safe. The Tonic gRPC service will drop the future
+    /// if the client goes away (e.g. due to timeout or cancellation).
     pub(crate) async fn get_vectored(
         &self,
         query: VersionedKeySpaceQuery,
@@ -2224,6 +2241,7 @@ impl Timeline {
                     compact_lsn_range: None,
                     sub_compaction: false,
                     sub_compaction_max_job_size_mb: None,
+                    gc_compaction_do_metadata_compaction: false,
                 },
                 ctx,
             )

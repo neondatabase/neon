@@ -3,10 +3,17 @@ use std::io;
 use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use postgres_protocol2::message::backend;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::codec::{Decoder, Encoder};
 
 pub enum FrontendMessage {
     Raw(Bytes),
+    RecordNotices(RecordNotices),
+}
+
+pub struct RecordNotices {
+    pub sender: UnboundedSender<Box<str>>,
+    pub limit: usize,
 }
 
 pub enum BackendMessage {
@@ -33,14 +40,11 @@ impl FallibleIterator for BackendMessages {
 
 pub struct PostgresCodec;
 
-impl Encoder<FrontendMessage> for PostgresCodec {
+impl Encoder<Bytes> for PostgresCodec {
     type Error = io::Error;
 
-    fn encode(&mut self, item: FrontendMessage, dst: &mut BytesMut) -> io::Result<()> {
-        match item {
-            FrontendMessage::Raw(buf) => dst.extend_from_slice(&buf),
-        }
-
+    fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> io::Result<()> {
+        dst.extend_from_slice(&item);
         Ok(())
     }
 }
