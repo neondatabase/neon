@@ -4,11 +4,12 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use redis::aio::{ConnectionLike, MultiplexedConnection};
-use redis::{ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo, RedisResult};
+use redis::{ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo, RedisError, RedisResult};
 use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
 use super::elasticache::CredentialsProvider;
+use crate::redis::elasticache::CredentialsProviderError;
 
 enum Credentials {
     Static(ConnectionInfo),
@@ -24,6 +25,14 @@ impl Clone for Credentials {
             }
         }
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum ConnectionProviderError {
+    #[error(transparent)]
+    Redis(#[from] RedisError),
+    #[error(transparent)]
+    CredentialsProvider(#[from] CredentialsProviderError),
 }
 
 /// A wrapper around `redis::MultiplexedConnection` that automatically refreshes the token.
@@ -86,15 +95,18 @@ impl ConnectionWithCredentialsProvider {
         }
     }
 
-    async fn ping(con: &mut MultiplexedConnection) -> RedisResult<()> {
-        redis::cmd("PING").query_async(con).await
+    async fn ping(con: &mut MultiplexedConnection) -> Result<(), ConnectionProviderError> {
+        redis::cmd("PING")
+            .query_async(con)
+            .await
+            .map_err(Into::into)
     }
 
     pub(crate) fn credentials_refreshed(&self) -> bool {
         self.credentials_refreshed.load(Ordering::Relaxed)
     }
 
-    pub(crate) async fn connect(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn connect(&mut self) -> Result<(), ConnectionProviderError> {
         let _guard = self.mutex.lock().await;
         if let Some(con) = self.con.as_mut() {
             match Self::ping(con).await {
@@ -141,7 +153,7 @@ impl ConnectionWithCredentialsProvider {
         Ok(())
     }
 
-    async fn get_connection_info(&self) -> anyhow::Result<ConnectionInfo> {
+    async fn get_connection_info(&self) -> Result<ConnectionInfo, ConnectionProviderError> {
         match &self.credentials {
             Credentials::Static(info) => Ok(info.clone()),
             Credentials::Dynamic(provider, addr) => {
@@ -160,7 +172,7 @@ impl ConnectionWithCredentialsProvider {
         }
     }
 
-    async fn get_client(&self) -> anyhow::Result<redis::Client> {
+    async fn get_client(&self) -> Result<redis::Client, ConnectionProviderError> {
         let client = redis::Client::open(self.get_connection_info().await?)?;
         self.credentials_refreshed.store(true, Ordering::Relaxed);
         Ok(client)

@@ -209,9 +209,9 @@ def test_ancestor_detach_branched_from(
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
-    # because we do the fullbackup from ancestor at the branch_lsn, the zenith.signal is always different
-    # as there is always "PREV_LSN: invalid" for "before"
-    skip_files = {"zenith.signal"}
+    # because we do the fullbackup from ancestor at the branch_lsn, the neon.signal and/or zenith.signal is always
+    # different as there is always "PREV_LSN: invalid" for "before"
+    skip_files = {"zenith.signal", "neon.signal"}
 
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, skip_files)
 
@@ -767,7 +767,7 @@ def test_compaction_induced_by_detaches_in_history(
         env.pageserver, env.initial_tenant, branch_timeline_id, branch_lsn, fullbackup_after
     )
 
-    # we don't need to skip any files, because zenith.signal will be identical
+    # we don't need to skip any files, because neon.signal will be identical
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
 
 
