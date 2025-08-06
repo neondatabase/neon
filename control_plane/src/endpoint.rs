@@ -99,6 +99,7 @@ pub struct EndpointConf {
     features: Vec<ComputeFeature>,
     cluster: Option<Cluster>,
     compute_ctl_config: ComputeCtlConfig,
+    privileged_role_name: Option<String>,
 }
 
 //
@@ -199,6 +200,7 @@ impl ComputeControlPlane {
         grpc: bool,
         skip_pg_catalog_updates: bool,
         drop_subscriptions_before_start: bool,
+        privileged_role_name: Option<String>,
         features: Vec<ComputeFeature>,
     ) -> Result<Arc<Endpoint>> {
         let pg_port = pg_port.unwrap_or_else(|| self.get_port());
@@ -237,6 +239,7 @@ impl ComputeControlPlane {
             features: features.clone(),
             cluster: None,
             compute_ctl_config: compute_ctl_config.clone(),
+            privileged_role_name: privileged_role_name.clone(),
         });
 
         ep.create_endpoint_dir()?;
@@ -258,6 +261,7 @@ impl ComputeControlPlane {
                 features,
                 cluster: None,
                 compute_ctl_config,
+                privileged_role_name,
             })?,
         )?;
         std::fs::write(
@@ -333,6 +337,9 @@ pub struct Endpoint {
 
     /// The compute_ctl config for the endpoint's compute.
     compute_ctl_config: ComputeCtlConfig,
+
+    /// The name of the privileged role for the endpoint.
+    privileged_role_name: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -433,6 +440,7 @@ impl Endpoint {
             features: conf.features,
             cluster: conf.cluster,
             compute_ctl_config: conf.compute_ctl_config,
+            privileged_role_name: conf.privileged_role_name,
         })
     }
 
@@ -869,6 +877,10 @@ impl Endpoint {
 
         if args.dev {
             cmd.arg("--dev");
+        }
+
+        if let Some(privileged_role_name) = self.privileged_role_name.clone() {
+            cmd.args(["--privileged-role-name", &privileged_role_name]);
         }
 
         let child = cmd.spawn()?;

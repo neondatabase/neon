@@ -87,6 +87,14 @@ struct Cli {
     #[arg(short = 'C', long, value_name = "DATABASE_URL")]
     pub connstr: String,
 
+    #[arg(
+        long,
+        default_value = "neon_superuser",
+        value_name = "PRIVILEGED_ROLE_NAME",
+        value_parser = Self::parse_privileged_role_name
+    )]
+    pub privileged_role_name: String,
+
     #[cfg(target_os = "linux")]
     #[arg(long, default_value = "neon-postgres")]
     pub cgroup: String,
@@ -149,6 +157,21 @@ impl Cli {
 
         Ok(url)
     }
+
+    /// For simplicity, we do not escape `privileged_role_name` anywhere in the code.
+    /// Since it's a system role, which we fully control, that's fine. Still, let's
+    /// validate it to avoid any surprises.
+    fn parse_privileged_role_name(value: &str) -> Result<String> {
+        use regex::Regex;
+
+        let pattern = Regex::new(r"^[a-z_]+$").unwrap();
+
+        if !pattern.is_match(value) {
+            bail!("--privileged-role-name can only contain lowercase letters and underscores")
+        }
+
+        Ok(value.to_string())
+    }
 }
 
 fn main() -> Result<()> {
@@ -178,6 +201,7 @@ fn main() -> Result<()> {
         ComputeNodeParams {
             compute_id: cli.compute_id,
             connstr,
+            privileged_role_name: cli.privileged_role_name.clone(),
             pgdata: cli.pgdata.clone(),
             pgbin: cli.pgbin.clone(),
             pgversion: get_pg_version_string(&cli.pgbin),
@@ -326,5 +350,50 @@ mod test {
             "https://example.com?hello=world",
         ])
         .expect_err("URL parameters are not allowed");
+    }
+
+    #[test]
+    fn verify_privileged_role_name() {
+        // Valid name
+        let cli = Cli::parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "my_superuser",
+        ]);
+        assert_eq!(cli.privileged_role_name, "my_superuser");
+
+        // Invalid names
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "NeonSuperuser",
+        ])
+        .expect_err("uppercase letters are not allowed");
+
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "$'neon_superuser",
+        ])
+        .expect_err("special characters are not allowed");
+
+        Cli::try_parse_from([
+            "compute_ctl",
+            "--pgdata=test",
+            "--connstr=test",
+            "--compute-id=test",
+            "--privileged-role-name",
+            "",
+        ])
+        .expect_err("empty name is not allowed");
     }
 }

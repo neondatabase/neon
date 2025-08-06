@@ -634,6 +634,10 @@ struct EndpointCreateCmdArgs {
         help = "Allow multiple primary endpoints running on the same branch. Shouldn't be used normally, but useful for tests."
     )]
     allow_multiple: bool,
+
+    /// Only allow changing it on creation
+    #[clap(long, help = "Name of the privileged role for the endpoint")]
+    privileged_role_name: Option<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -1490,6 +1494,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                 args.grpc,
                 !args.update_catalog,
                 false,
+                args.privileged_role_name.clone(),
                 args.features
                     .as_ref()
                     .map(|x| x.0.clone())

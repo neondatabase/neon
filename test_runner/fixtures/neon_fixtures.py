@@ -4326,6 +4326,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: int | None = None,
         allow_multiple: bool = False,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
         features: list[str] | None = None,
     ) -> Self:
         """
@@ -4354,6 +4355,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
             update_catalog=update_catalog,
+            privileged_role_name=privileged_role_name,
             features=features,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
@@ -4808,6 +4810,7 @@ class EndpointFactory:
         config_lines: list[str] | None = None,
         pageserver_id: int | None = None,
         update_catalog: bool = False,
+        privileged_role_name: str | None = None,
         features: list[str] | None = None,
     ) -> Endpoint:
         ep = Endpoint(
@@ -4832,6 +4835,7 @@ class EndpointFactory:
             config_lines=config_lines,
             pageserver_id=pageserver_id,
             update_catalog=update_catalog,
+            privileged_role_name=privileged_role_name,
             features=features,
         )
 
