@@ -1291,9 +1291,7 @@ impl ComputeNode {
 
         // In case of error, log and fail the check, but don't crash.
         // We're playing it safe because these errors could be transient
-        // and we don't yet retry. Also being careful here allows us to
-        // be backwards compatible with safekeepers that don't have the
-        // TIMELINE_STATUS API yet.
+        // and we don't yet retry.
         if responses.len() < quorum {
             error!(
                 "failed sync safekeepers check {:?} {:?} {:?}",
@@ -2492,7 +2490,7 @@ pub async fn installed_extensions(conf: tokio_postgres::Config) -> Result<()> {
                 serde_json::to_string(&extensions).expect("failed to serialize extensions list")
             );
         }
-        Err(err) => error!("could not get installed extensions: {err:?}"),
+        Err(err) => error!("could not get installed extensions: {err}"),
     }
     Ok(())
 }

@@ -728,7 +728,7 @@ class NeonEnvBuilder:
         # NB: neon_local rewrites postgresql.conf on each start based on neon_local config. No need to patch it.
         # However, in this new NeonEnv, the pageservers and safekeepers listen on different ports, and the storage
         # controller will currently reject re-attach requests from them because the NodeMetadata isn't identical.
-        # So, from_repo_dir patches up the the storcon database.
+        # So, from_repo_dir patches up the storcon database.
         patch_script_path = self.repo_dir / "storage_controller_db.startup.sql"
         assert not patch_script_path.exists()
         patch_script = ""
