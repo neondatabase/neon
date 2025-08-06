@@ -3694,6 +3694,23 @@ async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow
     Ok(())
 }
 
+async fn force_refresh_feature_flag(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+    tenant
+        .feature_resolver
+        .refresh_properties_and_flags(&tenant);
+    json_response(StatusCode::OK, ())
+}
+
 async fn tenant_evaluate_feature_flag(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -4158,6 +4175,9 @@ pub fn make_router(
         )
         .get("/v1/tenant/:tenant_shard_id/feature_flag/:flag_key", |r| {
             api_handler(r, tenant_evaluate_feature_flag)
+        })
+        .post("/v1/tenant/:tenant_shard_id/force_refresh_feature_flag", |r| {
+            api_handler(r, force_refresh_feature_flag)
         })
         .put("/v1/feature_flag/:flag_key", |r| {
             testing_api_handler("force override feature flag - put", r, force_override_feature_flag_for_testing_put)
