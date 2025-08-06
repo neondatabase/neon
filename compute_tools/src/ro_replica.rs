@@ -7,12 +7,9 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use postgres::SimpleQueryMessage;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, info_span, instrument, warn};
-use utils::{backoff::retry, id::TimelineId, lsn::Lsn};
+use utils::{backoff::retry, id::TimelineId, lsn::Lsn, shard::TenantShardId};
 
-use crate::{
-    compute::ComputeNode,
-    pageserver_client::{ConnectInfo, pageserver_connstrings_for_connect},
-};
+use crate::compute::ComputeNode;
 
 #[derive(Default)]
 pub(crate) struct GlobalState {
@@ -48,8 +45,12 @@ async fn bg_task(compute: Arc<ComputeNode>) {
     let lease_id = format!("v1-{}-{}", compute.params.compute_id, std::process::id());
     tracing::Span::current().record("lease_id", tracing::field::display(&lease_id));
 
+    // XXX can we get tenant_id and timeline_id now so they're included in log span?
+    // These should be immutable but it requires pspec is set alreayd. Is it?
+
     // Wait until we have the first value.
     // Allows us to simply .unwrap() later because it never transitions back to None.
+    // XXX maybe we should transition back to None and use that to detect replica promotion (where we stop renewing the lease?)
     info!("waiting for first lease lsn to be fetched from postgres");
     let mut min_inflight_request_lsn_changed =
         compute.ro_replica.min_inflight_request_lsn.subscribe();
@@ -143,10 +144,16 @@ struct ObtainedLease {
 }
 
 async fn attempt(lease_id: String, compute: &Arc<ComputeNode>) -> anyhow::Result<ObtainedLease> {
-    let (shards, timeline_id) = {
+    // Note: List of pageservers is dynamic, need to re-read configs before each attempt.
+    let (conninfo, auth, tenant_id, timeline_id) = {
         let state = compute.state.lock().unwrap();
         let pspec = state.pspec.as_ref().expect("spec must be set");
-        (pageserver_connstrings_for_connect(pspec), pspec.timeline_id)
+        (
+            pspec.pageserver_conninfo.clone(),
+            pspec.storage_auth_token.clone(),
+            pspec.tenant_id,
+            pspec.timeline_id,
+        )
     };
 
     let lsn = compute
@@ -156,43 +163,73 @@ async fn attempt(lease_id: String, compute: &Arc<ComputeNode>) -> anyhow::Result
         .expect("we only call this function once it has been transitioned to Some");
 
     let mut futs = FuturesUnordered::new();
-    for connect_info in shards {
-        let logging_span = info_span!(
-            "attempt_one",
-            tenant_id=%connect_info.tenant_shard_id.tenant_id,
-            shard_id=%connect_info.tenant_shard_id.shard_slug(),
-            timeline_id=%timeline_id,
-        );
-        let logging_wrapper = async |fut| {
-            async move {
-                // TODO: timeout?
-                match fut.await {
-                    Ok(Some(v)) => {
-                        info!("lease obtained");
-                        Ok(Some(v))
-                    }
-                    Ok(None) => {
-                        error!("pageserver rejected our request");
-                        Ok(None)
-                    }
-                    Err(err) => {
-                        error!("communication failure: {err:?}");
-                        Err(())
+    for (shard_index, shard) in conninfo.shards {
+        let tenant_shard_id = TenantShardId {
+            tenant_id,
+            shard_number: shard_index.shard_number,
+            shard_count: shard_index.shard_count,
+        };
+        // XXX: If there are more than pageserver for the one shard, do we need to get a
+        // leas on all of them? Currently, that's what we assume, but this is hypothetical
+        // as of this writing, as we never pass the info for more than one pageserver per
+        // shard.
+        for pageserver in shard.pageservers {
+            let logging_span = info_span!(
+                "attempt_one",
+                tenant_id=%tenant_shard_id.tenant_id,
+                shard_id=%tenant_shard_id.shard_slug(),
+                timeline_id=%timeline_id,
+                pageserver_id=?pageserver.id,
+                protocol=?conninfo.prefer_protocol,
+            );
+            let logging_wrapper = async |fut| {
+                async move {
+                    // TODO: timeout?
+                    match fut.await {
+                        Ok(Some(v)) => {
+                            info!("lease obtained");
+                            Ok(Some(v))
+                        }
+                        Ok(None) => {
+                            error!("pageserver rejected our request");
+                            Ok(None)
+                        }
+                        Err(err) => {
+                            error!("communication failure: {err:?}");
+                            Err(())
+                        }
                     }
                 }
-            }
-            .instrument(logging_span)
-            .await
-        };
-        let fut = match PageserverProtocol::from_connstring(&connect_info.connstring)? {
-            PageserverProtocol::Libpq => logging_wrapper(
-                attempt_one_libpq(connect_info, timeline_id, lease_id.clone(), lsn).boxed(),
-            ),
-            PageserverProtocol::Grpc => logging_wrapper(Box::pin(
-                attempt_one_grpc(connect_info, timeline_id, lease_id.clone(), lsn).boxed(),
-            )),
-        };
-        futs.push(fut);
+                .instrument(logging_span)
+                .await
+            };
+
+            let fut = match conninfo.prefer_protocol {
+                PageserverProtocol::Libpq => logging_wrapper(
+                    attempt_one_libpq(
+                        pageserver.libpq_url.clone().unwrap(),
+                        auth.clone(),
+                        tenant_shard_id,
+                        timeline_id,
+                        lease_id.clone(),
+                        lsn,
+                    )
+                    .boxed(),
+                ),
+                PageserverProtocol::Grpc => logging_wrapper(
+                    attempt_one_grpc(
+                        pageserver.grpc_url.clone().unwrap(),
+                        auth.clone(),
+                        tenant_shard_id,
+                        timeline_id,
+                        lease_id.clone(),
+                        lsn,
+                    )
+                    .boxed(),
+                ),
+            };
+            futs.push(fut);
+        }
     }
     let mut errors = 0;
     let mut nearest_expiration = None;
@@ -223,16 +260,13 @@ async fn attempt(lease_id: String, compute: &Arc<ComputeNode>) -> anyhow::Result
 }
 
 async fn attempt_one_libpq(
-    connect_info: ConnectInfo,
+    connstring: String,
+    auth: Option<String>,
+    tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     lease_id: String,
     lsn: Lsn,
 ) -> anyhow::Result<Option<chrono::DateTime<Utc>>> {
-    let ConnectInfo {
-        tenant_shard_id,
-        connstring,
-        auth,
-    } = connect_info;
     let mut config = tokio_postgres::Config::from_str(&connstring)?;
     if let Some(auth) = auth {
         config.password(auth);
@@ -259,18 +293,15 @@ async fn attempt_one_libpq(
 }
 
 async fn attempt_one_grpc(
-    connect_info: ConnectInfo,
+    connstring: String,
+    auth: Option<String>,
+    tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
     lease_id: String,
     lsn: Lsn,
 ) -> anyhow::Result<Option<chrono::DateTime<Utc>>> {
-    let ConnectInfo {
-        tenant_shard_id,
-        connstring,
-        auth,
-    } = connect_info;
     let mut client = pageserver_page_api::Client::connect(
-        connstring.to_string(),
+        connstring,
         tenant_shard_id.tenant_id,
         timeline_id,
         tenant_shard_id.to_index(),

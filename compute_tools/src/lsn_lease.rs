@@ -4,16 +4,15 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
-use compute_api::spec::{ComputeMode, PageserverProtocol};
+use compute_api::spec::{ComputeMode, PageserverConnectionInfo, PageserverProtocol};
 use pageserver_page_api as page_api;
 use postgres::{NoTls, SimpleQueryMessage};
 use tracing::{info, warn};
-use utils::id::TimelineId;
+use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::shard::TenantShardId;
 
 use crate::compute::ComputeNode;
-use crate::pageserver_client::{ConnectInfo, pageserver_connstrings_for_connect};
 
 /// Spawns a background thread to periodically renew LSN leases for static compute.
 /// Do nothing if the compute is not in static mode.
@@ -31,7 +30,7 @@ pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
     let span = tracing::info_span!("lsn_lease_bg_task", %tenant_id, %timeline_id, %lsn);
     thread::spawn(move || {
         let _entered = span.entered();
-        if let Err(e) = lsn_lease_bg_task(compute, timeline_id, lsn) {
+        if let Err(e) = lsn_lease_bg_task(compute, tenant_id, timeline_id, lsn) {
             // TODO: might need stronger error feedback than logging an warning.
             warn!("Exited with error: {e}");
         }
@@ -39,9 +38,14 @@ pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
 }
 
 /// Renews lsn lease periodically so static compute are not affected by GC.
-fn lsn_lease_bg_task(compute: Arc<ComputeNode>, timeline_id: TimelineId, lsn: Lsn) -> Result<()> {
+fn lsn_lease_bg_task(
+    compute: Arc<ComputeNode>,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    lsn: Lsn,
+) -> Result<()> {
     loop {
-        let valid_until = acquire_lsn_lease_with_retry(&compute, timeline_id, lsn)?;
+        let valid_until = acquire_lsn_lease_with_retry(&compute, tenant_id, timeline_id, lsn)?;
         let valid_duration = valid_until
             .duration_since(SystemTime::now())
             .unwrap_or(Duration::ZERO);
@@ -63,6 +67,7 @@ fn lsn_lease_bg_task(compute: Arc<ComputeNode>, timeline_id: TimelineId, lsn: Ls
 /// Returns an error if a lease is explicitly not granted. Otherwise, we keep sending requests.
 fn acquire_lsn_lease_with_retry(
     compute: &Arc<ComputeNode>,
+    tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
 ) -> Result<SystemTime> {
@@ -72,13 +77,16 @@ fn acquire_lsn_lease_with_retry(
 
     loop {
         // Note: List of pageservers is dynamic, need to re-read configs before each attempt.
-        let shards = {
+        let (conninfo, auth) = {
             let state = compute.state.lock().unwrap();
-            let pspec = state.pspec.as_ref().expect("spec must be set");
-            pageserver_connstrings_for_connect(pspec)
+            let spec = state.pspec.as_ref().expect("spec must be set");
+            (
+                spec.pageserver_conninfo.clone(),
+                spec.storage_auth_token.clone(),
+            )
         };
 
-        let result = try_acquire_lsn_lease(shards, timeline_id, lsn);
+        let result = try_acquire_lsn_lease(conninfo, auth.as_deref(), tenant_id, timeline_id, lsn);
         match result {
             Ok(Some(res)) => {
                 return Ok(res);
@@ -102,34 +110,44 @@ fn acquire_lsn_lease_with_retry(
 
 /// Tries to acquire LSN leases on all Pageserver shards.
 fn try_acquire_lsn_lease(
-    shards: Vec<ConnectInfo>,
+    conninfo: PageserverConnectionInfo,
+    auth: Option<&str>,
+    tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
 ) -> Result<Option<SystemTime>> {
     let mut leases = Vec::new();
-    for ConnectInfo {
-        tenant_shard_id,
-        connstring,
-        auth,
-    } in shards
-    {
-        let lease = match PageserverProtocol::from_connstring(&connstring)? {
-            PageserverProtocol::Libpq => acquire_lsn_lease_libpq(
-                &connstring,
-                auth.as_deref(),
-                tenant_shard_id,
-                timeline_id,
-                lsn,
-            )?,
-            PageserverProtocol::Grpc => acquire_lsn_lease_grpc(
-                &connstring,
-                auth.as_deref(),
-                tenant_shard_id,
-                timeline_id,
-                lsn,
-            )?,
+
+    for (shard_index, shard) in conninfo.shards.into_iter() {
+        let tenant_shard_id = TenantShardId {
+            tenant_id,
+            shard_number: shard_index.shard_number,
+            shard_count: shard_index.shard_count,
         };
-        leases.push(lease);
+
+        // XXX: If there are more than pageserver for the one shard, do we need to get a
+        // leas on all of them? Currently, that's what we assume, but this is hypothetical
+        // as of this writing, as we never pass the info for more than one pageserver per
+        // shard.
+        for pageserver in shard.pageservers {
+            let lease = match conninfo.prefer_protocol {
+                PageserverProtocol::Grpc => acquire_lsn_lease_grpc(
+                    &pageserver.grpc_url.unwrap(),
+                    auth,
+                    tenant_shard_id,
+                    timeline_id,
+                    lsn,
+                )?,
+                PageserverProtocol::Libpq => acquire_lsn_lease_libpq(
+                    &pageserver.libpq_url.unwrap(),
+                    auth,
+                    tenant_shard_id,
+                    timeline_id,
+                    lsn,
+                )?,
+            };
+            leases.push(lease);
+        }
     }
 
     Ok(leases.into_iter().min().flatten())
