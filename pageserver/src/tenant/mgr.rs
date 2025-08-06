@@ -352,7 +352,8 @@ async fn init_load_generations(
         let client = StorageControllerUpcallClient::new(conf, cancel);
         info!("Calling {} API to re-attach tenants", client.base_url());
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
-        match client.re_attach(conf).await {
+        let empty_local_disk = tenant_confs.is_empty();
+        match client.re_attach(conf, empty_local_disk).await {
             Ok(tenants) => tenants
                 .into_iter()
                 .flat_map(|(id, rart)| {

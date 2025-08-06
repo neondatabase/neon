@@ -1940,9 +1940,12 @@ class NeonStorageController(MetricsGetter, LogUtils):
         timeout_in_seconds: int | None = None,
         instance_id: int | None = None,
         base_port: int | None = None,
+        handle_ps_local_disk_loss: bool | None = None,
     ) -> Self:
         assert not self.running
-        self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
+        self.env.neon_cli.storage_controller_start(
+            timeout_in_seconds, instance_id, base_port, handle_ps_local_disk_loss
+        )
         self.running = True
         return self
 
@@ -2840,10 +2843,13 @@ class NeonProxiedStorageController(NeonStorageController):
         timeout_in_seconds: int | None = None,
         instance_id: int | None = None,
         base_port: int | None = None,
+        handle_ps_local_disk_loss: bool | None = None,
     ) -> Self:
         assert instance_id is not None and base_port is not None
 
-        self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
+        self.env.neon_cli.storage_controller_start(
+            timeout_in_seconds, instance_id, base_port, handle_ps_local_disk_loss
+        )
         self.instances[instance_id] = {"running": True}
 
         self.running = True
@@ -5799,6 +5805,7 @@ SKIP_FILES = frozenset(
         "postmaster.pid",
         "pg_control",
         "pg_dynshmem",
+        "neon-communicator.socket",
     )
 )
 

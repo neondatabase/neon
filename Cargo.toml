@@ -143,10 +143,10 @@ notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.19"
 once_cell = "1.13"
-opentelemetry = "0.27"
-opentelemetry_sdk = "0.27"
-opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "trace", "http", "reqwest-client"] }
-opentelemetry-semantic-conventions = "0.27"
+opentelemetry = "0.30"
+opentelemetry_sdk = "0.30"
+opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-semantic-conventions = "0.30"
 parking_lot = "0.12"
 parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
@@ -164,7 +164,7 @@ rand_core = "=0.6"
 redis = { version = "0.29.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_27"] }
+reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_30"] }
 reqwest-middleware = "0.4"
 reqwest-retry = "0.7"
 routerify = "3"
@@ -214,15 +214,12 @@ tonic = { version = "0.13.1", default-features = false, features = ["channel", "
 tonic-reflection = { version = "0.13.1", features = ["server"] }
 tower = { version = "0.5.2", default-features = false }
 tower-http = { version = "0.6.2", features = ["auth", "request-id", "trace"] }
-
-# This revision uses opentelemetry 0.27. There's no tag for it.
-tower-otel = { git = "https://github.com/mattiapenati/tower-otel", rev = "56a7321053bcb72443888257b622ba0d43a11fcd" }
-
+tower-otel = { version = "0.6", features = ["axum"] }
 tower-service = "0.3.3"
 tracing = "0.1"
 tracing-error = "0.2"
 tracing-log = "0.2"
-tracing-opentelemetry = "0.28"
+tracing-opentelemetry = "0.31"
 tracing-serde = "0.2.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 try-lock = "0.2.5"
