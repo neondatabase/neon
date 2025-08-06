@@ -52,7 +52,7 @@ impl From<ProtocolError> for tonic::Status {
 }
 
 /// The LSN a request should read at.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ReadLsn {
     /// The request's read LSN.
     pub request_lsn: Lsn,
@@ -332,7 +332,7 @@ impl From<GetDbSizeResponse> for proto::GetDbSizeResponse {
 }
 
 /// Requests one or more pages.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct GetPageRequest {
     /// A request ID. Will be included in the response. Should be unique for in-flight requests on
     /// the stream.
@@ -433,30 +433,18 @@ impl From<RequestID> for proto::RequestId {
 }
 
 /// A GetPage request class.
-#[derive(Clone, Copy, Debug, strum_macros::Display)]
+#[derive(Clone, Copy, Debug, Default, strum_macros::Display)]
 pub enum GetPageClass {
     /// Unknown class. For backwards compatibility: used when an older client version sends a class
     /// that a newer server version has removed.
     Unknown,
     /// A normal request. This is the default.
+    #[default]
     Normal,
     /// A prefetch request. NB: can only be classified on pg < 18.
     Prefetch,
     /// A background request (e.g. vacuum).
     Background,
-}
-
-impl GetPageClass {
-    /// Returns true if this is considered a bulk request (i.e. more throughput-oriented rather than
-    /// latency-sensitive).
-    pub fn is_bulk(&self) -> bool {
-        match self {
-            Self::Unknown => false,
-            Self::Normal => false,
-            Self::Prefetch => true,
-            Self::Background => true,
-        }
-    }
 }
 
 impl From<proto::GetPageClass> for GetPageClass {

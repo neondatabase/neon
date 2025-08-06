@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use bytes::Bytes;
 use enumset::EnumSet;
 use futures::future::join_all;
 use futures::{StreamExt, TryFutureExt};
@@ -46,6 +47,7 @@ use pageserver_api::shard::{ShardCount, TenantShardId};
 use postgres_ffi::PgMajorVersion;
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
 use scopeguard::defer;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tenant_size_model::svg::SvgBranchKind;
 use tenant_size_model::{SizeResult, StorageModel};
@@ -57,6 +59,7 @@ use utils::auth::SwappableJwtAuth;
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use wal_decoder::models::record::NeonWalRecord;
 
 use crate::config::PageServerConf;
 use crate::context;
@@ -77,6 +80,7 @@ use crate::tenant::remote_timeline_client::{
 };
 use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
+use crate::tenant::storage_layer::ValuesReconstructState;
 use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerName};
 use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
@@ -2712,6 +2716,16 @@ async fn deletion_queue_flush(
     }
 }
 
+/// Try if `GetPage@Lsn` is successful, useful for manual debugging.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct GetPageResponse {
+    pub page: Bytes,
+    pub layers_visited: u32,
+    pub delta_layers_visited: u32,
+    pub records: Vec<(Lsn, NeonWalRecord)>,
+    pub img: Option<(Lsn, Bytes)>,
+}
+
 async fn getpage_at_lsn_handler(
     request: Request<Body>,
     cancel: CancellationToken,
@@ -2762,21 +2776,24 @@ async fn getpage_at_lsn_handler_inner(
 
         // Use last_record_lsn if no lsn is provided
         let lsn = lsn.unwrap_or_else(|| timeline.get_last_record_lsn());
-        let page = timeline.get(key.0, lsn, &ctx).await?;
 
         if touch {
             json_response(StatusCode::OK, ())
         } else {
-            Result::<_, ApiError>::Ok(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "application/octet-stream")
-                    .body(hyper::Body::from(page))
-                    .unwrap(),
-            )
+            let mut reconstruct_state = ValuesReconstructState::new_with_debug(IoConcurrency::sequential());
+            let page = timeline.debug_get(key.0, lsn, &ctx, &mut reconstruct_state).await?;
+            let response = GetPageResponse {
+                page,
+                layers_visited: reconstruct_state.get_layers_visited(),
+                delta_layers_visited: reconstruct_state.get_delta_layers_visited(),
+                records: reconstruct_state.debug_state.records.clone(),
+                img: reconstruct_state.debug_state.img.clone(),
+            };
+
+            json_response(StatusCode::OK, response)
         }
     }
-    .instrument(info_span!("timeline_get", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .instrument(info_span!("timeline_debug_get", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
     .await
 }
 

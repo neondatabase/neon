@@ -3429,7 +3429,13 @@ impl TenantShard {
                 .collect_vec();
 
             for timeline in timelines {
-                timeline.maybe_freeze_ephemeral_layer().await;
+                // Include a span with the timeline ID. The parent span already has the tenant ID.
+                let span =
+                    info_span!("maybe_freeze_ephemeral_layer", timeline_id = %timeline.timeline_id);
+                timeline
+                    .maybe_freeze_ephemeral_layer()
+                    .instrument(span)
+                    .await;
             }
         }
 

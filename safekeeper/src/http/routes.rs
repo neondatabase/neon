@@ -241,9 +241,14 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
             ApiError::InternalServerError(anyhow::anyhow!("failed to parse CA certs: {e}"))
         })?;
 
-    let resp =
-        pull_timeline::handle_request(data, conf.sk_auth_token.clone(), ca_certs, global_timelines)
-            .await?;
+    let resp = pull_timeline::handle_request(
+        data,
+        conf.sk_auth_token.clone(),
+        ca_certs,
+        global_timelines,
+        false,
+    )
+    .await?;
     json_response(StatusCode::OK, resp)
 }
 
