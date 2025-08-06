@@ -1640,6 +1640,9 @@ pub struct TimelineInfo {
 
     /// Whether the timeline is invisible in synthetic size calculations.
     pub is_invisible: Option<bool>,
+    // HADRON: the largest LSN below which all page updates have been included in the image layers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_consistent_lsn: Option<Lsn>,
 
     #[serde(default)]
     pub standby_horizon: serde_json::Value,

@@ -2344,6 +2344,20 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         return response.json()
 
+    # HADRON
+    def tenant_timeline_describe(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ):
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/tenant/{tenant_id}/timeline/{timeline_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
+
     def nodes(self):
         """
         :return: list of {"id": ""}

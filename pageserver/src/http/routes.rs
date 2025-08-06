@@ -397,6 +397,7 @@ async fn build_timeline_info(
     timeline: &Arc<Timeline>,
     include_non_incremental_logical_size: bool,
     force_await_initial_logical_size: bool,
+    include_image_consistent_lsn: bool,
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
@@ -420,6 +421,10 @@ async fn build_timeline_info(
                 .get_current_logical_size_non_incremental(info.last_record_lsn, ctx)
                 .await?,
         );
+    }
+    // HADRON
+    if include_image_consistent_lsn {
+        info.image_consistent_lsn = Some(timeline.compute_image_consistent_lsn().await?);
     }
     Ok(info)
 }
@@ -512,6 +517,9 @@ async fn build_timeline_info_common(
         is_invisible: Some(is_invisible),
 
         walreceiver_status,
+        // HADRON
+        image_consistent_lsn: None,
+
         standby_horizon,
     };
     Ok(info)
@@ -715,6 +723,8 @@ async fn timeline_list_handler(
         parse_query_param(&request, "include-non-incremental-logical-size")?;
     let force_await_initial_logical_size: Option<bool> =
         parse_query_param(&request, "force-await-initial-logical-size")?;
+    let include_image_consistent_lsn: Option<bool> =
+        parse_query_param(&request, "include-image-consistent-lsn")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let state = get_state(&request);
@@ -735,6 +745,7 @@ async fn timeline_list_handler(
                 &timeline,
                 include_non_incremental_logical_size.unwrap_or(false),
                 force_await_initial_logical_size.unwrap_or(false),
+                include_image_consistent_lsn.unwrap_or(false),
                 &ctx,
             )
             .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
@@ -763,6 +774,9 @@ async fn timeline_and_offloaded_list_handler(
         parse_query_param(&request, "include-non-incremental-logical-size")?;
     let force_await_initial_logical_size: Option<bool> =
         parse_query_param(&request, "force-await-initial-logical-size")?;
+    let include_image_consistent_lsn: Option<bool> =
+        parse_query_param(&request, "include-image-consistent-lsn")?;
+
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let state = get_state(&request);
@@ -783,6 +797,7 @@ async fn timeline_and_offloaded_list_handler(
                 &timeline,
                 include_non_incremental_logical_size.unwrap_or(false),
                 force_await_initial_logical_size.unwrap_or(false),
+                include_image_consistent_lsn.unwrap_or(false),
                 &ctx,
             )
             .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
@@ -967,6 +982,9 @@ async fn timeline_detail_handler(
         parse_query_param(&request, "include-non-incremental-logical-size")?;
     let force_await_initial_logical_size: Option<bool> =
         parse_query_param(&request, "force-await-initial-logical-size")?;
+    // HADRON
+    let include_image_consistent_lsn: Option<bool> =
+        parse_query_param(&request, "include-image-consistent-lsn")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     // Logical size calculation needs downloading.
@@ -987,6 +1005,7 @@ async fn timeline_detail_handler(
             &timeline,
             include_non_incremental_logical_size.unwrap_or(false),
             force_await_initial_logical_size.unwrap_or(false),
+            include_image_consistent_lsn.unwrap_or(false),
             ctx,
         )
         .await
@@ -3646,6 +3665,7 @@ async fn activate_post_import_handler(
         let timeline_info = build_timeline_info(
             &timeline, false, // include_non_incremental_logical_size,
             false, // force_await_initial_logical_size
+            false, // include_image_consistent_lsn
             &ctx,
         )
         .await

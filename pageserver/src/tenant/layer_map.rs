@@ -46,10 +46,11 @@
 mod historic_layer_coverage;
 mod layer_coverage;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
@@ -904,6 +905,103 @@ impl LayerMap {
         max_stacked_deltas
     }
 
+    /* BEGIN_HADRON */
+    /**
+     * Compute the image consistent LSN, the largest LSN below which all pages have been redone successfully.
+     * It works by first finding the latest image layers and store them into a map. Then for each delta layer,
+     * find all overlapping image layers in order to potentially increase the image LSN in case there are gaps
+     * (e.g., if an image is created at LSN 100 but the delta layer spans LSN [150, 200], then we can increase
+     * image LSN to 150 because there is no WAL record in between).
+     * Finally, the image consistent LSN is computed by taking the minimum of all image layers.
+     */
+    pub fn compute_image_consistent_lsn(&self, disk_consistent_lsn: Lsn) -> Lsn {
+        struct ImageLayerInfo {
+            // creation LSN of the image layer
+            image_lsn: Lsn,
+            // the current minimum LSN of newer delta layers with overlapping key ranges
+            min_delta_lsn: Lsn,
+        }
+        let started_at = Instant::now();
+
+        let min_l0_deltas_lsn = {
+            let l0_deltas = self.level0_deltas();
+            l0_deltas
+                .iter()
+                .map(|layer| layer.get_lsn_range().start)
+                .min()
+                .unwrap_or(disk_consistent_lsn)
+        };
+        let global_key_range = Key::MIN..Key::MAX;
+
+        // step 1: collect all most recent image layers into a map
+        // map: end key to image_layer_info
+        let mut image_map: BTreeMap<Key, ImageLayerInfo> = BTreeMap::new();
+        for (img_range, img) in self.image_coverage(&global_key_range, disk_consistent_lsn) {
+            let img_lsn = img.map(|layer| layer.get_lsn_range().end).unwrap_or(Lsn(0));
+            image_map.insert(
+                img_range.end,
+                ImageLayerInfo {
+                    image_lsn: img_lsn,
+                    min_delta_lsn: min_l0_deltas_lsn,
+                },
+            );
+        }
+
+        // step 2: go through all delta layers, and update the image layer info with overlapping
+        // key ranges
+        for layer in self.historic.iter() {
+            if !layer.is_delta {
+                continue;
+            }
+            let delta_key_range = layer.get_key_range();
+            let delta_lsn_range = layer.get_lsn_range();
+            for (img_end_key, img_info) in image_map.range_mut(delta_key_range.start..Key::MAX) {
+                debug_assert!(img_end_key >= &delta_key_range.start);
+                if delta_lsn_range.end > img_info.image_lsn {
+                    // the delta layer includes WAL records after the image
+                    // it's possibel that the delta layer's start LSN < image LSN, which will be simply ignored by step 3
+                    img_info.min_delta_lsn =
+                        std::cmp::min(img_info.min_delta_lsn, delta_lsn_range.start);
+                }
+                if img_end_key >= &delta_key_range.end {
+                    // we have fully processed all overlapping image layers
+                    break;
+                }
+            }
+        }
+
+        // step 3, go through all image layers and find the image consistent LSN
+        let mut img_consistent_lsn = min_l0_deltas_lsn.checked_sub(Lsn(1)).unwrap();
+        let mut prev_key = Key::MIN;
+        for (img_key, img_info) in image_map {
+            tracing::debug!(
+                "Image layer {:?}:{} has min delta lsn {}",
+                Range {
+                    start: prev_key,
+                    end: img_key,
+                },
+                img_info.image_lsn,
+                img_info.min_delta_lsn,
+            );
+            let image_lsn = std::cmp::max(
+                img_info.image_lsn,
+                img_info.min_delta_lsn.checked_sub(Lsn(1)).unwrap_or(Lsn(0)),
+            );
+            img_consistent_lsn = std::cmp::min(img_consistent_lsn, image_lsn);
+            prev_key = img_key;
+        }
+        tracing::info!(
+            "computed image_consistent_lsn {} for disk_consistent_lsn {} in {}ms. Processed {} layrs in total.",
+            img_consistent_lsn,
+            disk_consistent_lsn,
+            started_at.elapsed().as_millis(),
+            self.historic.len()
+        );
+        img_consistent_lsn
+    }
+
+    /* END_HADRON */
+
     /// Return all L0 delta layers
     pub fn level0_deltas(&self) -> &Vec<Arc<PersistentLayerDesc>> {
         &self.l0_delta_layers
@@ -1579,6 +1677,138 @@ mod tests {
             LayerVisibilityHint::Visible
         ));
     }
+
+    /* BEGIN_HADRON */
+    #[test]
+    fn test_compute_image_consistent_lsn() {
+        let mut layer_map = LayerMap::default();
+
+        let disk_consistent_lsn = Lsn(1000);
+        // case 1: empty layer map
+        let image_consistent_lsn = layer_map.compute_image_consistent_lsn(disk_consistent_lsn);
+        assert_eq!(
+            disk_consistent_lsn.checked_sub(Lsn(1)).unwrap(),
+            image_consistent_lsn
+        );
+
+        // case 2: only L0 delta layer
+        {
+            let mut updates = layer_map.batch_update();
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(0)..Key::from_i128(100),
+                Lsn(900)..Lsn(990),
+                true,
+            ));
+
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(0)..Key::from_i128(100),
+                Lsn(850)..Lsn(899),
+                true,
+            ));
+        }
+
+        // should use min L0 delta LSN - 1 as image consistent LSN
+        let image_consistent_lsn = layer_map.compute_image_consistent_lsn(disk_consistent_lsn);
+        assert_eq!(Lsn(849), image_consistent_lsn);
+
+        // case 3: 3 images, no L1 delta
+        {
+            let mut updates = layer_map.batch_update();
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(0)..Key::from_i128(40),
+                Lsn(100)..Lsn(100),
+                false,
+            ));
+
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(40)..Key::from_i128(70),
+                Lsn(200)..Lsn(200),
+                false,
+            ));
+
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(70)..Key::from_i128(100),
+                Lsn(150)..Lsn(150),
+                false,
+            ));
+        }
+        // should use min L0 delta LSN - 1 as image consistent LSN
+        let image_consistent_lsn = layer_map.compute_image_consistent_lsn(disk_consistent_lsn);
+        assert_eq!(Lsn(849), image_consistent_lsn);
+
+        // case 4: 3 images with 1 L1 delta
+        {
+            let mut updates = layer_map.batch_update();
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(0)..Key::from_i128(50),
+                Lsn(300)..Lsn(350),
+                true,
+            ));
+        }
+        let image_consistent_lsn = layer_map.compute_image_consistent_lsn(disk_consistent_lsn);
+        assert_eq!(Lsn(299), image_consistent_lsn);
+
+        // case 5: 3 images with 1 more L1 delta with smaller LSN
+        {
+            let mut updates = layer_map.batch_update();
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(50)..Key::from_i128(72),
+                Lsn(200)..Lsn(300),
+                true,
+            ));
+        }
+        let image_consistent_lsn = layer_map.compute_image_consistent_lsn(disk_consistent_lsn);
+        assert_eq!(Lsn(199), image_consistent_lsn);
+
+        // case 6: 3 images with more newer L1 deltas (no impact on final results)
+        {
+            let mut updates = layer_map.batch_update();
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(0)..Key::from_i128(30),
+                Lsn(400)..Lsn(500),
+                true,
+            ));
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(35)..Key::from_i128(100),
+                Lsn(450)..Lsn(600),
+                true,
+            ));
+        }
+        let image_consistent_lsn = layer_map.compute_image_consistent_lsn(disk_consistent_lsn);
+        assert_eq!(Lsn(199), image_consistent_lsn);
+
+        // case 7: 3 images with more older L1 deltas (no impact on final results)
+        {
+            let mut updates = layer_map.batch_update();
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(0)..Key::from_i128(40),
+                Lsn(0)..Lsn(50),
+                true,
+            ));
+
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(50)..Key::from_i128(100),
+                Lsn(10)..Lsn(60),
+                true,
+            ));
+        }
+        let image_consistent_lsn = layer_map.compute_image_consistent_lsn(disk_consistent_lsn);
+        assert_eq!(Lsn(199), image_consistent_lsn);
+
+        // case 8: 3 images with one more L1 delta with overlapping LSN range
+        {
+            let mut updates = layer_map.batch_update();
+            updates.insert_historic(PersistentLayerDesc::new_test(
+                Key::from_i128(0)..Key::from_i128(50),
+                Lsn(50)..Lsn(250),
+                true,
+            ));
+        }
+        let image_consistent_lsn = layer_map.compute_image_consistent_lsn(disk_consistent_lsn);
+        assert_eq!(Lsn(100), image_consistent_lsn);
+    }
+
+    /* END_HADRON */
 }
 
 #[cfg(test)]

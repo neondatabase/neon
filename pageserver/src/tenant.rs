@@ -13205,6 +13205,40 @@ mod tests {
                 },
             ]
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_force_image_creation_lsn() -> anyhow::Result<()> {
+        let tenant_conf = pageserver_api::models::TenantConfig {
+            pitr_interval: Some(Duration::from_secs(7 * 3600)),
+            image_layer_force_creation_period: Some(Duration::from_secs(3600)),
+            ..Default::default()
+        };
+
+        let tenant_id = TenantId::generate();
+
+        let harness = TenantHarness::create_custom(
+            "test_get_force_image_creation_lsn",
+            tenant_conf,
+            tenant_id,
+            ShardIdentity::unsharded(),
+            Generation::new(1),
+        )
+        .await?;
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        timeline.gc_info.write().unwrap().cutoffs.time = Some(Lsn(100));
+        {
+            let writer = timeline.writer().await;
+            writer.finish_write(Lsn(5000));
+        }
+
+        let image_creation_lsn = timeline.get_force_image_creation_lsn().unwrap();
+        assert_eq!(image_creation_lsn, Lsn(4300));
         Ok(())
     }
 }
