@@ -449,9 +449,9 @@ fn get_database_stats(cli: &mut Client) -> anyhow::Result<(f64, i64)> {
     // like `postgres_exporter` use it to query Postgres statistics.
     // Use explicit 8 bytes type casts to match Rust types.
     let stats = cli.query_one(
-        "SELECT coalesce(sum(active_time), 0.0)::float8 AS total_active_time,
-            coalesce(sum(sessions), 0)::bigint AS total_sessions
-        FROM pg_stat_database
+        "SELECT pg_catalog.coalesce(pg_catalog.sum(active_time), 0.0)::pg_catalog.float8 AS total_active_time,
+            pg_catalog.coalesce(pg_catalog.sum(sessions), 0)::pg_catalog.bigint AS total_sessions
+        FROM pg_catalog.pg_stat_database
         WHERE datname NOT IN (
                 'postgres',
                 'template0',
@@ -487,11 +487,11 @@ fn get_backends_state_change(cli: &mut Client) -> anyhow::Result<Option<DateTime
     let mut last_active: Option<DateTime<Utc>> = None;
     // Get all running client backends except ourself, use RFC3339 DateTime format.
     let backends = cli.query(
-        "SELECT state, to_char(state_change, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS state_change
+        "SELECT state, pg_catalog.to_char(state_change, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'::pg_catalog.text) AS state_change
                 FROM pg_stat_activity
-                    WHERE backend_type = 'client backend'
-                    AND pid != pg_backend_pid()
-                    AND usename != 'cloud_admin';", // XXX: find a better way to filter other monitors?
+                    WHERE backend_type OPERATOR(pg_catalog.=) 'client backend'::pg_catalog.text
+                    AND pid OPERATOR(pg_catalog.!=) pg_catalog.pg_backend_pid()
+                    AND usename OPERATOR(pg_catalog.!=) 'cloud_admin'::pg_catalog.name;", // XXX: find a better way to filter other monitors?
         &[],
     );
 

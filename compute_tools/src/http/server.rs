@@ -99,7 +99,12 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     );
 
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
-                    .route("/lfc/prewarm", get(lfc::prewarm_state).post(lfc::prewarm))
+                    .route(
+                        "/lfc/prewarm",
+                        get(lfc::prewarm_state)
+                            .post(lfc::prewarm)
+                            .delete(lfc::cancel_prewarm),
+                    )
                     .route("/lfc/offload", get(lfc::offload_state).post(lfc::offload))
                     .route("/promote", post(promote::promote))
                     .route("/check_writability", post(check_writability::is_writable))

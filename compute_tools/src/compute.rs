@@ -32,8 +32,12 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 use tokio::{spawn, sync::watch, task::JoinHandle, time};
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use url::Url;
+use utils::backoff::{
+    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff_duration,
+};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
@@ -194,6 +198,7 @@ pub struct ComputeState {
     pub startup_span: Option<tracing::span::Span>,
 
     pub lfc_prewarm_state: LfcPrewarmState,
+    pub lfc_prewarm_token: CancellationToken,
     pub lfc_offload_state: LfcOffloadState,
 
     /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
@@ -219,6 +224,7 @@ impl ComputeState {
             lfc_offload_state: LfcOffloadState::default(),
             terminate_flush_lsn: None,
             promote_state: None,
+            lfc_prewarm_token: CancellationToken::new(),
         }
     }
 
@@ -585,7 +591,7 @@ impl ComputeNode {
         // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
         // Unset them via connection string options before connecting to the database.
         // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
-        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0 -c pgaudit.log=none";
+        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path='' -c statement_timeout=0 -c pgaudit.log=none";
         let options = match conn_conf.get_options() {
             // Allow the control plane to override any options set by the
             // compute
@@ -1559,6 +1565,41 @@ impl ComputeNode {
         Ok(lsn)
     }
 
+    fn sync_safekeepers_with_retries(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
+        let max_retries = 5;
+        let mut attempts = 0;
+        loop {
+            let result = self.sync_safekeepers(storage_auth_token.clone());
+            match &result {
+                Ok(_) => {
+                    if attempts > 0 {
+                        tracing::info!("sync_safekeepers succeeded after {attempts} retries");
+                    }
+                    return result;
+                }
+                Err(e) if attempts < max_retries => {
+                    tracing::info!(
+                        "sync_safekeepers failed, will retry (attempt {attempts}): {e:#}"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "sync_safekeepers still failed after {attempts} retries, giving up: {err:?}"
+                    );
+                    return result;
+                }
+            }
+            // sleep and retry
+            let backoff = exponential_backoff_duration(
+                attempts,
+                DEFAULT_BASE_BACKOFF_SECONDS,
+                DEFAULT_MAX_BACKOFF_SECONDS,
+            );
+            std::thread::sleep(backoff);
+            attempts += 1;
+        }
+    }
+
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip_all)]
@@ -1594,7 +1635,7 @@ impl ComputeNode {
                     lsn
                 } else {
                     info!("starting safekeepers syncing");
-                    self.sync_safekeepers(pspec.storage_auth_token.clone())
+                    self.sync_safekeepers_with_retries(pspec.storage_auth_token.clone())
                         .with_context(|| "failed to sync safekeepers")?
                 };
                 info!("safekeepers synced at LSN {}", lsn);
@@ -1889,7 +1930,7 @@ impl ComputeNode {
 
                     // It doesn't matter what were the options before, here we just want
                     // to connect and create a new superuser role.
-                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path='' -c statement_timeout=0";
                     zenith_admin_conf.options(ZENITH_OPTIONS);
 
                     let mut client =
@@ -2344,13 +2385,13 @@ impl ComputeNode {
         let result = client
             .simple_query(
                 "SELECT
-    row_to_json(pg_stat_statements)
+    pg_catalog.row_to_json(pss)
 FROM
-    pg_stat_statements
+    public.pg_stat_statements pss
 WHERE
-    userid != 'cloud_admin'::regrole::oid
+    pss.userid != 'cloud_admin'::pg_catalog.regrole::pg_catalog.oid
 ORDER BY
-    (mean_exec_time + mean_plan_time) DESC
+    (pss.mean_exec_time + pss.mean_plan_time) DESC
 LIMIT 100",
             )
             .await;
@@ -2478,11 +2519,11 @@ LIMIT 100",
 
         // check the role grants first - to gracefully handle read-replicas.
         let select = "SELECT privilege_type
-            FROM pg_namespace
-                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) acl ON true
-                JOIN pg_user users ON acl.grantee = users.usesysid
-            WHERE users.usename = $1
-                AND nspname = $2";
+            FROM pg_catalog.pg_namespace
+                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) AS acl ON true
+                JOIN pg_catalog.pg_user users ON acl.grantee = users.usesysid
+            WHERE users.usename OPERATOR(pg_catalog.=) $1::pg_catalog.name
+                AND nspname OPERATOR(pg_catalog.=) $2::pg_catalog.name";
         let rows = db_client
             .query(select, &[role_name, schema_name])
             .await
@@ -2551,8 +2592,9 @@ LIMIT 100",
                 .await
                 .with_context(|| format!("Failed to execute query: {query}"))?;
         } else {
-            let query =
-                format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
+            let query = format!(
+                "CREATE EXTENSION IF NOT EXISTS {ext_name} WITH SCHEMA public VERSION {quoted_version}"
+            );
             db_client
                 .simple_query(&query)
                 .await

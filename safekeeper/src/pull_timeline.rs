@@ -612,19 +612,25 @@ pub async fn handle_request(
         }
     }
 
+    let max_term = statuses
+        .iter()
+        .map(|(status, _)| status.acceptor_state.term)
+        .max()
+        .unwrap();
+
     // Find the most advanced safekeeper
     let (status, i) = statuses
         .into_iter()
         .max_by_key(|(status, _)| {
             (
                 status.acceptor_state.epoch,
+                status.flush_lsn,
                 /* BEGIN_HADRON */
                 // We need to pull from the SK with the highest term.
                 // This is because another compute may come online and vote the same highest term again on the other two SKs.
                 // Then, there will be 2 computes running on the same term.
                 status.acceptor_state.term,
                 /* END_HADRON */
-                status.flush_lsn,
                 status.commit_lsn,
             )
         })
@@ -633,6 +639,22 @@ pub async fn handle_request(
 
     assert!(status.tenant_id == request.tenant_id);
     assert!(status.timeline_id == request.timeline_id);
+
+    // TODO(diko): This is hadron only check to make sure that we pull the timeline
+    // from the safekeeper with the highest term during timeline restore.
+    // We could avoid returning the error by calling bump_term after pull_timeline.
+    // However, this is not a big deal because we retry the pull_timeline requests.
+    // The check should be removed together with removing custom hadron logic for
+    // safekeeper restore.
+    if wait_for_peer_timeline_status && status.acceptor_state.term != max_term {
+        return Err(ApiError::PreconditionFailed(
+            format!(
+                "choosen safekeeper {} has term {}, but the most advanced term is {}",
+                safekeeper_host, status.acceptor_state.term, max_term
+            )
+            .into(),
+        ));
+    }
 
     match pull_timeline(
         status,

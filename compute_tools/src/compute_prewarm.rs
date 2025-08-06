@@ -7,7 +7,8 @@ use http::StatusCode;
 use reqwest::Client;
 use std::mem::replace;
 use std::sync::Arc;
-use tokio::{io::AsyncReadExt, spawn};
+use tokio::{io::AsyncReadExt, select, spawn};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[derive(serde::Serialize, Default)]
@@ -92,34 +93,35 @@ impl ComputeNode {
     /// If there is a prewarm request ongoing, return `false`, `true` otherwise.
     /// Has a failpoint "compute-prewarm"
     pub fn prewarm_lfc(self: &Arc<Self>, from_endpoint: Option<String>) -> bool {
+        let token: CancellationToken;
         {
-            let state = &mut self.state.lock().unwrap().lfc_prewarm_state;
-            if let LfcPrewarmState::Prewarming = replace(state, LfcPrewarmState::Prewarming) {
+            let state = &mut self.state.lock().unwrap();
+            token = state.lfc_prewarm_token.clone();
+            if let LfcPrewarmState::Prewarming =
+                replace(&mut state.lfc_prewarm_state, LfcPrewarmState::Prewarming)
+            {
                 return false;
             }
         }
         crate::metrics::LFC_PREWARMS.inc();
 
-        let cloned = self.clone();
+        let this = self.clone();
         spawn(async move {
-            let state = match cloned.prewarm_impl(from_endpoint).await {
-                Ok(true) => LfcPrewarmState::Completed,
-                Ok(false) => {
-                    info!(
-                        "skipping LFC prewarm because LFC state is not found in endpoint storage"
-                    );
-                    LfcPrewarmState::Skipped
-                }
+            let prewarm_state = match this.prewarm_impl(from_endpoint, token).await {
+                Ok(state) => state,
                 Err(err) => {
                     crate::metrics::LFC_PREWARM_ERRORS.inc();
                     error!(%err, "could not prewarm LFC");
-                    LfcPrewarmState::Failed {
-                        error: format!("{err:#}"),
-                    }
+                    let error = format!("{err:#}");
+                    LfcPrewarmState::Failed { error }
                 }
             };
 
-            cloned.state.lock().unwrap().lfc_prewarm_state = state;
+            let state = &mut this.state.lock().unwrap();
+            if let LfcPrewarmState::Cancelled = prewarm_state {
+                state.lfc_prewarm_token = CancellationToken::new();
+            }
+            state.lfc_prewarm_state = prewarm_state;
         });
         true
     }
@@ -132,47 +134,70 @@ impl ComputeNode {
 
     /// Request LFC state from endpoint storage and load corresponding pages into Postgres.
     /// Returns a result with `false` if the LFC state is not found in endpoint storage.
-    async fn prewarm_impl(&self, from_endpoint: Option<String>) -> Result<bool> {
-        let EndpointStoragePair { url, token } = self.endpoint_storage_pair(from_endpoint)?;
+    async fn prewarm_impl(
+        &self,
+        from_endpoint: Option<String>,
+        token: CancellationToken,
+    ) -> Result<LfcPrewarmState> {
+        let EndpointStoragePair {
+            url,
+            token: storage_token,
+        } = self.endpoint_storage_pair(from_endpoint)?;
 
         #[cfg(feature = "testing")]
-        fail::fail_point!("compute-prewarm", |_| {
-            bail!("prewarm configured to fail because of a failpoint")
-        });
+        fail::fail_point!("compute-prewarm", |_| bail!("compute-prewarm failpoint"));
 
         info!(%url, "requesting LFC state from endpoint storage");
-        let request = Client::new().get(&url).bearer_auth(token);
-        let res = request.send().await.context("querying endpoint storage")?;
-        match res.status() {
+        let request = Client::new().get(&url).bearer_auth(storage_token);
+        let response = select! {
+            _ = token.cancelled() => return Ok(LfcPrewarmState::Cancelled),
+            response = request.send() => response
+        }
+        .context("querying endpoint storage")?;
+
+        match response.status() {
             StatusCode::OK => (),
-            StatusCode::NOT_FOUND => {
-                return Ok(false);
-            }
+            StatusCode::NOT_FOUND => return Ok(LfcPrewarmState::Skipped),
             status => bail!("{status} querying endpoint storage"),
         }
 
         let mut uncompressed = Vec::new();
-        let lfc_state = res
-            .bytes()
-            .await
-            .context("getting request body from endpoint storage")?;
-        ZstdDecoder::new(lfc_state.iter().as_slice())
-            .read_to_end(&mut uncompressed)
-            .await
-            .context("decoding LFC state")?;
+        let lfc_state = select! {
+            _ = token.cancelled() => return Ok(LfcPrewarmState::Cancelled),
+            lfc_state = response.bytes() => lfc_state
+        }
+        .context("getting request body from endpoint storage")?;
+
+        let mut decoder = ZstdDecoder::new(lfc_state.iter().as_slice());
+        select! {
+            _ = token.cancelled() => return Ok(LfcPrewarmState::Cancelled),
+            read = decoder.read_to_end(&mut uncompressed) => read
+        }
+        .context("decoding LFC state")?;
+
         let uncompressed_len = uncompressed.len();
+        info!(%url, "downloaded LFC state, uncompressed size {uncompressed_len}");
 
-        info!(%url, "downloaded LFC state, uncompressed size {uncompressed_len}, loading into Postgres");
-
-        ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
+        // Client connection and prewarm info querying are fast and therefore don't need
+        // cancellation
+        let client = ComputeNode::get_maintenance_client(&self.tokio_conn_conf)
             .await
-            .context("connecting to postgres")?
-            .query_one("select neon.prewarm_local_cache($1)", &[&uncompressed])
-            .await
-            .context("loading LFC state into postgres")
-            .map(|_| ())?;
+            .context("connecting to postgres")?;
+        let pg_token = client.cancel_token();
 
-        Ok(true)
+        let params: Vec<&(dyn postgres_types::ToSql + Sync)> = vec![&uncompressed];
+        select! {
+            res = client.query_one("select neon.prewarm_local_cache($1)", &params) => res,
+            _ = token.cancelled() => {
+                pg_token.cancel_query(postgres::NoTls).await
+                    .context("cancelling neon.prewarm_local_cache()")?;
+                return Ok(LfcPrewarmState::Cancelled)
+            }
+        }
+        .context("loading LFC state into postgres")
+        .map(|_| ())?;
+
+        Ok(LfcPrewarmState::Completed)
     }
 
     /// If offload request is ongoing, return false, true otherwise
@@ -200,20 +225,20 @@ impl ComputeNode {
 
     async fn offload_lfc_with_state_update(&self) {
         crate::metrics::LFC_OFFLOADS.inc();
-
-        let Err(err) = self.offload_lfc_impl().await else {
-            self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Completed;
-            return;
+        let state = match self.offload_lfc_impl().await {
+            Ok(state) => state,
+            Err(err) => {
+                crate::metrics::LFC_OFFLOAD_ERRORS.inc();
+                error!(%err, "could not offload LFC");
+                let error = format!("{err:#}");
+                LfcOffloadState::Failed { error }
+            }
         };
 
-        crate::metrics::LFC_OFFLOAD_ERRORS.inc();
-        error!(%err, "could not offload LFC state to endpoint storage");
-        self.state.lock().unwrap().lfc_offload_state = LfcOffloadState::Failed {
-            error: format!("{err:#}"),
-        };
+        self.state.lock().unwrap().lfc_offload_state = state;
     }
 
-    async fn offload_lfc_impl(&self) -> Result<()> {
+    async fn offload_lfc_impl(&self) -> Result<LfcOffloadState> {
         let EndpointStoragePair { url, token } = self.endpoint_storage_pair(None)?;
         info!(%url, "requesting LFC state from Postgres");
 
@@ -228,7 +253,7 @@ impl ComputeNode {
             .context("deserializing LFC state")?;
         let Some(state) = state else {
             info!(%url, "empty LFC state, not exporting");
-            return Ok(());
+            return Ok(LfcOffloadState::Skipped);
         };
 
         let mut compressed = Vec::new();
@@ -242,12 +267,16 @@ impl ComputeNode {
 
         let request = Client::new().put(url).bearer_auth(token).body(compressed);
         match request.send().await {
-            Ok(res) if res.status() == StatusCode::OK => Ok(()),
+            Ok(res) if res.status() == StatusCode::OK => Ok(LfcOffloadState::Completed),
             Ok(res) => bail!(
                 "Request to endpoint storage failed with status: {}",
                 res.status()
             ),
             Err(err) => Err(err).context("writing to endpoint storage"),
         }
+    }
+
+    pub fn cancel_prewarm(self: &Arc<Self>) {
+        self.state.lock().unwrap().lfc_prewarm_token.cancel();
     }
 }
