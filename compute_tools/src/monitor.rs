@@ -85,7 +85,8 @@ impl ComputeMonitor {
         if matches!(
             compute_status,
             ComputeStatus::Terminated
-                | ComputeStatus::TerminationPending { .. }
+                | ComputeStatus::TerminationPendingFast
+                | ComputeStatus::TerminationPendingImmediate
                 | ComputeStatus::Failed
         ) {
             info!(

@@ -165,7 +165,7 @@ message GetDbSizeResponse {
 message GetPageRequest {
   // A request ID. Will be included in the response. Should be unique for
   // in-flight requests on the stream.
-  uint64 request_id = 1;
+  RequestID request_id = 1;
   // The request class.
   GetPageClass request_class = 2;
   // The LSN to read at.
@@ -187,6 +187,14 @@ message GetPageRequest {
   // are always in order. But we can't currenly rely on this on the server, because
   // of compatibility with the libpq protocol handler.
   repeated uint32 block_number = 5;
+}
+
+// A Request ID. Should be unique for in-flight requests on a stream. Included in the response.
+message RequestID {
+  // The base request ID.
+  uint64 id = 1;
+  // The request attempt. Starts at 0, incremented on each retry.
+  uint32 attempt = 2;
 }
 
 // A GetPageRequest class. Primarily intended for observability, but may also be
@@ -211,13 +219,26 @@ enum GetPageClass {
 // the entire batch is ready, so no one can make use of the individual pages.
 message GetPageResponse {
   // The original request's ID.
-  uint64 request_id = 1;
-  // The response status code.
+  RequestID request_id = 1;
+  // The response status code. If not OK, the rel and page fields will be empty.
   GetPageStatusCode status_code = 2;
   // A string describing the status, if any.
   string reason = 3;
-  // The 8KB page images, in the same order as the request. Empty if status_code != OK.
-  repeated bytes page_image = 4;
+  // The relation that the pages belong to.
+  RelTag rel = 4;
+  // The page(s), in the same order as the request.
+  repeated Page page = 5;
+}
+
+// A page.
+//
+// TODO: it would be slightly more efficient (but less convenient) to have separate arrays of block
+// numbers and images, but given the 8KB page size it's probably negligible. Benchmark it anyway.
+message Page {
+  // The page number.
+  uint32 block_number = 1;
+  // The materialized page image, as an 8KB byte vector.
+  bytes image = 2;
 }
 
 // A GetPageResponse status code.

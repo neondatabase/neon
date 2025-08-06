@@ -40,7 +40,7 @@ def prom_parse(client: EndpointHttpClient) -> dict[str, float]:
 
 def offload_lfc(method: PrewarmMethod, client: EndpointHttpClient, cur: Cursor) -> Any:
     if method == PrewarmMethod.POSTGRES:
-        cur.execute("select get_local_cache_state()")
+        cur.execute("select neon.get_local_cache_state()")
         return cur.fetchall()[0][0]
 
     if method == PrewarmMethod.AUTOPREWARM:
@@ -72,7 +72,7 @@ def prewarm_endpoint(
     elif method == PrewarmMethod.COMPUTE_CTL:
         client.prewarm_lfc()
     elif method == PrewarmMethod.POSTGRES:
-        cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
+        cur.execute("select neon.prewarm_local_cache(%s)", (lfc_state,))
 
 
 def check_prewarmed(
@@ -116,7 +116,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
 
     pg_conn = endpoint.connect()
     pg_cur = pg_conn.cursor()
-    pg_cur.execute("create extension neon")
+    pg_cur.execute("create schema neon; create extension neon with schema neon")
     pg_cur.execute("create database lfc")
 
     lfc_conn = endpoint.connect(dbname="lfc")
@@ -142,10 +142,12 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv, method: PrewarmMethod):
     lfc_cur = lfc_conn.cursor()
     prewarm_endpoint(method, client, pg_cur, lfc_state)
 
-    pg_cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_used_pages'")
+    pg_cur.execute(
+        "select lfc_value from neon.neon_lfc_stats where lfc_key='file_cache_used_pages'"
+    )
     lfc_used_pages = pg_cur.fetchall()[0][0]
     log.info(f"Used LFC size: {lfc_used_pages}")
-    pg_cur.execute("select * from get_prewarm_info()")
+    pg_cur.execute("select * from neon.get_prewarm_info()")
     total, prewarmed, skipped, _ = pg_cur.fetchall()[0]
     log.info(f"Prewarm info: {total=} {prewarmed=} {skipped=}")
     progress = (prewarmed + skipped) * 100 // total
@@ -186,7 +188,7 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMet
 
     pg_conn = endpoint.connect()
     pg_cur = pg_conn.cursor()
-    pg_cur.execute("create extension neon")
+    pg_cur.execute("create schema neon; create extension neon with schema neon")
     pg_cur.execute("CREATE DATABASE lfc")
 
     lfc_conn = endpoint.connect(dbname="lfc")

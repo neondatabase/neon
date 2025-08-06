@@ -961,14 +961,20 @@ impl ComputeNode {
             None
         };
 
-        let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
         state.terminate_flush_lsn = lsn;
-        if let ComputeStatus::TerminationPending { mode } = state.status {
+
+        let delay_exit = state.status == ComputeStatus::TerminationPendingFast;
+        if state.status == ComputeStatus::TerminationPendingFast
+            || state.status == ComputeStatus::TerminationPendingImmediate
+        {
+            info!(
+                "Changing compute status from {} to {}",
+                state.status,
+                ComputeStatus::Terminated
+            );
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
-            // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = mode == compute_api::responses::TerminateMode::Fast
         }
         drop(state);
 
@@ -1810,6 +1816,8 @@ impl ComputeNode {
             tls_config,
         )?;
 
+        self.pg_reload_conf()?;
+
         if !spec.skip_pg_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
             // Temporarily reset max_cluster_size in config
@@ -1829,9 +1837,8 @@ impl ComputeNode {
 
                 Ok(())
             })?;
+            self.pg_reload_conf()?;
         }
-
-        self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
@@ -1905,7 +1912,8 @@ impl ComputeNode {
 
                             // exit loop
                             ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending { .. }
+                            | ComputeStatus::TerminationPendingFast
+                            | ComputeStatus::TerminationPendingImmediate
                             | ComputeStatus::Terminated => break 'cert_update,
 
                             // wait
