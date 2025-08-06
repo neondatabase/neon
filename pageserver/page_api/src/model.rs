@@ -15,7 +15,10 @@
 //! receivers should expect all sorts of junk from senders. This also allows the sender to use e.g.
 //! stream combinators without dealing with errors, and avoids validating the same message twice.
 
-use std::{fmt::Display, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    fmt::Display,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -783,7 +786,7 @@ impl TryFrom<proto::LeaseStandbyHorizonRequest> for LeaseStandbyHorizonRequest {
         if pb.lsn == 0 {
             return Err(ProtocolError::Missing("lsn"));
         }
-        if pb.lease_id.len() == 0 {
+        if pb.lease_id.is_empty() {
             return Err(ProtocolError::Invalid("lease_id", pb.lease_id));
         }
         Ok(Self {
@@ -831,8 +834,9 @@ impl From<LeaseStandbyHorizonResponse> for proto::LeaseStandbyHorizonResponse {
     fn from(response: LeaseStandbyHorizonResponse) -> Self {
         Self {
             expiration: Some(prost_types::Timestamp {
-                seconds: response.expiration.timestamp() as i64,
-                nanos: response.expiration.timestamp_subsec_nanos() as i32,
+                seconds: response.expiration.timestamp(),
+                nanos: i32::try_from(response.expiration.timestamp_subsec_nanos())
+                    .expect("should fit in i32 max"),
             }),
         }
     }

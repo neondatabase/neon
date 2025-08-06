@@ -1,9 +1,9 @@
-use std::{pin::Pin, str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use chrono::Utc;
 use compute_api::spec::PageserverProtocol;
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use postgres::SimpleQueryMessage;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, info_span, instrument, warn};
@@ -163,40 +163,34 @@ async fn attempt(lease_id: String, compute: &Arc<ComputeNode>) -> anyhow::Result
             shard_id=%connect_info.tenant_shard_id.shard_slug(),
             timeline_id=%timeline_id,
         );
-        let logging_wrapper =
-            |fut: Pin<Box<dyn Future<Output = anyhow::Result<Option<chrono::DateTime<Utc>>>>>>| {
-                async move {
-                    // TODO: timeout?
-                    match fut.await {
-                        Ok(Some(v)) => {
-                            info!("lease obtained");
-                            Ok(Some(v))
-                        }
-                        Ok(None) => {
-                            error!("pageserver rejected our request");
-                            Ok(None)
-                        }
-                        Err(err) => {
-                            error!("communication failure: {err:?}");
-                            Err(())
-                        }
+        let logging_wrapper = async |fut| {
+            async move {
+                // TODO: timeout?
+                match fut.await {
+                    Ok(Some(v)) => {
+                        info!("lease obtained");
+                        Ok(Some(v))
+                    }
+                    Ok(None) => {
+                        error!("pageserver rejected our request");
+                        Ok(None)
+                    }
+                    Err(err) => {
+                        error!("communication failure: {err:?}");
+                        Err(())
                     }
                 }
-                .instrument(logging_span)
-            };
+            }
+            .instrument(logging_span)
+            .await
+        };
         let fut = match PageserverProtocol::from_connstring(&connect_info.connstring)? {
-            PageserverProtocol::Libpq => logging_wrapper(Box::pin(attempt_one_libpq(
-                connect_info,
-                timeline_id,
-                lease_id.clone(),
-                lsn,
-            ))),
-            PageserverProtocol::Grpc => logging_wrapper(Box::pin(attempt_one_grpc(
-                connect_info,
-                timeline_id,
-                lease_id.clone(),
-                lsn,
-            ))),
+            PageserverProtocol::Libpq => logging_wrapper(
+                attempt_one_libpq(connect_info, timeline_id, lease_id.clone(), lsn).boxed(),
+            ),
+            PageserverProtocol::Grpc => logging_wrapper(Box::pin(
+                attempt_one_grpc(connect_info, timeline_id, lease_id.clone(), lsn).boxed(),
+            )),
         };
         futs.push(fut);
     }
@@ -280,7 +274,7 @@ async fn attempt_one_grpc(
         tenant_shard_id.tenant_id,
         timeline_id,
         tenant_shard_id.to_index(),
-        auth.map(String::from),
+        auth,
         None,
     )
     .await?;

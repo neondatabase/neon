@@ -231,7 +231,7 @@ impl Horizons {
         // Violation of this invariant would constitute a bug in gc:
         // it should
         for (lease_id, lease) in inner.leases_by_id.iter() {
-            if !(lease.lsn >= *applied_gc_cutoff_lsn) {
+            if lease.lsn < *applied_gc_cutoff_lsn {
                 warn!(?lease_id, applied_gc_cutoff_lsn=%*applied_gc_cutoff_lsn, "lease is below the applied gc cutoff");
                 bug = true;
             }
@@ -286,8 +286,8 @@ impl Horizons {
         let inner = self.inner.lock().unwrap();
         inner
             .leases_by_id
-            .iter()
-            .map(|(_, lease)| (lease.lsn, lease.valid_until))
+            .values()
+            .map(|Lease { valid_until, lsn }| (*lsn, *valid_until))
             .collect()
     }
 }

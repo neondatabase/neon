@@ -8929,15 +8929,15 @@ mod tests {
                 ],
                 // image layers
                 vec![
-(Lsn(0x10), vec![(key1, test_img("metadata key 1"))]),
-(
-                    Lsn(0x30),
-                    vec![
-                        (key0, test_img("metadata key 0")),
-                        (key3, test_img("metadata key 3")),
-                    ],
-                ),
-],
+                    (Lsn(0x10), vec![(key1, test_img("metadata key 1"))]),
+                    (
+                        Lsn(0x30),
+                        vec![
+                            (key0, test_img("metadata key 0")),
+                            (key3, test_img("metadata key 3")),
+                        ],
+                    ),
+                ],
                 Lsn(0x30),
             )
             .await?;
@@ -9600,7 +9600,7 @@ mod tests {
         let initial_leases = [0x30, 0x50, 0x70];
         let mut expirations = Vec::new();
         initial_leases.iter().enumerate().for_each(|(i, n)| {
-            let lease_id = format!("test_lease_{}", i);
+            let lease_id = format!("test_lease_{i}");
             expirations.push(
                 timeline
                     .lease_standby_horizon(lease_id, Lsn(*n), &ctx)
@@ -9684,9 +9684,9 @@ mod tests {
 
         // Should be able to read at any LSN between any standby_horizon and tip
         let readable_lsns = (legacy.0..=end_lsn.0)
-            .chain(leases.iter().map(|(lsn, _)| (lsn.0..=end_lsn.0)).flatten())
+            .chain(leases.iter().flat_map(|(lsn, _)| (lsn.0..=end_lsn.0)))
             .dedup()
-            .map(|lsn| Lsn(lsn))
+            .map(Lsn)
             .collect_vec();
         for lsn in readable_lsns {
             timeline
