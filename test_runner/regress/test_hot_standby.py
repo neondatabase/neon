@@ -141,7 +141,7 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
     tenant_id = env.initial_tenant
 
     # enable the compute feature t
-    compute_features = ['standby_horizon_leases_experimental']
+    compute_features = ["standby_horizon_leases_experimental"]
 
     with env.endpoints.create_start(
         branch_name="main",
