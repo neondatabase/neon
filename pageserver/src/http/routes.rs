@@ -79,8 +79,8 @@ use crate::tenant::storage_layer::{IoConcurrency, LayerAccessStatsReset, LayerNa
 use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 use crate::tenant::timeline::offload::{OffloadError, offload_timeline};
 use crate::tenant::timeline::{
-    CompactFlags, CompactOptions, CompactRequest, CompactionError, MarkInvisibleRequest, Timeline,
-    WaitLsnTimeout, WaitLsnWaiter, import_pgdata,
+    CompactFlags, CompactOptions, CompactRequest, MarkInvisibleRequest, Timeline, WaitLsnTimeout,
+    WaitLsnWaiter, import_pgdata,
 };
 use crate::tenant::{
     GetTimelineError, LogicalSizeCalculationCause, OffloadedTimeline, PageReconstructError,
@@ -2503,9 +2503,10 @@ async fn timeline_checkpoint_handler(
                 .compact(&cancel, flags, &ctx)
                 .await
                 .map_err(|e|
-                    match e {
-                        CompactionError::ShuttingDown => ApiError::ShuttingDown,
-                        CompactionError::Other(e) => ApiError::InternalServerError(e),
+                    if e.is_cancel() {
+                        ApiError::ShuttingDown
+                    } else {
+                        ApiError::InternalServerError(e.into_anyhow())
                     }
                 )?;
         }
@@ -3940,9 +3941,14 @@ pub fn make_router(
         .expect("construct launch timestamp header middleware"),
     );
 
+    let force_metric_collection_on_scrape = state.conf.force_metric_collection_on_scrape;
+
+    let prometheus_metrics_handler_wrapper =
+        move |req| prometheus_metrics_handler(req, force_metric_collection_on_scrape);
+
     Ok(router
         .data(state)
-        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/metrics", move |r| request_span(r, prometheus_metrics_handler_wrapper))
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| api_handler(r, status_handler))

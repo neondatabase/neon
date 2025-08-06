@@ -3327,7 +3327,7 @@ impl TenantShard {
                         // Ignore this, we likely raced with unarchival.
                         OffloadError::NotArchived => Ok(()),
                         OffloadError::AlreadyInProgress => Ok(()),
-                        OffloadError::Cancelled => Err(CompactionError::ShuttingDown),
+                        OffloadError::Cancelled => Err(CompactionError::new_cancelled()),
                         // don't break the anyhow chain
                         OffloadError::Other(err) => Err(CompactionError::Other(err)),
                     })?;
@@ -3357,16 +3357,13 @@ impl TenantShard {
 
     /// Trips the compaction circuit breaker if appropriate.
     pub(crate) fn maybe_trip_compaction_breaker(&self, err: &CompactionError) {
-        match err {
-            err if err.is_cancel() => {}
-            CompactionError::ShuttingDown => (),
-            CompactionError::Other(err) => {
-                self.compaction_circuit_breaker
-                    .lock()
-                    .unwrap()
-                    .fail(&CIRCUIT_BREAKERS_BROKEN, err);
-            }
+        if err.is_cancel() {
+            return;
         }
+        self.compaction_circuit_breaker
+            .lock()
+            .unwrap()
+            .fail(&CIRCUIT_BREAKERS_BROKEN, err);
     }
 
     /// Cancel scheduled compaction tasks
@@ -4208,6 +4205,15 @@ impl TenantShard {
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
+    }
+
+    // HADRON
+    pub fn get_image_creation_timeout(&self) -> Option<Duration> {
+        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
+        tenant_conf.image_layer_force_creation_period.or(self
+            .conf
+            .default_tenant_conf
+            .image_layer_force_creation_period)
     }
 
     pub fn get_pitr_interval(&self) -> Duration {

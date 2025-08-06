@@ -600,6 +600,9 @@ pub struct TenantConfigPatch {
     pub gc_period: FieldPatch<String>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub image_creation_threshold: FieldPatch<usize>,
+    // HADRON
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub image_layer_force_creation_period: FieldPatch<String>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub pitr_interval: FieldPatch<String>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
@@ -705,6 +708,11 @@ pub struct TenantConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_creation_threshold: Option<usize>,
 
+    // HADRON
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    pub image_layer_force_creation_period: Option<Duration>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub pitr_interval: Option<Duration>,
@@ -807,6 +815,7 @@ impl TenantConfig {
             mut gc_horizon,
             mut gc_period,
             mut image_creation_threshold,
+            mut image_layer_force_creation_period,
             mut pitr_interval,
             mut walreceiver_connect_timeout,
             mut lagging_wal_timeout,
@@ -871,6 +880,11 @@ impl TenantConfig {
         patch
             .image_creation_threshold
             .apply(&mut image_creation_threshold);
+        // HADRON
+        patch
+            .image_layer_force_creation_period
+            .map(|v| humantime::parse_duration(&v))?
+            .apply(&mut image_layer_force_creation_period);
         patch
             .pitr_interval
             .map(|v| humantime::parse_duration(&v))?
@@ -956,6 +970,7 @@ impl TenantConfig {
             gc_horizon,
             gc_period,
             image_creation_threshold,
+            image_layer_force_creation_period,
             pitr_interval,
             walreceiver_connect_timeout,
             lagging_wal_timeout,
@@ -1031,6 +1046,9 @@ impl TenantConfig {
             image_creation_threshold: self
                 .image_creation_threshold
                 .unwrap_or(global_conf.image_creation_threshold),
+            image_layer_force_creation_period: self
+                .image_layer_force_creation_period
+                .or(global_conf.image_layer_force_creation_period),
             pitr_interval: self.pitr_interval.unwrap_or(global_conf.pitr_interval),
             walreceiver_connect_timeout: self
                 .walreceiver_connect_timeout

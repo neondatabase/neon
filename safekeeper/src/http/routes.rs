@@ -699,6 +699,11 @@ pub fn make_router(
         }))
     }
 
+    let force_metric_collection_on_scrape = conf.force_metric_collection_on_scrape;
+
+    let prometheus_metrics_handler_wrapper =
+        move |req| prometheus_metrics_handler(req, force_metric_collection_on_scrape);
+
     // NB: on any changes do not forget to update the OpenAPI spec
     // located nearby (/safekeeper/src/http/openapi_spec.yaml).
     let auth = conf.http_auth.clone();
@@ -706,7 +711,9 @@ pub fn make_router(
         .data(conf)
         .data(global_timelines)
         .data(auth)
-        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
+        .get("/metrics", move |r| {
+            request_span(r, prometheus_metrics_handler_wrapper)
+        })
         .get("/profile/cpu", |r| request_span(r, profile_cpu_handler))
         .get("/profile/heap", |r| request_span(r, profile_heap_handler))
         .get("/v1/status", |r| request_span(r, status_handler))

@@ -452,6 +452,12 @@ impl PageServerNode {
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
+            // HADRON
+            image_layer_force_creation_period: settings
+                .remove("image_layer_force_creation_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'image_layer_force_creation_period' as duration")?,
             image_layer_creation_check_threshold: settings
                 .remove("image_layer_creation_check_threshold")
                 .map(|x| x.parse::<u8>())

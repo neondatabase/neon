@@ -387,7 +387,7 @@ impl From<GetPageRequest> for proto::GetPageRequest {
 pub type RequestID = u64;
 
 /// A GetPage request class.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, strum_macros::Display)]
 pub enum GetPageClass {
     /// Unknown class. For backwards compatibility: used when an older client version sends a class
     /// that a newer server version has removed.
@@ -398,6 +398,19 @@ pub enum GetPageClass {
     Prefetch,
     /// A background request (e.g. vacuum).
     Background,
+}
+
+impl GetPageClass {
+    /// Returns true if this is considered a bulk request (i.e. more throughput-oriented rather than
+    /// latency-sensitive).
+    pub fn is_bulk(&self) -> bool {
+        match self {
+            Self::Unknown => false,
+            Self::Normal => false,
+            Self::Prefetch => true,
+            Self::Background => true,
+        }
+    }
 }
 
 impl From<proto::GetPageClass> for GetPageClass {
