@@ -138,6 +138,12 @@ struct Cli {
     /// Run in development mode, skipping VM-specific operations like process termination
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub dev: bool,
+
+    #[arg(long)]
+    pub pg_init_timeout: Option<u64>,
+
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub lakebase_mode: bool,
 }
 
 impl Cli {
@@ -219,6 +225,8 @@ fn main() -> Result<()> {
             installed_extensions_collection_interval: Arc::new(AtomicU64::new(
                 cli.installed_extensions_collection_interval,
             )),
+            pg_init_timeout: cli.pg_init_timeout.map(Duration::from_secs),
+            lakebase_mode: cli.lakebase_mode,
         },
         config,
     )?;
