@@ -41,7 +41,7 @@ impl NodeOs {
 
     /// Generate a random number in range [0, max).
     pub fn random(&self, max: u64) -> u64 {
-        self.internal.rng.lock().gen_range(0..max)
+        self.internal.rng.lock().random_range(0..max)
     }
 
     /// Append a new event to the world event log.

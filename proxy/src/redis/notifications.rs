@@ -10,6 +10,7 @@ use super::connection_with_credentials_provider::ConnectionWithCredentialsProvid
 use crate::cache::project_info::ProjectInfoCache;
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
+use crate::util::deserialize_json_string;
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 const RECONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -119,15 +120,6 @@ impl std::ops::Deref for InvalidateAccount {
 struct InvalidateRole {
     project_id: ProjectIdInt,
     role_name: RoleNameInt,
-}
-
-fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    T: for<'de2> serde::Deserialize<'de2>,
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    serde_json::from_str(&s).map_err(<D::Error as serde::de::Error>::custom)
 }
 
 // https://github.com/serde-rs/serde/issues/1714

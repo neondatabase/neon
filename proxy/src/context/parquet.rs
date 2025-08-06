@@ -523,29 +523,29 @@ mod tests {
 
     fn generate_request_data(rng: &mut impl Rng) -> RequestData {
         RequestData {
-            session_id: uuid::Builder::from_random_bytes(rng.r#gen()).into_uuid(),
-            peer_addr: Ipv4Addr::from(rng.r#gen::<[u8; 4]>()).to_string(),
+            session_id: uuid::Builder::from_random_bytes(rng.random()).into_uuid(),
+            peer_addr: Ipv4Addr::from(rng.random::<[u8; 4]>()).to_string(),
             timestamp: chrono::DateTime::from_timestamp_millis(
-                rng.gen_range(1703862754..1803862754),
+                rng.random_range(1703862754..1803862754),
             )
             .unwrap()
             .naive_utc(),
             application_name: Some("test".to_owned()),
             user_agent: Some("test-user-agent".to_owned()),
-            username: Some(hex::encode(rng.r#gen::<[u8; 4]>())),
-            endpoint_id: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
-            database: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
-            project: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
-            branch: Some(hex::encode(rng.r#gen::<[u8; 16]>())),
+            username: Some(hex::encode(rng.random::<[u8; 4]>())),
+            endpoint_id: Some(hex::encode(rng.random::<[u8; 16]>())),
+            database: Some(hex::encode(rng.random::<[u8; 16]>())),
+            project: Some(hex::encode(rng.random::<[u8; 16]>())),
+            branch: Some(hex::encode(rng.random::<[u8; 16]>())),
             pg_options: None,
             auth_method: None,
             jwt_issuer: None,
-            protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
+            protocol: ["tcp", "ws", "http"][rng.random_range(0..3)],
             region: String::new(),
             error: None,
-            success: rng.r#gen(),
+            success: rng.random(),
             cold_start_info: "no",
-            duration_us: rng.gen_range(0..30_000_000),
+            duration_us: rng.random_range(0..30_000_000),
             disconnect_timestamp: None,
         }
     }
@@ -622,15 +622,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313953, 3, 6000),
-                (1313942, 3, 6000),
-                (1314001, 3, 6000),
-                (1313958, 3, 6000),
-                (1314094, 3, 6000),
-                (1313931, 3, 6000),
-                (1313725, 3, 6000),
-                (1313960, 3, 6000),
-                (438318, 1, 2000)
+                (1313878, 3, 6000),
+                (1313891, 3, 6000),
+                (1314058, 3, 6000),
+                (1313914, 3, 6000),
+                (1313760, 3, 6000),
+                (1314084, 3, 6000),
+                (1313965, 3, 6000),
+                (1313911, 3, 6000),
+                (438290, 1, 2000)
             ]
         );
 
@@ -662,11 +662,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1205810, 5, 10000),
-                (1205534, 5, 10000),
-                (1205835, 5, 10000),
-                (1205820, 5, 10000),
-                (1206074, 5, 10000)
+                (1206039, 5, 10000),
+                (1205798, 5, 10000),
+                (1205776, 5, 10000),
+                (1206051, 5, 10000),
+                (1205746, 5, 10000)
             ]
         );
 
@@ -691,15 +691,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1313953, 3, 6000),
-                (1313942, 3, 6000),
-                (1314001, 3, 6000),
-                (1313958, 3, 6000),
-                (1314094, 3, 6000),
-                (1313931, 3, 6000),
-                (1313725, 3, 6000),
-                (1313960, 3, 6000),
-                (438318, 1, 2000)
+                (1313878, 3, 6000),
+                (1313891, 3, 6000),
+                (1314058, 3, 6000),
+                (1313914, 3, 6000),
+                (1313760, 3, 6000),
+                (1314084, 3, 6000),
+                (1313965, 3, 6000),
+                (1313911, 3, 6000),
+                (438290, 1, 2000)
             ]
         );
 
@@ -736,7 +736,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(658584, 2, 3001), (658298, 2, 3000), (658094, 2, 2999)]
+            [(658552, 2, 3001), (658265, 2, 3000), (658061, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

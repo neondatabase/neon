@@ -11,6 +11,9 @@ crate-type = ["staticlib"]
 # 'testing' feature is currently unused in the communicator, but we accept it for convenience of
 # calling build scripts, so that you can pass the same feature to all packages.
 testing = []
+# 'rest_broker' feature is currently unused in the communicator, but we accept it for convenience of
+# calling build scripts, so that you can pass the same feature to all packages.
+rest_broker = []
 
 [dependencies]
 neon-shmem.workspace = true
