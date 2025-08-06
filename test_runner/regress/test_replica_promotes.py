@@ -90,6 +90,7 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
         secondary_cur.execute("select count(*) from t")
         assert secondary_cur.fetchone() == (100,)
 
+    primary_spec = primary.get_compute_spec()
     primary_endpoint_id = primary.endpoint_id
     stop_and_check_lsn(primary, expected_primary_lsn)
 
@@ -99,10 +100,9 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
     if method == PromoteMethod.COMPUTE_CTL:
         client = secondary.http_client()
         client.prewarm_lfc(primary_endpoint_id)
-        # control plane knows safekeepers, simulate it by querying primary
         assert (lsn := primary.terminate_flush_lsn)
-        safekeepers_lsn = {"safekeepers": safekeepers, "wal_flush_lsn": lsn}
-        assert client.promote(safekeepers_lsn)["status"] == "completed"
+        promote_spec = {"spec": primary_spec, "wal_flush_lsn": str(lsn)}
+        assert client.promote(promote_spec)["status"] == "completed"
     else:
         promo_cur.execute(f"alter system set neon.safekeepers='{safekeepers}'")
         promo_cur.execute("select pg_reload_conf()")
@@ -131,20 +131,34 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
 
         lsn_triple = get_lsn_triple(new_primary_cur)
         log.info(f"Secondary: LSN after workload is {lsn_triple}")
-        expected_promoted_lsn = Lsn(lsn_triple[2])
+        expected_lsn = Lsn(lsn_triple[2])
 
     with secondary.connect() as conn, conn.cursor() as new_primary_cur:
         new_primary_cur.execute("select payload from t")
         assert new_primary_cur.fetchall() == [(it,) for it in range(1, 201)]
 
     if method == PromoteMethod.COMPUTE_CTL:
-        # compute_ctl's /promote switches replica type to Primary so it syncs
-        # safekeepers on finish
-        stop_and_check_lsn(secondary, expected_promoted_lsn)
+        # compute_ctl's /promote switches replica type to Primary so it syncs safekeepers on finish
+        stop_and_check_lsn(secondary, expected_lsn)
     else:
-        # on testing postgres, we don't update replica type, secondaries don't
-        # sync so lsn should be None
+        # on testing postgres, we don't update replica type, secondaries don't sync so lsn should be None
         stop_and_check_lsn(secondary, None)
+
+    if method == PromoteMethod.COMPUTE_CTL:
+        secondary.stop()
+        # In production, compute ultimately receives new compute spec from cplane.
+        secondary.respec(mode="Primary")
+        secondary.start()
+
+        with secondary.connect() as conn, conn.cursor() as new_primary_cur:
+            new_primary_cur.execute(
+                "INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload"
+            )
+            assert new_primary_cur.fetchall() == [(it,) for it in range(101, 201)]
+            lsn_triple = get_lsn_triple(new_primary_cur)
+            log.info(f"Secondary: LSN after restart and workload is {lsn_triple}")
+            expected_lsn = Lsn(lsn_triple[2])
+        stop_and_check_lsn(secondary, expected_lsn)
 
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary2")
 
@@ -154,10 +168,11 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
         log.info(f"New primary: Boot LSN is {lsn_triple}")
 
         new_primary_cur.execute("select count(*) from t")
-        assert new_primary_cur.fetchone() == (200,)
+        compute_ctl_count = 100 * (method == PromoteMethod.COMPUTE_CTL)
+        assert new_primary_cur.fetchone() == (200 + compute_ctl_count,)
         new_primary_cur.execute("INSERT INTO t (payload) SELECT generate_series(201, 300)")
         new_primary_cur.execute("select count(*) from t")
-        assert new_primary_cur.fetchone() == (300,)
+        assert new_primary_cur.fetchone() == (300 + compute_ctl_count,)
     stop_and_check_lsn(primary, expected_primary_lsn)
 
 
@@ -175,18 +190,91 @@ def test_replica_promote_handler_disconnects(neon_simple_env: NeonEnv):
         cur.execute("create schema neon;create extension neon with schema neon")
         cur.execute("create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)")
         cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
-        cur.execute("show neon.safekeepers")
-        safekeepers = cur.fetchall()[0][0]
 
     primary.http_client().offload_lfc()
+    primary_spec = primary.get_compute_spec()
     primary_endpoint_id = primary.endpoint_id
     primary.stop(mode="immediate-terminate")
     assert (lsn := primary.terminate_flush_lsn)
 
     client = secondary.http_client()
     client.prewarm_lfc(primary_endpoint_id)
-    safekeepers_lsn = {"safekeepers": safekeepers, "wal_flush_lsn": lsn}
-    assert client.promote(safekeepers_lsn, disconnect=True)["status"] == "completed"
+    promote_spec = {"spec": primary_spec, "wal_flush_lsn": str(lsn)}
+    assert client.promote(promote_spec, disconnect=True)["status"] == "completed"
+
+    with secondary.connect() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (100,)
+        cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload")
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (200,)
+
+
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+def test_replica_promote_fails(neon_simple_env: NeonEnv):
+    """
+    Test that if a /promote route fails, we can safely start primary back
+    """
+    env: NeonEnv = neon_simple_env
+    primary: Endpoint = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
+    secondary: Endpoint = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
+    secondary.stop()
+    secondary.start(env={"FAILPOINTS": "compute-promotion=return(0)"})
+
+    with primary.connect() as conn, conn.cursor() as cur:
+        cur.execute("create schema neon;create extension neon with schema neon")
+        cur.execute("create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)")
+        cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
+
+    primary.http_client().offload_lfc()
+    primary_spec = primary.get_compute_spec()
+    primary_endpoint_id = primary.endpoint_id
+    primary.stop(mode="immediate-terminate")
+    assert (lsn := primary.terminate_flush_lsn)
+
+    client = secondary.http_client()
+    client.prewarm_lfc(primary_endpoint_id)
+    promote_spec = {"spec": primary_spec, "wal_flush_lsn": str(lsn)}
+    assert client.promote(promote_spec)["status"] == "failed"
+    secondary.stop()
+
+    primary.start()
+    with primary.connect() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (100,)
+        cur.execute("INSERT INTO t (payload) SELECT generate_series(101, 200) RETURNING payload")
+        cur.execute("select count(*) from t")
+        assert cur.fetchone() == (200,)
+
+
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+def test_replica_promote_prewarm_fails(neon_simple_env: NeonEnv):
+    """
+    Test that if /lfc/prewarm route fails, we are able to promote
+    """
+    env: NeonEnv = neon_simple_env
+    primary: Endpoint = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
+    secondary: Endpoint = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
+    secondary.stop()
+    secondary.start(env={"FAILPOINTS": "compute-prewarm=return(0)"})
+
+    with primary.connect() as conn, conn.cursor() as cur:
+        cur.execute("create schema neon;create extension neon with schema neon")
+        cur.execute("create table t(pk bigint GENERATED ALWAYS AS IDENTITY, payload integer)")
+        cur.execute("INSERT INTO t(payload) SELECT generate_series(1, 100)")
+
+    primary.http_client().offload_lfc()
+    primary_spec = primary.get_compute_spec()
+    primary_endpoint_id = primary.endpoint_id
+    primary.stop(mode="immediate-terminate")
+    assert (lsn := primary.terminate_flush_lsn)
+
+    client = secondary.http_client()
+    with pytest.raises(AssertionError):
+        client.prewarm_lfc(primary_endpoint_id)
+    assert client.prewarm_lfc_status()["status"] == "failed"
+    promote_spec = {"spec": primary_spec, "wal_flush_lsn": str(lsn)}
+    assert client.promote(promote_spec)["status"] == "completed"
 
     with secondary.connect() as conn, conn.cursor() as cur:
         cur.execute("select count(*) from t")

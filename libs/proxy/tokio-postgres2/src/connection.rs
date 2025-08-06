@@ -44,6 +44,27 @@ pub struct Connection<S, T> {
     state: State,
 }
 
+pub const INITIAL_CAPACITY: usize = 2 * 1024;
+pub const GC_THRESHOLD: usize = 16 * 1024;
+
+/// Gargabe collect the [`BytesMut`] if it has too much spare capacity.
+pub fn gc_bytesmut(buf: &mut BytesMut) {
+    // We use a different mode to shrink the buf when above the threshold.
+    // When above the threshold, we only re-allocate when the buf has 2x spare capacity.
+    let reclaim = GC_THRESHOLD.checked_sub(buf.len()).unwrap_or(buf.len());
+
+    // `try_reclaim` tries to get the capacity from any shared `BytesMut`s,
+    // before then comparing the length against the capacity.
+    if buf.try_reclaim(reclaim) {
+        let capacity = usize::max(buf.len(), INITIAL_CAPACITY);
+
+        // Allocate a new `BytesMut` so that we deallocate the old version.
+        let mut new = BytesMut::with_capacity(capacity);
+        new.extend_from_slice(buf);
+        *buf = new;
+    }
+}
+
 pub enum Never {}
 
 impl<S, T> Connection<S, T>
@@ -86,7 +107,14 @@ where
                             continue;
                         }
                         BackendMessage::Async(_) => continue,
-                        BackendMessage::Normal { messages } => messages,
+                        BackendMessage::Normal { messages, ready } => {
+                            // if we read a ReadyForQuery from postgres, let's try GC the read buffer.
+                            if ready {
+                                gc_bytesmut(self.stream.read_buffer_mut());
+                            }
+
+                            messages
+                        }
                     }
                 }
             };
@@ -177,12 +205,7 @@ where
                 // Send a terminate message to postgres
                 Poll::Ready(None) => {
                     trace!("poll_write: at eof, terminating");
-                    let mut request = BytesMut::new();
-                    frontend::terminate(&mut request);
-
-                    Pin::new(&mut self.stream)
-                        .start_send(request.freeze())
-                        .map_err(Error::io)?;
+                    frontend::terminate(self.stream.write_buffer_mut());
 
                     trace!("poll_write: sent eof, closing");
                     trace!("poll_write: done");
@@ -205,6 +228,10 @@ where
         {
             Poll::Ready(()) => {
                 trace!("poll_flush: flushed");
+
+                // GC the write buffer if we managed to flush
+                gc_bytesmut(self.stream.write_buffer_mut());
+
                 Poll::Ready(Ok(()))
             }
             Poll::Pending => {

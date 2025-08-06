@@ -26,6 +26,7 @@ pub mod monitor;
 pub mod pageserver_client;
 pub mod params;
 pub mod pg_helpers;
+pub mod pg_isready;
 pub mod pgbouncer;
 pub(crate) mod ro_replica;
 pub mod rsyslog;

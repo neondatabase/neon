@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod connect_auth;
 pub(crate) mod connect_compute;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
@@ -23,17 +24,13 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 
-use crate::cache::Cache;
 use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
 use crate::config::ProxyConfig;
 use crate::context::RequestContext;
-use crate::control_plane::client::ControlPlaneClient;
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use crate::pglb::{ClientMode, ClientRequestError};
 use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
-use crate::proxy::connect_compute::{TcpMechanism, connect_to_compute};
-use crate::proxy::retry::ShouldRetryWakeCompute;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
 use crate::types::EndpointCacheKey;
@@ -95,61 +92,24 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
     auth_info.set_startup_params(params, params_compat);
 
-    let mut node;
-    let mut attempt = 0;
-    let connect = TcpMechanism {
-        locks: &config.connect_compute_locks,
-    };
     let backend = auth::Backend::ControlPlane(cplane, creds.info);
 
-    // NOTE: This is messy, but should hopefully be detangled with PGLB.
-    // We wanted to separate the concerns of **connect** to compute (a PGLB operation),
-    // from **authenticate** to compute (a NeonKeeper operation).
-    //
-    // This unfortunately removed retry handling for one error case where
-    // the compute was cached, and we connected, but the compute cache was actually stale
-    // and is associated with the wrong endpoint. We detect this when the **authentication** fails.
-    // As such, we retry once here if the `authenticate` function fails and the error is valid to retry.
-    loop {
-        attempt += 1;
+    // TODO: callback to pglb
+    let res = connect_auth::connect_to_compute_and_auth(
+        ctx,
+        config,
+        &backend,
+        auth_info,
+        connect_compute::TlsNegotiation::Postgres,
+    )
+    .await;
 
-        // TODO: callback to pglb
-        let res = connect_to_compute(
-            ctx,
-            &connect,
-            &backend,
-            config.wake_compute_retry_config,
-            &config.connect_to_compute,
-        )
-        .await;
+    let mut node = match res {
+        Ok(node) => node,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
+    };
 
-        match res {
-            Ok(n) => node = n,
-            Err(e) => return Err(client.throw_error(e, Some(ctx)).await)?,
-        }
-
-        let auth::Backend::ControlPlane(cplane, user_info) = &backend else {
-            unreachable!("ensured above");
-        };
-
-        let res = auth_info.authenticate(ctx, &mut node).await;
-        match res {
-            Ok(()) => {
-                send_client_greeting(ctx, &config.greetings, client);
-                break;
-            }
-            Err(e) if attempt < 2 && e.should_retry_wake_compute() => {
-                tracing::warn!(error = ?e, "retrying wake compute");
-
-                #[allow(irrefutable_let_patterns)]
-                if let ControlPlaneClient::ProxyV1(cplane_proxy_v1) = &**cplane {
-                    let key = user_info.endpoint_cache_key();
-                    cplane_proxy_v1.caches.node_info.invalidate(&key);
-                }
-            }
-            Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
-        }
-    }
+    send_client_greeting(ctx, &config.greetings, client);
 
     let auth::Backend::ControlPlane(_, user_info) = backend else {
         unreachable!("ensured above");

@@ -13,6 +13,7 @@ use metrics::{Encoder, TextEncoder};
 
 use crate::communicator_socket_client::connect_communicator_socket;
 use crate::compute::ComputeNode;
+use crate::hadron_metrics;
 use crate::http::JsonResponse;
 use crate::metrics::collect;
 
@@ -21,10 +22,17 @@ pub(in crate::http) async fn get_metrics() -> Response {
     // When we call TextEncoder::encode() below, it will immediately return an
     // error if a metric family has no metrics, so we need to preemptively
     // filter out metric families with no metrics.
-    let metrics = collect()
+    let mut metrics = collect()
         .into_iter()
         .filter(|m| !m.get_metric().is_empty())
         .collect::<Vec<MetricFamily>>();
+
+    // Add Hadron metrics.
+    let hadron_metrics: Vec<MetricFamily> = hadron_metrics::collect()
+        .into_iter()
+        .filter(|m| !m.get_metric().is_empty())
+        .collect();
+    metrics.extend(hadron_metrics);
 
     let encoder = TextEncoder::new();
     let mut buffer = vec![];

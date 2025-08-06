@@ -87,9 +87,10 @@ class EndpointHttpClient(requests.Session):
         def prewarmed():
             json = self.prewarm_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"{status}, {err=}"
+            assert status in ["failed", "completed", "skipped"], f"{status}, {err=}"
 
         wait_until(prewarmed, timeout=60)
+        assert self.prewarm_lfc_status()["status"] != "failed"
 
     def offload_lfc_status(self) -> dict[str, str]:
         res = self.get(self.offload_url)
@@ -105,19 +106,19 @@ class EndpointHttpClient(requests.Session):
         def offloaded():
             json = self.offload_lfc_status()
             status, err = json["status"], json.get("error")
-            assert status == "completed", f"{status}, {err=}"
+            assert status in ["failed", "completed"], f"{status}, {err=}"
 
         wait_until(offloaded)
+        assert self.offload_lfc_status()["status"] != "failed"
 
-    def promote(self, safekeepers_lsn: dict[str, Any], disconnect: bool = False):
+    def promote(self, promote_spec: dict[str, Any], disconnect: bool = False):
         url = f"http://localhost:{self.external_port}/promote"
         if disconnect:
             try:  # send first request to start promote and disconnect
-                self.post(url, data=safekeepers_lsn, timeout=0.001)
+                self.post(url, json=promote_spec, timeout=0.001)
             except ReadTimeout:
                 pass  # wait on second request which returns on promotion finish
-        res = self.post(url, data=safekeepers_lsn)
-        res.raise_for_status()
+        res = self.post(url, json=promote_spec)
         json: dict[str, str] = res.json()
         return json
 

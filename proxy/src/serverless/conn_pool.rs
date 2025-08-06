@@ -190,6 +190,9 @@ mod tests {
         fn get_process_id(&self) -> i32 {
             0
         }
+        fn reset(&mut self) -> Result<(), postgres_client::Error> {
+            Ok(())
+        }
     }
 
     fn create_inner() -> ClientInnerCommon<MockClient> {

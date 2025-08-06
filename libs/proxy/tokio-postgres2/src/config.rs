@@ -250,19 +250,20 @@ impl Config {
     {
         let stream = connect_tls(stream, self.ssl_mode, tls).await?;
         let mut stream = StartupStream::new(stream);
-        connect_raw::startup(&mut stream, self).await?;
         connect_raw::authenticate(&mut stream, self).await?;
 
         Ok(stream)
     }
 
-    pub async fn authenticate<S, T>(&self, stream: &mut StartupStream<S, T>) -> Result<(), Error>
+    pub fn authenticate<S, T>(
+        &self,
+        stream: &mut StartupStream<S, T>,
+    ) -> impl Future<Output = Result<(), Error>>
     where
         S: AsyncRead + AsyncWrite + Unpin,
         T: TlsStream + Unpin,
     {
-        connect_raw::startup(stream, self).await?;
-        connect_raw::authenticate(stream, self).await
+        connect_raw::authenticate(stream, self)
     }
 }
 

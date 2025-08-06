@@ -133,6 +133,9 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
     tenant_conf = {
         # set PITR interval to be small, so we can do GC
         "pitr_interval": "0 s",
+        # we want to control gc and checkpoint frequency precisely
+        "gc_period": "0s",
+        "compaction_period": "0s",
         # this test tests standby_horizon leases feature
         "standby_horizon_lease_length": "10s",
     }
@@ -193,6 +196,23 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
                 client = pageserver.http_client()
                 client.timeline_checkpoint(tenant_shard_id, timeline_id)
                 client.timeline_compact(tenant_shard_id, timeline_id)
+                # Wait for standby horizon to get propagated.
+                # This shouldn't be necessary, but the current mechanism for
+                # standby_horizon propagation is imperfect. Detailed
+                # description in https://databricks.atlassian.net/browse/LKB-2499
+                while True:
+                    val = client.get_metric_value(
+                        "pageserver_standby_horizon",
+                        {
+                            "tenant_id": str(tenant_shard_id.tenant_id),
+                            "shard_id": str(tenant_shard_id.shard_index),
+                            "timeline_id": str(timeline_id),
+                        },
+                    )
+                    log.info("waiting for next standby_horizon push from safekeeper, {val=}")
+                    if val != 0:
+                        break
+                    time.sleep(0.1)
                 client.timeline_gc(tenant_shard_id, timeline_id, 0)
 
             # Re-execute the query. The GetPage requests that this

@@ -13,6 +13,8 @@
 #include <math.h>
 #include <sys/socket.h>
 
+#include <curl/curl.h>
+
 #include "libpq-int.h"
 
 #include "access/xlog.h"
@@ -86,6 +88,10 @@ static int pageserver_response_log_timeout = 10000;
 /* 2.5 minutes. A bit higher than highest default TCP retransmission timeout */
 static int pageserver_response_disconnect_timeout = 150000;
 
+static int	conf_refresh_reconnect_attempt_threshold = 16;
+// Hadron: timeout for refresh errors (1 minute)
+static uint64 	kRefreshErrorTimeoutUSec = 1 * USECS_PER_MINUTE;
+
 typedef struct
 {
 	char		connstring[MAX_SHARDS][MAX_PAGESERVER_CONNSTRING_SIZE];
@@ -130,7 +136,7 @@ static uint64 pagestore_local_counter = 0;
 typedef enum PSConnectionState {
 	PS_Disconnected,			/* no connection yet */
 	PS_Connecting_Startup,		/* connection starting up */
-	PS_Connecting_PageStream,	/* negotiating pagestream */ 
+	PS_Connecting_PageStream,	/* negotiating pagestream */
 	PS_Connected,				/* connected, pagestream established */
 } PSConnectionState;
 
@@ -401,7 +407,7 @@ get_shard_number(BufferTag *tag)
 }
 
 static inline void
-CLEANUP_AND_DISCONNECT(PageServer *shard) 
+CLEANUP_AND_DISCONNECT(PageServer *shard)
 {
 	if (shard->wes_read)
 	{
@@ -423,7 +429,7 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
  * complete the connection (e.g. due to receiving an earlier cancellation
  * during connection start).
  * Returns true if successfully connected; false if the connection failed.
- * 
+ *
  * Throws errors in unrecoverable situations, or when this backend's query
  * is canceled.
  */
@@ -1030,6 +1036,101 @@ pageserver_disconnect_shard(shardno_t shard_no)
 	shard->state = PS_Disconnected;
 }
 
+// BEGIN HADRON
+/*
+ * Nudge compute_ctl to refresh our configuration. Called when we suspect we may be
+ * connecting to the wrong pageservers due to a stale configuration.
+ *
+ * This is a best-effort operation. If we couldn't send the local loopback HTTP request
+ * to compute_ctl or if the request fails for any reason, we just log the error and move
+ * on.
+ */
+
+extern int hadron_extension_server_port;
+
+// The timestamp (usec) of the first error that occurred while trying to refresh the configuration.
+// Will be reset to 0 after a successful refresh.
+static uint64 first_recorded_refresh_error_usec = 0;
+
+// Request compute_ctl to refresh the configuration. This operation may fail, e.g., if the compute_ctl
+// is already in the configuration state. The function returns true if the caller needs to cancel the
+// current query to avoid dead/live lock.
+static bool
+hadron_request_configuration_refresh() {
+	static CURL	   *handle = NULL;
+	CURLcode	res;
+	char	   *compute_ctl_url;
+	bool cancel_query = false;
+
+	if (!lakebase_mode)
+		return false;
+
+	if (handle == NULL)
+	{
+		handle = alloc_curl_handle();
+
+		curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "POST");
+		curl_easy_setopt(handle, CURLOPT_TIMEOUT, 3L /* seconds */ );
+		curl_easy_setopt(handle, CURLOPT_POSTFIELDS, "");
+	}
+
+	// Set the URL
+	compute_ctl_url = psprintf("http://localhost:%d/refresh_configuration", hadron_extension_server_port);
+
+
+	elog(LOG, "Sending refresh configuration request to compute_ctl: %s", compute_ctl_url);
+
+	curl_easy_setopt(handle, CURLOPT_URL, compute_ctl_url);
+
+	res = curl_easy_perform(handle);
+	if (res != CURLE_OK )
+	{
+		elog(WARNING, "refresh_configuration request failed: %s\n", curl_easy_strerror(res));
+	}
+	else
+	{
+		long http_code = 0;
+		curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &http_code);
+		if ( res != CURLE_OK )
+		{
+			elog(WARNING, "compute_ctl refresh_configuration request getinfo failed: %s\n", curl_easy_strerror(res));
+		}
+		else
+		{
+			elog(LOG, "compute_ctl refresh_configuration got HTTP response: %ld\n", http_code);
+			if( http_code == 200 )
+			{
+				first_recorded_refresh_error_usec = 0;
+			}
+			else
+			{
+				if (first_recorded_refresh_error_usec == 0)
+				{
+					first_recorded_refresh_error_usec = GetCurrentTimestamp();
+				}
+				else if(GetCurrentTimestamp() - first_recorded_refresh_error_usec > kRefreshErrorTimeoutUSec)
+				{
+					{
+						first_recorded_refresh_error_usec = 0;
+						cancel_query = true;
+					}
+				}
+			}
+		}
+	}
+
+	// In regular Postgres usage, it is not necessary to manually free memory allocated by palloc (psprintf) because
+	// it will be cleaned up after the "memory context" is reset (e.g. after the query or the transaction is finished).
+	// However, the number of times this function gets called during a single query/transaction can be unbounded due to
+	// the various retry loops around calls to pageservers. Therefore, we need to manually free this memory here.
+	if (compute_ctl_url != NULL)
+	{
+		pfree(compute_ctl_url);
+	}
+	return cancel_query;
+}
+// END HADRON
+
 static bool
 pageserver_send(shardno_t shard_no, NeonRequest *request)
 {
@@ -1064,6 +1165,11 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 		while (!pageserver_connect(shard_no, shard->n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
 		{
 			shard->n_reconnect_attempts += 1;
+			if (shard->n_reconnect_attempts > conf_refresh_reconnect_attempt_threshold
+				&& hadron_request_configuration_refresh() )
+			{
+				neon_shard_log(shard_no, ERROR, "request failed too many times, cancelling query");
+			}
 		}
 		shard->n_reconnect_attempts = 0;
 	} else {
@@ -1171,17 +1277,26 @@ pageserver_receive(shardno_t shard_no)
 		pfree(msg);
 		pageserver_disconnect(shard_no);
 		resp = NULL;
+
+		/*
+		 * Always poke compute_ctl to request a configuration refresh if we have issues receiving data from pageservers after
+		 * successfully connecting to it. It could be an indication that we are connecting to the wrong pageservers (e.g. PS
+		 * is in secondary mode or otherwise refuses to respond our request).
+		 */
+		hadron_request_configuration_refresh();
 	}
 	else if (rc == -2)
 	{
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect(shard_no);
+		hadron_request_configuration_refresh();
 		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: could not read COPY data: %s", msg);
 	}
 	else
 	{
 		pageserver_disconnect(shard_no);
+		hadron_request_configuration_refresh();
 		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: unexpected PQgetCopyData return value: %d", rc);
 	}
 
@@ -1249,19 +1364,32 @@ pageserver_try_receive(shardno_t shard_no)
 		neon_shard_log(shard_no, LOG, "pageserver_receive disconnect: psql end of copy data: %s", pchomp(PQerrorMessage(pageserver_conn)));
 		pageserver_disconnect(shard_no);
 		resp = NULL;
+		hadron_request_configuration_refresh();
 	}
 	else if (rc == -2)
 	{
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect(shard_no);
+		hadron_request_configuration_refresh();
 		neon_shard_log(shard_no, LOG, "pageserver_receive disconnect: could not read COPY data: %s", msg);
 		resp = NULL;
 	}
 	else
 	{
 		pageserver_disconnect(shard_no);
+		hadron_request_configuration_refresh();
 		neon_shard_log(shard_no, ERROR, "pageserver_receive disconnect: unexpected PQgetCopyData return value: %d", rc);
+	}
+
+	/*
+	 * Always poke compute_ctl to request a configuration refresh if we have issues receiving data from pageservers after
+	 * successfully connecting to it. It could be an indication that we are connecting to the wrong pageservers (e.g. PS
+	 * is in secondary mode or otherwise refuses to respond our request).
+	 */
+	if ( rc < 0 && hadron_request_configuration_refresh() )
+	{
+		neon_shard_log(shard_no, ERROR, "refresh_configuration request failed, cancelling query");
 	}
 
 	shard->nresponses_received++;
@@ -1459,6 +1587,16 @@ pg_init_libpagestore(void)
 							3,	/* max */
 							PGC_SU_BACKEND,
 							0,	/* no flags required */
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("hadron.conf_refresh_reconnect_attempt_threshold",
+							"Threshold of the number of consecutive failed pageserver "
+							"connection attempts (per shard) before signaling "
+							"compute_ctl for a configuration refresh.",
+							NULL,
+							&conf_refresh_reconnect_attempt_threshold,
+							16, 0, INT_MAX,
+							PGC_USERSET,
+							0,
 							NULL, NULL, NULL);
 
 	DefineCustomIntVariable("neon.pageserver_response_log_timeout",
