@@ -1,10 +1,9 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
 
-use std::fmt::Display;
-
 use chrono::{DateTime, Utc};
 use jsonwebtoken::jwk::JwkSet;
 use serde::{Deserialize, Serialize, Serializer};
+use std::fmt::Display;
 
 use crate::privilege::Privilege;
 use crate::spec::{ComputeSpec, Database, ExtVersion, PgIdent, Role};
@@ -49,7 +48,7 @@ pub struct ExtensionInstallResponse {
 /// Status of the LFC prewarm process. The same state machine is reused for
 /// both autoprewarm (prewarm after compute/Postgres start using the previously
 /// stored LFC state) and explicit prewarming via API.
-#[derive(Serialize, Default, Debug, Clone, PartialEq)]
+#[derive(Serialize, Default, Debug, Clone)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcPrewarmState {
     /// Default value when compute boots up.
@@ -59,7 +58,14 @@ pub enum LfcPrewarmState {
     Prewarming,
     /// We found requested LFC state in the endpoint storage and
     /// completed prewarming successfully.
-    Completed,
+    Completed {
+        total: i32,
+        prewarmed: i32,
+        skipped: i32,
+        state_download_time_ms: u32,
+        uncompress_time_ms: u32,
+        prewarm_time_ms: u32,
+    },
     /// Unexpected error happened during prewarming. Note, `Not Found 404`
     /// response from the endpoint storage is explicitly excluded here
     /// because it can normally happen on the first compute start,
@@ -84,7 +90,7 @@ impl Display for LfcPrewarmState {
         match self {
             LfcPrewarmState::NotPrewarmed => f.write_str("NotPrewarmed"),
             LfcPrewarmState::Prewarming => f.write_str("Prewarming"),
-            LfcPrewarmState::Completed => f.write_str("Completed"),
+            LfcPrewarmState::Completed { .. } => f.write_str("Completed"),
             LfcPrewarmState::Skipped => f.write_str("Skipped"),
             LfcPrewarmState::Failed { error } => write!(f, "Error({error})"),
             LfcPrewarmState::Cancelled => f.write_str("Cancelled"),
@@ -92,26 +98,36 @@ impl Display for LfcPrewarmState {
     }
 }
 
-#[derive(Serialize, Default, Debug, Clone, PartialEq)]
+#[derive(Serialize, Default, Debug, Clone)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LfcOffloadState {
     #[default]
     NotOffloaded,
     Offloading,
-    Completed,
+    Completed {
+        state_query_time_ms: u32,
+        compress_time_ms: u32,
+        state_upload_time_ms: u32,
+    },
     Failed {
         error: String,
     },
+    /// LFC state was empty so it wasn't offloaded
     Skipped,
 }
 
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(tag = "status", rename_all = "snake_case")]
-/// Response of /promote
 pub enum PromoteState {
     NotPromoted,
-    Completed,
-    Failed { error: String },
+    Completed {
+        lsn_wait_time_ms: u32,
+        pg_promote_time_ms: u32,
+        reconfigure_time_ms: u32,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Deserialize, Default, Debug)]

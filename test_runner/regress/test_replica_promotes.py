@@ -145,6 +145,7 @@ def test_replica_promote(neon_simple_env: NeonEnv, method: PromoteMethod):
         stop_and_check_lsn(secondary, None)
 
     if method == PromoteMethod.COMPUTE_CTL:
+        log.info("Restarting primary to check new config")
         secondary.stop()
         # In production, compute ultimately receives new compute spec from cplane.
         secondary.respec(mode="Primary")

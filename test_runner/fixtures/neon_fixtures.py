@@ -2325,6 +2325,19 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         log.info(f"migrate_safekeepers success: {response.json()}")
 
+    def abort_safekeeper_migration(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ):
+        response = self.request(
+            "POST",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/safekeeper_migrate_abort",
+            headers=self.headers(TokenScope.PAGE_SERVER_API),
+        )
+        response.raise_for_status()
+        log.info(f"abort_safekeeper_migration success: {response.json()}")
+
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
         :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr": str, "listen_http_port": int}
