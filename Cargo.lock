@@ -4499,7 +4499,9 @@ name = "pageserver_client_grpc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "compute_api",
  "futures",
+ "pageserver_api",
  "pageserver_page_api",
  "tokio",
  "tokio-stream",
