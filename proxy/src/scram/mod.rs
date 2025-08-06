@@ -6,6 +6,7 @@
 //! * <https://github.com/postgres/postgres/blob/94226d4506e66d6e7cbf4b391f1e7393c1962841/src/backend/libpq/auth-scram.c>
 //! * <https://github.com/postgres/postgres/blob/94226d4506e66d6e7cbf4b391f1e7393c1962841/src/interfaces/libpq/fe-auth-scram.c>
 
+mod cache;
 mod countmin;
 mod exchange;
 mod key;
@@ -18,10 +19,8 @@ pub mod threadpool;
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
 pub(crate) use exchange::{Exchange, exchange};
-use hmac::{Hmac, Mac};
 pub(crate) use key::ScramKey;
 pub(crate) use secret::ServerSecret;
-use sha2::{Digest, Sha256};
 
 const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
 const SCRAM_SHA_256_PLUS: &str = "SCRAM-SHA-256-PLUS";
@@ -42,29 +41,13 @@ fn base64_decode_array<const N: usize>(input: impl AsRef<[u8]>) -> Option<[u8; N
     Some(bytes)
 }
 
-/// This function essentially is `Hmac(sha256, key, input)`.
-/// Further reading: <https://datatracker.ietf.org/doc/html/rfc2104>.
-fn hmac_sha256<'a>(key: &[u8], parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("bad key size");
-    parts.into_iter().for_each(|s| mac.update(s));
-
-    mac.finalize().into_bytes().into()
-}
-
-fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    parts.into_iter().for_each(|s| hasher.update(s));
-
-    hasher.finalize().into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::threadpool::ThreadPool;
     use super::{Exchange, ServerSecret};
-    use crate::intern::EndpointIdInt;
+    use crate::intern::{EndpointIdInt, RoleNameInt};
     use crate::sasl::{Mechanism, Step};
-    use crate::types::EndpointId;
+    use crate::types::{EndpointId, RoleName};
 
     #[test]
     fn snapshot() {
@@ -114,21 +97,32 @@ mod tests {
         );
     }
 
-    async fn run_round_trip_test(server_password: &str, client_password: &str) {
-        let pool = ThreadPool::new(1);
-
+    async fn check(
+        pool: &ThreadPool,
+        scram_secret: &ServerSecret,
+        password: &[u8],
+    ) -> Result<(), &'static str> {
         let ep = EndpointId::from("foo");
         let ep = EndpointIdInt::from(ep);
+        let role = RoleName::from("user");
+        let role = RoleNameInt::from(&role);
 
-        let scram_secret = ServerSecret::build(server_password).await.unwrap();
-        let outcome = super::exchange(&pool, ep, &scram_secret, client_password.as_bytes())
+        let outcome = super::exchange(pool, ep, role, scram_secret, password)
             .await
             .unwrap();
 
         match outcome {
-            crate::sasl::Outcome::Success(_) => {}
-            crate::sasl::Outcome::Failure(r) => panic!("{r}"),
+            crate::sasl::Outcome::Success(_) => Ok(()),
+            crate::sasl::Outcome::Failure(r) => Err(r),
         }
+    }
+
+    async fn run_round_trip_test(server_password: &str, client_password: &str) {
+        let pool = ThreadPool::new(1);
+        let scram_secret = ServerSecret::build(server_password).await.unwrap();
+        check(&pool, &scram_secret, client_password.as_bytes())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -140,5 +134,28 @@ mod tests {
     #[should_panic(expected = "password doesn't match")]
     async fn failure() {
         run_round_trip_test("pencil", "eraser").await;
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn password_cache() {
+        let pool = ThreadPool::new(1);
+        let scram_secret = ServerSecret::build("password").await.unwrap();
+
+        // wrong passwords are not added to cache
+        check(&pool, &scram_secret, b"wrong").await.unwrap_err();
+        assert!(!logs_contain("storing cached password"));
+
+        // correct passwords get cached
+        check(&pool, &scram_secret, b"password").await.unwrap();
+        assert!(logs_contain("storing cached password"));
+
+        // wrong passwords do not match the cache
+        check(&pool, &scram_secret, b"wrong").await.unwrap_err();
+        assert!(!logs_contain("password validated from cache"));
+
+        // correct passwords match the cache
+        check(&pool, &scram_secret, b"password").await.unwrap();
+        assert!(logs_contain("password validated from cache"));
     }
 }

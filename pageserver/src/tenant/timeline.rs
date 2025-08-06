@@ -71,7 +71,7 @@ use tracing::*;
 use utils::generation::Generation;
 use utils::guard_arc_swap::GuardArcSwap;
 use utils::id::TimelineId;
-use utils::logging::{MonitorSlowFutureCallback, monitor_slow_future};
+use utils::logging::{MonitorSlowFutureCallback, log_slow, monitor_slow_future};
 use utils::lsn::{AtomicLsn, Lsn, RecordLsn};
 use utils::postgres_client::PostgresClientProtocol;
 use utils::rate_limit::RateLimit;
@@ -6968,7 +6968,13 @@ impl Timeline {
 
             write_guard.store_and_unlock(new_gc_cutoff)
         };
-        waitlist.wait().await;
+        let waitlist_wait_fut = std::pin::pin!(waitlist.wait());
+        log_slow(
+            "applied_gc_cutoff waitlist wait",
+            Duration::from_secs(30),
+            waitlist_wait_fut,
+        )
+        .await;
 
         info!("GC starting");
 

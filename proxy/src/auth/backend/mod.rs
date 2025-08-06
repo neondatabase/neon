@@ -16,16 +16,16 @@ use tracing::{debug, info};
 
 use crate::auth::{self, ComputeUserInfoMaybeEndpoint, validate_password_and_exchange};
 use crate::cache::Cached;
+use crate::cache::node_info::CachedNodeInfo;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestContext;
 use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::errors::GetAuthInfoError;
 use crate::control_plane::messages::EndpointRateLimitConfig;
 use crate::control_plane::{
-    self, AccessBlockerFlags, AuthSecret, CachedNodeInfo, ControlPlaneApi, EndpointAccessControl,
-    RoleAccessControl,
+    self, AccessBlockerFlags, AuthSecret, ControlPlaneApi, EndpointAccessControl, RoleAccessControl,
 };
-use crate::intern::EndpointIdInt;
+use crate::intern::{EndpointIdInt, RoleNameInt};
 use crate::pqproto::BeMessage;
 use crate::proxy::NeonOptions;
 use crate::proxy::wake_compute::WakeComputeBackend;
@@ -273,9 +273,11 @@ async fn authenticate_with_secret(
 ) -> auth::Result<ComputeCredentials> {
     if let Some(password) = unauthenticated_password {
         let ep = EndpointIdInt::from(&info.endpoint);
+        let role = RoleNameInt::from(&info.user);
 
         let auth_outcome =
-            validate_password_and_exchange(&config.thread_pool, ep, &password, secret).await?;
+            validate_password_and_exchange(&config.scram_thread_pool, ep, role, &password, secret)
+                .await?;
         let keys = match auth_outcome {
             crate::sasl::Outcome::Success(key) => key,
             crate::sasl::Outcome::Failure(reason) => {
@@ -433,11 +435,12 @@ mod tests {
     use super::auth_quirks;
     use super::jwt::JwkCache;
     use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
+    use crate::cache::node_info::CachedNodeInfo;
     use crate::config::AuthenticationConfig;
     use crate::context::RequestContext;
     use crate::control_plane::messages::EndpointRateLimitConfig;
     use crate::control_plane::{
-        self, AccessBlockerFlags, CachedNodeInfo, EndpointAccessControl, RoleAccessControl,
+        self, AccessBlockerFlags, EndpointAccessControl, RoleAccessControl,
     };
     use crate::proxy::NeonOptions;
     use crate::rate_limiter::EndpointRateLimiter;
@@ -498,7 +501,7 @@ mod tests {
 
     static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
         jwks_cache: JwkCache::default(),
-        thread_pool: ThreadPool::new(1),
+        scram_thread_pool: ThreadPool::new(1),
         scram_protocol_timeout: std::time::Duration::from_secs(5),
         ip_allowlist_check_enabled: true,
         is_vpc_acccess_proxy: false,

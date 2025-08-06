@@ -77,6 +77,9 @@ where
         connect_timeout,
     };
 
+    let mut stream = stream.into_framed();
+    let write_buf = std::mem::take(stream.write_buffer_mut());
+
     let (client_tx, conn_rx) = mpsc::unbounded_channel();
     let (conn_tx, client_rx) = mpsc::channel(4);
     let client = Client::new(
@@ -86,9 +89,9 @@ where
         ssl_mode,
         process_id,
         secret_key,
+        write_buf,
     );
 
-    let stream = stream.into_framed();
     let connection = Connection::new(stream, conn_tx, conn_rx);
 
     Ok((client, connection))

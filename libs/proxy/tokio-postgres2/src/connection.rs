@@ -229,8 +229,11 @@ where
             Poll::Ready(()) => {
                 trace!("poll_flush: flushed");
 
-                // GC the write buffer if we managed to flush
-                gc_bytesmut(self.stream.write_buffer_mut());
+                // Since our codec prefers to share the buffer with the `Client`,
+                // if we don't release our share, then the `Client` would have to re-alloc
+                // the buffer when they next use it.
+                debug_assert!(self.stream.write_buffer().is_empty());
+                *self.stream.write_buffer_mut() = BytesMut::new();
 
                 Poll::Ready(Ok(()))
             }

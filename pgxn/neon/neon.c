@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * neon.c
- *	  Main entry point into the neon exension
+ *	  Main entry point into the neon extension
  *
  *-------------------------------------------------------------------------
  */
@@ -508,7 +508,7 @@ _PG_init(void)
 
 	DefineCustomBoolVariable(
 							"neon.disable_logical_replication_subscribers",
-							"Disables incomming logical replication",
+							"Disable incoming logical replication",
 							NULL,
 							&disable_logical_replication_subscribers,
 							false,
@@ -567,7 +567,7 @@ _PG_init(void)
 
 	DefineCustomEnumVariable(
 							"neon.debug_compare_local",
-							"Debug mode for compaing content of pages in prefetch ring/LFC/PS and local disk",
+							"Debug mode for comparing content of pages in prefetch ring/LFC/PS and local disk",
 							NULL,
 							&debug_compare_local,
 							DEBUG_COMPARE_LOCAL_NONE,
@@ -625,11 +625,15 @@ _PG_init(void)
 	ExecutorEnd_hook = neon_ExecutorEnd;
 }
 
+/* Various functions exposed at SQL level */
+
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
 PG_FUNCTION_INFO_V1(backpressure_throttling_time);
 PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
 PG_FUNCTION_INFO_V1(approximate_working_set_size);
+PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
+PG_FUNCTION_INFO_V1(local_cache_pages);
 
 Datum
 pg_cluster_size(PG_FUNCTION_ARGS)
@@ -704,6 +708,76 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(dc);
 }
 
+Datum
+neon_get_lfc_stats(PG_FUNCTION_ARGS)
+{
+#define NUM_NEON_GET_STATS_COLS        2
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	LfcStatsEntry *entries;
+	size_t		num_entries;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	/* lfc_get_stats() does all the heavy lifting */
+	entries = lfc_get_stats(&num_entries);
+
+	/* Convert the LfcStatsEntrys to a result set */
+	for (size_t i = 0; i < num_entries; i++)
+	{
+		LfcStatsEntry *entry = &entries[i];
+		Datum		values[NUM_NEON_GET_STATS_COLS];
+		bool		nulls[NUM_NEON_GET_STATS_COLS];
+
+		values[0] = CStringGetTextDatum(entry->metric_name);
+		nulls[0] = false;
+		values[1] = Int64GetDatum(entry->isnull ? 0 : entry->value);
+		nulls[1] = entry->isnull;
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	PG_RETURN_VOID();
+
+#undef NUM_NEON_GET_STATS_COLS
+}
+
+Datum
+local_cache_pages(PG_FUNCTION_ARGS)
+{
+#define NUM_LOCALCACHE_PAGES_COLS	7
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	LocalCachePagesRec *entries;
+	size_t		num_entries;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	/* lfc_local_cache_pages() does all the heavy lifting */
+	entries = lfc_local_cache_pages(&num_entries);
+
+	/* Convert the LocalCachePagesRec structs to a result set */
+	for (size_t i = 0; i < num_entries; i++)
+	{
+		LocalCachePagesRec *entry = &entries[i];
+		Datum		values[NUM_LOCALCACHE_PAGES_COLS];
+		bool		nulls[NUM_LOCALCACHE_PAGES_COLS] = {
+			false, false, false, false, false, false, false
+		};
+
+		values[0] = Int64GetDatum((int64) entry->pageoffs);
+		values[1] = ObjectIdGetDatum(entry->relfilenode);
+		values[2] = ObjectIdGetDatum(entry->reltablespace);
+		values[3] = ObjectIdGetDatum(entry->reldatabase);
+		values[4] = ObjectIdGetDatum(entry->forknum);
+		values[5] = Int64GetDatum((int64) entry->blocknum);
+		values[6] = Int32GetDatum(entry->accesscount);
+
+		/* Build and return the tuple. */
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	PG_RETURN_VOID();
+
+#undef NUM_LOCALCACHE_PAGES_COLS
+}
+
 /*
  * Initialization stage 2: make requests for the amount of shared memory we
  * will need.
@@ -735,7 +809,6 @@ neon_shmem_request_hook(void)
 static void
 neon_shmem_startup_hook(void)
 {
-	/* Initialize */
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 

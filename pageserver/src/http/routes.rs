@@ -2009,6 +2009,10 @@ async fn put_tenant_location_config_handler(
     let state = get_state(&request);
     let conf = state.conf;
 
+    fail::fail_point!("put-location-conf-handler", |_| {
+        Err(ApiError::ResourceUnavailable("failpoint".into()))
+    });
+
     // The `Detached` state is special, it doesn't upsert a tenant, it removes
     // its local disk content and drops it from memory.
     if let LocationConfigMode::Detached = request_data.config.mode {
