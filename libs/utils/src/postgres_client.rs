@@ -49,10 +49,12 @@ pub struct ConnectionConfigArgs<'a> {
 
 impl<'a> ConnectionConfigArgs<'a> {
     fn options(&'a self) -> Vec<String> {
+        // PostgreSQL connection parameters must be prefixed with "-c"
         let mut options = vec![
             "-c".to_owned(),
             format!("timeline_id={}", self.ttid.timeline_id),
             format!("tenant_id={}", self.ttid.tenant_id),
+            // Serialize protocol config as JSON for PostgreSQL parameter parsing
             format!(
                 "protocol={}",
                 serde_json::to_string(&self.protocol).unwrap()
@@ -60,6 +62,7 @@ impl<'a> ConnectionConfigArgs<'a> {
         ];
 
         if let Some(shard) = &self.shard {
+            // Use .literal() for ShardCount to get u8 value, .0 for direct field access
             options.push(format!("shard_count={}", shard.count.literal()));
             options.push(format!("shard_number={}", shard.number.0));
             options.push(format!("shard_stripe_size={}", shard.stripe_size.0));
@@ -76,6 +79,7 @@ pub fn wal_stream_connection_config(
 ) -> anyhow::Result<PgConnectionConfig> {
     let (host, port) =
         parse_host_port(args.listen_pg_addr_str).context("Unable to parse listen_pg_addr_str")?;
+    // Use PostgreSQL standard port 5432 if not specified
     let port = port.unwrap_or(5432);
     let mut connstr = PgConnectionConfig::new_host_port(host, port)
         .extend_options(args.options())
