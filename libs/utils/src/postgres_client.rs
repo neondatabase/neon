@@ -6,6 +6,7 @@ use anyhow::Context;
 use postgres_connection::{PgConnectionConfig, parse_host_port};
 
 use crate::id::TenantTimelineId;
+use crate::shard::ShardIdentity;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -38,9 +39,7 @@ pub struct ConnectionConfigArgs<'a> {
     pub protocol: PostgresClientProtocol,
 
     pub ttid: TenantTimelineId,
-    pub shard_number: Option<u8>,
-    pub shard_count: Option<u8>,
-    pub shard_stripe_size: Option<u32>,
+    pub shard: Option<ShardIdentity>,
 
     pub listen_pg_addr_str: &'a str,
 
@@ -60,16 +59,10 @@ impl<'a> ConnectionConfigArgs<'a> {
             ),
         ];
 
-        if self.shard_number.is_some() {
-            assert!(self.shard_count.is_some());
-            assert!(self.shard_stripe_size.is_some());
-
-            options.push(format!("shard_count={}", self.shard_count.unwrap()));
-            options.push(format!("shard_number={}", self.shard_number.unwrap()));
-            options.push(format!(
-                "shard_stripe_size={}",
-                self.shard_stripe_size.unwrap()
-            ));
+        if let Some(shard) = &self.shard {
+            options.push(format!("shard_count={}", shard.count.literal()));
+            options.push(format!("shard_number={}", shard.number.0));
+            options.push(format!("shard_stripe_size={}", shard.stripe_size.0));
         }
 
         options
