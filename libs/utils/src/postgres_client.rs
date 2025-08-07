@@ -87,3 +87,238 @@ pub fn wal_stream_connection_config(
 
     Ok(connstr)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::id::{TenantId, TimelineId};
+    use crate::shard::{ShardCount, ShardNumber, ShardStripeSize};
+
+    #[test]
+    fn test_connection_config_args_with_shard() {
+        let ttid = TenantTimelineId::new(TenantId::generate(), TimelineId::generate());
+        let shard = ShardIdentity::new(
+            ShardNumber(0),
+            ShardCount::new(4),
+            ShardStripeSize(32768),
+        )
+        .unwrap();
+
+        let args = ConnectionConfigArgs {
+            protocol: PostgresClientProtocol::Vanilla,
+            ttid,
+            shard: Some(shard),
+            listen_pg_addr_str: "localhost:5432",
+            auth_token: None,
+            availability_zone: None,
+        };
+
+        let options = args.options();
+
+        // Verify basic options are present
+        assert!(options.contains(&"-c".to_string()));
+        assert!(options
+            .iter()
+            .any(|opt| opt.starts_with("timeline_id=")));
+        assert!(options.iter().any(|opt| opt.starts_with("tenant_id=")));
+        assert!(options.iter().any(|opt| opt.starts_with("protocol=")));
+
+        // Verify shard parameters are included with correct values
+        assert!(options
+            .iter()
+            .any(|opt| opt == "shard_count=4"), "shard_count should be 4");
+        assert!(options
+            .iter()
+            .any(|opt| opt == "shard_number=0"), "shard_number should be 0");
+        assert!(options
+            .iter()
+            .any(|opt| opt == "shard_stripe_size=32768"), "shard_stripe_size should be 32768");
+    }
+
+    #[test]
+    fn test_connection_config_args_without_shard() {
+        let ttid = TenantTimelineId::new(TenantId::generate(), TimelineId::generate());
+
+        let args = ConnectionConfigArgs {
+            protocol: PostgresClientProtocol::Vanilla,
+            ttid,
+            shard: None,
+            listen_pg_addr_str: "localhost:5432",
+            auth_token: None,
+            availability_zone: None,
+        };
+
+        let options = args.options();
+
+        // Verify basic options are present
+        assert!(options.contains(&"-c".to_string()));
+        assert!(options
+            .iter()
+            .any(|opt| opt.starts_with("timeline_id=")));
+        assert!(options.iter().any(|opt| opt.starts_with("tenant_id=")));
+        assert!(options.iter().any(|opt| opt.starts_with("protocol=")));
+
+        // Verify no shard parameters are included
+        assert!(
+            !options.iter().any(|opt| opt.contains("shard_count")),
+            "shard_count should not be present"
+        );
+        assert!(
+            !options.iter().any(|opt| opt.contains("shard_number")),
+            "shard_number should not be present"
+        );
+        assert!(
+            !options.iter().any(|opt| opt.contains("shard_stripe_size")),
+            "shard_stripe_size should not be present"
+        );
+    }
+
+    #[test]
+    fn test_connection_config_with_interpreted_protocol() {
+        let ttid = TenantTimelineId::new(TenantId::generate(), TimelineId::generate());
+        let shard = ShardIdentity::new(
+            ShardNumber(2),
+            ShardCount::new(8),
+            ShardStripeSize(8192),
+        )
+        .unwrap();
+
+        let args = ConnectionConfigArgs {
+            protocol: PostgresClientProtocol::Interpreted {
+                format: InterpretedFormat::Protobuf,
+                compression: Some(Compression::Zstd { level: 3 }),
+            },
+            ttid,
+            shard: Some(shard),
+            listen_pg_addr_str: "10.0.0.1:5433",
+            auth_token: Some("test_token"),
+            availability_zone: Some("us-east-1"),
+        };
+
+        let options = args.options();
+
+        // Verify protocol is serialized correctly
+        let protocol_option = options
+            .iter()
+            .find(|opt| opt.starts_with("protocol="))
+            .expect("protocol option should be present");
+        assert!(protocol_option.contains("interpreted"));
+        assert!(protocol_option.contains("protobuf"));
+
+        // Verify shard parameters
+        assert!(options
+            .iter()
+            .any(|opt| opt == "shard_count=8"));
+        assert!(options
+            .iter()
+            .any(|opt| opt == "shard_number=2"));
+        assert!(options
+            .iter()
+            .any(|opt| opt == "shard_stripe_size=8192"));
+    }
+
+    #[test]
+    fn test_wal_stream_connection_config_with_shard() {
+        let ttid = TenantTimelineId::new(TenantId::generate(), TimelineId::generate());
+        let shard = ShardIdentity::new(
+            ShardNumber(1),
+            ShardCount::new(4),
+            ShardStripeSize(32768),
+        )
+        .unwrap();
+
+        let args = ConnectionConfigArgs {
+            protocol: PostgresClientProtocol::Vanilla,
+            ttid,
+            shard: Some(shard),
+            listen_pg_addr_str: "192.168.1.1:5432",
+            auth_token: Some("secret_token"),
+            availability_zone: Some("us-west-2"),
+        };
+
+        let config = wal_stream_connection_config(args).unwrap();
+
+        // Verify port (host comparison is complex due to url::Host type)
+        assert_eq!(config.port(), 5432);
+
+        // Verify address format includes correct host
+        assert_eq!(config.raw_address(), "192.168.1.1:5432");
+    }
+
+    #[test]
+    fn test_wal_stream_connection_config_without_shard() {
+        let ttid = TenantTimelineId::new(TenantId::generate(), TimelineId::generate());
+
+        let args = ConnectionConfigArgs {
+            protocol: PostgresClientProtocol::Vanilla,
+            ttid,
+            shard: None,
+            listen_pg_addr_str: "example.com",
+            auth_token: None,
+            availability_zone: None,
+        };
+
+        let config = wal_stream_connection_config(args).unwrap();
+
+        // Verify default port
+        assert_eq!(config.port(), 5432);
+        
+        // Verify address format
+        assert_eq!(config.raw_address(), "example.com:5432");
+    }
+
+    #[test]
+    fn test_options_format_consistency() {
+        // This test ensures that the options format remains consistent
+        // and matches what PostgreSQL connection expects
+        let ttid = TenantTimelineId::new(TenantId::generate(), TimelineId::generate());
+        let shard = ShardIdentity::new(
+            ShardNumber(3),
+            ShardCount::new(16),
+            ShardStripeSize(16384),
+        )
+        .unwrap();
+
+        let args = ConnectionConfigArgs {
+            protocol: PostgresClientProtocol::Vanilla,
+            ttid,
+            shard: Some(shard),
+            listen_pg_addr_str: "localhost:5432",
+            auth_token: None,
+            availability_zone: None,
+        };
+
+        let options = args.options();
+
+        // First option should always be "-c"
+        assert_eq!(options[0], "-c");
+
+        // All other options should be key=value format
+        for opt in &options[1..] {
+            assert!(
+                opt.contains('='),
+                "Option '{}' should be in key=value format",
+                opt
+            );
+        }
+
+        // Verify specific shard option formats
+        let shard_count_opt = options
+            .iter()
+            .find(|opt| opt.starts_with("shard_count="))
+            .expect("shard_count option should exist");
+        assert_eq!(shard_count_opt, "shard_count=16");
+
+        let shard_number_opt = options
+            .iter()
+            .find(|opt| opt.starts_with("shard_number="))
+            .expect("shard_number option should exist");
+        assert_eq!(shard_number_opt, "shard_number=3");
+
+        let shard_stripe_opt = options
+            .iter()
+            .find(|opt| opt.starts_with("shard_stripe_size="))
+            .expect("shard_stripe_size option should exist");
+        assert_eq!(shard_stripe_opt, "shard_stripe_size=16384");
+    }
+}
