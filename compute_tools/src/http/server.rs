@@ -23,7 +23,8 @@ use super::{
     middleware::authorize::Authorize,
     routes::{
         check_writability, configure, database_schema, dbs_and_roles, extension_server, extensions,
-        grants, insights, lfc, metrics, metrics_json, status, terminate,
+        grants, hadron_liveness_probe, insights, lfc, metrics, metrics_json, promote,
+        refresh_configuration, status, terminate,
     },
 };
 use crate::compute::ComputeNode;
@@ -43,6 +44,7 @@ pub enum Server {
         port: u16,
         config: ComputeCtlConfig,
         compute_id: String,
+        instance_id: Option<String>,
     },
 }
 
@@ -67,7 +69,12 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                         post(extension_server::download_extension),
                     )
                     .route("/extensions", post(extensions::install_extension))
-                    .route("/grants", post(grants::add_grant));
+                    .route("/grants", post(grants::add_grant))
+                    // Hadron: Compute-initiated configuration refresh
+                    .route(
+                        "/refresh_configuration",
+                        post(refresh_configuration::refresh_configuration),
+                    );
 
                 // Add in any testing support
                 if cfg!(feature = "testing") {
@@ -79,14 +86,27 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                 router
             }
             Server::External {
-                config, compute_id, ..
+                config,
+                compute_id,
+                instance_id,
+                ..
             } => {
-                let unauthenticated_router =
-                    Router::<Arc<ComputeNode>>::new().route("/metrics", get(metrics::get_metrics));
+                let unauthenticated_router = Router::<Arc<ComputeNode>>::new()
+                    .route("/metrics", get(metrics::get_metrics))
+                    .route(
+                        "/autoscaling_metrics",
+                        get(metrics::get_autoscaling_metrics),
+                    );
 
                 let authenticated_router = Router::<Arc<ComputeNode>>::new()
-                    .route("/lfc/prewarm", get(lfc::prewarm_state).post(lfc::prewarm))
+                    .route(
+                        "/lfc/prewarm",
+                        get(lfc::prewarm_state)
+                            .post(lfc::prewarm)
+                            .delete(lfc::cancel_prewarm),
+                    )
                     .route("/lfc/offload", get(lfc::offload_state).post(lfc::offload))
+                    .route("/promote", post(promote::promote))
                     .route("/check_writability", post(check_writability::is_writable))
                     .route("/configure", post(configure::configure))
                     .route("/database_schema", get(database_schema::get_schema_dump))
@@ -95,8 +115,13 @@ impl From<&Server> for Router<Arc<ComputeNode>> {
                     .route("/metrics.json", get(metrics_json::get_metrics))
                     .route("/status", get(status::get_status))
                     .route("/terminate", post(terminate::terminate))
+                    .route(
+                        "/hadron_liveness_probe",
+                        get(hadron_liveness_probe::hadron_liveness_probe),
+                    )
                     .layer(AsyncRequireAuthorizationLayer::new(Authorize::new(
                         compute_id.clone(),
+                        instance_id.clone(),
                         config.jwks.clone(),
                     )));
 

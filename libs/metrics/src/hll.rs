@@ -107,7 +107,7 @@ impl<const N: usize> MetricType for HyperLogLogState<N> {
 }
 
 impl<const N: usize> HyperLogLogState<N> {
-    pub fn measure(&self, item: &impl Hash) {
+    pub fn measure(&self, item: &(impl Hash + ?Sized)) {
         // changing the hasher will break compatibility with previous measurements.
         self.record(BuildHasherDefault::<xxh3::Hash64>::default().hash_one(item));
     }
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_cardinality_small() {
-        let (actual, estimate) = test_cardinality(100, Zipf::new(100, 1.2f64).unwrap());
+        let (actual, estimate) = test_cardinality(100, Zipf::new(100.0, 1.2f64).unwrap());
 
         assert_eq!(actual, [46, 30, 32]);
         assert!(51.3 < estimate[0] && estimate[0] < 51.4);
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_cardinality_medium() {
-        let (actual, estimate) = test_cardinality(10000, Zipf::new(10000, 1.2f64).unwrap());
+        let (actual, estimate) = test_cardinality(10000, Zipf::new(10000.0, 1.2f64).unwrap());
 
         assert_eq!(actual, [2529, 1618, 1629]);
         assert!(2309.1 < estimate[0] && estimate[0] < 2309.2);
@@ -280,7 +280,8 @@ mod tests {
 
     #[test]
     fn test_cardinality_large() {
-        let (actual, estimate) = test_cardinality(1_000_000, Zipf::new(1_000_000, 1.2f64).unwrap());
+        let (actual, estimate) =
+            test_cardinality(1_000_000, Zipf::new(1_000_000.0, 1.2f64).unwrap());
 
         assert_eq!(actual, [129077, 79579, 79630]);
         assert!(126067.2 < estimate[0] && estimate[0] < 126067.3);
@@ -290,7 +291,7 @@ mod tests {
 
     #[test]
     fn test_cardinality_small2() {
-        let (actual, estimate) = test_cardinality(100, Zipf::new(200, 0.8f64).unwrap());
+        let (actual, estimate) = test_cardinality(100, Zipf::new(200.0, 0.8f64).unwrap());
 
         assert_eq!(actual, [92, 58, 60]);
         assert!(116.1 < estimate[0] && estimate[0] < 116.2);
@@ -300,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_cardinality_medium2() {
-        let (actual, estimate) = test_cardinality(10000, Zipf::new(20000, 0.8f64).unwrap());
+        let (actual, estimate) = test_cardinality(10000, Zipf::new(20000.0, 0.8f64).unwrap());
 
         assert_eq!(actual, [8201, 5131, 5051]);
         assert!(6846.4 < estimate[0] && estimate[0] < 6846.5);
@@ -310,7 +311,8 @@ mod tests {
 
     #[test]
     fn test_cardinality_large2() {
-        let (actual, estimate) = test_cardinality(1_000_000, Zipf::new(2_000_000, 0.8f64).unwrap());
+        let (actual, estimate) =
+            test_cardinality(1_000_000, Zipf::new(2_000_000.0, 0.8f64).unwrap());
 
         assert_eq!(actual, [777847, 482069, 482246]);
         assert!(699437.4 < estimate[0] && estimate[0] < 699437.5);

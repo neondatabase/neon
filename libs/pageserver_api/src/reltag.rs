@@ -1,9 +1,9 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use postgres_ffi::Oid;
-use postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
-use postgres_ffi::relfile_utils::{MAIN_FORKNUM, forkname_to_number, forknumber_to_name};
+use postgres_ffi_types::Oid;
+use postgres_ffi_types::constants::GLOBALTABLESPACE_OID;
+use postgres_ffi_types::forknum::{MAIN_FORKNUM, forkname_to_number, forknumber_to_name};
 use serde::{Deserialize, Serialize};
 
 ///
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 // FIXME: should move 'forknum' as last field to keep this consistent with Postgres.
 // Then we could replace the custom Ord and PartialOrd implementations below with
 // deriving them. This will require changes in walredoproc.c.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
 pub struct RelTag {
     pub forknum: u8,
     pub spcnode: Oid,
@@ -184,12 +184,12 @@ pub enum SlruKind {
     MultiXactOffsets,
 }
 
-impl SlruKind {
-    pub fn to_str(&self) -> &'static str {
+impl fmt::Display for SlruKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Clog => "pg_xact",
-            Self::MultiXactMembers => "pg_multixact/members",
-            Self::MultiXactOffsets => "pg_multixact/offsets",
+            Self::Clog => write!(f, "pg_xact"),
+            Self::MultiXactMembers => write!(f, "pg_multixact/members"),
+            Self::MultiXactOffsets => write!(f, "pg_multixact/offsets"),
         }
     }
 }

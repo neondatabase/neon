@@ -142,7 +142,7 @@ services:
       - "storage_broker"
       - "--listen-addr=0.0.0.0:50051"
 
-  compute:
+  compute1:
     restart: always
     build:
       context: ./compute_wrapper/
@@ -152,6 +152,7 @@ services:
         - TAG=${COMPUTE_TAG:-${TAG:-latest}}
         - http_proxy=${http_proxy:-}
         - https_proxy=${https_proxy:-}
+    image: built-compute
     environment:
       - PG_VERSION=${PG_VERSION:-16}
       - TENANT_ID=${TENANT_ID:-}
@@ -166,6 +167,11 @@ services:
       - 3080:3080 # http endpoints
     entrypoint:
       - "/shell/compute.sh"
+    # Ad an alias for compute1 for compatibility
+    networks:
+      default:
+        aliases:
+            - compute
     depends_on:
       - safekeeper1
       - safekeeper2
@@ -174,25 +180,31 @@ services:
 
   compute_is_ready:
     image: postgres:latest
+    environment:
+      - PARALLEL_COMPUTES=1
     entrypoint:
-      - "/bin/bash"
+      - "/bin/sh"
       - "-c"
     command:
-      - "until pg_isready -h compute -p 55433 -U cloud_admin ; do
-            echo 'Waiting to start compute...' && sleep 1;
-         done"
+      - "for i in $(seq 1 $${PARALLEL_COMPUTES}); do
+           until pg_isready -h compute$$i -p 55433 -U cloud_admin ; do
+             sleep 1;
+           done;
+         done;
+         echo All computes are started"
     depends_on:
-      - compute
+      - compute1
 
   neon-test-extensions:
     profiles: ["test-extensions"]
-    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-16}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-${PG_VERSION:-16}}:${TEST_EXTENSIONS_TAG:-${TAG:-latest}}
     environment:
-      - PGPASSWORD=cloud_admin
+      - PGUSER=${PGUSER:-cloud_admin}
+      - PGPASSWORD=${PGPASSWORD:-cloud_admin}
     entrypoint:
       - "/bin/bash"
       - "-c"
     command:
-      - sleep 1800
+      - sleep 3600
     depends_on:
-      - compute
+      - compute1

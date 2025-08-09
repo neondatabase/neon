@@ -1,0 +1,289 @@
+// Page service, presented by pageservers for computes.
+//
+// This is the compute read path. It primarily serves page versions at given
+// LSNs, but also base backups, SLRU segments, and relation metadata.
+//
+// EXPERIMENTAL: this is still under development and subject to change.
+//
+// Request metadata headers:
+// - authorization: JWT token ("Bearer <token>"), if auth is enabled
+// - neon-tenant-id: tenant ID ("7c4a1f9e3bd6470c8f3e21a65bd2e980")
+// - neon-shard-id: shard ID, as <number><count> in hex ("0b10" = shard 11 of 16, 0-based)
+// - neon-timeline-id: timeline ID ("f08c4e9a2d5f76b1e3a7c2d8910f4b3e")
+//
+// The service can be accessed via e.g. grpcurl:
+//
+//    ```
+//    grpcurl \
+//      -plaintext \
+//      -H "neon-tenant-id: 7c4a1f9e3bd6470c8f3e21a65bd2e980" \
+//      -H "neon-shard-id: 0000" \
+//      -H "neon-timeline-id: f08c4e9a2d5f76b1e3a7c2d8910f4b3e" \
+//      -H "authorization: Bearer $JWT" \
+//      -d '{"read_lsn": {"request_lsn": 100000000, "not_modified_since_lsn": 1}, "db_oid": 1}' \
+//      localhost:51051 page_api.PageService/GetDbSize
+//    ```
+//
+// TODO: consider adding neon-compute-mode ("primary", "static", "replica").
+// However, this will require reconnecting when changing modes.
+//
+// TODO: write implementation guidance on
+// - Health checks
+// - Tracing, OpenTelemetry
+// - Compression
+
+syntax = "proto3";
+package page_api;
+
+import "google/protobuf/timestamp.proto";
+
+service PageService {
+  // NB: unlike libpq, there is no CheckRelExists in gRPC, at the compute team's request. Instead,
+  // use GetRelSize with allow_missing=true to check existence.
+
+  // Fetches a base backup.
+  rpc GetBaseBackup (GetBaseBackupRequest) returns (stream GetBaseBackupResponseChunk);
+
+  // Returns the total size of a database, as # of bytes.
+  rpc GetDbSize (GetDbSizeRequest) returns (GetDbSizeResponse);
+
+  // Fetches pages.
+  //
+  // This is implemented as a bidirectional streaming RPC for performance. Unary
+  // requests incur costs for e.g. HTTP/2 stream setup, header parsing,
+  // authentication, and so on -- with streaming, we only pay these costs during
+  // the initial stream setup. This ~doubles throughput in benchmarks. Other
+  // RPCs use regular unary requests, since they are not as frequent and
+  // performance-critical, and this simplifies implementation.
+  //
+  // NB: a gRPC status response (e.g. errors) will terminate the stream. The
+  // stream may be shared by multiple Postgres backends, so we avoid this by
+  // sending them as GetPageResponse.status_code instead.
+  rpc GetPages (stream GetPageRequest) returns (stream GetPageResponse);
+
+  // Returns the size of a relation, as # of blocks.
+  rpc GetRelSize (GetRelSizeRequest) returns (GetRelSizeResponse);
+
+  // Fetches an SLRU segment.
+  rpc GetSlruSegment (GetSlruSegmentRequest) returns (GetSlruSegmentResponse);
+
+  // Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't garbage
+  // collect the LSN until the lease expires. Must be acquired on all relevant shards.
+  rpc LeaseLsn (LeaseLsnRequest) returns (LeaseLsnResponse);
+}
+
+// The LSN a request should read at.
+message ReadLsn {
+  // The request's read LSN. Required.
+  uint64 request_lsn = 1;
+  // If given, the caller guarantees that the page has not been modified since
+  // this LSN. Must be smaller than or equal to request_lsn. This allows the
+  // Pageserver to serve an old page without waiting for the request LSN to
+  // arrive. Valid for all request types.
+  //
+  // It is undefined behaviour to make a request such that the page was, in
+  // fact, modified between request_lsn and not_modified_since_lsn. The
+  // Pageserver might detect it and return an error, or it might return the old
+  // page version or the new page version. Setting not_modified_since_lsn equal
+  // to request_lsn is always safe, but can lead to unnecessary waiting.
+  uint64 not_modified_since_lsn = 2;
+}
+
+// A relation identifier.
+message RelTag {
+    uint32 spc_oid = 1;
+    uint32 db_oid = 2;
+    uint32 rel_number = 3;
+    uint32 fork_number = 4;
+}
+
+// Requests a base backup.
+message GetBaseBackupRequest {
+  // The LSN to fetch the base backup at. 0 or absent means the latest LSN known to the Pageserver.
+  uint64 lsn = 1;
+  // If true, logical replication slots will not be created.
+  bool replica = 2;
+  // If true, include relation files in the base backup. Mainly for debugging and tests.
+  bool full = 3;
+  // Compression algorithm to use. Base backups send a compressed payload instead of using gRPC
+  // compression, so that we can cache compressed backups on the server.
+  BaseBackupCompression compression = 4;
+}
+
+// Base backup compression algorithms.
+enum BaseBackupCompression {
+  // Unknown algorithm. Used when clients send an unsupported algorithm.
+  BASE_BACKUP_COMPRESSION_UNKNOWN = 0;
+  // No compression.
+  BASE_BACKUP_COMPRESSION_NONE = 1;
+  // GZIP compression.
+  BASE_BACKUP_COMPRESSION_GZIP = 2;
+}
+
+// Base backup response chunk, returned as an ordered stream.
+message GetBaseBackupResponseChunk {
+  // A basebackup data chunk. The size is undefined, but bounded by the 4 MB
+  // gRPC message size limit.
+  bytes chunk = 1;
+}
+
+// Requests the size of a database, as # of bytes. Only valid on shard 0, other
+// shards will error.
+message GetDbSizeRequest {
+  ReadLsn read_lsn = 1;
+  uint32 db_oid = 2;
+}
+
+message GetDbSizeResponse {
+  uint64 num_bytes = 1;
+}
+
+// Requests one or more pages.
+message GetPageRequest {
+  // A request ID. Will be included in the response. Should be unique for
+  // in-flight requests on the stream.
+  RequestID request_id = 1;
+  // The request class.
+  GetPageClass request_class = 2;
+  // The LSN to read at.
+  ReadLsn read_lsn = 3;
+  // The relation to read from.
+  RelTag rel = 4;
+  // Page numbers to read. Must belong to the remote shard.
+  //
+  // Multiple pages will be executed as a single batch by the Pageserver,
+  // amortizing layer access costs and parallelizing them. This may increase the
+  // latency of any individual request, but improves the overall latency and
+  // throughput of the batch as a whole.
+  //
+  // TODO: this causes an allocation in the common single-block case. The sender
+  // can use a SmallVec to stack-allocate it, but Prost will always deserialize
+  // into a heap-allocated Vec. Consider optimizing this.
+  //
+  // TODO: we might be able to avoid a sort or something if we mandate that these
+  // are always in order. But we can't currenly rely on this on the server, because
+  // of compatibility with the libpq protocol handler.
+  repeated uint32 block_number = 5;
+}
+
+// A Request ID. Should be unique for in-flight requests on a stream. Included in the response.
+message RequestID {
+  // The base request ID.
+  uint64 id = 1;
+  // The request attempt. Starts at 0, incremented on each retry.
+  uint32 attempt = 2;
+}
+
+// A GetPageRequest class. Primarily intended for observability, but may also be
+// used for prioritization in the future.
+enum GetPageClass {
+  // Unknown class. For backwards compatibility: used when an older client version sends a class
+  // that a newer server version has removed.
+  GET_PAGE_CLASS_UNKNOWN = 0;
+  // A normal request. This is the default.
+  GET_PAGE_CLASS_NORMAL = 1;
+  // A prefetch request. NB: can only be classified on pg < 18.
+  GET_PAGE_CLASS_PREFETCH = 2;
+  // A background request (e.g. vacuum).
+  GET_PAGE_CLASS_BACKGROUND = 3;
+}
+
+// A GetPage response.
+//
+// A batch response will contain all of the requested pages. We could eagerly
+// emit individual pages as soon as they are ready, but on a readv() Postgres
+// holds buffer pool locks on all pages in the batch and we'll only return once
+// the entire batch is ready, so no one can make use of the individual pages.
+message GetPageResponse {
+  // The original request's ID.
+  RequestID request_id = 1;
+  // The response status code. If not OK, the rel and page fields will be empty.
+  GetPageStatusCode status_code = 2;
+  // A string describing the status, if any.
+  string reason = 3;
+  // The relation that the pages belong to.
+  RelTag rel = 4;
+  // The page(s), in the same order as the request.
+  repeated Page page = 5;
+}
+
+// A page.
+//
+// TODO: it would be slightly more efficient (but less convenient) to have separate arrays of block
+// numbers and images, but given the 8KB page size it's probably negligible. Benchmark it anyway.
+message Page {
+  // The page number.
+  uint32 block_number = 1;
+  // The materialized page image, as an 8KB byte vector.
+  bytes image = 2;
+}
+
+// A GetPageResponse status code.
+//
+// These are effectively equivalent to gRPC statuses. However, we use a bidirectional stream
+// (potentially shared by many backends), and a gRPC status response would terminate the stream so
+// we send GetPageResponse messages with these codes instead.
+enum GetPageStatusCode {
+  // Unknown status. For forwards compatibility: used when an older client version receives a new
+  // status code from a newer server version.
+  GET_PAGE_STATUS_CODE_UNKNOWN = 0;
+  // The request was successful.
+  GET_PAGE_STATUS_CODE_OK = 1;
+  // The page did not exist. The tenant/timeline/shard has already been
+  // validated during stream setup.
+  GET_PAGE_STATUS_CODE_NOT_FOUND = 2;
+  // The request was invalid.
+  GET_PAGE_STATUS_CODE_INVALID_REQUEST = 3;
+  // The request failed due to an internal server error.
+  GET_PAGE_STATUS_CODE_INTERNAL_ERROR = 4;
+  // The tenant is rate limited. Slow down and retry later.
+  GET_PAGE_STATUS_CODE_SLOW_DOWN = 5;
+  // NB: shutdown errors are emitted as a gRPC Unavailable status.
+  //
+  // TODO: consider adding a GET_PAGE_STATUS_CODE_LAYER_DOWNLOAD in the case of a layer download.
+  // This could free up the server task to process other requests while the download is in progress.
+}
+
+// Fetches the size of a relation at a given LSN, as # of blocks. Only valid on
+// shard 0, other shards will error.
+message GetRelSizeRequest {
+  ReadLsn read_lsn = 1;
+  RelTag rel = 2;
+  // If true, return missing=true for missing relations instead of a NotFound error.
+  bool allow_missing = 3;
+}
+
+message GetRelSizeResponse {
+  // The number of blocks in the relation.
+  uint32 num_blocks = 1;
+  // If allow_missing=true, this is true for missing relations.
+  bool missing = 2;
+}
+
+// Requests an SLRU segment. Only valid on shard 0, other shards will error.
+message GetSlruSegmentRequest {
+  ReadLsn read_lsn = 1;
+  uint32 kind = 2;
+  uint32 segno = 3;
+}
+
+// Returns an SLRU segment.
+//
+// These are up 32 pages (256 KB), so we can send them as a single response.
+message GetSlruSegmentResponse {
+  bytes segment = 1;
+}
+
+// Acquires or extends a lease on the given LSN. This guarantees that the Pageserver won't garbage
+// collect the LSN until the lease expires. Must be acquired on all relevant shards.
+message LeaseLsnRequest {
+  // The LSN to lease. Can't be 0 or below the current GC cutoff.
+  uint64 lsn = 1;
+}
+
+// Lease acquisition response. If the lease could not be granted because the LSN has already been
+// garbage collected, a FailedPrecondition status will be returned instead.
+message LeaseLsnResponse {
+  // The lease expiration time.
+  google.protobuf.Timestamp expires = 1;
+}

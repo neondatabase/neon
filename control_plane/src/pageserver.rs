@@ -16,11 +16,13 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use camino::Utf8PathBuf;
+use pageserver_api::config::{DEFAULT_GRPC_LISTEN_PORT, DEFAULT_HTTP_LISTEN_PORT};
 use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
 use postgres_connection::{PgConnectionConfig, parse_host_port};
+use safekeeper_api::PgMajorVersion;
 use utils::auth::{Claims, Scope};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -120,7 +122,7 @@ impl PageServerNode {
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::GenerationsApi))
                 .unwrap();
-            overrides.push(format!("control_plane_api_token='{}'", jwt_token));
+            overrides.push(format!("control_plane_api_token='{jwt_token}'"));
         }
 
         if !conf.other.contains_key("remote_storage") {
@@ -129,7 +131,9 @@ impl PageServerNode {
             ));
         }
 
-        if conf.http_auth_type != AuthType::Trust || conf.pg_auth_type != AuthType::Trust {
+        if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type]
+            .contains(&AuthType::NeonJWT)
+        {
             // Keys are generated in the toplevel repo dir, pageservers' workdirs
             // are one level below that, so refer to keys with ../
             overrides.push("auth_validation_public_key_path='../auth_public_key.pem'".to_owned());
@@ -250,9 +254,10 @@ impl PageServerNode {
         // the storage controller
         let metadata_path = datadir.join("metadata.json");
 
-        let (_http_host, http_port) =
+        let http_host = "localhost".to_string();
+        let (_, http_port) =
             parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
-        let http_port = http_port.unwrap_or(9898);
+        let http_port = http_port.unwrap_or(DEFAULT_HTTP_LISTEN_PORT);
 
         let https_port = match self.conf.listen_https_addr.as_ref() {
             Some(https_addr) => {
@@ -263,6 +268,13 @@ impl PageServerNode {
             None => None,
         };
 
+        let (mut grpc_host, mut grpc_port) = (None, None);
+        if let Some(grpc_addr) = &self.conf.listen_grpc_addr {
+            let (_, port) = parse_host_port(grpc_addr).expect("Unable to parse listen_grpc_addr");
+            grpc_host = Some("localhost".to_string());
+            grpc_port = Some(port.unwrap_or(DEFAULT_GRPC_LISTEN_PORT));
+        }
+
         // Intentionally hand-craft JSON: this acts as an implicit format compat test
         // in case the pageserver-side structure is edited, and reflects the real life
         // situation: the metadata is written by some other script.
@@ -271,7 +283,9 @@ impl PageServerNode {
             serde_json::to_vec(&pageserver_api::config::NodeMetadata {
                 postgres_host: "localhost".to_string(),
                 postgres_port: self.pg_connection_config.port(),
-                http_host: "localhost".to_string(),
+                grpc_host,
+                grpc_port,
+                http_host,
                 http_port,
                 https_port,
                 other: HashMap::from([(
@@ -289,7 +303,7 @@ impl PageServerNode {
     async fn start_node(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
-        print!(
+        println!(
             "Starting pageserver node {} at '{}' in {:?}, retrying for {:?}",
             self.conf.id,
             self.pg_connection_config.raw_address(),
@@ -438,6 +452,12 @@ impl PageServerNode {
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
+            // HADRON
+            image_layer_force_creation_period: settings
+                .remove("image_layer_force_creation_period")
+                .map(humantime::parse_duration)
+                .transpose()
+                .context("Failed to parse 'image_layer_force_creation_period' as duration")?,
             image_layer_creation_check_threshold: settings
                 .remove("image_layer_creation_check_threshold")
                 .map(|x| x.parse::<u8>())
@@ -511,11 +531,6 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'timeline_offloading' as bool")?,
-            wal_receiver_protocol_override: settings
-                .remove("wal_receiver_protocol_override")
-                .map(serde_json::from_str)
-                .transpose()
-                .context("parse `wal_receiver_protocol_override` from json")?,
             rel_size_v2_enabled: settings
                 .remove("rel_size_v2_enabled")
                 .map(|x| x.parse::<bool>())
@@ -546,6 +561,16 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("Falied to parse 'sampling_ratio'")?,
+            relsize_snapshot_cache_capacity: settings
+                .remove("relsize snapshot cache capacity")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .context("Falied to parse 'relsize_snapshot_cache_capacity' as integer")?,
+            basebackup_cache_enabled: settings
+                .remove("basebackup_cache_enabled")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'basebackup_cache_enabled' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -589,7 +614,7 @@ impl PageServerNode {
         timeline_id: TimelineId,
         base: (Lsn, PathBuf),
         pg_wal: Option<(Lsn, PathBuf)>,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     ) -> anyhow::Result<()> {
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
@@ -627,5 +652,17 @@ impl PageServerNode {
         }
 
         Ok(())
+    }
+    pub async fn timeline_info(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        force_await_logical_size: mgmt_api::ForceAwaitLogicalSize,
+    ) -> anyhow::Result<TimelineInfo> {
+        let timeline_info = self
+            .http_client
+            .timeline_info(tenant_shard_id, timeline_id, force_await_logical_size)
+            .await?;
+        Ok(timeline_info)
     }
 }

@@ -9,7 +9,7 @@
 #
 # build-tools:   This contains Rust compiler toolchain and other tools needed at compile
 #                time. This is also used for the storage builds. This image is defined in
-#                build-tools.Dockerfile.
+#                build-tools/Dockerfile.
 #
 # build-deps:    Contains C compiler, other build tools, and compile-time dependencies
 #                needed to compile PostgreSQL and most extensions. (Some extensions need
@@ -77,9 +77,6 @@
 # build_and_test.yml github workflow for how that's done.
 
 ARG PG_VERSION
-ARG REPOSITORY=ghcr.io/neondatabase
-ARG IMAGE=build-tools
-ARG TAG=pinned
 ARG BUILD_TAG
 ARG DEBIAN_VERSION=bookworm
 ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
@@ -118,6 +115,9 @@ ARG EXTENSIONS=all
 FROM $BASE_IMAGE_SHA AS build-deps
 ARG DEBIAN_VERSION
 
+# Keep in sync with build-tools/Dockerfile
+ENV PROTOC_VERSION=25.1
+
 # Use strict mode for bash to catch errors early
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
@@ -133,7 +133,7 @@ RUN case $DEBIAN_VERSION in \
       # Install newer version (3.25) from backports.
       # libstdc++-10-dev is required for plv8
       bullseye) \
-        echo "deb http://deb.debian.org/debian bullseye-backports main" > /etc/apt/sources.list.d/bullseye-backports.list; \
+        echo "deb http://archive.debian.org/debian bullseye-backports main" > /etc/apt/sources.list.d/bullseye-backports.list; \
         VERSION_INSTALLS="cmake/bullseye-backports cmake-data/bullseye-backports libstdc++-10-dev"; \
       ;; \
       # Version-specific installs for Bookworm (PG17):
@@ -149,8 +149,17 @@ RUN case $DEBIAN_VERSION in \
     ninja-build git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd curl unzip g++ \
+    libclang-dev \
+    jsonnet \
     $VERSION_INSTALLS \
-    && apt clean && rm -rf /var/lib/apt/lists/*
+    && apt clean && rm -rf /var/lib/apt/lists/* \
+    && useradd -ms /bin/bash nonroot -b /home \
+    # Install protoc from binary release, since Debian's versions are too old.
+    && curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \
+    && unzip -q protoc.zip -d protoc \
+    && mv protoc/bin/protoc /usr/local/bin/protoc \
+    && mv protoc/include/google /usr/local/include/google \
+    && rm -rf protoc.zip protoc
 
 #########################################################################################
 #
@@ -161,7 +170,29 @@ RUN case $DEBIAN_VERSION in \
 FROM build-deps AS pg-build
 ARG PG_VERSION
 COPY vendor/postgres-${PG_VERSION:?} postgres
+COPY compute/patches/postgres_fdw.patch .
+COPY compute/patches/pg_stat_statements_pg14-16.patch .
+COPY compute/patches/pg_stat_statements_pg17.patch .
 RUN cd postgres && \
+    # Apply patches to some contrib extensions
+    # For example, we need to grant EXECUTE on pg_stat_statements_reset() to {privileged_role_name}.
+    # In vanilla Postgres this function is limited to Postgres role superuser.
+    # In Neon we have {privileged_role_name} role that is not a superuser but replaces superuser in some cases.
+    # We could add the additional grant statements to the Postgres repository but it would be hard to maintain,
+    # whenever we need to pick up a new Postgres version and we want to limit the changes in our Postgres fork,
+    # so we do it here.
+    case "${PG_VERSION}" in \
+    "v14" | "v15" | "v16") \
+    patch -p1 < /pg_stat_statements_pg14-16.patch; \
+    ;; \
+    "v17") \
+    patch -p1 < /pg_stat_statements_pg17.patch; \
+    ;; \
+    *) \
+    # To do not forget to migrate patches to the next major version
+    echo "No contrib patches for this PostgreSQL version" && exit 1;; \
+    esac && \
+    patch -p1 < /postgres_fdw.patch && \
     export CONFIGURE_CMD="./configure CFLAGS='-O2 -g3 -fsigned-char' --enable-debug --with-openssl --with-uuid=ossp \
     --with-icu --with-libxml --with-libxslt --with-lz4" && \
     if [ "${PG_VERSION:?}" != "v14" ]; then \
@@ -171,15 +202,10 @@ RUN cd postgres && \
     eval $CONFIGURE_CMD && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C contrib/ install && \
-    # Install headers
-    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install && \
-    make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install && \
     # Enable some of contrib extensions
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/dblink.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgres_fdw.control && \
-    file=/usr/local/pgsql/share/extension/postgres_fdw--1.0.sql && [ -e $file ] && \
-    echo 'GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO neon_superuser;' >> $file && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/earthdistance.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/insert_username.control && \
@@ -189,34 +215,7 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrowlocks.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/refint.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control && \
-    # We need to grant EXECUTE on pg_stat_statements_reset() to neon_superuser.
-    # In vanilla postgres this function is limited to Postgres role superuser.
-    # In neon we have neon_superuser role that is not a superuser but replaces superuser in some cases.
-    # We could add the additional grant statements to the postgres repository but it would be hard to maintain,
-    # whenever we need to pick up a new postgres version and we want to limit the changes in our postgres fork,
-    # so we do it here.
-    for file in /usr/local/pgsql/share/extension/pg_stat_statements--*.sql; do \
-        filename=$(basename "$file"); \
-        # Note that there are no downgrade scripts for pg_stat_statements, so we \
-        # don't have to modify any downgrade paths or (much) older versions: we only \
-        # have to make sure every creation of the pg_stat_statements_reset function \
-        # also adds execute permissions to the neon_superuser.
-        case $filename in \
-          pg_stat_statements--1.4.sql) \
-            # pg_stat_statements_reset is first created with 1.4
-            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset() TO neon_superuser;' >> $file; \
-            ;; \
-          pg_stat_statements--1.6--1.7.sql) \
-            # Then with the 1.6-1.7 migration it is re-created with a new signature, thus add the permissions back
-            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint) TO neon_superuser;' >> $file; \
-            ;; \
-          pg_stat_statements--1.10--1.11.sql) \
-            # Then with the 1.10-1.11 migration it is re-created with a new signature again, thus add the permissions back
-            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint, boolean) TO neon_superuser;' >> $file; \
-            ;; \
-        esac; \
-    done;
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control
 
 # Set PATH for all the subsequent build steps
 ENV PATH="/usr/local/pgsql/bin:$PATH"
@@ -297,6 +296,7 @@ RUN ./autogen.sh && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
+    make staged-install && \
     cd extensions/postgis && \
     make clean && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -581,6 +581,38 @@ WORKDIR /ext-src/hypopg-src
 RUN make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/hypopg.control
+
+#########################################################################################
+#
+# Layer "online_advisor-build"
+# compile online_advisor extension
+#
+#########################################################################################
+FROM build-deps AS online_advisor-src
+ARG PG_VERSION
+
+# online_advisor supports all Postgres version starting from PG14, but prior to PG17 has to be included in preload_shared_libraries
+# last release 1.0 - May 15, 2025
+WORKDIR /ext-src
+RUN case "${PG_VERSION:?}" in \
+    "v17") \
+        ;; \
+    *) \
+        echo "skipping the version of online_advistor for $PG_VERSION" && exit 0 \
+        ;; \
+    esac && \
+	wget https://github.com/knizhnik/online_advisor/archive/refs/tags/1.0.tar.gz -O online_advisor.tar.gz && \
+    echo "37dcadf8f7cc8d6cc1f8831276ee245b44f1b0274f09e511e47a67738ba9ed0f online_advisor.tar.gz" | sha256sum --check && \
+    mkdir online_advisor-src && cd online_advisor-src && tar xzf ../online_advisor.tar.gz --strip-components=1 -C .
+
+FROM pg-build AS online_advisor-build
+COPY --from=online_advisor-src /ext-src/ /ext-src/
+WORKDIR /ext-src/
+RUN if [ -d online_advisor-src ]; then \
+	    cd online_advisor-src && \
+        make -j install && \
+        echo 'trusted = true' >> /usr/local/pgsql/share/extension/online_advisor.control; \
+    fi
 
 #########################################################################################
 #
@@ -1024,17 +1056,10 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 
 #########################################################################################
 #
-# Layer "pg build with nonroot user and cargo installed"
-# This layer is base and common for layers with `pgrx`
+# Layer "build-deps with Rust toolchain installed"
 #
 #########################################################################################
-FROM pg-build AS pg-build-nonroot-with-cargo
-ARG PG_VERSION
-
-RUN apt update && \
-    apt install --no-install-recommends --no-install-suggests -y curl libclang-dev && \
-    apt clean && rm -rf /var/lib/apt/lists/* && \
-    useradd -ms /bin/bash nonroot -b /home
+FROM build-deps AS build-deps-with-cargo
 
 ENV HOME=/home/nonroot
 ENV PATH="/home/nonroot/.cargo/bin:$PATH"
@@ -1051,11 +1076,27 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
 
 #########################################################################################
 #
+# Layer "pg-build with Rust toolchain installed"
+# This layer is base and common for layers with `pgrx`
+#
+#########################################################################################
+FROM pg-build AS pg-build-with-cargo
+ARG PG_VERSION
+
+ENV HOME=/home/nonroot
+ENV PATH="/home/nonroot/.cargo/bin:$PATH"
+USER nonroot
+WORKDIR /home/nonroot
+
+COPY --from=build-deps-with-cargo /home/nonroot /home/nonroot
+
+#########################################################################################
+#
 # Layer "rust extensions"
 # This layer is used to build `pgrx` deps
 #
 #########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build
+FROM pg-build-with-cargo AS rust-extensions-build
 ARG PG_VERSION
 
 RUN case "${PG_VERSION:?}" in \
@@ -1077,7 +1118,7 @@ USER root
 # and eventually get merged with `rust-extensions-build`
 #
 #########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx12
+FROM pg-build-with-cargo AS rust-extensions-build-pgrx12
 ARG PG_VERSION
 
 RUN cargo install --locked --version 0.12.9 cargo-pgrx && \
@@ -1094,7 +1135,7 @@ USER root
 # and eventually get merged with `rust-extensions-build`
 #
 #########################################################################################
-FROM pg-build-nonroot-with-cargo AS rust-extensions-build-pgrx14
+FROM pg-build-with-cargo AS rust-extensions-build-pgrx14
 ARG PG_VERSION
 
 RUN cargo install --locked --version 0.14.1 cargo-pgrx && \
@@ -1111,14 +1152,16 @@ USER root
 
 FROM build-deps AS pgrag-src
 ARG PG_VERSION
-
 WORKDIR /ext-src
+COPY compute/patches/onnxruntime.patch .
+
 RUN wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
+    patch -p1 < /ext-src/onnxruntime.patch && \
     echo "#nothing to test here" > neon-test.sh
 
-RUN wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.1.1.tar.gz -O pgrag.tar.gz &&  \
-    echo "087b2ecd11ba307dc968042ef2e9e43dc04d9ba60e8306e882c407bbe1350a50 pgrag.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.1.2.tar.gz -O pgrag.tar.gz &&  \
+    echo "7361654ea24f08cbb9db13c2ee1c0fe008f6114076401bb871619690dafc5225 pgrag.tar.gz" | sha256sum --check && \
     mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C .
 
 FROM rust-extensions-build-pgrx14 AS pgrag-build
@@ -1129,7 +1172,7 @@ COPY --from=pgrag-src /ext-src/ /ext-src/
 # Install it using virtual environment, because Python 3.11 (the default version on Debian 12 (Bookworm)) complains otherwise
 WORKDIR /ext-src/onnxruntime-src
 RUN apt update && apt install --no-install-recommends --no-install-suggests -y \
-    python3 python3-pip python3-venv protobuf-compiler && \
+    python3 python3-pip python3-venv && \
     apt clean && rm -rf /var/lib/apt/lists/* && \
     python3 -m venv venv && \
     . venv/bin/activate && \
@@ -1148,14 +1191,14 @@ RUN cd exts/rag && \
 RUN cd exts/rag_bge_small_en_v15 && \
     sed -i 's/pgrx = "0.14.1"/pgrx = { version = "0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     ORT_LIB_LOCATION=/ext-src/onnxruntime-src/build/Linux \
-        REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/bge_small_en_v15.onnx \
+        REMOTE_ONNX_URL=http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local/pgrag-data/bge_small_en_v15.onnx \
         cargo pgrx install --release --features remote_onnx && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_bge_small_en_v15.control
 
 RUN cd exts/rag_jina_reranker_v1_tiny_en && \
     sed -i 's/pgrx = "0.14.1"/pgrx = { version = "0.14.1", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     ORT_LIB_LOCATION=/ext-src/onnxruntime-src/build/Linux \
-        REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/jina_reranker_v1_tiny_en.onnx \
+        REMOTE_ONNX_URL=http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local/pgrag-data/jina_reranker_v1_tiny_en.onnx \
         cargo pgrx install --release --features remote_onnx && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_jina_reranker_v1_tiny_en.control
 
@@ -1474,7 +1517,7 @@ WORKDIR /ext-src
 COPY compute/patches/pg_duckdb_v031.patch .
 COPY compute/patches/duckdb_v120.patch .
 # pg_duckdb build requires source dir to be a git repo to get submodules
-# allow neon_superuser to execute some functions that in pg_duckdb are available to superuser only:
+# allow {privileged_role_name} to execute some functions that in pg_duckdb are available to superuser only:
 # - extension management function duckdb.install_extension()
 # - access to duckdb.extensions table and its sequence
 RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
@@ -1522,29 +1565,31 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pgaudit-src
 ARG PG_VERSION
 WORKDIR /ext-src
+COPY "compute/patches/pgaudit-parallel_workers-${PG_VERSION}.patch" .
 RUN case "${PG_VERSION}" in \
     "v14") \
-    export PGAUDIT_VERSION=1.6.2 \
-    export PGAUDIT_CHECKSUM=1f350d70a0cbf488c0f2b485e3a5c9b11f78ad9e3cbb95ef6904afa1eb3187eb \
+    export PGAUDIT_VERSION=1.6.3 \
+    export PGAUDIT_CHECKSUM=37a8f5a7cc8d9188e536d15cf0fdc457fcdab2547caedb54442c37f124110919 \
     ;; \
     "v15") \
-    export PGAUDIT_VERSION=1.7.0 \
-    export PGAUDIT_CHECKSUM=8f4a73e451c88c567e516e6cba7dc1e23bc91686bb6f1f77f8f3126d428a8bd8 \
+    export PGAUDIT_VERSION=1.7.1 \
+    export PGAUDIT_CHECKSUM=e9c8e6e092d82b2f901d72555ce0fe7780552f35f8985573796cd7e64b09d4ec \
     ;; \
     "v16") \
-    export PGAUDIT_VERSION=16.0 \
-    export PGAUDIT_CHECKSUM=d53ef985f2d0b15ba25c512c4ce967dce07b94fd4422c95bd04c4c1a055fe738 \
+    export PGAUDIT_VERSION=16.1 \
+    export PGAUDIT_CHECKSUM=3bae908ab70ba0c6f51224009dbcfff1a97bd6104c6273297a64292e1b921fee \
     ;; \
     "v17") \
-    export PGAUDIT_VERSION=17.0 \
-    export PGAUDIT_CHECKSUM=7d0d08d030275d525f36cd48b38c6455f1023da863385badff0cec44965bfd8c \
+    export PGAUDIT_VERSION=17.1 \
+    export PGAUDIT_CHECKSUM=9c5f37504d393486cc75d2ced83f75f5899be64fa85f689d6babb833b4361e6c \
     ;; \
     *) \
     echo "pgaudit is not supported on this PostgreSQL version" && exit 1;; \
     esac && \
     wget https://github.com/pgaudit/pgaudit/archive/refs/tags/${PGAUDIT_VERSION}.tar.gz -O pgaudit.tar.gz && \
     echo "${PGAUDIT_CHECKSUM} pgaudit.tar.gz" | sha256sum --check && \
-    mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C .
+    mkdir pgaudit-src && cd pgaudit-src && tar xzf ../pgaudit.tar.gz --strip-components=1 -C . && \
+    patch -p1 < "/ext-src/pgaudit-parallel_workers-${PG_VERSION}.patch"
 
 FROM pg-build AS pgaudit-build
 COPY --from=pgaudit-src /ext-src/ /ext-src/
@@ -1584,22 +1629,14 @@ RUN make install USE_PGXS=1 -j $(getconf _NPROCESSORS_ONLN)
 # compile neon extensions
 #
 #########################################################################################
-FROM pg-build AS neon-ext-build
+FROM pg-build-with-cargo AS neon-ext-build
 ARG PG_VERSION
 
-COPY pgxn/ pgxn/
-RUN make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_utils \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_test_utils \
-        -s install && \
-    make -j $(getconf _NPROCESSORS_ONLN) \
-        -C pgxn/neon_rmgr \
-        -s install
+USER root
+COPY . .
+
+RUN make -j $(getconf _NPROCESSORS_ONLN) -C pgxn -s install-compute \
+      BUILD_TYPE=release CARGO_BUILD_FLAGS="--locked --release" NEON_CARGO_ARTIFACT_TARGET_DIR="$(pwd)/target/release"
 
 #########################################################################################
 #
@@ -1648,6 +1685,7 @@ COPY --from=pg_jsonschema-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_graphql-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_tiktoken-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=hypopg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=online_advisor-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_hashids-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rum-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgtap-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1688,7 +1726,7 @@ FROM extensions-${EXTENSIONS} AS neon-pg-ext-build
 # Compile the Neon-specific `compute_ctl`, `fast_import`, and `local_proxy` binaries
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
+FROM build-deps-with-cargo AS compute-tools
 ARG BUILD_TAG
 ENV BUILD_TAG=$BUILD_TAG
 
@@ -1698,7 +1736,7 @@ COPY --chown=nonroot . .
 RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
     --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/git \
     --mount=type=cache,uid=1000,target=/home/nonroot/target \
-    mold -run cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
+    cargo build --locked --profile release-line-debug-size-lto --bin compute_ctl --bin fast_import --bin local_proxy && \
     mkdir target-bin && \
     cp target/release-line-debug-size-lto/compute_ctl \
        target/release-line-debug-size-lto/fast_import \
@@ -1745,23 +1783,23 @@ RUN set -e \
 #########################################################################################
 FROM build-deps AS exporters
 ARG TARGETARCH
-# Keep sql_exporter version same as in build-tools.Dockerfile and
+# Keep sql_exporter version same as in build-tools/Dockerfile and
 # test_runner/regress/test_compute_metrics.py
 # See comment on the top of the file regading `echo`, `-e` and `\n`
 RUN if [ "$TARGETARCH" = "amd64" ]; then\
         postgres_exporter_sha256='59aa4a7bb0f7d361f5e05732f5ed8c03cc08f78449cef5856eadec33a627694b';\
         pgbouncer_exporter_sha256='c9f7cf8dcff44f0472057e9bf52613d93f3ffbc381ad7547a959daa63c5e84ac';\
-        sql_exporter_sha256='38e439732bbf6e28ca4a94d7bc3686d3fa1abdb0050773d5617a9efdb9e64d08';\
+        sql_exporter_sha256='9a41127a493e8bfebfe692bf78c7ed2872a58a3f961ee534d1b0da9ae584aaab';\
     else\
         postgres_exporter_sha256='d1dedea97f56c6d965837bfd1fbb3e35a3b4a4556f8cccee8bd513d8ee086124';\
         pgbouncer_exporter_sha256='217c4afd7e6492ae904055bc14fe603552cf9bac458c063407e991d68c519da3';\
-        sql_exporter_sha256='11918b00be6e2c3a67564adfdb2414fdcbb15a5db76ea17d1d1a944237a893c6';\
+        sql_exporter_sha256='530e6afc77c043497ed965532c4c9dfa873bc2a4f0b3047fad367715c0081d6a';\
     fi\
     && curl -sL https://github.com/prometheus-community/postgres_exporter/releases/download/v0.17.1/postgres_exporter-0.17.1.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
     && curl -sL https://github.com/prometheus-community/pgbouncer_exporter/releases/download/v0.10.2/pgbouncer_exporter-0.10.2.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
-    && curl -sL https://github.com/burningalchemist/sql_exporter/releases/download/0.17.0/sql_exporter-0.17.0.linux-${TARGETARCH}.tar.gz\
+    && curl -sL https://github.com/burningalchemist/sql_exporter/releases/download/0.17.3/sql_exporter-0.17.3.linux-${TARGETARCH}.tar.gz\
      | tar xzf - --strip-components=1 -C.\
     && echo "${postgres_exporter_sha256} postgres_exporter" | sha256sum -c -\
     && echo "${pgbouncer_exporter_sha256} pgbouncer_exporter" | sha256sum -c -\
@@ -1792,10 +1830,11 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 # Preprocess the sql_exporter configuration files
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS sql_exporter_preprocessor
+FROM build-deps AS sql_exporter_preprocessor
 ARG PG_VERSION
 
 USER nonroot
+WORKDIR /home/nonroot
 
 COPY --chown=nonroot compute compute
 
@@ -1809,12 +1848,27 @@ RUN make PG_VERSION="${PG_VERSION:?}" -C compute
 
 FROM pg-build AS extension-tests
 ARG PG_VERSION
+# This is required for the PostGIS test
+RUN apt-get update && case $DEBIAN_VERSION in \
+      bullseye) \
+        apt-get install -y libproj19 libgdal28 time; \
+      ;; \
+      bookworm) \
+        apt-get install -y libgdal32 libproj25 time; \
+      ;; \
+      *) \
+        echo "Unknown Debian version ${DEBIAN_VERSION}" && exit 1 \
+      ;; \
+    esac
+
 COPY docker-compose/ext-src/ /ext-src/
 
 COPY --from=pg-build /postgres /postgres
-#COPY --from=postgis-src /ext-src/ /ext-src/
+COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=postgis-build /ext-src/postgis-src /ext-src/postgis-src
+COPY --from=postgis-build /sfcgal/* /usr
 COPY --from=plv8-src /ext-src/ /ext-src/
-#COPY --from=h3-pg-src /ext-src/ /ext-src/
+COPY --from=h3-pg-src /ext-src/h3-pg-src /ext-src/h3-pg-src
 COPY --from=postgresql-unit-src /ext-src/ /ext-src/
 COPY --from=pgvector-src /ext-src/ /ext-src/
 COPY --from=pgjwt-src /ext-src/ /ext-src/
@@ -1823,6 +1877,7 @@ COPY --from=pgjwt-src /ext-src/ /ext-src/
 COPY --from=pg_graphql-src /ext-src/ /ext-src/
 #COPY --from=pg_tiktoken-src /ext-src/ /ext-src/
 COPY --from=hypopg-src /ext-src/ /ext-src/
+COPY --from=online_advisor-src /ext-src/ /ext-src/
 COPY --from=pg_hashids-src /ext-src/ /ext-src/
 COPY --from=rum-src /ext-src/ /ext-src/
 COPY --from=pgtap-src /ext-src/ /ext-src/
@@ -1852,10 +1907,11 @@ COPY compute/patches/pg_repack.patch /ext-src
 RUN cd /ext-src/pg_repack-src && patch -p1 </ext-src/pg_repack.patch && rm -f /ext-src/pg_repack.patch
 
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
-RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl jq \
+RUN echo /usr/local/pgsql/lib > /etc/ld.so.conf.d/00-neon.conf && /sbin/ldconfig
+RUN apt-get update && apt-get install -y libtap-parser-sourcehandler-pgtap-perl jq parallel \
    && apt clean && rm -rf /ext-src/*.tar.gz /ext-src/*.patch /var/lib/apt/lists/*
 ENV PATH=/usr/local/pgsql/bin:$PATH
-ENV PGHOST=compute
+ENV PGHOST=compute1
 ENV PGPORT=55433
 ENV PGUSER=cloud_admin
 ENV PGDATABASE=postgres
@@ -1925,7 +1981,7 @@ RUN apt update && \
         locales \
         lsof \
         procps \
-        rsyslog \
+        rsyslog-gnutls \
         screen \
         tcpdump \
         $VERSION_INSTALLS && \

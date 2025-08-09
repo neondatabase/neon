@@ -10,10 +10,13 @@ use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use postgres_client::tls::TlsConnect;
 use postgres_protocol::message::frontend;
-use tokio::io::{AsyncReadExt, DuplexStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio_util::codec::{Decoder, Encoder};
 
 use super::*;
+use crate::config::TlsConfig;
+use crate::context::RequestContext;
+use crate::pglb::handshake::{HandshakeData, handshake};
 
 enum Intercept {
     None,
@@ -49,15 +52,14 @@ async fn proxy_mitm(
         };
 
         let mut end_server = tokio_util::codec::Framed::new(end_server, PgFrame);
-        let (end_client, buf) = end_client.framed.into_inner();
-        assert!(buf.is_empty());
+        let end_client = end_client.flush_and_into_inner().await.unwrap();
         let mut end_client = tokio_util::codec::Framed::new(end_client, PgFrame);
 
         // give the end_server the startup parameters
         let mut buf = BytesMut::new();
         frontend::startup_message(
             &postgres_protocol::message::frontend::StartupMessageParams {
-                params: startup.params.into(),
+                params: startup.params.as_bytes().into(),
             },
             &mut buf,
         )
@@ -170,7 +172,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await?;
 
     proxy.await?
@@ -253,7 +255,7 @@ async fn connect_failure(
         .dbname("db")
         .password("password")
         .ssl_mode(SslMode::Require)
-        .connect_raw(server, client_config.make_tls_connect()?)
+        .tls_and_authenticate(server, client_config.make_tls_connect()?)
         .await
         .err()
         .context("client shouldn't be able to connect")?;

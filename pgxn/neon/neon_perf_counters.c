@@ -17,20 +17,60 @@
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 
+#include "neon.h"
 #include "neon_perf_counters.h"
-#include "neon_pgversioncompat.h"
+#include "walproposer.h"
+
+/* BEGIN_HADRON */
+databricks_metrics *databricks_metrics_shared;
+
+Size
+DatabricksMetricsShmemSize(void)
+{
+	return sizeof(databricks_metrics);
+}
+
+void
+DatabricksMetricsShmemInit(void)
+{
+	bool		found;
+
+	databricks_metrics_shared =
+		ShmemInitStruct("Databricks counters",
+						DatabricksMetricsShmemSize(),
+						&found);
+	Assert(found == IsUnderPostmaster);
+	if (!found)
+	{
+		pg_atomic_init_u32(&databricks_metrics_shared->index_corruption_count, 0);
+		pg_atomic_init_u32(&databricks_metrics_shared->data_corruption_count, 0);
+		pg_atomic_init_u32(&databricks_metrics_shared->internal_error_count, 0);
+		pg_atomic_init_u32(&databricks_metrics_shared->ps_corruption_detected, 0);
+	}
+}
+/* END_HADRON */
 
 neon_per_backend_counters *neon_per_backend_counters_shared;
 
-Size
-NeonPerfCountersShmemSize(void)
+void
+NeonPerfCountersShmemRequest(void)
 {
-	Size		size = 0;
-
-	size = add_size(size, mul_size(NUM_NEON_PERF_COUNTER_SLOTS,
-								   sizeof(neon_per_backend_counters)));
-
-	return size;
+	Size size;
+#if PG_MAJORVERSION_NUM < 15
+	/* Hack: in PG14 MaxBackends is not initialized at the time of calling NeonPerfCountersShmemRequest function.
+	 * Do it ourselves and then undo to prevent assertion failure
+	 */
+	Assert(MaxBackends == 0); /* not initialized yet */
+	InitializeMaxBackends();
+	size = mul_size(NUM_NEON_PERF_COUNTER_SLOTS, sizeof(neon_per_backend_counters));
+	MaxBackends = 0;
+#else
+	size = mul_size(NUM_NEON_PERF_COUNTER_SLOTS, sizeof(neon_per_backend_counters));
+#endif
+	if (lakebase_mode) {
+		size = add_size(size, DatabricksMetricsShmemSize());
+	}
+	RequestAddinShmemSpace(size);
 }
 
 void
@@ -71,6 +111,27 @@ inc_iohist(IOHistogram hist, uint64 latency_us)
 	hist->wait_us_count++;
 }
 
+static inline void
+inc_qthist(QTHistogram hist, uint64 elapsed_us)
+{
+	int			lo = 0;
+	int			hi = NUM_QT_BUCKETS - 1;
+
+	/* Find the right bucket with binary search */
+	while (lo < hi)
+	{
+		int			mid = (lo + hi) / 2;
+
+		if (elapsed_us < qt_bucket_thresholds[mid])
+			hi = mid;
+		else
+			lo = mid + 1;
+	}
+	hist->elapsed_us_bucket[lo]++;
+	hist->elapsed_us_sum += elapsed_us;
+	hist->elapsed_us_count++;
+}
+
 /*
  * Count a GetPage wait operation.
  */
@@ -98,6 +159,13 @@ inc_page_cache_write_wait(uint64 latency)
 	inc_iohist(&MyNeonCounters->file_cache_write_hist, latency);
 }
 
+
+void
+inc_query_time(uint64 elapsed)
+{
+	inc_qthist(&MyNeonCounters->query_time_hist, elapsed);
+}
+
 /*
  * Support functions for the views, neon_backend_perf_counters and
  * neon_perf_counters.
@@ -112,11 +180,11 @@ typedef struct
 } metric_t;
 
 static int
-histogram_to_metrics(IOHistogram histogram,
-					 metric_t *metrics,
-					 const char *count,
-					 const char *sum,
-					 const char *bucket)
+io_histogram_to_metrics(IOHistogram histogram,
+						metric_t *metrics,
+						const char *count,
+						const char *sum,
+						const char *bucket)
 {
 	int		i = 0;
 	uint64	bucket_accum = 0;
@@ -145,10 +213,44 @@ histogram_to_metrics(IOHistogram histogram,
 	return i;
 }
 
+static int
+qt_histogram_to_metrics(QTHistogram histogram,
+						metric_t *metrics,
+						const char *count,
+						const char *sum,
+						const char *bucket)
+{
+	int		i = 0;
+	uint64	bucket_accum = 0;
+
+	metrics[i].name = count;
+	metrics[i].is_bucket = false;
+	metrics[i].value = (double) histogram->elapsed_us_count;
+	i++;
+	metrics[i].name = sum;
+	metrics[i].is_bucket = false;
+	metrics[i].value = (double) histogram->elapsed_us_sum / 1000000.0;
+	i++;
+	for (int bucketno = 0; bucketno < NUM_QT_BUCKETS; bucketno++)
+	{
+		uint64		threshold = qt_bucket_thresholds[bucketno];
+
+		bucket_accum += histogram->elapsed_us_bucket[bucketno];
+
+		metrics[i].name = bucket;
+		metrics[i].is_bucket = true;
+		metrics[i].bucket_le = (threshold == UINT64_MAX) ? INFINITY : ((double) threshold) / 1000000.0;
+		metrics[i].value = (double) bucket_accum;
+		i++;
+	}
+
+	return i;
+}
+
 static metric_t *
 neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 {
-#define NUM_METRICS ((2 + NUM_IO_WAIT_BUCKETS) * 3 + 12)
+#define NUM_METRICS ((2 + NUM_IO_WAIT_BUCKETS) * 3 + (2 + NUM_QT_BUCKETS) + 12)
 	metric_t   *metrics = palloc((NUM_METRICS + 1) * sizeof(metric_t));
 	int			i = 0;
 
@@ -159,10 +261,10 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 		i++; \
 	} while (false)
 
-	i += histogram_to_metrics(&counters->getpage_hist, &metrics[i],
-							  "getpage_wait_seconds_count",
-							  "getpage_wait_seconds_sum",
-							  "getpage_wait_seconds_bucket");
+	i += io_histogram_to_metrics(&counters->getpage_hist, &metrics[i],
+								 "getpage_wait_seconds_count",
+								 "getpage_wait_seconds_sum",
+								 "getpage_wait_seconds_bucket");
 
 	APPEND_METRIC(getpage_prefetch_requests_total);
 	APPEND_METRIC(getpage_sync_requests_total);
@@ -178,14 +280,19 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 
 	APPEND_METRIC(file_cache_hits_total);
 
-	i += histogram_to_metrics(&counters->file_cache_read_hist, &metrics[i],
-							  "file_cache_read_wait_seconds_count",
-							  "file_cache_read_wait_seconds_sum",
-							  "file_cache_read_wait_seconds_bucket");
-	i += histogram_to_metrics(&counters->file_cache_write_hist, &metrics[i],
-							  "file_cache_write_wait_seconds_count",
-							  "file_cache_write_wait_seconds_sum",
-							  "file_cache_write_wait_seconds_bucket");
+	i += io_histogram_to_metrics(&counters->file_cache_read_hist, &metrics[i],
+								 "file_cache_read_wait_seconds_count",
+								 "file_cache_read_wait_seconds_sum",
+								 "file_cache_read_wait_seconds_bucket");
+	i += io_histogram_to_metrics(&counters->file_cache_write_hist, &metrics[i],
+								 "file_cache_write_wait_seconds_count",
+								 "file_cache_write_wait_seconds_sum",
+								 "file_cache_write_wait_seconds_bucket");
+
+	i += qt_histogram_to_metrics(&counters->query_time_hist, &metrics[i],
+								 "query_time_seconds_count",
+								 "query_time_seconds_sum",
+								 "query_time_seconds_bucket");
 
 	Assert(i == NUM_METRICS);
 
@@ -257,12 +364,21 @@ neon_get_backend_perf_counters(PG_FUNCTION_ARGS)
 }
 
 static inline void
-histogram_merge_into(IOHistogram into, IOHistogram from)
+io_histogram_merge_into(IOHistogram into, IOHistogram from)
 {
 	into->wait_us_count += from->wait_us_count;
 	into->wait_us_sum += from->wait_us_sum;
 	for (int bucketno = 0; bucketno < NUM_IO_WAIT_BUCKETS; bucketno++)
 		into->wait_us_bucket[bucketno] += from->wait_us_bucket[bucketno];
+}
+
+static inline void
+qt_histogram_merge_into(QTHistogram into, QTHistogram from)
+{
+	into->elapsed_us_count += from->elapsed_us_count;
+	into->elapsed_us_sum += from->elapsed_us_sum;
+	for (int bucketno = 0; bucketno < NUM_QT_BUCKETS; bucketno++)
+		into->elapsed_us_bucket[bucketno] += from->elapsed_us_bucket[bucketno];
 }
 
 PG_FUNCTION_INFO_V1(neon_get_perf_counters);
@@ -275,6 +391,12 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 	neon_per_backend_counters totals = {0};
 	metric_t   *metrics;
 
+	/* BEGIN_HADRON */
+	WalproposerShmemState *wp_shmem;
+	uint32 num_safekeepers;
+	uint32 num_active_safekeepers;
+	/* END_HADRON */
+
 	/* We put all the tuples into a tuplestore in one go. */
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -283,7 +405,7 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 	{
 		neon_per_backend_counters *counters = &neon_per_backend_counters_shared[procno];
 
-		histogram_merge_into(&totals.getpage_hist, &counters->getpage_hist);
+		io_histogram_merge_into(&totals.getpage_hist, &counters->getpage_hist);
 		totals.getpage_prefetch_requests_total += counters->getpage_prefetch_requests_total;
 		totals.getpage_sync_requests_total += counters->getpage_sync_requests_total;
 		totals.getpage_prefetch_misses_total += counters->getpage_prefetch_misses_total;
@@ -294,13 +416,13 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 		totals.pageserver_open_requests += counters->pageserver_open_requests;
 		totals.getpage_prefetches_buffered += counters->getpage_prefetches_buffered;
 		totals.file_cache_hits_total += counters->file_cache_hits_total;
-		histogram_merge_into(&totals.file_cache_read_hist, &counters->file_cache_read_hist);
-		histogram_merge_into(&totals.file_cache_write_hist, &counters->file_cache_write_hist);
-
 		totals.compute_getpage_stuck_requests_total += counters->compute_getpage_stuck_requests_total;
 		totals.compute_getpage_max_inflight_stuck_time_ms = Max(
 			totals.compute_getpage_max_inflight_stuck_time_ms,
 			counters->compute_getpage_max_inflight_stuck_time_ms);
+		io_histogram_merge_into(&totals.file_cache_read_hist, &counters->file_cache_read_hist);
+		io_histogram_merge_into(&totals.file_cache_write_hist, &counters->file_cache_write_hist);
+		qt_histogram_merge_into(&totals.query_time_hist, &counters->query_time_hist);
 	}
 
 	metrics = neon_perf_counters_to_metrics(&totals);
@@ -309,6 +431,55 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 		metric_to_datums(&metrics[i], &values[0], &nulls[0]);
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
+
+	if (lakebase_mode) {
+
+		if (databricks_test_hook == TestHookCorruption) {
+			ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						errmsg("test corruption")));
+		}
+
+		// Not ideal but piggyback our databricks counters into the neon perf counters view
+		// so that we don't need to introduce neon--1.x+1.sql to add a new view.
+		{
+		// Keeping this code in its own block to work around the C90 "don't mix declarations and code" rule when we define
+		// the `databricks_metrics` array in the next block. Yes, we are seriously dealing with C90 rules in 2025.
+
+		// Read safekeeper status from wal proposer shared memory first.
+		// Note that we are taking a mutex when reading from walproposer shared memory so that the total safekeeper count is
+		// consistent with the active wal acceptors count. Assuming that we don't query this view too often the mutex should
+		// not be a huge deal.
+		wp_shmem = GetWalpropShmemState();
+		SpinLockAcquire(&wp_shmem->mutex);
+		num_safekeepers = wp_shmem->num_safekeepers;
+		num_active_safekeepers = 0;
+		for (int i = 0; i < num_safekeepers; i++) {
+			if (wp_shmem->safekeeper_status[i] == 1) {
+				num_active_safekeepers++;
+			}
+		}
+		SpinLockRelease(&wp_shmem->mutex);
+	}
+	{
+			metric_t databricks_metrics[] = {
+				{"sql_index_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->index_corruption_count)},
+				{"sql_data_corruption_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->data_corruption_count)},
+				{"sql_internal_error_count", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->internal_error_count)},
+				{"ps_corruption_detected", false, 0, (double) pg_atomic_read_u32(&databricks_metrics_shared->ps_corruption_detected)},
+				{"num_active_safekeepers", false, 0.0, (double) num_active_safekeepers},
+				{"num_configured_safekeepers", false, 0.0, (double) num_safekeepers},
+				{NULL, false, 0, 0},
+			};
+			for (int i = 0; databricks_metrics[i].name != NULL; i++)
+			{
+				metric_to_datums(&databricks_metrics[i], &values[0], &nulls[0]);
+				tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+			}
+		}
+		/* END_HADRON */
+	}
+
 	pfree(metrics);
 
 	return (Datum) 0;

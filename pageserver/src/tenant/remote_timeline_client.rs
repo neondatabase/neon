@@ -443,7 +443,8 @@ impl RemoteTimelineClient {
     pub fn init_upload_queue_for_empty_remote(
         &self,
         local_metadata: &TimelineMetadata,
-        rel_size_v2_status: Option<RelSizeMigration>,
+        rel_size_v2_migration: Option<RelSizeMigration>,
+        rel_size_migrated_at: Option<Lsn>,
     ) -> anyhow::Result<()> {
         // Set the maximum number of inprogress tasks to the remote storage concurrency. There's
         // certainly no point in starting more upload tasks than this.
@@ -455,7 +456,8 @@ impl RemoteTimelineClient {
         let mut upload_queue = self.upload_queue.lock().unwrap();
         let initialized_queue =
             upload_queue.initialize_empty_remote(local_metadata, inprogress_limit)?;
-        initialized_queue.dirty.rel_size_migration = rel_size_v2_status;
+        initialized_queue.dirty.rel_size_migration = rel_size_v2_migration;
+        initialized_queue.dirty.rel_size_migrated_at = rel_size_migrated_at;
         self.update_remote_physical_size_gauge(None);
         info!("initialized upload queue as empty");
         Ok(())
@@ -994,10 +996,12 @@ impl RemoteTimelineClient {
     pub(crate) fn schedule_index_upload_for_rel_size_v2_status_update(
         self: &Arc<Self>,
         rel_size_v2_status: RelSizeMigration,
+        rel_size_migrated_at: Option<Lsn>,
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
         upload_queue.dirty.rel_size_migration = Some(rel_size_v2_status);
+        upload_queue.dirty.rel_size_migrated_at = rel_size_migrated_at;
         // TODO: allow this operation to bypass the validation check because we might upload the index part
         // with no layers but the flag updated. For now, we just modify the index part in memory and the next
         // upload will include the flag.
@@ -1344,6 +1348,21 @@ impl RemoteTimelineClient {
         self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
 
         self.launch_queued_tasks(upload_queue);
+
+        Ok(())
+    }
+
+    pub(crate) fn schedule_unlinking_of_layers_from_index_part<I>(
+        self: &Arc<Self>,
+        names: I,
+    ) -> Result<(), NotInitialized>
+    where
+        I: IntoIterator<Item = LayerName>,
+    {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        self.schedule_unlinking_of_layers_from_index_part0(upload_queue, names);
 
         Ok(())
     }

@@ -8,7 +8,9 @@ members = [
     "pageserver/compaction",
     "pageserver/ctl",
     "pageserver/client",
+    "pageserver/client_grpc",
     "pageserver/pagebench",
+    "pageserver/page_api",
     "proxy",
     "safekeeper",
     "safekeeper/client",
@@ -21,8 +23,11 @@ members = [
     "libs/http-utils",
     "libs/pageserver_api",
     "libs/postgres_ffi",
+    "libs/postgres_ffi_types",
+    "libs/postgres_versioninfo",
     "libs/safekeeper_api",
     "libs/desim",
+    "libs/neon-shmem",
     "libs/utils",
     "libs/consumption_metrics",
     "libs/postgres_backend",
@@ -38,10 +43,13 @@ members = [
     "libs/walproposer",
     "libs/wal_decoder",
     "libs/postgres_initdb",
+    "libs/proxy/json",
     "libs/proxy/postgres-protocol2",
     "libs/proxy/postgres-types2",
+    "libs/proxy/subzero_core",
     "libs/proxy/tokio-postgres2",
-    "endpoint_storage"
+    "endpoint_storage",
+    "pgxn/neon/communicator",
 ]
 
 [workspace.package]
@@ -69,8 +77,8 @@ aws-credential-types = "1.2.0"
 aws-sigv4 = { version = "1.2", features = ["sign-http"] }
 aws-types = "1.3"
 axum = { version = "0.8.1", features = ["ws"] }
-axum-extra = { version = "0.10.0", features = ["typed-header"] }
-base64 = "0.13.0"
+axum-extra = { version = "0.10.0", features = ["typed-header", "query"] }
+base64 = "0.22"
 bincode = "1.3"
 bindgen = "0.71"
 bit_field = "0.10.2"
@@ -123,21 +131,22 @@ jemalloc_pprof = { version = "0.7", features = ["symbolize", "flamegraph"] }
 jsonwebtoken = "9"
 lasso = "0.7"
 libc = "0.2"
+lock_api = "0.4.13"
 md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
-memoffset = "0.9"
-nix = { version = "0.27", features = ["dir", "fs", "process", "socket", "signal", "poll"] }
+moka = { version = "0.12", features = ["sync"] }
+nix = { version = "0.30.1", features = ["dir", "fs", "mman", "process", "socket", "signal", "poll"] }
 # Do not update to >= 7.0.0, at least. The update will have a significant impact
 # on compute startup metrics (start_postgres_ms), >= 25% degradation.
 notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.19"
 once_cell = "1.13"
-opentelemetry = "0.27"
-opentelemetry_sdk = "0.27"
-opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "trace", "http", "reqwest-client"] }
-opentelemetry-semantic-conventions = "0.27"
+opentelemetry = "0.30"
+opentelemetry_sdk = "0.30"
+opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-proto", "trace", "http", "reqwest-blocking-client"] }
+opentelemetry-semantic-conventions = "0.30"
 parking_lot = "0.12"
 parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
@@ -147,17 +156,20 @@ pin-project-lite = "0.2"
 pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "prost-codec"] }
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
-prost = "0.13"
-rand = "0.8"
+prost = "0.13.5"
+prost-types = "0.13.5"
+rand = "0.9"
+# Remove after p256 is updated to 0.14.
+rand_core = "=0.6"
 redis = { version = "0.29.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_27"] }
+reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_30"] }
 reqwest-middleware = "0.4"
 reqwest-retry = "0.7"
 routerify = "3"
 rpds = "0.13"
-rustc-hash = "1.1.0"
+rustc-hash = "2.1.1"
 rustls = { version = "0.23.16", default-features = false }
 rustls-pemfile = "2"
 rustls-pki-types = "1.11"
@@ -169,8 +181,9 @@ sentry = { version = "0.37", default-features = false, features = ["backtrace", 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
-serde_with = { version = "2.0", features = [ "base64" ] }
+serde_with = { version = "3", features = [ "base64" ] }
 serde_assert = "0.5.0"
+serde_repr = "0.1.20"
 sha2 = "0.10.2"
 signal-hook = "0.3"
 smallvec = "1.11"
@@ -192,25 +205,24 @@ tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.g
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tar = "0.3"
-tokio-util = { version = "0.7.10", features = ["io", "rt"] }
+tokio-util = { version = "0.7.10", features = ["io", "io-util", "rt"] }
 toml = "0.8"
 toml_edit = "0.22"
-tonic = {version = "0.12.3", default-features = false, features = ["channel", "tls", "tls-roots"]}
+tonic = { version = "0.13.1", default-features = false, features = ["channel", "codegen", "gzip", "prost", "router", "server", "tls-ring", "tls-native-roots", "zstd"] }
+tonic-reflection = { version = "0.13.1", features = ["server"] }
 tower = { version = "0.5.2", default-features = false }
 tower-http = { version = "0.6.2", features = ["auth", "request-id", "trace"] }
-
-# This revision uses opentelemetry 0.27. There's no tag for it.
-tower-otel = { git = "https://github.com/mattiapenati/tower-otel", rev = "56a7321053bcb72443888257b622ba0d43a11fcd" }
-
+tower-otel = { version = "0.6", features = ["axum"] }
 tower-service = "0.3.3"
 tracing = "0.1"
 tracing-error = "0.2"
 tracing-log = "0.2"
-tracing-opentelemetry = "0.28"
+tracing-opentelemetry = "0.31"
 tracing-serde = "0.2.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
+tracing-appender = "0.2.3"
 try-lock = "0.2.5"
 test-log = { version = "0.2.17", default-features = false, features = ["log"] }
 twox-hash = { version = "1.6.3", default-features = false }
@@ -221,9 +233,10 @@ uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 rustls-native-certs = "0.8"
 whoami = "1.5.1"
-zerocopy = { version = "0.8", features = ["derive", "simd"] }
 json-structural-diff = { version = "0.2.0" }
 x509-cert = { version = "0.2.5" }
+zerocopy = { version = "0.8", features = ["derive", "simd"] }
+zeroize = "1.8"
 
 ## TODO replace this with tracing
 env_logger = "0.11"
@@ -244,40 +257,47 @@ azure_storage_blobs = { git = "https://github.com/neondatabase/azure-sdk-for-rus
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
+desim = { version = "0.1", path = "./libs/desim" }
 endpoint_storage = { version = "0.0.1", path = "./endpoint_storage/" }
 http-utils = { version = "0.1", path = "./libs/http-utils/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
+neon-shmem = { version = "0.1", path = "./libs/neon-shmem/" }
 pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
+pageserver_client_grpc = { path = "./pageserver/client_grpc" }
 pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
+pageserver_page_api = { path = "./pageserver/page_api" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
+postgres_ffi_types = { version = "0.1", path = "./libs/postgres_ffi_types/" }
+postgres_versioninfo = { version = "0.1", path = "./libs/postgres_versioninfo/" }
 postgres_initdb = { path = "./libs/postgres_initdb" }
+posthog_client_lite = { version = "0.1", path = "./libs/posthog_client_lite" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }
 remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
 safekeeper_client = { path = "./safekeeper/client" }
-desim = { version = "0.1", path = "./libs/desim" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
 storage_controller_client = { path = "./storage_controller/client" }
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
 vm_monitor = { version = "0.1", path = "./libs/vm_monitor/" }
-walproposer = { version = "0.1", path = "./libs/walproposer/" }
 wal_decoder = { version = "0.1", path = "./libs/wal_decoder" }
+walproposer = { version = "0.1", path = "./libs/walproposer/" }
 
 ## Common library dependency
 workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
+cbindgen = "0.29.0"
 criterion = "0.5.1"
 rcgen = "0.13"
 rstest = "0.18"
 camino-tempfile = "1.0.2"
-tonic-build = "0.12"
+tonic-build = "0.13.1"
 
 [patch.crates-io]
 

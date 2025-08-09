@@ -38,6 +38,11 @@ on:
         required: false
         default: 1
         type: number
+      rerun-failed:
+        description: 'rerun failed tests to ignore flaky tests'
+        required: false
+        default: true
+        type: boolean
 
 defaults:
   run:
@@ -81,6 +86,10 @@ jobs:
         with:
           submodules: true
 
+      - uses: ./.github/actions/prepare-for-subzero
+        with:
+          token: ${{ secrets.CI_ACCESS_TOKEN }}
+
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
@@ -99,11 +108,10 @@ jobs:
 
       # Set some environment variables used by all the steps.
       #
-      # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
-      #   It also includes --features, if any
+      # CARGO_FLAGS is extra options to pass to all "cargo" subcommands.
       #
-      # CARGO_FEATURES is passed to "cargo metadata". It is separate from CARGO_FLAGS,
-      #   because "cargo metadata" doesn't accept --release or --debug options
+      # CARGO_PROFILE is passed to "cargo build", "cargo test" etc, but not to
+      #   "cargo metadata", because it doesn't accept --release or --debug options.
       #
       # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
       # corresponding Cargo.toml files for their descriptions.
@@ -112,16 +120,16 @@ jobs:
           ARCH: ${{ inputs.arch }}
           SANITIZERS: ${{ inputs.sanitizers }}
         run: |
-          CARGO_FEATURES="--features testing"
+          CARGO_FLAGS="--locked --features testing,rest_broker"
           if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
-            CARGO_FLAGS="--locked"
+            CARGO_PROFILE=""
           elif [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix=""
-            CARGO_FLAGS="--locked"
+            CARGO_PROFILE=""
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
-            CARGO_FLAGS="--locked --release"
+            CARGO_PROFILE="--release"
           fi
           if [[ $SANITIZERS == 'enabled' ]]; then
             make_vars="WITH_SANITIZERS=yes"
@@ -131,8 +139,8 @@ jobs:
           {
             echo "cov_prefix=${cov_prefix}"
             echo "make_vars=${make_vars}"
-            echo "CARGO_FEATURES=${CARGO_FEATURES}"
             echo "CARGO_FLAGS=${CARGO_FLAGS}"
+            echo "CARGO_PROFILE=${CARGO_PROFILE}"
             echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo"
           } >> $GITHUB_ENV
 
@@ -146,7 +154,7 @@ jobs:
           secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
           use-fallback: false
           path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools/Dockerfile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
@@ -158,7 +166,7 @@ jobs:
           secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
           use-fallback: false
           path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools/Dockerfile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
@@ -170,7 +178,7 @@ jobs:
           secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
           use-fallback: false
           path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools/Dockerfile') }}
 
       - name: Cache postgres v17 build
         id: cache_pg_17
@@ -182,36 +190,20 @@ jobs:
           secretKey: ${{ secrets.HETZNER_CACHE_SECRET_KEY }}
           use-fallback: false
           path: pg_install/v17
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools/Dockerfile') }}
 
-      - name: Build postgres v14
-        if: steps.cache_pg_14.outputs.cache-hit != 'true'
-        run: mold -run make ${make_vars} postgres-v14 -j$(nproc)
-
-      - name: Build postgres v15
-        if: steps.cache_pg_15.outputs.cache-hit != 'true'
-        run: mold -run make ${make_vars} postgres-v15 -j$(nproc)
-
-      - name: Build postgres v16
-        if: steps.cache_pg_16.outputs.cache-hit != 'true'
-        run: mold -run make ${make_vars} postgres-v16 -j$(nproc)
-
-      - name: Build postgres v17
-        if: steps.cache_pg_17.outputs.cache-hit != 'true'
-        run: mold -run make ${make_vars} postgres-v17 -j$(nproc)
-
-      - name: Build neon extensions
-        run: mold -run make ${make_vars} neon-pg-ext -j$(nproc)
+      - name: Build all
+        # Note: the Makefile picks up BUILD_TYPE and CARGO_PROFILE from the env variables
+        run: mold -run make ${make_vars} all -j$(nproc) CARGO_BUILD_FLAGS="$CARGO_FLAGS"
 
       - name: Build walproposer-lib
         run: mold -run make ${make_vars} walproposer-lib -j$(nproc)
 
-      - name: Run cargo build
-        env:
-          WITH_TESTS: ${{ inputs.sanitizers != 'enabled' && '--tests' || '' }}
+      - name: Build unit tests
+        if: inputs.sanitizers != 'enabled'
         run: |
           export ASAN_OPTIONS=detect_leaks=0
-          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins ${WITH_TESTS}
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_PROFILE --tests
 
       # Do install *before* running rust tests because they might recompile the
       # binaries with different features/flags.
@@ -223,7 +215,7 @@ jobs:
           # Install target binaries
           mkdir -p /tmp/neon/bin/
           binaries=$(
-            ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
+            ${cov_prefix} cargo metadata $CARGO_FLAGS --format-version=1 --no-deps |
             jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
           )
           for bin in $binaries; do
@@ -240,7 +232,7 @@ jobs:
             mkdir -p /tmp/neon/test_bin/
 
             test_exe_paths=$(
-              ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES --message-format=json --no-run |
+              ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_PROFILE --message-format=json --no-run |
               jq -r '.executable | select(. != null)'
             )
             for bin in $test_exe_paths; do
@@ -274,29 +266,25 @@ jobs:
           export LD_LIBRARY_PATH
 
           #nextest does not yet support running doctests
-          ${cov_prefix} cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
+          ${cov_prefix} cargo test --doc $CARGO_FLAGS $CARGO_PROFILE
 
           # run all non-pageserver tests
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E '!package(pageserver)'
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_PROFILE -E '!package(pageserver)'
 
-          # run pageserver tests with different settings
-          for get_vectored_concurrent_io in sequential sidecar-task; do
-            for io_engine in std-fs tokio-epoll-uring ; do
-                for io_mode in buffered direct direct-rw ; do
-                  NEON_PAGESERVER_UNIT_TEST_GET_VECTORED_CONCURRENT_IO=$get_vectored_concurrent_io \
-                  NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine \
-                  NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IO_MODE=$io_mode \
-                  ${cov_prefix} \
-                  cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
-              done
-            done
-          done
+          # run pageserver tests
+          # (When developing new pageserver features gated by config fields, we commonly make the rust
+          # unit tests sensitive to an environment variable NEON_PAGESERVER_UNIT_TEST_FEATURENAME.
+          # Then run the nextest invocation below for all relevant combinations. Singling out the
+          # pageserver tests from non-pageserver tests cuts down the time it takes for this CI step.)
+          NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=tokio-epoll-uring  \
+          ${cov_prefix} \
+          cargo nextest run $CARGO_FLAGS $CARGO_PROFILE  -E 'package(pageserver)'
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
           export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
           export REMOTE_STORAGE_S3_REGION=eu-central-1
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_s3)'
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_PROFILE -E 'package(remote_storage)' -E 'test(test_real_s3)'
 
           # Run separate tests for real Azure Blob Storage
           # XXX: replace region with `eu-central-1`-like region
@@ -305,17 +293,17 @@ jobs:
           export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
           export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
           export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_azure)'
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_PROFILE -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
       - name: Install postgres binaries
         run: |
           # Use tar to copy files matching the pattern, preserving the paths in the destionation
           tar c \
             pg_install/v* \
-            pg_install/build/*/src/test/regress/*.so \
-            pg_install/build/*/src/test/regress/pg_regress \
-            pg_install/build/*/src/test/isolation/isolationtester \
-            pg_install/build/*/src/test/isolation/pg_isolation_regress \
+            build/*/src/test/regress/*.so \
+            build/*/src/test/regress/pg_regress \
+            build/*/src/test/isolation/isolationtester \
+            build/*/src/test/isolation/pg_isolation_regress \
             | tar  x -C /tmp/neon
 
       - name: Upload Neon artifact
@@ -383,7 +371,7 @@ jobs:
       - name: Pytest regression tests
         continue-on-error: ${{ matrix.lfc_state == 'with-lfc' && inputs.build-type == 'debug' }}
         uses: ./.github/actions/run-python-test-set
-        timeout-minutes: ${{ inputs.sanitizers != 'enabled' && 75 || 180 }}
+        timeout-minutes: ${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 75 || 180 }}
         with:
           build_type: ${{ inputs.build-type }}
           test_selection: regress
@@ -391,22 +379,20 @@ jobs:
           run_with_real_s3: true
           real_s3_bucket: neon-github-ci-tests
           real_s3_region: eu-central-1
-          rerun_failed: ${{ inputs.test-run-count == 1 }}
+          rerun_failed: ${{ inputs.rerun-failed }}
           pg_version: ${{ matrix.pg_version }}
           sanitizers: ${{ inputs.sanitizers }}
           aws-oidc-role-arn: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
           # `--session-timeout` is equal to (timeout-minutes - 10 minutes) * 60 seconds.
           # Attempt to stop tests gracefully to generate test reports
           # until they are forcibly stopped by the stricter `timeout-minutes` limit.
-          extra_params: --session-timeout=${{ inputs.sanitizers != 'enabled' && 3000 || 10200 }} --count=${{ inputs.test-run-count }}
+          extra_params: --session-timeout=${{ (inputs.build-type == 'release' && inputs.sanitizers != 'enabled') && 3000 || 10200 }} --count=${{ inputs.test-run-count }}
                         ${{ inputs.test-selection != '' && format('-k "{0}"', inputs.test-selection) || '' }}
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
-          PAGESERVER_GET_VECTORED_CONCURRENT_IO: sidecar-task
-          PAGESERVER_VIRTUAL_FILE_IO_MODE: direct-rw
           USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}
 
       # Temporary disable this step until we figure out why it's so flaky

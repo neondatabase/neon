@@ -19,7 +19,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use itertools::Itertools;
 use pageserver_api::controller_api::{
-    AvailabilityZone, MetadataHealthRecord, NodeSchedulingPolicy, PlacementPolicy,
+    AvailabilityZone, MetadataHealthRecord, NodeLifecycle, NodeSchedulingPolicy, PlacementPolicy,
     SafekeeperDescribeResponse, ShardSchedulingPolicy, SkSchedulingPolicy,
 };
 use pageserver_api::models::{ShardImportStatus, TenantConfig};
@@ -29,6 +29,7 @@ use pageserver_api::shard::{
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring;
+use safekeeper_api::membership::SafekeeperGeneration;
 use scoped_futures::ScopedBoxFuture;
 use serde::{Deserialize, Serialize};
 use utils::generation::Generation;
@@ -94,6 +95,8 @@ pub(crate) enum DatabaseError {
     Logical(String),
     #[error("Migration error: {0}")]
     Migration(String),
+    #[error("CAS error: {0}")]
+    Cas(String),
 }
 
 #[derive(measured::FixedCardinalityLabel, Copy, Clone)]
@@ -102,6 +105,7 @@ pub(crate) enum DatabaseOperation {
     UpdateNode,
     DeleteNode,
     ListNodes,
+    ListTombstones,
     BeginShardSplit,
     CompleteShardSplit,
     AbortShardSplit,
@@ -125,6 +129,10 @@ pub(crate) enum DatabaseOperation {
     UpdateLeader,
     SetPreferredAzs,
     InsertTimeline,
+    UpdateTimeline,
+    UpdateTimelineMembership,
+    UpdateCplaneNotifiedGeneration,
+    UpdateSkSetNotifiedGeneration,
     GetTimeline,
     InsertTimelineReconcile,
     RemoveTimelineReconcile,
@@ -357,6 +365,8 @@ impl Persistence {
     }
 
     /// When a node is first registered, persist it before using it for anything
+    /// If the provided node_id already exists, it will be error.
+    /// The common case is when a node marked for deletion wants to register.
     pub(crate) async fn insert_node(&self, node: &Node) -> DatabaseResult<()> {
         let np = &node.to_persistent();
         self.with_measured_conn(DatabaseOperation::InsertNode, move |conn| {
@@ -373,19 +383,41 @@ impl Persistence {
 
     /// At startup, populate the list of nodes which our shards may be placed on
     pub(crate) async fn list_nodes(&self) -> DatabaseResult<Vec<NodePersistence>> {
-        let nodes: Vec<NodePersistence> = self
+        use crate::schema::nodes::dsl::*;
+
+        let result: Vec<NodePersistence> = self
             .with_measured_conn(DatabaseOperation::ListNodes, move |conn| {
                 Box::pin(async move {
                     Ok(crate::schema::nodes::table
+                        .filter(lifecycle.ne(String::from(NodeLifecycle::Deleted)))
                         .load::<NodePersistence>(conn)
                         .await?)
                 })
             })
             .await?;
 
-        tracing::info!("list_nodes: loaded {} nodes", nodes.len());
+        tracing::info!("list_nodes: loaded {} nodes", result.len());
 
-        Ok(nodes)
+        Ok(result)
+    }
+
+    pub(crate) async fn list_tombstones(&self) -> DatabaseResult<Vec<NodePersistence>> {
+        use crate::schema::nodes::dsl::*;
+
+        let result: Vec<NodePersistence> = self
+            .with_measured_conn(DatabaseOperation::ListTombstones, move |conn| {
+                Box::pin(async move {
+                    Ok(crate::schema::nodes::table
+                        .filter(lifecycle.eq(String::from(NodeLifecycle::Deleted)))
+                        .load::<NodePersistence>(conn)
+                        .await?)
+                })
+            })
+            .await?;
+
+        tracing::info!("list_tombstones: loaded {} nodes", result.len());
+
+        Ok(result)
     }
 
     pub(crate) async fn update_node<V>(
@@ -404,6 +436,7 @@ impl Persistence {
                 Box::pin(async move {
                     let updated = diesel::update(nodes)
                         .filter(node_id.eq(input_node_id.0 as i64))
+                        .filter(lifecycle.ne(String::from(NodeLifecycle::Deleted)))
                         .set(values)
                         .execute(conn)
                         .await?;
@@ -438,12 +471,67 @@ impl Persistence {
         &self,
         input_node_id: NodeId,
         input_https_port: Option<u16>,
+        input_grpc_addr: Option<String>,
+        input_grpc_port: Option<u16>,
     ) -> DatabaseResult<()> {
         use crate::schema::nodes::dsl::*;
         self.update_node(
             input_node_id,
-            listen_https_port.eq(input_https_port.map(|x| x as i32)),
+            (
+                listen_https_port.eq(input_https_port.map(|x| x as i32)),
+                listen_grpc_addr.eq(input_grpc_addr),
+                listen_grpc_port.eq(input_grpc_port.map(|x| x as i32)),
+            ),
         )
+        .await
+    }
+
+    /// Tombstone is a special state where the node is not deleted from the database,
+    /// but it is not available for usage.
+    /// The main reason for it is to prevent the flaky node to register.
+    pub(crate) async fn set_tombstone(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.update_node(
+            del_node_id,
+            lifecycle.eq(String::from(NodeLifecycle::Deleted)),
+        )
+        .await
+    }
+
+    pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        self.with_measured_conn(DatabaseOperation::DeleteNode, move |conn| {
+            Box::pin(async move {
+                // You can hard delete a node only if it has a tombstone.
+                // So we need to check if the node has lifecycle set to deleted.
+                let node_to_delete = nodes
+                    .filter(node_id.eq(del_node_id.0 as i64))
+                    .first::<NodePersistence>(conn)
+                    .await
+                    .optional()?;
+
+                if let Some(np) = node_to_delete {
+                    let lc = NodeLifecycle::from_str(&np.lifecycle).map_err(|e| {
+                        DatabaseError::Logical(format!(
+                            "Node {del_node_id} has invalid lifecycle: {e}"
+                        ))
+                    })?;
+
+                    if lc != NodeLifecycle::Deleted {
+                        return Err(DatabaseError::Logical(format!(
+                            "Node {del_node_id} was not soft deleted before, cannot hard delete it"
+                        )));
+                    }
+
+                    diesel::delete(nodes)
+                        .filter(node_id.eq(del_node_id.0 as i64))
+                        .execute(conn)
+                        .await?;
+                }
+
+                Ok(())
+            })
+        })
         .await
     }
 
@@ -543,21 +631,6 @@ impl Persistence {
         .await
     }
 
-    pub(crate) async fn delete_node(&self, del_node_id: NodeId) -> DatabaseResult<()> {
-        use crate::schema::nodes::dsl::*;
-        self.with_measured_conn(DatabaseOperation::DeleteNode, move |conn| {
-            Box::pin(async move {
-                diesel::delete(nodes)
-                    .filter(node_id.eq(del_node_id.0 as i64))
-                    .execute(conn)
-                    .await?;
-
-                Ok(())
-            })
-        })
-        .await
-    }
-
     /// When a tenant invokes the /re-attach API, this function is responsible for doing an efficient
     /// batched increment of the generations of all tenants whose generation_pageserver is equal to
     /// the node that called /re-attach.
@@ -571,6 +644,24 @@ impl Persistence {
         let updated = self
             .with_measured_conn(DatabaseOperation::ReAttach, move |conn| {
                 Box::pin(async move {
+                    let node: Option<NodePersistence> = nodes
+                        .filter(node_id.eq(input_node_id.0 as i64))
+                        .first::<NodePersistence>(conn)
+                        .await
+                        .optional()?;
+
+                    // Check if the node is not marked as deleted
+                    match node {
+                        Some(node) if matches!(NodeLifecycle::from_str(&node.lifecycle), Ok(NodeLifecycle::Deleted)) => {
+                            return Err(DatabaseError::Logical(format!(
+                                "Node {input_node_id} is marked as deleted, re-attach is not allowed"
+                            )));
+                        }
+                        _ => {
+                            // go through
+                        }
+                    };
+
                     let rows_updated = diesel::update(tenant_shards)
                         .filter(generation_pageserver.eq(input_node_id.0 as i64))
                         .set(generation.eq(generation + 1))
@@ -587,21 +678,23 @@ impl Persistence {
                         .load(conn)
                         .await?;
 
-                    // If the node went through a drain and restart phase before re-attaching,
-                    // then reset it's node scheduling policy to active.
-                    diesel::update(nodes)
-                        .filter(node_id.eq(input_node_id.0 as i64))
-                        .filter(
-                            scheduling_policy
-                                .eq(String::from(NodeSchedulingPolicy::PauseForRestart))
-                                .or(scheduling_policy
-                                    .eq(String::from(NodeSchedulingPolicy::Draining)))
-                                .or(scheduling_policy
-                                    .eq(String::from(NodeSchedulingPolicy::Filling))),
-                        )
-                        .set(scheduling_policy.eq(String::from(NodeSchedulingPolicy::Active)))
-                        .execute(conn)
-                        .await?;
+                    if let Some(node) = node {
+                        let old_scheduling_policy =
+                            NodeSchedulingPolicy::from_str(&node.scheduling_policy).unwrap();
+                        let new_scheduling_policy = match old_scheduling_policy {
+                            NodeSchedulingPolicy::Active => NodeSchedulingPolicy::Active,
+                            NodeSchedulingPolicy::PauseForRestart => NodeSchedulingPolicy::Active,
+                            NodeSchedulingPolicy::Draining => NodeSchedulingPolicy::Active,
+                            NodeSchedulingPolicy::Filling => NodeSchedulingPolicy::Active,
+                            NodeSchedulingPolicy::Pause => NodeSchedulingPolicy::Pause,
+                            NodeSchedulingPolicy::Deleting => NodeSchedulingPolicy::Pause,
+                        };
+                        diesel::update(nodes)
+                            .filter(node_id.eq(input_node_id.0 as i64))
+                            .set(scheduling_policy.eq(String::from(new_scheduling_policy)))
+                            .execute(conn)
+                            .await?;
+                    }
 
                     Ok(updated)
                 })
@@ -927,7 +1020,7 @@ impl Persistence {
                 .execute(conn).await?;
             if u8::try_from(updated)
                 .map_err(|_| DatabaseError::Logical(
-                    format!("Overflow existing shard count {} while splitting", updated))
+                    format!("Overflow existing shard count {updated} while splitting"))
                 )? != old_shard_count.count() {
                 // Perhaps a deletion or another split raced with this attempt to split, mutating
                 // the parent shards that we intend to split. In this case the split request should fail.
@@ -1267,8 +1360,7 @@ impl Persistence {
 
                 if inserted_updated != 1 {
                     return Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     )));
                 }
 
@@ -1312,6 +1404,48 @@ impl Persistence {
         .await
     }
 
+    /// Activate the given safekeeper, ensuring that there is no TOCTOU.
+    /// Returns `Some` if the safekeeper has indeed been activating (or already active). Other states return `None`.
+    pub(crate) async fn activate_safekeeper(&self, id_: i64) -> Result<Option<()>, DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| {
+            Box::pin(async move {
+                #[derive(Insertable, AsChangeset)]
+                #[diesel(table_name = crate::schema::safekeepers)]
+                struct UpdateSkSchedulingPolicy<'a> {
+                    id: i64,
+                    scheduling_policy: &'a str,
+                }
+                let scheduling_policy_active = String::from(SkSchedulingPolicy::Active);
+                let scheduling_policy_activating = String::from(SkSchedulingPolicy::Activating);
+
+                let rows_affected = diesel::update(
+                    safekeepers.filter(id.eq(id_)).filter(
+                        scheduling_policy
+                            .eq(scheduling_policy_activating)
+                            .or(scheduling_policy.eq(&scheduling_policy_active)),
+                    ),
+                )
+                .set(scheduling_policy.eq(&scheduling_policy_active))
+                .execute(conn)
+                .await?;
+
+                if rows_affected == 0 {
+                    return Ok(Some(()));
+                }
+                if rows_affected != 1 {
+                    return Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({rows_affected})",
+                    )));
+                }
+
+                Ok(Some(()))
+            })
+        })
+        .await
+    }
+
     /// Persist timeline. Returns if the timeline was newly inserted. If it wasn't, we haven't done any writes.
     pub(crate) async fn insert_timeline(&self, entry: TimelinePersistence) -> DatabaseResult<bool> {
         use crate::schema::timelines;
@@ -1330,12 +1464,200 @@ impl Persistence {
                     0 => Ok(false),
                     1 => Ok(true),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     ))),
                 }
             })
         })
+        .await
+    }
+
+    /// Update an already present timeline.
+    /// VERY UNSAFE FUNCTION: this overrides in-progress migrations. Don't use this unless neccessary.
+    pub(crate) async fn update_timeline_unsafe(
+        &self,
+        entry: TimelineUpdate,
+    ) -> DatabaseResult<bool> {
+        use crate::schema::timelines;
+
+        let entry = &entry;
+        self.with_measured_conn(DatabaseOperation::UpdateTimeline, move |conn| {
+            Box::pin(async move {
+                let inserted_updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(&entry.tenant_id))
+                    .filter(timelines::timeline_id.eq(&entry.timeline_id))
+                    .set(entry)
+                    .execute(conn)
+                    .await?;
+
+                match inserted_updated {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(DatabaseError::Logical(format!(
+                        "unexpected number of rows ({inserted_updated})"
+                    ))),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Update timeline membership configuration in the database.
+    /// Perform a compare-and-swap (CAS) operation on the timeline's generation.
+    /// The `new_generation` must be the next (+1) generation after the one in the database.
+    /// Also inserts reconcile_requests to safekeeper_timeline_pending_ops table in the same
+    /// transaction.
+    pub(crate) async fn update_timeline_membership(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        new_generation: SafekeeperGeneration,
+        sk_set: &[NodeId],
+        new_sk_set: Option<&[NodeId]>,
+        reconcile_requests: &[TimelinePendingOpPersistence],
+    ) -> DatabaseResult<()> {
+        use crate::schema::safekeeper_timeline_pending_ops as stpo;
+        use crate::schema::timelines;
+        use diesel::query_dsl::methods::FilterDsl;
+
+        let prev_generation = new_generation.previous().unwrap();
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(DatabaseOperation::UpdateTimelineMembership, move |conn| {
+            Box::pin(async move {
+                let updated = diesel::update(timelines::table)
+                    .filter(timelines::tenant_id.eq(&tenant_id.to_string()))
+                    .filter(timelines::timeline_id.eq(&timeline_id.to_string()))
+                    .filter(timelines::generation.eq(prev_generation.into_inner() as i32))
+                    .set((
+                        timelines::generation.eq(new_generation.into_inner() as i32),
+                        timelines::sk_set
+                            .eq(sk_set.iter().map(|id| id.0 as i64).collect::<Vec<_>>()),
+                        timelines::new_sk_set.eq(new_sk_set
+                            .map(|set| set.iter().map(|id| id.0 as i64).collect::<Vec<_>>())),
+                    ))
+                    .execute(conn)
+                    .await?;
+
+                match updated {
+                    0 => {
+                        // TODO(diko): It makes sense to select the current generation
+                        // and include it in the error message for better debuggability.
+                        return Err(DatabaseError::Cas(
+                            "Failed to update membership configuration".to_string(),
+                        ));
+                    }
+                    1 => {}
+                    _ => {
+                        return Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({updated})"
+                        )));
+                    }
+                };
+
+                for req in reconcile_requests {
+                    let inserted_updated = diesel::insert_into(stpo::table)
+                        .values(req)
+                        .on_conflict((stpo::tenant_id, stpo::timeline_id, stpo::sk_id))
+                        .do_update()
+                        .set(req)
+                        .filter(stpo::generation.lt(req.generation))
+                        .execute(conn)
+                        .await?;
+
+                    if inserted_updated > 1 {
+                        return Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({inserted_updated})"
+                        )));
+                    }
+                }
+
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    /// Update the cplane notified generation for a timeline.
+    /// Perform a compare-and-swap (CAS) operation on the timeline's cplane notified generation.
+    /// The update will fail if the specified generation is less than the cplane notified generation
+    /// in the database.
+    pub(crate) async fn update_cplane_notified_generation(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        generation: SafekeeperGeneration,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(
+            DatabaseOperation::UpdateCplaneNotifiedGeneration,
+            move |conn| {
+                Box::pin(async move {
+                    let updated = diesel::update(dsl::timelines)
+                        .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                        .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                        .filter(dsl::cplane_notified_generation.le(generation.into_inner() as i32))
+                        .set(dsl::cplane_notified_generation.eq(generation.into_inner() as i32))
+                        .execute(conn)
+                        .await?;
+
+                    match updated {
+                        0 => Err(DatabaseError::Cas(
+                            "Failed to update cplane notified generation".to_string(),
+                        )),
+                        1 => Ok(()),
+                        _ => Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({updated})"
+                        ))),
+                    }
+                })
+            },
+        )
+        .await
+    }
+
+    /// Update the sk set notified generation for a timeline.
+    /// Perform a compare-and-swap (CAS) operation on the timeline's sk set notified generation.
+    /// The update will fail if the specified generation is less than the sk set notified generation
+    /// in the database.
+    pub(crate) async fn update_sk_set_notified_generation(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        generation: SafekeeperGeneration,
+    ) -> DatabaseResult<()> {
+        use crate::schema::timelines::dsl;
+
+        let tenant_id = &tenant_id;
+        let timeline_id = &timeline_id;
+        self.with_measured_conn(
+            DatabaseOperation::UpdateSkSetNotifiedGeneration,
+            move |conn| {
+                Box::pin(async move {
+                    let updated = diesel::update(dsl::timelines)
+                        .filter(dsl::tenant_id.eq(&tenant_id.to_string()))
+                        .filter(dsl::timeline_id.eq(&timeline_id.to_string()))
+                        .filter(dsl::sk_set_notified_generation.le(generation.into_inner() as i32))
+                        .set(dsl::sk_set_notified_generation.eq(generation.into_inner() as i32))
+                        .execute(conn)
+                        .await?;
+
+                    match updated {
+                        0 => Err(DatabaseError::Cas(
+                            "Failed to update sk set notified generation".to_string(),
+                        )),
+                        1 => Ok(()),
+                        _ => Err(DatabaseError::Logical(format!(
+                            "unexpected number of rows ({updated})"
+                        ))),
+                    }
+                })
+            },
+        )
         .await
     }
 
@@ -1400,8 +1722,7 @@ impl Persistence {
                     0 => Ok(()),
                     1 => Ok(()),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        updated
+                        "unexpected number of rows ({updated})"
                     ))),
                 }
             })
@@ -1494,8 +1815,7 @@ impl Persistence {
                     0 => Ok(false),
                     1 => Ok(true),
                     _ => Err(DatabaseError::Logical(format!(
-                        "unexpected number of rows ({})",
-                        inserted_updated
+                        "unexpected number of rows ({inserted_updated})"
                     ))),
                 }
             })
@@ -2048,6 +2368,9 @@ pub(crate) struct NodePersistence {
     pub(crate) listen_pg_port: i32,
     pub(crate) availability_zone_id: String,
     pub(crate) listen_https_port: Option<i32>,
+    pub(crate) lifecycle: String,
+    pub(crate) listen_grpc_addr: Option<String>,
+    pub(crate) listen_grpc_port: Option<i32>,
 }
 
 /// Tenant metadata health status that are stored durably.
@@ -2287,6 +2610,7 @@ pub(crate) struct TimelinePersistence {
     pub(crate) new_sk_set: Option<Vec<i64>>,
     pub(crate) cplane_notified_generation: i32,
     pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) sk_set_notified_generation: i32,
 }
 
 /// This is separate from [TimelinePersistence] only because postgres allows NULLs
@@ -2305,6 +2629,7 @@ pub(crate) struct TimelineFromDb {
     pub(crate) new_sk_set: Option<Vec<Option<i64>>>,
     pub(crate) cplane_notified_generation: i32,
     pub(crate) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) sk_set_notified_generation: i32,
 }
 
 impl TimelineFromDb {
@@ -2324,8 +2649,21 @@ impl TimelineFromDb {
             new_sk_set,
             cplane_notified_generation: self.cplane_notified_generation,
             deleted_at: self.deleted_at,
+            sk_set_notified_generation: self.sk_set_notified_generation,
         }
     }
+}
+
+// This is separate from TimelinePersistence because we don't want to touch generation and deleted_at values for the update.
+#[derive(AsChangeset)]
+#[diesel(table_name = crate::schema::timelines)]
+#[diesel(treat_none_as_null = true)]
+pub(crate) struct TimelineUpdate {
+    pub(crate) tenant_id: String,
+    pub(crate) timeline_id: String,
+    pub(crate) start_lsn: LsnWrapper,
+    pub(crate) sk_set: Vec<i64>,
+    pub(crate) new_sk_set: Option<Vec<i64>>,
 }
 
 #[derive(Insertable, AsChangeset, Queryable, Selectable, Clone)]

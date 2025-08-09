@@ -13,7 +13,7 @@ use pageserver::tenant::remote_timeline_client::{
 };
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver_api::shard::ShardIndex;
-use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
+use remote_storage::{DownloadError, GenericRemoteStorage, ListingObject, RemotePath};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use utils::generation::Generation;
@@ -146,7 +146,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                     for (layer, metadata) in index_part.layer_metadata {
                         if metadata.file_size == 0 {
                             result.errors.push(format!(
-                                "index_part.json contains a layer {} that has 0 size in its layer metadata", layer,
+                                "index_part.json contains a layer {layer} that has 0 size in its layer metadata",
                             ))
                         }
 
@@ -165,23 +165,34 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                                 .head_object(&path, &CancellationToken::new())
                                 .await;
 
-                            if let Err(e) = response {
-                                // Object is not present.
-                                let is_l0 = LayerMap::is_l0(layer.key_range(), layer.is_delta());
+                            match response {
+                                Ok(_) => {}
+                                Err(DownloadError::NotFound) => {
+                                    // Object is not present.
+                                    let is_l0 =
+                                        LayerMap::is_l0(layer.key_range(), layer.is_delta());
 
-                                let msg = format!(
-                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {}) with error: {}",
-                                    layer,
-                                    metadata.generation.get_suffix(),
-                                    metadata.shard,
-                                    is_l0,
-                                    e,
-                                );
+                                    let msg = format!(
+                                        "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {})",
+                                        layer,
+                                        metadata.generation.get_suffix(),
+                                        metadata.shard,
+                                        is_l0,
+                                    );
 
-                                if is_l0 || ignore_error {
-                                    result.warnings.push(msg);
-                                } else {
-                                    result.errors.push(msg);
+                                    if is_l0 || ignore_error {
+                                        result.warnings.push(msg);
+                                    } else {
+                                        result.errors.push(msg);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "cannot check if the layer {}{} is present in remote storage (error: {})",
+                                        layer,
+                                        metadata.generation.get_suffix(),
+                                        e,
+                                    );
                                 }
                             }
                         }

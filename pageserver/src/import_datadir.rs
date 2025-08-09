@@ -57,7 +57,7 @@ pub async fn import_timeline_from_postgres_datadir(
 
     // TODO this shoud be start_lsn, which is not necessarily equal to end_lsn (aka lsn)
     // Then fishing out pg_control would be unnecessary
-    let mut modification = tline.begin_modification(pgdata_lsn);
+    let mut modification = tline.begin_modification_for_import(pgdata_lsn);
     modification.init_empty()?;
 
     // Import all but pg_wal
@@ -309,7 +309,7 @@ async fn import_wal(
         waldecoder.feed_bytes(&buf);
 
         let mut nrecords = 0;
-        let mut modification = tline.begin_modification(last_lsn);
+        let mut modification = tline.begin_modification_for_import(last_lsn);
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 let interpreted = InterpretedWalRecord::from_bytes_filtered(
@@ -357,7 +357,7 @@ pub async fn import_basebackup_from_tar(
     ctx: &RequestContext,
 ) -> Result<()> {
     info!("importing base at {base_lsn}");
-    let mut modification = tline.begin_modification(base_lsn);
+    let mut modification = tline.begin_modification_for_import(base_lsn);
     modification.init_empty()?;
 
     let mut pg_control: Option<ControlFileData> = None;
@@ -457,7 +457,7 @@ pub async fn import_wal_from_tar(
 
         waldecoder.feed_bytes(&bytes[offset..]);
 
-        let mut modification = tline.begin_modification(last_lsn);
+        let mut modification = tline.begin_modification_for_import(last_lsn);
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 let interpreted = InterpretedWalRecord::from_bytes_filtered(
@@ -520,7 +520,7 @@ async fn import_file(
     }
 
     if file_path.starts_with("global") {
-        let spcnode = postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
+        let spcnode = postgres_ffi_types::constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
 
         match file_name.as_ref() {
@@ -553,7 +553,7 @@ async fn import_file(
             }
         }
     } else if file_path.starts_with("base") {
-        let spcnode = pg_constants::DEFAULTTABLESPACE_OID;
+        let spcnode = postgres_ffi_types::constants::DEFAULTTABLESPACE_OID;
         let dbnode: u32 = file_path
             .iter()
             .nth(1)
@@ -610,13 +610,13 @@ async fn import_file(
         debug!("imported twophase file");
     } else if file_path.starts_with("pg_wal") {
         debug!("found wal file in base section. ignore it");
-    } else if file_path.starts_with("zenith.signal") {
+    } else if file_path.starts_with("zenith.signal") || file_path.starts_with("neon.signal") {
         // Parse zenith signal file to set correct previous LSN
         let bytes = read_all_bytes(reader).await?;
-        // zenith.signal format is "PREV LSN: prev_lsn"
+        // neon.signal format is "PREV LSN: prev_lsn"
         // TODO write serialization and deserialization in the same place.
-        let zenith_signal = std::str::from_utf8(&bytes)?.trim();
-        let prev_lsn = match zenith_signal {
+        let neon_signal = std::str::from_utf8(&bytes)?.trim();
+        let prev_lsn = match neon_signal {
             "PREV LSN: none" => Lsn(0),
             "PREV LSN: invalid" => Lsn(0),
             other => {
@@ -624,17 +624,17 @@ async fn import_file(
                 split[1]
                     .trim()
                     .parse::<Lsn>()
-                    .context("can't parse zenith.signal")?
+                    .context("can't parse neon.signal")?
             }
         };
 
-        // zenith.signal is not necessarily the last file, that we handle
+        // neon.signal is not necessarily the last file, that we handle
         // but it is ok to call `finish_write()`, because final `modification.commit()`
         // will update lsn once more to the final one.
         let writer = modification.tline.writer().await;
         writer.finish_write(prev_lsn);
 
-        debug!("imported zenith signal {}", prev_lsn);
+        debug!("imported neon signal {}", prev_lsn);
     } else if file_path.starts_with("pg_tblspc") {
         // TODO Backups exported from neon won't have pg_tblspc, but we will need
         // this to import arbitrary postgres databases.

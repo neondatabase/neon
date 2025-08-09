@@ -2,60 +2,60 @@ use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
 use measured::label::{
-    FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet,
+    FixedCardinalitySet, LabelGroupSet, LabelGroupVisitor, LabelName, LabelSet, LabelValue,
+    StaticLabelSet,
 };
+use measured::metric::group::Encoding;
 use measured::metric::histogram::Thresholds;
 use measured::metric::name::MetricName;
 use measured::{
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
-    MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
+    LabelGroup, MetricGroup,
 };
-use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
+use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLogVec, InfoMetric};
 use tokio::time::{self, Instant};
 
 use crate::control_plane::messages::ColdStartInfo;
 use crate::error::ErrorKind;
 
 #[derive(MetricGroup)]
-#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
+#[metric(new())]
 pub struct Metrics {
     #[metric(namespace = "proxy")]
-    #[metric(init = ProxyMetrics::new(thread_pool))]
+    #[metric(init = ProxyMetrics::new())]
     pub proxy: ProxyMetrics,
 
     #[metric(namespace = "wake_compute_lock")]
     pub wake_compute_lock: ApiLockMetrics,
+
+    #[metric(namespace = "service")]
+    pub service: ServiceMetrics,
+
+    #[metric(namespace = "cache")]
+    pub cache: CacheMetrics,
 }
 
-static SELF: OnceLock<Metrics> = OnceLock::new();
 impl Metrics {
-    pub fn install(thread_pool: Arc<ThreadPoolMetrics>) {
-        let mut metrics = Metrics::new(thread_pool);
-
-        metrics.proxy.errors_total.init_all_dense();
-        metrics.proxy.redis_errors_total.init_all_dense();
-        metrics.proxy.redis_events_count.init_all_dense();
-        metrics.proxy.retries_metric.init_all_dense();
-        metrics.proxy.invalid_endpoints_total.init_all_dense();
-        metrics.proxy.connection_failures_total.init_all_dense();
-
-        SELF.set(metrics)
-            .ok()
-            .expect("proxy metrics must not be installed more than once");
-    }
-
+    #[track_caller]
     pub fn get() -> &'static Self {
-        #[cfg(test)]
-        return SELF.get_or_init(|| Metrics::new(Arc::new(ThreadPoolMetrics::new(0))));
+        static SELF: OnceLock<Metrics> = OnceLock::new();
 
-        #[cfg(not(test))]
-        SELF.get()
-            .expect("proxy metrics must be installed by the main() function")
+        SELF.get_or_init(|| {
+            let mut metrics = Metrics::new();
+
+            metrics.proxy.errors_total.init_all_dense();
+            metrics.proxy.redis_errors_total.init_all_dense();
+            metrics.proxy.redis_events_count.init_all_dense();
+            metrics.proxy.retries_metric.init_all_dense();
+            metrics.proxy.connection_failures_total.init_all_dense();
+
+            metrics
+        })
     }
 }
 
 #[derive(MetricGroup)]
-#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
+#[metric(new())]
 pub struct ProxyMetrics {
     #[metric(flatten)]
     pub db_connections: CounterPairVec<NumDbConnectionsGauge>,
@@ -80,11 +80,6 @@ pub struct ProxyMetrics {
     )]
     pub console_request_latency: HistogramVec<ConsoleRequestSet, 16>,
 
-    /// Time it takes to acquire a token to call console plane.
-    // largest bucket = 3^16 * 0.05ms = 2.15s
-    #[metric(metadata = Thresholds::exponential_buckets(0.00005, 3.0))]
-    pub control_plane_token_acquire_seconds: Histogram<16>,
-
     /// Size of the HTTP request body lengths.
     // smallest bucket = 16 bytes
     // largest bucket = 4^12 * 16 bytes = 256MB
@@ -98,18 +93,9 @@ pub struct ProxyMetrics {
     /// Number of opened connections to a database.
     pub http_pool_opened_connections: Gauge,
 
-    /// Number of cache hits/misses for allowed ips.
-    pub allowed_ips_cache_misses: CounterVec<StaticLabelSet<CacheOutcome>>,
-
     /// Number of allowed ips
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0]))]
     pub allowed_ips_number: Histogram<10>,
-
-    /// Number of cache hits/misses for VPC endpoint IDs.
-    pub vpc_endpoint_id_cache_stats: CounterVec<StaticLabelSet<CacheOutcome>>,
-
-    /// Number of cache hits/misses for access blocker flags.
-    pub access_blocker_flags_cache_stats: CounterVec<StaticLabelSet<CacheOutcome>>,
 
     /// Number of allowed VPC endpoints IDs
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0]))]
@@ -127,6 +113,9 @@ pub struct ProxyMetrics {
     /// Number of bytes sent/received between all clients and backends.
     pub io_bytes: CounterVec<StaticLabelSet<Direction>>,
 
+    /// Number of IO errors while logging.
+    pub logging_errors_count: Counter,
+
     /// Number of errors by a given classification.
     pub errors_total: CounterVec<StaticLabelSet<crate::error::ErrorKind>>,
 
@@ -139,20 +128,14 @@ pub struct ProxyMetrics {
     /// Number of TLS handshake failures
     pub tls_handshake_failures: Counter,
 
-    /// Number of connection requests affected by authentication rate limits
-    pub requests_auth_rate_limits_total: Counter,
+    /// Number of SHA 256 rounds executed.
+    pub sha_rounds: Counter,
 
     /// HLL approximate cardinality of endpoints that are connecting
     pub connecting_endpoints: HyperLogLogVec<StaticLabelSet<Protocol>, 32>,
 
     /// Number of endpoints affected by errors of a given classification
     pub endpoints_affected_by_errors: HyperLogLogVec<StaticLabelSet<crate::error::ErrorKind>, 32>,
-
-    /// Number of endpoints affected by authentication rate limits
-    pub endpoints_auth_rate_limits: HyperLogLog<32>,
-
-    /// Number of invalid endpoints (per protocol, per rejected).
-    pub invalid_endpoints_total: CounterVec<InvalidEndpointsSet>,
 
     /// Number of retries (per outcome, per retry_type).
     #[metric(metadata = Thresholds::with_buckets([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]))]
@@ -165,8 +148,25 @@ pub struct ProxyMetrics {
     pub connect_compute_lock: ApiLockMetrics,
 
     #[metric(namespace = "scram_pool")]
-    #[metric(init = thread_pool)]
-    pub scram_pool: Arc<ThreadPoolMetrics>,
+    pub scram_pool: OnceLockWrapper<Arc<ThreadPoolMetrics>>,
+}
+
+/// A Wrapper over [`OnceLock`] to implement [`MetricGroup`].
+pub struct OnceLockWrapper<T>(pub OnceLock<T>);
+
+impl<T> Default for OnceLockWrapper<T> {
+    fn default() -> Self {
+        Self(OnceLock::new())
+    }
+}
+
+impl<Enc: Encoding, T: MetricGroup<Enc>> MetricGroup<Enc> for OnceLockWrapper<T> {
+    fn collect_group_into(&self, enc: &mut Enc) -> Result<(), Enc::Err> {
+        if let Some(inner) = self.0.get() {
+            inner.collect_group_into(enc)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(MetricGroup)]
@@ -234,20 +234,6 @@ impl std::fmt::Display for Protocol {
 pub enum Bool {
     True,
     False,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "outcome")]
-pub enum Outcome {
-    Success,
-    Failed,
-}
-
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "outcome")]
-pub enum CacheOutcome {
-    Hit,
-    Miss,
 }
 
 #[derive(LabelGroup)]
@@ -405,19 +391,18 @@ pub enum Waiting {
 #[label(singleton = "kind")]
 #[allow(clippy::enum_variant_names)]
 pub enum RedisMsgKind {
-    HSet,
-    HSetMultiple,
+    Set,
+    Get,
+    Expire,
     HGet,
-    HGetAll,
-    HDel,
 }
 
 #[derive(Default, Clone)]
 pub struct LatencyAccumulated {
-    cplane: time::Duration,
-    client: time::Duration,
-    compute: time::Duration,
-    retry: time::Duration,
+    pub cplane: time::Duration,
+    pub client: time::Duration,
+    pub compute: time::Duration,
+    pub retry: time::Duration,
 }
 
 impl std::fmt::Display for LatencyAccumulated {
@@ -583,14 +568,6 @@ impl From<bool> for Bool {
 }
 
 #[derive(LabelGroup)]
-#[label(set = InvalidEndpointsSet)]
-pub struct InvalidEndpointsGroup {
-    pub protocol: Protocol,
-    pub rejected: Bool,
-    pub outcome: ConnectOutcome,
-}
-
-#[derive(LabelGroup)]
 #[label(set = RetriesMetricSet)]
 pub struct RetriesMetricGroup {
     pub outcome: ConnectOutcome,
@@ -610,11 +587,11 @@ pub enum RedisEventsCount {
     BranchCreated,
     ProjectCreated,
     CancelSession,
-    PasswordUpdate,
-    AllowedIpsUpdate,
-    AllowedVpcEndpointIdsUpdateForProjects,
-    AllowedVpcEndpointIdsUpdateForAllProjectsInOrg,
-    BlockPublicOrVpcAccessUpdate,
+    InvalidateRole,
+    InvalidateEndpoint,
+    InvalidateProject,
+    InvalidateProjects,
+    InvalidateOrg,
 }
 
 pub struct ThreadPoolWorkers(usize);
@@ -688,4 +665,101 @@ pub struct ThreadPoolMetrics {
     pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
     pub worker_task_skips_total: CounterVec<ThreadPoolWorkers>,
+}
+
+#[derive(MetricGroup, Default)]
+pub struct ServiceMetrics {
+    pub info: InfoMetric<ServiceInfo>,
+}
+
+#[derive(Default)]
+pub struct ServiceInfo {
+    pub state: ServiceState,
+}
+
+impl ServiceInfo {
+    pub const fn running() -> Self {
+        ServiceInfo {
+            state: ServiceState::Running,
+        }
+    }
+
+    pub const fn terminating() -> Self {
+        ServiceInfo {
+            state: ServiceState::Terminating,
+        }
+    }
+}
+
+impl LabelGroup for ServiceInfo {
+    fn visit_values(&self, v: &mut impl LabelGroupVisitor) {
+        const STATE: &LabelName = LabelName::from_str("state");
+        v.write_value(STATE, &self.state);
+    }
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug, Default)]
+#[label(singleton = "state")]
+pub enum ServiceState {
+    #[default]
+    Init,
+    Running,
+    Terminating,
+}
+
+#[derive(MetricGroup)]
+#[metric(new())]
+pub struct CacheMetrics {
+    /// The capacity of the cache
+    pub capacity: GaugeVec<StaticLabelSet<CacheKind>>,
+    /// The total number of entries inserted into the cache
+    pub inserted_total: CounterVec<StaticLabelSet<CacheKind>>,
+    /// The total number of entries removed from the cache
+    pub evicted_total: CounterVec<CacheEvictionSet>,
+    /// The total number of cache requests
+    pub request_total: CounterVec<CacheOutcomeSet>,
+}
+
+impl Default for CacheMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+#[label(singleton = "cache")]
+pub enum CacheKind {
+    NodeInfo,
+    ProjectInfoEndpoints,
+    ProjectInfoRoles,
+    Schema,
+    Pbkdf2,
+}
+
+#[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
+pub enum CacheRemovalCause {
+    Expired,
+    Explicit,
+    Replaced,
+    Size,
+}
+
+#[derive(LabelGroup)]
+#[label(set = CacheEvictionSet)]
+pub struct CacheEviction {
+    pub cache: CacheKind,
+    pub cause: CacheRemovalCause,
+}
+
+#[derive(FixedCardinalityLabel, Copy, Clone)]
+pub enum CacheOutcome {
+    Hit,
+    Miss,
+}
+
+#[derive(LabelGroup)]
+#[label(set = CacheOutcomeSet)]
+pub struct CacheOutcomeGroup {
+    pub cache: CacheKind,
+    pub outcome: CacheOutcome,
 }

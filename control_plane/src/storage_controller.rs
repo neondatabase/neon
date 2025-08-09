@@ -6,6 +6,8 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::background_process;
+use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper0::Uri;
 use nix::unistd::Pid;
@@ -22,6 +24,7 @@ use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use pem::Pem;
 use postgres_backend::AuthType;
 use reqwest::{Method, Response};
+use safekeeper_api::PgMajorVersion;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -30,9 +33,6 @@ use url::Url;
 use utils::auth::{Claims, Scope, encode_from_key_file};
 use utils::id::{NodeId, TenantId};
 use whoami::username;
-
-use crate::background_process;
-use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 
 pub struct StorageController {
     env: LocalEnv,
@@ -48,7 +48,7 @@ pub struct StorageController {
 
 const COMMAND: &str = "storage_controller";
 
-const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
+const STORAGE_CONTROLLER_POSTGRES_VERSION: PgMajorVersion = PgMajorVersion::PG16;
 
 const DB_NAME: &str = "storage_controller";
 
@@ -56,6 +56,7 @@ pub struct NeonStorageControllerStartArgs {
     pub instance_id: u8,
     pub base_port: Option<u16>,
     pub start_timeout: humantime::Duration,
+    pub handle_ps_local_disk_loss: Option<bool>,
 }
 
 impl NeonStorageControllerStartArgs {
@@ -64,6 +65,7 @@ impl NeonStorageControllerStartArgs {
             instance_id: 1,
             base_port: None,
             start_timeout,
+            handle_ps_local_disk_loss: None,
         }
     }
 }
@@ -167,7 +169,7 @@ impl StorageController {
     fn storage_controller_instance_dir(&self, instance_id: u8) -> PathBuf {
         self.env
             .base_data_dir
-            .join(format!("storage_controller_{}", instance_id))
+            .join(format!("storage_controller_{instance_id}"))
     }
 
     fn pid_file(&self, instance_id: u8) -> Utf8PathBuf {
@@ -184,9 +186,15 @@ impl StorageController {
     /// to other versions if that one isn't found.  Some automated tests create circumstances
     /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
     async fn get_pg_dir(&self, dir_name: &str) -> anyhow::Result<Utf8PathBuf> {
-        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 16, 15, 14];
+        const PREFER_VERSIONS: [PgMajorVersion; 5] = [
+            STORAGE_CONTROLLER_POSTGRES_VERSION,
+            PgMajorVersion::PG16,
+            PgMajorVersion::PG15,
+            PgMajorVersion::PG14,
+            PgMajorVersion::PG17,
+        ];
 
-        for v in prefer_versions {
+        for v in PREFER_VERSIONS {
             let path = Utf8PathBuf::from_path_buf(self.env.pg_dir(v, dir_name)?).unwrap();
             if tokio::fs::try_exists(&path).await? {
                 return Ok(path);
@@ -220,7 +228,7 @@ impl StorageController {
             "-d",
             DB_NAME,
             "-p",
-            &format!("{}", postgres_port),
+            &format!("{postgres_port}"),
         ];
         let pg_lib_dir = self.get_pg_lib_dir().await.unwrap();
         let envs = [
@@ -263,7 +271,7 @@ impl StorageController {
                 "-h",
                 "localhost",
                 "-p",
-                &format!("{}", postgres_port),
+                &format!("{postgres_port}"),
                 "-U",
                 &username(),
                 "-O",
@@ -425,7 +433,7 @@ impl StorageController {
             // from `LocalEnv`'s config file (`.neon/config`).
             tokio::fs::write(
                 &pg_data_path.join("postgresql.conf"),
-                format!("port = {}\nfsync=off\n", postgres_port),
+                format!("port = {postgres_port}\nfsync=off\n"),
             )
             .await?;
 
@@ -477,7 +485,7 @@ impl StorageController {
             self.setup_database(postgres_port).await?;
         }
 
-        let database_url = format!("postgresql://localhost:{}/{DB_NAME}", postgres_port);
+        let database_url = format!("postgresql://localhost:{postgres_port}/{DB_NAME}");
 
         // We support running a startup SQL script to fiddle with the database before we launch storcon.
         // This is used by the test suite.
@@ -508,7 +516,7 @@ impl StorageController {
         drop(client);
         conn.await??;
 
-        let addr = format!("{}:{}", host, listen_port);
+        let addr = format!("{host}:{listen_port}");
         let address_for_peers = Uri::builder()
             .scheme(scheme)
             .authority(addr.clone())
@@ -555,6 +563,10 @@ impl StorageController {
 
         if self.config.use_local_compute_notifications {
             args.push("--use-local-compute-notifications".to_string());
+        }
+
+        if let Some(value) = self.config.kick_secondary_downloads {
+            args.push(format!("--kick-secondary-downloads={value}"));
         }
 
         if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
@@ -628,17 +640,47 @@ impl StorageController {
             args.push("--timelines-onto-safekeepers".to_string());
         }
 
-        println!("Starting storage controller");
+        // neon_local is used in test environments where we often have less than 3 safekeepers.
+        if self.config.timeline_safekeeper_count.is_some() || self.env.safekeepers.len() < 3 {
+            let sk_cnt = self
+                .config
+                .timeline_safekeeper_count
+                .unwrap_or(self.env.safekeepers.len());
+
+            args.push(format!("--timeline-safekeeper-count={sk_cnt}"));
+        }
+
+        if let Some(duration) = self.config.shard_split_request_timeout {
+            args.push(format!(
+                "--shard-split-request-timeout={}",
+                humantime::Duration::from(duration)
+            ));
+        }
+
+        let mut envs = vec![
+            ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+            ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+        ];
+
+        if let Some(posthog_config) = &self.config.posthog_config {
+            envs.push((
+                "POSTHOG_CONFIG".to_string(),
+                serde_json::to_string(posthog_config)?,
+            ));
+        }
+
+        println!("Starting storage controller at {scheme}://{host}:{listen_port}");
+
+        if start_args.handle_ps_local_disk_loss.unwrap_or_default() {
+            args.push("--handle-ps-local-disk-loss".to_string());
+        }
 
         background_process::start_process(
             COMMAND,
             &instance_dir,
             &self.env.storage_controller_bin(),
             args,
-            vec![
-                ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-            ],
+            envs,
             background_process::InitialPidFile::Create(self.pid_file(start_args.instance_id)),
             &start_args.start_timeout,
             || async {
@@ -802,9 +844,9 @@ impl StorageController {
             builder = builder.json(&body)
         }
         if let Some(private_key) = &self.private_key {
-            println!("Getting claims for path {}", path);
+            println!("Getting claims for path {path}");
             if let Some(required_claims) = Self::get_claims_for_path(&path)? {
-                println!("Got claims {:?} for path {}", required_claims, path);
+                println!("Got claims {required_claims:?} for path {path}");
                 let jwt_token = encode_from_key_file(&required_claims, private_key)?;
                 builder = builder.header(
                     reqwest::header::AUTHORIZATION,

@@ -9,8 +9,8 @@ use log::*;
 use postgres::Client;
 use postgres::types::PgLsn;
 use postgres_ffi::{
-    WAL_SEGMENT_SIZE, XLOG_BLCKSZ, XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD,
-    XLOG_SIZE_OF_XLOG_SHORT_PHD,
+    PgMajorVersion, WAL_SEGMENT_SIZE, XLOG_BLCKSZ, XLOG_SIZE_OF_XLOG_LONG_PHD,
+    XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
 };
 
 macro_rules! xlog_utils_test {
@@ -29,7 +29,7 @@ macro_rules! xlog_utils_test {
 postgres_ffi::for_all_postgres_versions! { xlog_utils_test }
 
 pub struct Conf {
-    pub pg_version: u32,
+    pub pg_version: PgMajorVersion,
     pub pg_distrib_dir: PathBuf,
     pub datadir: PathBuf,
 }
@@ -52,11 +52,7 @@ impl Conf {
     pub fn pg_distrib_dir(&self) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
-        #[allow(clippy::manual_range_patterns)]
-        match self.pg_version {
-            14 | 15 | 16 | 17 => Ok(path.join(format!("v{}", self.pg_version))),
-            _ => bail!("Unsupported postgres version: {}", self.pg_version),
-        }
+        Ok(path.join(self.pg_version.v_str()))
     }
 
     fn pg_bin_dir(&self) -> anyhow::Result<PathBuf> {

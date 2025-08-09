@@ -8,6 +8,7 @@ anyhow.workspace = true
 axum-extra.workspace = true
 axum.workspace = true
 camino.workspace = true
+clap.workspace = true
 futures.workspace = true
 jsonwebtoken.workspace = true
 prometheus.workspace = true

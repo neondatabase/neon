@@ -3,12 +3,10 @@
 
 use postgres_protocol2::message::backend::ReadyForQueryBody;
 
-pub use crate::cancel_token::CancelToken;
+pub use crate::cancel_token::{CancelToken, RawCancelToken};
 pub use crate::client::{Client, SocketConfig};
 pub use crate::config::Config;
-pub use crate::connect_raw::RawConnection;
 pub use crate::connection::Connection;
-use crate::error::DbError;
 pub use crate::error::Error;
 pub use crate::generic_client::GenericClient;
 pub use crate::query::RowStream;
@@ -18,7 +16,6 @@ pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
 pub use crate::transaction::Transaction;
 pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
-use crate::types::ToSql;
 
 /// After executing a query, the connection will be in one of these states
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -51,8 +48,8 @@ mod cancel_token;
 mod client;
 mod codec;
 pub mod config;
-mod connect;
-mod connect_raw;
+pub mod connect;
+pub mod connect_raw;
 mod connect_socket;
 mod connect_tls;
 mod connection;
@@ -94,21 +91,6 @@ impl Notification {
     }
 }
 
-/// An asynchronous message from the server.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum AsyncMessage {
-    /// A notice.
-    ///
-    /// Notices use the same format as errors, but aren't "errors" per-se.
-    Notice(DbError),
-    /// A notification.
-    ///
-    /// Connections can subscribe to notifications with the `LISTEN` command.
-    Notification(Notification),
-}
-
 /// Message returned by the `SimpleQuery` stream.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -119,10 +101,4 @@ pub enum SimpleQueryMessage {
     ///
     /// The number of rows modified or selected is returned.
     CommandComplete(u64),
-}
-
-fn slice_iter<'a>(
-    s: &'a [&'a (dyn ToSql + Sync)],
-) -> impl ExactSizeIterator<Item = &'a (dyn ToSql + Sync)> + 'a {
-    s.iter().map(|s| *s as _)
 }

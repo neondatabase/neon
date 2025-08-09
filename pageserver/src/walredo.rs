@@ -32,12 +32,13 @@ use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::key::Key;
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::TenantShardId;
+use postgres_ffi::PgMajorVersion;
 use tracing::*;
 use utils::lsn::Lsn;
 use utils::sync::gate::GateError;
 use utils::sync::heavier_once_cell;
+use wal_decoder::models::record::NeonWalRecord;
 
 use crate::config::PageServerConf;
 use crate::metrics::{
@@ -146,6 +147,16 @@ pub enum RedoAttemptType {
     GcCompaction,
 }
 
+impl std::fmt::Display for RedoAttemptType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RedoAttemptType::ReadPage => write!(f, "read page"),
+            RedoAttemptType::LegacyCompaction => write!(f, "legacy compaction"),
+            RedoAttemptType::GcCompaction => write!(f, "gc compaction"),
+        }
+    }
+}
+
 ///
 /// Public interface of WAL redo manager
 ///
@@ -165,7 +176,7 @@ impl PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         redo_attempt_type: RedoAttemptType,
     ) -> Result<Bytes, Error> {
         if records.is_empty() {
@@ -198,6 +209,7 @@ impl PostgresRedoManager {
                         self.conf.wal_redo_timeout,
                         pg_version,
                         max_retry_attempts,
+                        redo_attempt_type,
                     )
                     .await
                 };
@@ -220,6 +232,7 @@ impl PostgresRedoManager {
                 self.conf.wal_redo_timeout,
                 pg_version,
                 max_retry_attempts,
+                redo_attempt_type,
             )
             .await
         }
@@ -232,7 +245,7 @@ impl PostgresRedoManager {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn ping(&self, pg_version: u32) -> Result<(), Error> {
+    pub async fn ping(&self, pg_version: PgMajorVersion) -> Result<(), Error> {
         self.do_with_walredo_process(pg_version, |proc| async move {
             proc.ping(Duration::from_secs(1))
                 .await
@@ -342,7 +355,7 @@ impl PostgresRedoManager {
         O,
     >(
         &self,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         closure: F,
     ) -> Result<O, Error> {
         let proc: Arc<Process> = match self.redo_process.get_or_init_detached().await {
@@ -442,8 +455,9 @@ impl PostgresRedoManager {
         base_img_lsn: Lsn,
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         max_retry_attempts: u32,
+        redo_attempt_type: RedoAttemptType,
     ) -> Result<Bytes, Error> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
 
@@ -484,17 +498,28 @@ impl PostgresRedoManager {
                 );
 
                 if let Err(e) = result.as_ref() {
-                    error!(
-                        "error applying {} WAL records {}..{} ({} bytes) to key {key}, from base image with LSN {} to reconstruct page image at LSN {} n_attempts={}: {:?}",
-                        records.len(),
-                        records.first().map(|p| p.0).unwrap_or(Lsn(0)),
-                        records.last().map(|p| p.0).unwrap_or(Lsn(0)),
-                        nbytes,
-                        base_img_lsn,
-                        lsn,
-                        n_attempts,
-                        e,
-                    );
+                    macro_rules! message {
+                        ($level:tt) => {
+                            $level!(
+                                "error applying {} WAL records {}..{} ({} bytes) to key {} during {}, from base image with LSN {} to reconstruct page image at LSN {} n_attempts={}: {:?}",
+                                records.len(),
+                                records.first().map(|p| p.0).unwrap_or(Lsn(0)),
+                                records.last().map(|p| p.0).unwrap_or(Lsn(0)),
+                                nbytes,
+                                key,
+                                redo_attempt_type,
+                                base_img_lsn,
+                                lsn,
+                                n_attempts,
+                                e,
+                            )
+                        }
+                    }
+                    match redo_attempt_type {
+                        RedoAttemptType::ReadPage => message!(error),
+                        RedoAttemptType::LegacyCompaction => message!(error),
+                        RedoAttemptType::GcCompaction => message!(warn),
+                    }
                 }
 
                 result.map_err(Error::Other)
@@ -566,27 +591,61 @@ impl PostgresRedoManager {
 }
 
 #[cfg(test)]
+pub(crate) mod harness {
+    use super::PostgresRedoManager;
+    use crate::config::PageServerConf;
+    use utils::{id::TenantId, shard::TenantShardId};
+
+    pub struct RedoHarness {
+        // underscored because unused, except for removal at drop
+        _repo_dir: camino_tempfile::Utf8TempDir,
+        pub manager: PostgresRedoManager,
+        tenant_shard_id: TenantShardId,
+    }
+
+    impl RedoHarness {
+        pub fn new() -> anyhow::Result<Self> {
+            crate::tenant::harness::setup_logging();
+
+            let repo_dir = camino_tempfile::tempdir()?;
+            let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
+            let conf = Box::leak(Box::new(conf));
+            let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
+
+            let manager = PostgresRedoManager::new(conf, tenant_shard_id);
+
+            Ok(RedoHarness {
+                _repo_dir: repo_dir,
+                manager,
+                tenant_shard_id,
+            })
+        }
+        pub fn span(&self) -> tracing::Span {
+            tracing::info_span!("RedoHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
     use bytes::Bytes;
     use pageserver_api::key::Key;
-    use pageserver_api::record::NeonWalRecord;
-    use pageserver_api::shard::TenantShardId;
+    use postgres_ffi::PgMajorVersion;
     use tracing::Instrument;
-    use utils::id::TenantId;
     use utils::lsn::Lsn;
+    use wal_decoder::models::record::NeonWalRecord;
 
-    use super::PostgresRedoManager;
-    use crate::config::PageServerConf;
     use crate::walredo::RedoAttemptType;
+    use crate::walredo::harness::RedoHarness;
 
     #[tokio::test]
     async fn test_ping() {
         let h = RedoHarness::new().unwrap();
 
         h.manager
-            .ping(14)
+            .ping(PgMajorVersion::PG14)
             .instrument(h.span())
             .await
             .expect("ping should work");
@@ -612,7 +671,7 @@ mod tests {
                 Lsn::from_str("0/16E2408").unwrap(),
                 None,
                 short_records(),
-                14,
+                PgMajorVersion::PG14,
                 RedoAttemptType::ReadPage,
             )
             .instrument(h.span())
@@ -641,7 +700,7 @@ mod tests {
                 Lsn::from_str("0/16E2408").unwrap(),
                 None,
                 short_records(),
-                14,
+                PgMajorVersion::PG14,
                 RedoAttemptType::ReadPage,
             )
             .instrument(h.span())
@@ -663,7 +722,7 @@ mod tests {
                 Lsn::INVALID,
                 None,
                 short_records(),
-                16, /* 16 currently produces stderr output on startup, which adds a nice extra edge */
+                PgMajorVersion::PG16, /* 16 currently produces stderr output on startup, which adds a nice extra edge */
                 RedoAttemptType::ReadPage,
             )
             .instrument(h.span())
@@ -689,34 +748,5 @@ mod tests {
                 }
             )
         ]
-    }
-
-    struct RedoHarness {
-        // underscored because unused, except for removal at drop
-        _repo_dir: camino_tempfile::Utf8TempDir,
-        manager: PostgresRedoManager,
-        tenant_shard_id: TenantShardId,
-    }
-
-    impl RedoHarness {
-        fn new() -> anyhow::Result<Self> {
-            crate::tenant::harness::setup_logging();
-
-            let repo_dir = camino_tempfile::tempdir()?;
-            let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
-            let conf = Box::leak(Box::new(conf));
-            let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
-
-            let manager = PostgresRedoManager::new(conf, tenant_shard_id);
-
-            Ok(RedoHarness {
-                _repo_dir: repo_dir,
-                manager,
-                tenant_shard_id,
-            })
-        }
-        fn span(&self) -> tracing::Span {
-            tracing::info_span!("RedoHarness", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug())
-        }
     }
 }

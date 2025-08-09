@@ -4,8 +4,10 @@
 //! This allows connecting to pods/services running in the same Kubernetes cluster from
 //! the outside. Similar to an ingress controller for HTTPS.
 
+use std::io;
+use std::net::SocketAddr;
 use std::path::Path;
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail, ensure};
 use clap::Arg;
@@ -17,17 +19,20 @@ use rustls::pki_types::{DnsName, PrivateKeyDer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info};
 use utils::project_git_version;
 use utils::sentry_init::init_sentry;
 
 use crate::context::RequestContext;
-use crate::metrics::{Metrics, ThreadPoolMetrics};
+use crate::metrics::{Metrics, ServiceInfo};
+use crate::pglb::TlsRequired;
+use crate::pqproto::FeStartupPacket;
 use crate::protocol2::ConnectionInfo;
-use crate::proxy::{ErrorSource, copy_bidirectional_client_compute, run_until_cancelled};
+use crate::proxy::{ErrorSource, copy_bidirectional_client_compute};
 use crate::stream::{PqStream, Stream};
-use crate::tls::TlsServerEndPoint;
+use crate::util::run_until_cancelled;
 
 project_git_version!(GIT_VERSION);
 
@@ -71,11 +76,9 @@ fn cli() -> clap::Command {
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    let _logging_guard = crate::logging::init().await?;
+    let _logging_guard = crate::logging::init()?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
-
-    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
 
     let args = cli().get_matches();
     let destination: String = args
@@ -84,7 +87,7 @@ pub async fn run() -> anyhow::Result<()> {
         .parse()?;
 
     // Configure TLS
-    let (tls_config, tls_server_end_point): (Arc<rustls::ServerConfig>, TlsServerEndPoint) = match (
+    let tls_config = match (
         args.get_one::<String>("tls-key"),
         args.get_one::<String>("tls-cert"),
     ) {
@@ -117,7 +120,6 @@ pub async fn run() -> anyhow::Result<()> {
         dest.clone(),
         tls_config.clone(),
         None,
-        tls_server_end_point,
         proxy_listener,
         cancellation_token.clone(),
     ))
@@ -127,11 +129,16 @@ pub async fn run() -> anyhow::Result<()> {
         dest,
         tls_config,
         Some(compute_tls_config),
-        tls_server_end_point,
         proxy_listener_compute_tls,
         cancellation_token.clone(),
     ))
     .map(crate::error::flatten_err);
+
+    Metrics::get()
+        .service
+        .info
+        .set_label(ServiceInfo::running());
+
     let signals_task = tokio::spawn(crate::signals::handle(cancellation_token, || {}));
 
     // the signal task cant ever succeed.
@@ -154,7 +161,7 @@ pub async fn run() -> anyhow::Result<()> {
 pub(super) fn parse_tls(
     key_path: &Path,
     cert_path: &Path,
-) -> anyhow::Result<(Arc<rustls::ServerConfig>, TlsServerEndPoint)> {
+) -> anyhow::Result<Arc<rustls::ServerConfig>> {
     let key = {
         let key_bytes = std::fs::read(key_path).context("TLS key file")?;
 
@@ -187,10 +194,6 @@ pub(super) fn parse_tls(
             })?
     };
 
-    // needed for channel bindings
-    let first_cert = cert_chain.first().context("missing certificate")?;
-    let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
-
     let tls_config =
         rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
@@ -199,14 +202,13 @@ pub(super) fn parse_tls(
             .with_single_cert(cert_chain, key)?
             .into();
 
-    Ok((tls_config, tls_server_end_point))
+    Ok(tls_config)
 }
 
 pub(super) async fn task_main(
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
     compute_tls_config: Option<Arc<rustls::ClientConfig>>,
-    tls_server_end_point: TlsServerEndPoint,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -232,7 +234,6 @@ pub(super) async fn task_main(
                     .set_nodelay(true)
                     .context("failed to set socket option")?;
 
-                info!(%peer_addr, "serving");
                 let ctx = RequestContext::new(
                     session_id,
                     ConnectionInfo {
@@ -240,19 +241,18 @@ pub(super) async fn task_main(
                         extra: None,
                     },
                     crate::metrics::Protocol::SniRouter,
-                    "sni",
                 );
-                handle_client(
-                    ctx,
-                    dest_suffix,
-                    tls_config,
-                    compute_tls_config,
-                    tls_server_end_point,
-                    socket,
-                )
-                .await
+                handle_client(ctx, dest_suffix, tls_config, compute_tls_config, socket).await
             }
             .unwrap_or_else(|e| {
+                if let Some(FirstMessage(io_error)) = e.downcast_ref() {
+                    // this is noisy. if we get EOF on the very first message that's likely
+                    // just NLB doing a healthcheck.
+                    if io_error.kind() == io::ErrorKind::UnexpectedEof {
+                        return;
+                    }
+                }
+
                 // Acknowledge that the task has finished with an error.
                 error!("per-client task finished with an error: {e:#}");
             })
@@ -269,55 +269,33 @@ pub(super) async fn task_main(
     Ok(())
 }
 
-const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+struct FirstMessage(io::Error);
 
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     ctx: &RequestContext,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
-    tls_server_end_point: TlsServerEndPoint,
-) -> anyhow::Result<Stream<S>> {
-    let mut stream = PqStream::new(Stream::from_raw(raw_stream));
-
-    let msg = stream.read_startup_packet().await?;
-    use pq_proto::FeStartupPacket::SslRequest;
+) -> anyhow::Result<TlsStream<S>> {
+    let (mut stream, msg) = PqStream::parse_startup(Stream::from_raw(raw_stream))
+        .await
+        .map_err(FirstMessage)?;
 
     match msg {
-        SslRequest { direct: false } => {
-            stream
-                .write_message(&pq_proto::BeMessage::EncryptionResponse(true))
-                .await?;
+        FeStartupPacket::SslRequest { direct: None } => {
+            let raw = stream.accept_tls().await?;
 
-            // Upgrade raw stream into a secure TLS-backed stream.
-            // NOTE: We've consumed `tls`; this fact will be used later.
-
-            let (raw, read_buf) = stream.into_inner();
-            // TODO: Normally, client doesn't send any data before
-            // server says TLS handshake is ok and read_buf is empty.
-            // However, you could imagine pipelining of postgres
-            // SSLRequest + TLS ClientHello in one hunk similar to
-            // pipelining in our node js driver. We should probably
-            // support that by chaining read_buf with the stream.
-            if !read_buf.is_empty() {
-                bail!("data is sent before server replied with EncryptionResponse");
-            }
-
-            Ok(Stream::Tls {
-                tls: Box::new(
-                    raw.upgrade(tls_config, !ctx.has_private_peer_addr())
-                        .await?,
-                ),
-                tls_server_end_point,
-            })
+            Ok(raw
+                .upgrade(tls_config, !ctx.has_private_peer_addr())
+                .await?)
         }
         unexpected => {
             info!(
                 ?unexpected,
                 "unexpected startup packet, rejecting connection"
             );
-            stream
-                .throw_error_str(ERR_INSECURE_CONNECTION, crate::error::ErrorKind::User, None)
-                .await?
+            Err(stream.throw_error(TlsRequired, None).await)?
         }
     }
 }
@@ -327,15 +305,18 @@ async fn handle_client(
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
     compute_tls_config: Option<Arc<rustls::ClientConfig>>,
-    tls_server_end_point: TlsServerEndPoint,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
-    let mut tls_stream = ssl_handshake(&ctx, stream, tls_config, tls_server_end_point).await?;
+    let mut tls_stream = ssl_handshake(&ctx, stream, tls_config).await?;
 
     // Cut off first part of the SNI domain
     // We receive required destination details in the format of
     //   `{k8s_service_name}--{k8s_namespace}--{port}.non-sni-domain`
-    let sni = tls_stream.sni_hostname().ok_or(anyhow!("SNI missing"))?;
+    let sni = tls_stream
+        .get_ref()
+        .1
+        .server_name()
+        .ok_or(anyhow!("SNI missing"))?;
     let dest: Vec<&str> = sni
         .split_once('.')
         .context("invalid SNI")?
@@ -394,6 +375,7 @@ async fn handle_client(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Connection {
     Raw(tokio::net::TcpStream),
     Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),

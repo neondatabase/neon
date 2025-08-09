@@ -111,6 +111,14 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*stalling layer flushes for compaction backpressure.*",
     ".*layer roll waiting for flush due to compaction backpressure.*",
     ".*BatchSpanProcessor.*",
+    # Can happen in tests that purposely wipe pageserver "local disk" data.
+    ".*Local data loss suspected.*",
+    # Too many frozen layers error is normal during intensive benchmarks
+    ".*too many frozen layers.*",
+    ".*Failed to resolve tenant shard after.*",
+    # Expected warnings when pageserver has not refreshed GC info yet
+    ".*pitr LSN/interval not found, skipping force image creation LSN calculation.*",
+    ".*No broker updates received for a while.*",
     *(
         [
             r".*your platform is not a supported production platform, ignoing request for O_DIRECT; this could hide alignment bugs.*"
@@ -144,6 +152,8 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     ".*reconciler.*neon_local error.*",
     # Tenant rate limits may fire in tests that submit lots of API requests.
     ".*tenant \\S+ is rate limited.*",
+    # Reconciliations may get stuck/delayed e.g. in chaos tests.
+    ".*background_reconcile: Shard reconciliation is stuck.*",
 ]
 
 

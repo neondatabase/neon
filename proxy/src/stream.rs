@@ -2,19 +2,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{io, task};
 
-use bytes::BytesMut;
-use pq_proto::framed::{ConnectionError, Framed};
-use pq_proto::{BeMessage, FeMessage, FeStartupPacket, ProtocolError};
 use rustls::ServerConfig;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_rustls::server::TlsStream;
-use tracing::debug;
 
-use crate::control_plane::messages::ColdStartInfo;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::Metrics;
+use crate::pqproto::{
+    BeMessage, FE_PASSWORD_MESSAGE, FeStartupPacket, SQLSTATE_INTERNAL_ERROR, WriteBuf,
+    read_message, read_startup,
+};
 use crate::tls::TlsServerEndPoint;
 
 /// Stream wrapper which implements libpq's protocol.
@@ -23,58 +21,77 @@ use crate::tls::TlsServerEndPoint;
 /// or [`AsyncWrite`] to prevent subtle errors (e.g. trying
 /// to pass random malformed bytes through the connection).
 pub struct PqStream<S> {
-    pub(crate) framed: Framed<S>,
+    stream: S,
+    read: Vec<u8>,
+    write: WriteBuf,
 }
 
 impl<S> PqStream<S> {
-    /// Construct a new libpq protocol wrapper.
-    pub fn new(stream: S) -> Self {
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Construct a new libpq protocol wrapper over a stream without the first startup message.
+    #[cfg(test)]
+    pub fn new_skip_handshake(stream: S) -> Self {
         Self {
-            framed: Framed::new(stream),
+            stream,
+            read: Vec::new(),
+            write: WriteBuf::new(),
         }
-    }
-
-    /// Extract the underlying stream and read buffer.
-    pub fn into_inner(self) -> (S, BytesMut) {
-        self.framed.into_inner()
-    }
-
-    /// Get a shared reference to the underlying stream.
-    pub(crate) fn get_ref(&self) -> &S {
-        self.framed.get_ref()
     }
 }
 
-fn err_connection() -> io::Error {
-    io::Error::new(io::ErrorKind::ConnectionAborted, "connection is lost")
+impl<S: AsyncRead + AsyncWrite + Unpin> PqStream<S> {
+    /// Construct a new libpq protocol wrapper and read the first startup message.
+    ///
+    /// This is not cancel safe.
+    pub async fn parse_startup(mut stream: S) -> io::Result<(Self, FeStartupPacket)> {
+        let startup = read_startup(&mut stream).await?;
+        Ok((
+            Self {
+                stream,
+                read: Vec::new(),
+                write: WriteBuf::new(),
+            },
+            startup,
+        ))
+    }
+
+    /// Tell the client that encryption is not supported.
+    ///
+    /// This is not cancel safe
+    pub async fn reject_encryption(&mut self) -> io::Result<FeStartupPacket> {
+        // N for No.
+        self.write.encryption(b'N');
+        self.flush().await?;
+        read_startup(&mut self.stream).await
+    }
 }
 
 impl<S: AsyncRead + Unpin> PqStream<S> {
-    /// Receive [`FeStartupPacket`], which is a first packet sent by a client.
-    pub async fn read_startup_packet(&mut self) -> io::Result<FeStartupPacket> {
-        self.framed
-            .read_startup_message()
-            .await
-            .map_err(ConnectionError::into_io_error)?
-            .ok_or_else(err_connection)
-    }
-
-    async fn read_message(&mut self) -> io::Result<FeMessage> {
-        self.framed
-            .read_message()
-            .await
-            .map_err(ConnectionError::into_io_error)?
-            .ok_or_else(err_connection)
-    }
-
-    pub(crate) async fn read_password_message(&mut self) -> io::Result<bytes::Bytes> {
-        match self.read_message().await? {
-            FeMessage::PasswordMessage(msg) => Ok(msg),
-            bad => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unexpected message type: {bad:?}"),
-            )),
+    /// Read a raw postgres packet, which will respect the max length requested.
+    /// This is not cancel safe.
+    async fn read_raw_expect(&mut self, tag: u8, max: u32) -> io::Result<&mut [u8]> {
+        let (actual_tag, msg) = read_message(&mut self.stream, &mut self.read, max).await?;
+        if actual_tag != tag {
+            return Err(io::Error::other(format!(
+                "incorrect message tag, expected {:?}, got {:?}",
+                tag as char, actual_tag as char,
+            )));
         }
+        Ok(msg)
+    }
+
+    /// Read a postgres password message, which will respect the max length requested.
+    /// This is not cancel safe.
+    pub async fn read_password_message(&mut self) -> io::Result<&mut [u8]> {
+        // passwords are usually pretty short
+        // and SASL SCRAM messages are no longer than 256 bytes in my testing
+        // (a few hashes and random bytes, encoded into base64).
+        const MAX_PASSWORD_LENGTH: u32 = 512;
+        self.read_raw_expect(FE_PASSWORD_MESSAGE, MAX_PASSWORD_LENGTH)
+            .await
     }
 }
 
@@ -82,6 +99,16 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
 pub struct ReportedError {
     source: anyhow::Error,
     error_kind: ErrorKind,
+}
+
+impl ReportedError {
+    pub fn new(e: impl UserFacingError + Into<anyhow::Error>) -> Self {
+        let error_kind = e.get_error_kind();
+        Self {
+            source: e.into(),
+            error_kind,
+        }
+    }
 }
 
 impl std::fmt::Display for ReportedError {
@@ -102,109 +129,74 @@ impl ReportableError for ReportedError {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-enum ErrorTag {
-    #[serde(rename = "proxy")]
-    Proxy,
-    #[serde(rename = "compute")]
-    Compute,
-    #[serde(rename = "client")]
-    Client,
-    #[serde(rename = "controlplane")]
-    ControlPlane,
-    #[serde(rename = "other")]
-    Other,
-}
-
-impl From<ErrorKind> for ErrorTag {
-    fn from(error_kind: ErrorKind) -> Self {
-        match error_kind {
-            ErrorKind::User => Self::Client,
-            ErrorKind::ClientDisconnect => Self::Client,
-            ErrorKind::RateLimit => Self::Proxy,
-            ErrorKind::ServiceRateLimit => Self::Proxy, // considering rate limit as proxy error for SLI
-            ErrorKind::Quota => Self::Proxy,
-            ErrorKind::Service => Self::Proxy,
-            ErrorKind::ControlPlane => Self::ControlPlane,
-            ErrorKind::Postgres => Self::Other,
-            ErrorKind::Compute => Self::Compute,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "snake_case")]
-struct ProbeErrorData {
-    tag: ErrorTag,
-    msg: String,
-    cold_start_info: Option<ColdStartInfo>,
-}
-
 impl<S: AsyncWrite + Unpin> PqStream<S> {
-    /// Write the message into an internal buffer, but don't flush the underlying stream.
-    pub(crate) fn write_message_noflush(
-        &mut self,
-        message: &BeMessage<'_>,
-    ) -> io::Result<&mut Self> {
-        self.framed
-            .write_message(message)
-            .map_err(ProtocolError::into_io_error)?;
-        Ok(self)
+    /// Tell the client that we are willing to accept SSL.
+    /// This is not cancel safe
+    pub async fn accept_tls(mut self) -> io::Result<S> {
+        // S for SSL.
+        self.write.encryption(b'S');
+        self.flush().await?;
+        Ok(self.stream)
     }
 
-    /// Write the message into an internal buffer and flush it.
-    pub async fn write_message(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self> {
-        self.write_message_noflush(message)?;
-        self.flush().await?;
-        Ok(self)
+    /// Assert that we are using direct TLS.
+    pub fn accept_direct_tls(self) -> S {
+        self.stream
+    }
+
+    /// Write a raw message to the internal buffer.
+    pub fn write_raw(&mut self, size_hint: usize, tag: u8, f: impl FnOnce(&mut Vec<u8>)) {
+        self.write.write_raw(size_hint, tag, f);
+    }
+
+    /// Write the message into an internal buffer
+    pub fn write_message(&mut self, message: BeMessage<'_>) {
+        message.write_message(&mut self.write);
+    }
+
+    /// Write the buffer to the socket until we have some more space again.
+    pub async fn write_if_full(&mut self) -> io::Result<()> {
+        while self.write.occupied_len() > 2048 {
+            self.stream.write_buf(&mut self.write).await?;
+        }
+
+        Ok(())
     }
 
     /// Flush the output buffer into the underlying stream.
-    pub(crate) async fn flush(&mut self) -> io::Result<&mut Self> {
-        self.framed.flush().await?;
-        Ok(self)
+    ///
+    /// This is cancel safe.
+    pub async fn flush(&mut self) -> io::Result<()> {
+        self.stream.write_all_buf(&mut self.write).await?;
+        self.write.reset();
+
+        self.stream.flush().await?;
+
+        Ok(())
     }
 
-    /// Writes message with the given error kind to the stream.
-    /// Used only for probe queries
-    async fn write_format_message(
-        &mut self,
-        msg: &str,
-        error_kind: ErrorKind,
-        ctx: Option<&crate::context::RequestContext>,
-    ) -> String {
-        let formatted_msg = match ctx {
-            Some(ctx) if ctx.get_testodrome_id().is_some() => {
-                serde_json::to_string(&ProbeErrorData {
-                    tag: ErrorTag::from(error_kind),
-                    msg: msg.to_string(),
-                    cold_start_info: Some(ctx.cold_start_info()),
-                })
-                .unwrap_or_default()
-            }
-            _ => msg.to_string(),
-        };
-
-        // already error case, ignore client IO error
-        self.write_message(&BeMessage::ErrorResponse(&formatted_msg, None))
-            .await
-            .inspect_err(|e| debug!("write_message failed: {e}"))
-            .ok();
-
-        formatted_msg
+    /// Flush the output buffer into the underlying stream.
+    ///
+    /// This is cancel safe.
+    pub async fn flush_and_into_inner(mut self) -> io::Result<S> {
+        self.flush().await?;
+        Ok(self.stream)
     }
 
-    /// Write the error message using [`Self::write_format_message`], then re-throw it.
-    /// Allowing string literals is safe under the assumption they might not contain any runtime info.
-    /// This method exists due to `&str` not implementing `Into<anyhow::Error>`.
+    /// Write the error message to the client, then re-throw it.
+    ///
+    /// Trait [`UserFacingError`] acts as an allowlist for error types.
     /// If `ctx` is provided and has testodrome_id set, error messages will be prefixed according to error kind.
-    pub async fn throw_error_str<T>(
+    pub(crate) async fn throw_error<E>(
         &mut self,
-        msg: &'static str,
-        error_kind: ErrorKind,
+        error: E,
         ctx: Option<&crate::context::RequestContext>,
-    ) -> Result<T, ReportedError> {
-        self.write_format_message(msg, error_kind, ctx).await;
+    ) -> ReportedError
+    where
+        E: UserFacingError + Into<anyhow::Error>,
+    {
+        let error_kind = error.get_error_kind();
+        let msg = error.to_string_client();
 
         if error_kind != ErrorKind::RateLimit && error_kind != ErrorKind::User {
             tracing::info!(
@@ -214,39 +206,39 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
             );
         }
 
-        Err(ReportedError {
-            source: anyhow::anyhow!(msg),
-            error_kind,
-        })
-    }
-
-    /// Write the error message using [`Self::write_format_message`], then re-throw it.
-    /// Trait [`UserFacingError`] acts as an allowlist for error types.
-    /// If `ctx` is provided and has testodrome_id set, error messages will be prefixed according to error kind.
-    pub(crate) async fn throw_error<T, E>(
-        &mut self,
-        error: E,
-        ctx: Option<&crate::context::RequestContext>,
-    ) -> Result<T, ReportedError>
-    where
-        E: UserFacingError + Into<anyhow::Error>,
-    {
-        let error_kind = error.get_error_kind();
-        let msg = error.to_string_client();
-        self.write_format_message(&msg, error_kind, ctx).await;
-        if error_kind != ErrorKind::RateLimit && error_kind != ErrorKind::User {
-            tracing::info!(
-                kind=error_kind.to_metric_label(),
-                error=%error,
-                msg,
-                "forwarding error to user",
-            );
+        let probe_msg;
+        let mut msg = &*msg;
+        if let Some(ctx) = ctx
+            && ctx.get_testodrome_id().is_some()
+        {
+            let tag = match error_kind {
+                ErrorKind::User => "client",
+                ErrorKind::ClientDisconnect => "client",
+                ErrorKind::RateLimit => "proxy",
+                ErrorKind::ServiceRateLimit => "proxy",
+                ErrorKind::Quota => "proxy",
+                ErrorKind::Service => "proxy",
+                ErrorKind::ControlPlane => "controlplane",
+                ErrorKind::Postgres => "other",
+                ErrorKind::Compute => "compute",
+            };
+            probe_msg = typed_json::json!({
+                "tag": tag,
+                "msg": msg,
+                "cold_start_info": ctx.cold_start_info(),
+            })
+            .to_string();
+            msg = &probe_msg;
         }
 
-        Err(ReportedError {
-            source: anyhow::anyhow!(error),
-            error_kind,
-        })
+        // TODO: either preserve the error code from postgres, or assign error codes to proxy errors.
+        self.write.write_error(msg, SQLSTATE_INTERNAL_ERROR);
+
+        self.flush()
+            .await
+            .unwrap_or_else(|e| tracing::debug!("write_message failed: {e}"));
+
+        ReportedError::new(error)
     }
 }
 

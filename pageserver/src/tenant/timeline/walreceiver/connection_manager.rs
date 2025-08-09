@@ -32,9 +32,7 @@ use utils::backoff::{
 };
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
-use utils::postgres_client::{
-    ConnectionConfigArgs, PostgresClientProtocol, wal_stream_connection_config,
-};
+use utils::postgres_client::{ConnectionConfigArgs, wal_stream_connection_config};
 
 use super::walreceiver_connection::{WalConnectionStatus, WalReceiverError};
 use super::{TaskEvent, TaskHandle, TaskStateUpdate, WalReceiverConf};
@@ -102,6 +100,7 @@ pub(super) async fn connection_manager_loop_step(
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
     let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id, cancel).await?;
+    let mut broker_reset_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
     debug!("Subscribed for broker timeline updates");
 
     loop {
@@ -158,7 +157,10 @@ pub(super) async fn connection_manager_loop_step(
             // Got a new update from the broker
             broker_update = broker_subscription.message() /* TODO: review cancellation-safety */ => {
                 match broker_update {
-                    Ok(Some(broker_update)) => connection_manager_state.register_timeline_update(broker_update),
+                    Ok(Some(broker_update)) => {
+                        broker_reset_interval.reset();
+                        connection_manager_state.register_timeline_update(broker_update);
+                    },
                     Err(status) => {
                         match status.code() {
                             Code::Unknown if status.message().contains("stream closed because of a broken pipe") || status.message().contains("connection reset") || status.message().contains("error reading a body from connection") => {
@@ -177,6 +179,21 @@ pub(super) async fn connection_manager_loop_step(
                         error!("broker subscription stream ended"); // can't happen
                         return Ok(());
                     }
+                }
+            },
+
+            // If we've not received any updates from the broker from a while, are waiting for WAL
+            // and have no safekeeper connection or connection candidates, then it might be that
+            // the broker subscription is wedged. Drop the current subscription and re-subscribe
+            // with the goal of unblocking it.
+            _ = broker_reset_interval.tick() => {
+                let awaiting_lsn = wait_lsn_status.borrow().is_some();
+                let no_candidates = connection_manager_state.wal_stream_candidates.is_empty();
+                let no_connection = connection_manager_state.wal_connection.is_none();
+
+                if awaiting_lsn && no_candidates && no_connection {
+                    tracing::info!("No broker updates received for a while, but waiting for WAL. Re-setting stream ...");
+                    broker_subscription = subscribe_for_timeline_updates(broker_client, id, cancel).await?;
                 }
             },
 
@@ -991,19 +1008,12 @@ impl ConnectionManagerState {
                     return None; // no connection string, ignore sk
                 }
 
-                let (shard_number, shard_count, shard_stripe_size) = match self.conf.protocol {
-                    PostgresClientProtocol::Vanilla => {
-                        (None, None, None)
-                    },
-                    PostgresClientProtocol::Interpreted { .. } => {
-                        let shard_identity = self.timeline.get_shard_identity();
-                        (
-                            Some(shard_identity.number.0),
-                            Some(shard_identity.count.0),
-                            Some(shard_identity.stripe_size.0),
-                        )
-                    }
-                };
+                let shard_identity = self.timeline.get_shard_identity();
+                let (shard_number, shard_count, shard_stripe_size) = (
+                    Some(shard_identity.number.0),
+                    Some(shard_identity.count.0),
+                    Some(shard_identity.stripe_size.0),
+                );
 
                 let connection_conf_args = ConnectionConfigArgs {
                     protocol: self.conf.protocol,
@@ -1120,8 +1130,8 @@ impl ReconnectReason {
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::config::defaults::DEFAULT_WAL_RECEIVER_PROTOCOL;
     use url::Host;
+    use utils::postgres_client::PostgresClientProtocol;
 
     use super::*;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
@@ -1552,6 +1562,11 @@ mod tests {
             .await
             .expect("Failed to create an empty timeline for dummy wal connection manager");
 
+        let protocol = PostgresClientProtocol::Interpreted {
+            format: utils::postgres_client::InterpretedFormat::Protobuf,
+            compression: Some(utils::postgres_client::Compression::Zstd { level: 1 }),
+        };
+
         ConnectionManagerState {
             id: TenantTimelineId {
                 tenant_id: harness.tenant_shard_id.tenant_id,
@@ -1560,7 +1575,7 @@ mod tests {
             timeline,
             cancel: CancellationToken::new(),
             conf: WalReceiverConf {
-                protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
+                protocol,
                 wal_connect_timeout: Duration::from_secs(1),
                 lagging_wal_timeout: Duration::from_secs(1),
                 max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),

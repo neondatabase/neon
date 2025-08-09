@@ -159,6 +159,10 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         heartbeat_timeout: Duration::from_secs(0),
         remote_storage: None,
         max_offloader_lag_bytes: 0,
+        /* BEGIN_HADRON */
+        max_reelect_offloader_lag_bytes: 0,
+        max_timeline_disk_usage_bytes: 0,
+        /* END_HADRON */
         wal_backup_enabled: false,
         listen_pg_addr_tenant_only: None,
         advertise_pg_addr: None,
@@ -186,6 +190,14 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         ssl_ca_certs: Vec::new(),
         use_https_safekeeper_api: false,
         enable_tls_wal_service_api: false,
+        force_metric_collection_on_scrape: true,
+        /* BEGIN_HADRON */
+        enable_pull_timeline_on_startup: false,
+        advertise_pg_addr_tenant_only: None,
+        hcc_base_url: None,
+        global_disk_check_interval: Duration::from_secs(10),
+        max_global_disk_usage_ratio: 0.0,
+        /* END_HADRON */
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;
@@ -257,7 +269,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
                         let estr = e.to_string();
                         if !estr.contains("finished processing START_REPLICATION") {
                             warn!("conn {:?} error: {:?}", connection_id, e);
-                            panic!("unexpected error at safekeeper: {:#}", e);
+                            panic!("unexpected error at safekeeper: {e:#}");
                         }
                         conns.remove(&connection_id);
                         break;

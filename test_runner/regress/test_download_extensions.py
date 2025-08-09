@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import tarfile
 from enum import StrEnum
 from pathlib import Path
@@ -29,27 +28,6 @@ if TYPE_CHECKING:
     from fixtures.pg_version import PgVersion
     from pytest_httpserver import HTTPServer
     from werkzeug.wrappers.request import Request
-
-
-# use neon_env_builder_local fixture to override the default neon_env_builder fixture
-# and use a test-specific pg_install instead of shared one
-@pytest.fixture(scope="function")
-def neon_env_builder_local(
-    neon_env_builder: NeonEnvBuilder,
-    test_output_dir: Path,
-    pg_distrib_dir: Path,
-) -> NeonEnvBuilder:
-    test_local_pginstall = test_output_dir / "pg_install"
-    log.info(f"copy {pg_distrib_dir} to {test_local_pginstall}")
-
-    # We can't copy only the version that we are currently testing because other
-    # binaries like the storage controller need specific Postgres versions.
-    shutil.copytree(pg_distrib_dir, test_local_pginstall)
-
-    neon_env_builder.pg_distrib_dir = test_local_pginstall
-    log.info(f"local neon_env_builder.pg_distrib_dir: {neon_env_builder.pg_distrib_dir}")
-
-    return neon_env_builder
 
 
 @final
@@ -159,7 +137,8 @@ def test_remote_extensions(
 
     # Setup a mock nginx S3 gateway which will return our test extension.
     (host, port) = httpserver_listen_address
-    extensions_endpoint = f"http://{host}:{port}/pg-ext-s3-gateway"
+    remote_ext_base_url = f"http://{host}:{port}/pg-ext-s3-gateway"
+    log.info(f"remote extensions base URL: {remote_ext_base_url}")
 
     extension.build(pg_config, test_output_dir)
     tarball = extension.package(test_output_dir)
@@ -221,7 +200,7 @@ def test_remote_extensions(
 
     endpoint.create_remote_extension_spec(spec)
 
-    endpoint.start(remote_ext_base_url=extensions_endpoint)
+    endpoint.start(remote_ext_base_url=remote_ext_base_url)
 
     with endpoint.connect() as conn:
         with conn.cursor() as cur:
@@ -249,7 +228,7 @@ def test_remote_extensions(
     # Remove the extension files to force a redownload of the extension.
     extension.remove(test_output_dir, pg_version)
 
-    endpoint.start(remote_ext_base_url=extensions_endpoint)
+    endpoint.start(remote_ext_base_url=remote_ext_base_url)
 
     # Test that ALTER EXTENSION UPDATE statements also fetch remote extensions.
     with endpoint.connect() as conn:

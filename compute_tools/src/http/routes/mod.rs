@@ -10,10 +10,13 @@ pub(in crate::http) mod extension_server;
 pub(in crate::http) mod extensions;
 pub(in crate::http) mod failpoints;
 pub(in crate::http) mod grants;
+pub(in crate::http) mod hadron_liveness_probe;
 pub(in crate::http) mod insights;
 pub(in crate::http) mod lfc;
 pub(in crate::http) mod metrics;
 pub(in crate::http) mod metrics_json;
+pub(in crate::http) mod promote;
+pub(in crate::http) mod refresh_configuration;
 pub(in crate::http) mod status;
 pub(in crate::http) mod terminate;
 

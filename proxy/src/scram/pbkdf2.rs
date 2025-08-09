@@ -1,34 +1,56 @@
+//! For postgres password authentication, we need to perform a PBKDF2 using
+//! PRF=HMAC-SHA2-256, producing only 1 block (32 bytes) of output key.
+
+use hmac::Mac as _;
 use hmac::digest::consts::U32;
 use hmac::digest::generic_array::GenericArray;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use zeroize::Zeroize as _;
+
+use crate::metrics::Metrics;
+
+/// The Psuedo-random function used during PBKDF2 and the SCRAM-SHA-256 handshake.
+pub type Prf = hmac::Hmac<sha2::Sha256>;
+pub(crate) type Block = GenericArray<u8, U32>;
 
 pub(crate) struct Pbkdf2 {
-    hmac: Hmac<Sha256>,
-    prev: GenericArray<u8, U32>,
-    hi: GenericArray<u8, U32>,
+    hmac: Prf,
+    /// U{r-1} for whatever iteration r we are currently on.
+    prev: Block,
+    /// the output of `fold(xor, U{1}..U{r})` for whatever iteration r we are currently on.
+    hi: Block,
+    /// number of iterations left
     iterations: u32,
+}
+
+impl Drop for Pbkdf2 {
+    fn drop(&mut self) {
+        self.prev.zeroize();
+        self.hi.zeroize();
+    }
 }
 
 // inspired from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
 impl Pbkdf2 {
-    pub(crate) fn start(str: &[u8], salt: &[u8], iterations: u32) -> Self {
-        let hmac =
-            Hmac::<Sha256>::new_from_slice(str).expect("HMAC is able to accept all key sizes");
+    pub(crate) fn start(pw: &[u8], salt: &[u8], iterations: u32) -> Self {
+        // key the HMAC and derive the first block in-place
+        let mut hmac = Prf::new_from_slice(pw).expect("HMAC is able to accept all key sizes");
 
-        let prev = hmac
-            .clone()
-            .chain_update(salt)
-            .chain_update(1u32.to_be_bytes())
-            .finalize()
-            .into_bytes();
+        // U1 = PRF(Password, Salt + INT_32_BE(i))
+        // i = 1 since we only need 1 block of output.
+        hmac.update(salt);
+        hmac.update(&1u32.to_be_bytes());
+        let init_block = hmac.finalize_reset().into_bytes();
+
+        // Prf::new_from_slice will run 2 sha256 rounds.
+        // Our update + finalize run 2 sha256 rounds for each pbkdf2 round.
+        Metrics::get().proxy.sha_rounds.inc_by(4);
 
         Self {
             hmac,
-            // one consumed for the hash above
+            // one iteration spent above
             iterations: iterations - 1,
-            hi: prev,
-            prev,
+            hi: init_block,
+            prev: init_block,
         }
     }
 
@@ -36,7 +58,11 @@ impl Pbkdf2 {
         (self.iterations).clamp(0, 4096)
     }
 
-    pub(crate) fn turn(&mut self) -> std::task::Poll<[u8; 32]> {
+    /// For "fairness", we implement PBKDF2 with cooperative yielding, which is why we use this `turn`
+    /// function that only executes a fixed number of iterations before continuing.
+    ///
+    /// Task must be rescheuled if this returns [`std::task::Poll::Pending`].
+    pub(crate) fn turn(&mut self) -> std::task::Poll<Block> {
         let Self {
             hmac,
             prev,
@@ -44,23 +70,38 @@ impl Pbkdf2 {
             iterations,
         } = self;
 
-        // only do 4096 iterations per turn before sharing the thread for fairness
+        // only do up to 4096 iterations per turn for fairness
         let n = (*iterations).clamp(0, 4096);
         for _ in 0..n {
-            *prev = hmac.clone().chain_update(*prev).finalize().into_bytes();
-
-            for (hi, prev) in hi.iter_mut().zip(*prev) {
-                *hi ^= prev;
-            }
+            let next = single_round(hmac, prev);
+            xor_assign(hi, &next);
+            *prev = next;
         }
+
+        // Our update + finalize run 2 sha256 rounds for each pbkdf2 round.
+        Metrics::get().proxy.sha_rounds.inc_by(2 * n as u64);
 
         *iterations -= n;
         if *iterations == 0 {
-            std::task::Poll::Ready((*hi).into())
+            std::task::Poll::Ready(*hi)
         } else {
             std::task::Poll::Pending
         }
     }
+}
+
+#[inline(always)]
+pub fn xor_assign(x: &mut Block, y: &Block) {
+    for (x, &y) in std::iter::zip(x, y) {
+        *x ^= y;
+    }
+}
+
+#[inline(always)]
+fn single_round(prf: &mut Prf, ui: &Block) -> Block {
+    // Ui = PRF(Password, Ui-1)
+    prf.update(ui);
+    prf.finalize_reset().into_bytes()
 }
 
 #[cfg(test)]
@@ -76,11 +117,11 @@ mod tests {
         let pass = b"Ne0n_!5_50_C007";
 
         let mut job = Pbkdf2::start(pass, salt, 60000);
-        let hash = loop {
+        let hash: [u8; 32] = loop {
             let std::task::Poll::Ready(hash) = job.turn() else {
                 continue;
             };
-            break hash;
+            break hash.into();
         };
 
         let expected = pbkdf2_hmac_array::<Sha256, 32>(pass, salt, 60000);

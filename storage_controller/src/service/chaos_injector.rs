@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pageserver_api::controller_api::ShardSchedulingPolicy;
-use rand::seq::SliceRandom;
-use rand::{Rng, thread_rng};
+use rand::Rng;
+use rand::seq::{IndexedRandom, SliceRandom};
 use tokio_util::sync::CancellationToken;
 use utils::id::NodeId;
 use utils::shard::TenantShardId;
@@ -72,7 +72,7 @@ impl ChaosInjector {
             let cron_interval = self.get_cron_interval_sleep_future();
             let chaos_type = tokio::select! {
                 _ = interval.tick() => {
-                    if thread_rng().gen_bool(0.5) {
+                    if rand::rng().random_bool(0.5) {
                         ChaosEvent::MigrationsToSecondary
                     } else {
                         ChaosEvent::GracefulMigrationsAnywhere
@@ -107,7 +107,7 @@ impl ChaosInjector {
         // - Skip shards doing a graceful migration already, so that we allow these to run to
         //   completion rather than only exercising the first part and then cancelling with
         //   some other chaos.
-        !matches!(shard.get_scheduling_policy(), ShardSchedulingPolicy::Active)
+        matches!(shard.get_scheduling_policy(), ShardSchedulingPolicy::Active)
             && shard.get_preferred_node().is_none()
     }
 
@@ -134,7 +134,7 @@ impl ChaosInjector {
         let Some(new_location) = shard
             .intent
             .get_secondary()
-            .choose(&mut thread_rng())
+            .choose(&mut rand::rng())
             .cloned()
         else {
             tracing::info!(
@@ -190,7 +190,7 @@ impl ChaosInjector {
         // Pick our victims: use a hand-rolled loop rather than choose_multiple() because we want
         // to take the mutable refs from our candidates rather than ref'ing them.
         while !candidates.is_empty() && victims.len() < batch_size {
-            let i = thread_rng().gen_range(0..candidates.len());
+            let i = rand::rng().random_range(0..candidates.len());
             victims.push(candidates.swap_remove(i));
         }
 
@@ -210,7 +210,7 @@ impl ChaosInjector {
                 })
                 .collect::<Vec<_>>();
 
-            let Some(victim_node) = candidate_nodes.choose(&mut thread_rng()) else {
+            let Some(victim_node) = candidate_nodes.choose(&mut rand::rng()) else {
                 // This can happen if e.g. we are in a small region with only one pageserver per AZ.
                 tracing::info!(
                     "no candidate nodes found for migrating shard {tenant_shard_id} within its home AZ",
@@ -264,7 +264,7 @@ impl ChaosInjector {
                 out_of_home_az.len()
             );
 
-            out_of_home_az.shuffle(&mut thread_rng());
+            out_of_home_az.shuffle(&mut rand::rng());
             victims.extend(out_of_home_az.into_iter().take(batch_size));
         } else {
             tracing::info!(
@@ -274,7 +274,7 @@ impl ChaosInjector {
             );
 
             victims.extend(out_of_home_az);
-            in_home_az.shuffle(&mut thread_rng());
+            in_home_az.shuffle(&mut rand::rng());
             victims.extend(in_home_az.into_iter().take(batch_size - victims.len()));
         }
 

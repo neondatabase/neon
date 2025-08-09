@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
-use pageserver_api::models::{
+use pageserver_api::pagestream_api::{
     PagestreamBeMessage, PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
 };
 use pageserver_api::reltag::RelTag;

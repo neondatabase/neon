@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::os::fd::RawFd;
@@ -15,6 +16,7 @@ use metrics::{
     register_int_gauge, register_int_gauge_vec, register_uint_gauge, register_uint_gauge_vec,
 };
 use once_cell::sync::Lazy;
+use pageserver_api::config::defaults::DEFAULT_MAX_GET_VECTORED_KEYS;
 use pageserver_api::config::{
     PageServicePipeliningConfig, PageServicePipeliningConfigPipelined,
     PageServiceProtocolPipelinedBatchingStrategy, PageServiceProtocolPipelinedExecutionStrategy,
@@ -32,7 +34,6 @@ use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext};
 use crate::pgdatadir_mapping::DatadirModificationStats;
 use crate::task_mgr::TaskKind;
-use crate::tenant::Timeline;
 use crate::tenant::layer_map::LayerMap;
 use crate::tenant::mgr::TenantSlot;
 use crate::tenant::storage_layer::{InMemoryLayer, PersistentLayerDesc};
@@ -102,7 +103,18 @@ pub(crate) static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::n
     .expect("failed to define a metric")
 });
 
-// Buckets for background operation duration in seconds, like compaction, GC, size calculation.
+/* BEGIN_HADRON */
+pub(crate) static STORAGE_ACTIVE_COUNT_PER_TIMELINE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_active_storage_operations_count",
+        "Count of active storage operations with operation, tenant and timeline dimensions",
+        &["operation", "tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+/*END_HADRON */
+
+// Buckets for background operations like compaction, GC, size calculation
 const STORAGE_OP_BUCKETS: &[f64] = &[0.010, 0.100, 1.0, 10.0, 100.0, 1000.0];
 
 pub(crate) static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
@@ -444,6 +456,15 @@ static PAGE_CACHE_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
         &["error_kind"]
     )
     .expect("failed to define a metric")
+});
+
+pub(crate) static FEATURE_FLAG_EVALUATION: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "pageserver_feature_flag_evaluation",
+        "Number of times a feature flag is evaluated",
+        &["flag_key", "status", "value"],
+    )
+    .unwrap()
 });
 
 #[derive(IntoStaticStr)]
@@ -843,23 +864,50 @@ pub(crate) static COMPRESSION_IMAGE_OUTPUT_BYTES: Lazy<IntCounter> = Lazy::new(|
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+pub(crate) static RELSIZE_LATEST_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
-        "pageserver_relsize_cache_entries",
-        "Number of entries in the relation size cache",
+        "pageserver_relsize_latest_cache_entries",
+        "Number of entries in the latest relation size cache",
     )
     .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!("pageserver_relsize_cache_hits", "Relation size cache hits",)
-        .expect("failed to define a metric")
+pub(crate) static RELSIZE_LATEST_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_latest_cache_hits",
+        "Latest relation size cache hits",
+    )
+    .expect("failed to define a metric")
 });
 
-pub(crate) static RELSIZE_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static RELSIZE_LATEST_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "pageserver_relsize_cache_misses",
-        "Relation size cache misses",
+        "pageserver_relsize_latest_cache_misses",
+        "Relation size latest cache misses",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_SNAPSHOT_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_relsize_snapshot_cache_entries",
+        "Number of entries in the pitr relation size cache",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_SNAPSHOT_CACHE_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_snapshot_cache_hits",
+        "Pitr relation size cache hits",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static RELSIZE_SNAPSHOT_CACHE_MISSES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_relsize_snapshot_cache_misses",
+        "Relation size snapshot cache misses",
     )
     .expect("failed to define a metric")
 });
@@ -1017,6 +1065,15 @@ pub(crate) static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("Failed to register pageserver_tenant_states_count metric")
 });
 
+pub(crate) static TIMELINE_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_timeline_states_count",
+        "Count of timelines per state",
+        &["state"]
+    )
+    .expect("Failed to register pageserver_timeline_states_count metric")
+});
+
 /// A set of broken tenants.
 ///
 /// These are expected to be so rare that a set is fine. Set as in a new timeseries per each broken
@@ -1037,6 +1094,15 @@ pub(crate) static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|
         &["tenant_id"]
     )
     .expect("Failed to register pageserver_tenant_synthetic_cached_size_bytes metric")
+});
+
+pub(crate) static TENANT_OFFLOADED_TIMELINES: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_tenant_offloaded_timelines",
+        "Number of offloaded timelines of a tenant",
+        &["tenant_id", "shard_id"]
+    )
+    .expect("Failed to register pageserver_tenant_offloaded_timelines metric")
 });
 
 pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
@@ -1276,11 +1342,44 @@ impl EvictionsWithLowResidenceDuration {
 //
 // Roughly logarithmic scale.
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
-    0.000030, // 30 usec
-    0.001000, // 1000 usec
-    0.030,    // 30 ms
-    1.000,    // 1000 ms
-    30.000,   // 30000 ms
+    0.00005,  // 50us
+    0.00006,  // 60us
+    0.00007,  // 70us
+    0.00008,  // 80us
+    0.00009,  // 90us
+    0.0001,   // 100us
+    0.000110, // 110us
+    0.000120, // 120us
+    0.000130, // 130us
+    0.000140, // 140us
+    0.000150, // 150us
+    0.000160, // 160us
+    0.000170, // 170us
+    0.000180, // 180us
+    0.000190, // 190us
+    0.000200, // 200us
+    0.000210, // 210us
+    0.000220, // 220us
+    0.000230, // 230us
+    0.000240, // 240us
+    0.000250, // 250us
+    0.000300, // 300us
+    0.000350, // 350us
+    0.000400, // 400us
+    0.000450, // 450us
+    0.000500, // 500us
+    0.000600, // 600us
+    0.000700, // 700us
+    0.000800, // 800us
+    0.000900, // 900us
+    0.001000, // 1ms
+    0.002000, // 2ms
+    0.003000, // 3ms
+    0.004000, // 4ms
+    0.005000, // 5ms
+    0.01000,  // 10ms
+    0.02000,  // 20ms
+    0.05000,  // 50ms
 ];
 
 /// VirtualFile fs operation variants.
@@ -1640,12 +1739,7 @@ impl Drop for SmgrOpTimer {
 
 impl SmgrOpFlushInProgress {
     /// The caller must guarantee that `socket_fd`` outlives this function.
-    pub(crate) async fn measure<Fut, O>(
-        self,
-        started_at: Instant,
-        mut fut: Fut,
-        socket_fd: RawFd,
-    ) -> O
+    pub(crate) async fn measure<Fut, O>(self, started_at: Instant, fut: Fut, socket_fd: RawFd) -> O
     where
         Fut: std::future::Future<Output = O>,
     {
@@ -1870,7 +1964,7 @@ static SMGR_QUERY_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 static PAGE_SERVICE_BATCH_SIZE_BUCKETS_GLOBAL: Lazy<Vec<f64>> = Lazy::new(|| {
-    (1..=u32::try_from(Timeline::MAX_GET_VECTORED_KEYS).unwrap())
+    (1..=u32::try_from(DEFAULT_MAX_GET_VECTORED_KEYS).unwrap())
         .map(|v| v.into())
         .collect()
 });
@@ -1888,7 +1982,7 @@ static PAGE_SERVICE_BATCH_SIZE_BUCKETS_PER_TIMELINE: Lazy<Vec<f64>> = Lazy::new(
     let mut buckets = Vec::new();
     for i in 0.. {
         let bucket = 1 << i;
-        if bucket > u32::try_from(Timeline::MAX_GET_VECTORED_KEYS).unwrap() {
+        if bucket > u32::try_from(DEFAULT_MAX_GET_VECTORED_KEYS).unwrap() {
             break;
         }
         buckets.push(bucket.into());
@@ -2198,8 +2292,10 @@ impl BasebackupQueryTimeOngoingRecording<'_> {
         // If you want to change categorize of a specific error, also change it in `log_query_error`.
         let metric = match res {
             Ok(_) => &self.parent.ok,
-            Err(QueryError::Shutdown) => {
-                // Do not observe ok/err for shutdown
+            Err(QueryError::Shutdown) | Err(QueryError::Reconnect) => {
+                // Do not observe ok/err for shutdown/reconnect.
+                // Reconnect error might be raised when the operation is waiting for LSN and the tenant shutdown interrupts
+                // the operation. A reconnect error will be issued and the client will retry.
                 return;
             }
             Err(QueryError::Disconnected(ConnectionError::Io(io_error)))
@@ -2726,6 +2822,49 @@ pub(crate) static WALRECEIVER_CANDIDATES_ADDED: Lazy<IntCounter> =
 pub(crate) static WALRECEIVER_CANDIDATES_REMOVED: Lazy<IntCounter> =
     Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["remove"]));
 
+pub(crate) static LOCAL_DATA_LOSS_SUSPECTED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "pageserver_local_data_loss_suspected",
+        "Non-zero value indicates that pageserver local data loss is suspected (and highly likely)."
+    )
+    .expect("failed to define a metric")
+});
+
+// Counter keeping track of misrouted PageStream requests. Spelling out PageStream requests here to distinguish
+// it from other types of reqeusts (SK wal replication, http requests, etc.). PageStream requests are used by
+// Postgres compute to fetch data from pageservers.
+// A misrouted PageStream request is registered if the pageserver cannot find the tenant identified in the
+// request, or if the pageserver is not the "primary" serving the tenant shard. These error almost always identify
+// issues with compute configuration, caused by either the compute node itself being stuck in the wrong
+// configuration or Storage Controller reconciliation bugs. Misrouted requests are expected during tenant migration
+// and/or during recovery following a pageserver failure, but persistently high rates of misrouted requests
+// are indicative of bugs (and unavailability).
+pub(crate) static MISROUTED_PAGESTREAM_REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_misrouted_pagestream_requests_total",
+        "Number of pageserver pagestream requests that were routed to the wrong pageserver"
+    )
+    .expect("failed to define a metric")
+});
+
+// Global counter for PageStream request results by outcome. Outcomes are divided into 3 categories:
+// - success
+// - internal_error: errors that indicate bugs in the storage cluster (e.g. page reconstruction errors, misrouted requests, LSN timeout errors)
+// - other_error: transient error conditions that are expected in normal operation or indicate bugs with other parts of the system (e.g. error due to pageserver shutdown, malformed requests etc.)
+pub(crate) static PAGESTREAM_HANDLER_RESULTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_pagestream_handler_results_total",
+        "Number of pageserver pagestream handler results by outcome (success, internal_error, other_error)",
+        &["outcome"]
+    )
+    .expect("failed to define a metric")
+});
+
+// Constants for pageserver_pagestream_handler_results_total's outcome labels
+pub(crate) const PAGESTREAM_HANDLER_OUTCOME_SUCCESS: &str = "success";
+pub(crate) const PAGESTREAM_HANDLER_OUTCOME_INTERNAL_ERROR: &str = "internal_error";
+pub(crate) const PAGESTREAM_HANDLER_OUTCOME_OTHER_ERROR: &str = "other_error";
+
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting
@@ -2775,7 +2914,6 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_received: IntCounter,
     pub(crate) records_observed: IntCounter,
     pub(crate) records_committed: IntCounter,
-    pub(crate) records_filtered: IntCounter,
     pub(crate) values_committed_metadata_images: IntCounter,
     pub(crate) values_committed_metadata_deltas: IntCounter,
     pub(crate) values_committed_data_images: IntCounter,
@@ -2829,11 +2967,6 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| {
     records_committed: register_int_counter!(
         "pageserver_wal_ingest_records_committed",
         "Number of WAL records which resulted in writes to pageserver storage"
-    )
-    .expect("failed to define a metric"),
-    records_filtered: register_int_counter!(
-        "pageserver_wal_ingest_records_filtered",
-        "Number of WAL records filtered out due to sharding"
     )
     .expect("failed to define a metric"),
     values_committed_metadata_images: values_committed.with_label_values(&["metadata", "image"]),
@@ -2970,13 +3103,19 @@ pub(crate) static WAL_REDO_PROCESS_COUNTERS: Lazy<WalRedoProcessCounters> =
 pub(crate) struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
     start: Instant,
+    stopped: Cell<bool>,
 }
 
 impl StorageTimeMetricsTimer {
     fn new(metrics: StorageTimeMetrics) -> Self {
+        /*BEGIN_HADRON */
+        // record the active operation as the timer starts
+        metrics.timeline_active_count.inc();
+        /*END_HADRON */
         Self {
             metrics,
             start: Instant::now(),
+            stopped: Cell::new(false),
         }
     }
 
@@ -2992,6 +3131,10 @@ impl StorageTimeMetricsTimer {
         self.metrics.timeline_sum.inc_by(seconds);
         self.metrics.timeline_count.inc();
         self.metrics.global_histogram.observe(seconds);
+        /* BEGIN_HADRON*/
+        self.stopped.set(true);
+        self.metrics.timeline_active_count.dec();
+        /*END_HADRON */
         duration
     }
 
@@ -3001,6 +3144,16 @@ impl StorageTimeMetricsTimer {
         AlwaysRecordingStorageTimeMetricsTimer(Some(self))
     }
 }
+
+/*BEGIN_HADRON */
+impl Drop for StorageTimeMetricsTimer {
+    fn drop(&mut self) {
+        if !self.stopped.get() {
+            self.metrics.timeline_active_count.dec();
+        }
+    }
+}
+/*END_HADRON */
 
 pub(crate) struct AlwaysRecordingStorageTimeMetricsTimer(Option<StorageTimeMetricsTimer>);
 
@@ -3027,6 +3180,10 @@ pub(crate) struct StorageTimeMetrics {
     timeline_sum: Counter,
     /// Number of oeprations, per operation, tenant_id and timeline_id
     timeline_count: IntCounter,
+    /*BEGIN_HADRON */
+    /// Number of active operations per operation, tenant_id, and timeline_id
+    timeline_active_count: IntGauge,
+    /*END_HADRON */
     /// Global histogram having only the "operation" label.
     global_histogram: Histogram,
 }
@@ -3046,6 +3203,11 @@ impl StorageTimeMetrics {
         let timeline_count = STORAGE_TIME_COUNT_PER_TIMELINE
             .get_metric_with_label_values(&[operation, tenant_id, shard_id, timeline_id])
             .unwrap();
+        /*BEGIN_HADRON */
+        let timeline_active_count = STORAGE_ACTIVE_COUNT_PER_TIMELINE
+            .get_metric_with_label_values(&[operation, tenant_id, shard_id, timeline_id])
+            .unwrap();
+        /*END_HADRON */
         let global_histogram = STORAGE_TIME_GLOBAL
             .get_metric_with_label_values(&[operation])
             .unwrap();
@@ -3053,6 +3215,7 @@ impl StorageTimeMetrics {
         StorageTimeMetrics {
             timeline_sum,
             timeline_count,
+            timeline_active_count,
             global_histogram,
         }
     }
@@ -3251,6 +3414,8 @@ impl TimelineMetrics {
                 &timeline_id,
             );
 
+        TIMELINE_STATE_METRIC.with_label_values(&["active"]).inc();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -3341,7 +3506,7 @@ impl TimelineMetrics {
     pub fn dec_frozen_layer(&self, layer: &InMemoryLayer) {
         assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
         let labels = self.make_frozen_layer_labels(layer);
-        let size = layer.try_len().expect("frozen layer should have no writer");
+        let size = layer.len();
         TIMELINE_LAYER_COUNT
             .get_metric_with_label_values(&labels)
             .unwrap()
@@ -3356,7 +3521,7 @@ impl TimelineMetrics {
     pub fn inc_frozen_layer(&self, layer: &InMemoryLayer) {
         assert!(matches!(layer.info(), InMemoryLayerInfo::Frozen { .. }));
         let labels = self.make_frozen_layer_labels(layer);
-        let size = layer.try_len().expect("frozen layer should have no writer");
+        let size = layer.len();
         TIMELINE_LAYER_COUNT
             .get_metric_with_label_values(&labels)
             .unwrap()
@@ -3404,6 +3569,8 @@ impl TimelineMetrics {
             // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
             return;
         }
+
+        TIMELINE_STATE_METRIC.with_label_values(&["active"]).dec();
 
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
@@ -3462,6 +3629,14 @@ impl TimelineMetrics {
                 shard_id,
                 timeline_id,
             ]);
+            /* BEGIN_HADRON */
+            let _ = STORAGE_ACTIVE_COUNT_PER_TIMELINE.remove_label_values(&[
+                op,
+                tenant_id,
+                shard_id,
+                timeline_id,
+            ]);
+            /*END_HADRON */
         }
 
         for op in StorageIoSizeOperation::VARIANTS {
@@ -3524,11 +3699,14 @@ impl TimelineMetrics {
 }
 
 pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
+    let tid = tenant_shard_id.tenant_id.to_string();
+    let shard_id = tenant_shard_id.shard_slug().to_string();
+
     // Only shard zero deals in synthetic sizes
     if tenant_shard_id.is_shard_zero() {
-        let tid = tenant_shard_id.tenant_id.to_string();
         let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
     }
+    let _ = TENANT_OFFLOADED_TIMELINES.remove_label_values(&[&tid, &shard_id]);
 
     tenant_throttling::remove_tenant_metrics(tenant_shard_id);
 
@@ -4251,6 +4429,9 @@ pub(crate) mod disk_usage_based_eviction {
         pub(crate) layers_collected: IntCounter,
         pub(crate) layers_selected: IntCounter,
         pub(crate) layers_evicted: IntCounter,
+        /*BEGIN_HADRON */
+        pub(crate) bytes_evicted: IntCounter,
+        /*END_HADRON */
     }
 
     impl Default for Metrics {
@@ -4287,12 +4468,21 @@ pub(crate) mod disk_usage_based_eviction {
             )
             .unwrap();
 
+            /*BEGIN_HADRON */
+            let bytes_evicted = register_int_counter!(
+                "pageserver_disk_usage_based_eviction_evicted_bytes_total",
+                "Amount of bytes successfully evicted"
+            )
+            .unwrap();
+            /*END_HADRON */
+
             Self {
                 tenant_collection_time,
                 tenant_layer_count,
                 layers_collected,
                 layers_selected,
                 layers_evicted,
+                bytes_evicted,
             }
         }
     }
@@ -4319,6 +4509,48 @@ pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
         .unwrap()
         .set(u64::try_from(num_threads.get()).unwrap());
 }
+
+pub(crate) static BASEBACKUP_CACHE_READ: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_basebackup_cache_read_total",
+        "Number of read accesses to the basebackup cache grouped by hit/miss/error",
+        &["result"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static BASEBACKUP_CACHE_PREPARE: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_basebackup_cache_prepare_total",
+        "Number of prepare requests processed by the basebackup cache grouped by ok/skip/error",
+        &["result"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static BASEBACKUP_CACHE_ENTRIES: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_basebackup_cache_entries_total",
+        "Number of entries in the basebackup cache"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static BASEBACKUP_CACHE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_basebackup_cache_size_bytes",
+        "Total size of all basebackup cache entries on disk in bytes"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static BASEBACKUP_CACHE_PREPARE_QUEUE_SIZE: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_basebackup_cache_prepare_queue_size",
+        "Number of requests in the basebackup prepare channel"
+    )
+    .expect("failed to define a metric")
+});
 
 static PAGESERVER_CONFIG_IGNORED_ITEMS: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
@@ -4370,6 +4602,7 @@ pub fn preinitialize_metrics(
         &CIRCUIT_BREAKERS_UNBROKEN,
         &PAGE_SERVICE_SMGR_FLUSH_INPROGRESS_MICROS_GLOBAL,
         &WAIT_LSN_IN_PROGRESS_GLOBAL_MICROS,
+        &MISROUTED_PAGESTREAM_REQUESTS,
     ]
     .into_iter()
     .for_each(|c| {
@@ -4407,6 +4640,7 @@ pub fn preinitialize_metrics(
 
     // gauges
     WALRECEIVER_ACTIVE_MANAGERS.get();
+    LOCAL_DATA_LOSS_SUSPECTED.get();
 
     // histograms
     [

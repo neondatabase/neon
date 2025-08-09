@@ -5,17 +5,17 @@ DO ${outer_tag}$
         IF EXISTS(
             SELECT nspname
             FROM pg_catalog.pg_namespace
-            WHERE nspname = 'public'
+            WHERE nspname OPERATOR(pg_catalog.=) 'public'::pg_catalog.name
         )
         THEN
             SELECT nspowner::regrole::text
             FROM pg_catalog.pg_namespace
-            WHERE nspname = 'public'
+            WHERE nspname OPERATOR(pg_catalog.=) 'public'::pg_catalog.text
             INTO schema_owner;
 
-            IF schema_owner = 'cloud_admin' OR schema_owner = 'zenith_admin'
+            IF schema_owner OPERATOR(pg_catalog.=) 'cloud_admin'::pg_catalog.text OR schema_owner OPERATOR(pg_catalog.=) 'zenith_admin'::pg_catalog.text
             THEN
-                EXECUTE format('ALTER SCHEMA public OWNER TO %I', {db_owner});
+                EXECUTE pg_catalog.format('ALTER SCHEMA public OWNER TO %I', {db_owner});
             END IF;
         END IF;
     END

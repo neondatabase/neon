@@ -87,6 +87,7 @@ impl WalProposer {
         let config = Config {
             ttid,
             safekeepers_list: addrs,
+            safekeeper_conninfo_options: String::new(),
             safekeeper_reconnect_timeout: 1000,
             safekeeper_connection_timeout: 5000,
             sync_safekeepers,
@@ -216,7 +217,7 @@ impl TestConfig {
         ];
 
         let server_ids = [servers[0].id, servers[1].id, servers[2].id];
-        let safekeepers_addrs = server_ids.map(|id| format!("node:{}", id)).to_vec();
+        let safekeepers_addrs = server_ids.map(|id| format!("node:{id}")).to_vec();
 
         let ttid = TenantTimelineId::generate();
 
@@ -393,13 +394,13 @@ pub fn generate_schedule(seed: u64) -> Schedule {
     let mut schedule = Vec::new();
     let mut time = 0;
 
-    let cnt = rng.gen_range(1..100);
+    let cnt = rng.random_range(1..100);
 
     for _ in 0..cnt {
-        time += rng.gen_range(0..500);
-        let action = match rng.gen_range(0..3) {
-            0 => TestAction::WriteTx(rng.gen_range(1..10)),
-            1 => TestAction::RestartSafekeeper(rng.gen_range(0..3)),
+        time += rng.random_range(0..500);
+        let action = match rng.random_range(0..3) {
+            0 => TestAction::WriteTx(rng.random_range(1..10)),
+            1 => TestAction::RestartSafekeeper(rng.random_range(0..3)),
             2 => TestAction::RestartWalProposer,
             _ => unreachable!(),
         };
@@ -412,13 +413,13 @@ pub fn generate_schedule(seed: u64) -> Schedule {
 pub fn generate_network_opts(seed: u64) -> NetworkOptions {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
-    let timeout = rng.gen_range(100..2000);
-    let max_delay = rng.gen_range(1..2 * timeout);
-    let min_delay = rng.gen_range(1..=max_delay);
+    let timeout = rng.random_range(100..2000);
+    let max_delay = rng.random_range(1..2 * timeout);
+    let min_delay = rng.random_range(1..=max_delay);
 
-    let max_fail_prob = rng.gen_range(0.0..0.9);
-    let connect_fail_prob = rng.gen_range(0.0..max_fail_prob);
-    let send_fail_prob = rng.gen_range(0.0..connect_fail_prob);
+    let max_fail_prob = rng.random_range(0.0..0.9);
+    let connect_fail_prob = rng.random_range(0.0..max_fail_prob);
+    let send_fail_prob = rng.random_range(0.0..connect_fail_prob);
 
     NetworkOptions {
         keepalive_timeout: Some(timeout),

@@ -408,7 +408,7 @@ impl OpenFiles {
 /// error types may be elegible for retry.
 pub(crate) fn is_fatal_io_error(e: &std::io::Error) -> bool {
     use nix::errno::Errno::*;
-    match e.raw_os_error().map(nix::errno::from_i32) {
+    match e.raw_os_error().map(nix::errno::Errno::from_raw) {
         Some(EIO) => {
             // Terminate on EIO because we no longer trust the device to store
             // data safely, or to uphold persistence guarantees on fsync.
@@ -1275,8 +1275,8 @@ mod tests {
     use std::sync::Arc;
 
     use owned_buffers_io::io_buf_ext::IoBufExt;
+    use rand::Rng;
     use rand::seq::SliceRandom;
-    use rand::{Rng, thread_rng};
 
     use super::*;
     use crate::context::DownloadBehavior;
@@ -1358,7 +1358,7 @@ mod tests {
 
         // Check that all the other FDs still work too. Use them in random order for
         // good measure.
-        file_b_dupes.as_mut_slice().shuffle(&mut thread_rng());
+        file_b_dupes.as_mut_slice().shuffle(&mut rand::rng());
         for vfile in file_b_dupes.iter_mut() {
             assert_first_512_eq(vfile, b"content_b").await;
         }
@@ -1413,9 +1413,8 @@ mod tests {
             let ctx = ctx.detached_child(TaskKind::UnitTest, DownloadBehavior::Error);
             let hdl = rt.spawn(async move {
                 let mut buf = IoBufferMut::with_capacity_zeroed(SIZE);
-                let mut rng = rand::rngs::OsRng;
                 for _ in 1..1000 {
-                    let f = &files[rng.gen_range(0..files.len())];
+                    let f = &files[rand::rng().random_range(0..files.len())];
                     buf = f
                         .read_exact_at(buf.slice_full(), 0, &ctx)
                         .await

@@ -36,6 +36,28 @@ typedef struct IOHistogramData
 
 typedef IOHistogramData *IOHistogram;
 
+static const uint64 qt_bucket_thresholds[] = {
+	       2,        3,        6,        10,  /* 0 us   - 10 us */
+	      20,       30,       60,       100,  /* 10 us  - 100 us */
+	     200,      300,      600,	   1000,  /* 100 us - 1 ms */
+	    2000,     3000,     6000,     10000,  /* 1 ms   - 10 ms */
+	   20000,    30000,    60000,    100000,  /* 10 ms  - 100 ms */
+	  200000,   300000,   600000,   1000000,  /* 100 ms - 1 s */
+	 2000000,  3000000,  6000000,  10000000,  /* 1 s - 10 s */
+	20000000, 30000000, 60000000, 100000000,  /* 10 s - 100 s */
+	UINT64_MAX,
+};
+#define NUM_QT_BUCKETS (lengthof(qt_bucket_thresholds))
+
+typedef struct QTHistogramData
+{
+	uint64		elapsed_us_count;
+	uint64		elapsed_us_sum;
+	uint64		elapsed_us_bucket[NUM_QT_BUCKETS];
+} QTHistogramData;
+
+typedef QTHistogramData *QTHistogram;
+
 typedef struct
 {
 	/*
@@ -127,6 +149,11 @@ typedef struct
 	/* LFC I/O time buckets */
 	IOHistogramData file_cache_read_hist;
 	IOHistogramData file_cache_write_hist;
+
+	/*
+	 * Histogram of query execution time.
+	 */
+	QTHistogramData query_time_hist;
 } neon_per_backend_counters;
 
 /* Pointer to the shared memory array of neon_per_backend_counters structs */
@@ -140,18 +167,34 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
  */
 #define NUM_NEON_PERF_COUNTER_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
 
-#if PG_VERSION_NUM >= 170000
 #define MyNeonCounters (&neon_per_backend_counters_shared[MyProcNumber])
-#else
-#define MyNeonCounters (&neon_per_backend_counters_shared[MyProc->pgprocno])
-#endif
 
 extern void inc_getpage_wait(uint64 latency);
 extern void inc_page_cache_read_wait(uint64 latency);
 extern void inc_page_cache_write_wait(uint64 latency);
+extern void inc_query_time(uint64 elapsed);
 
 extern Size NeonPerfCountersShmemSize(void);
 extern void NeonPerfCountersShmemInit(void);
+
+/* BEGIN_HADRON */
+typedef struct
+{
+	pg_atomic_uint32 index_corruption_count;
+	pg_atomic_uint32 data_corruption_count;
+	pg_atomic_uint32 internal_error_count;
+	pg_atomic_uint32 ps_corruption_detected;
+} databricks_metrics;
+
+extern databricks_metrics *databricks_metrics_shared;
+
+extern Size DatabricksMetricsShmemSize(void);
+extern void DatabricksMetricsShmemInit(void);
+
+extern int databricks_test_hook;
+
+static const int TestHookCorruption = 1;
+/* END_HADRON */
 
 
 #endif							/* NEON_PERF_COUNTERS_H */

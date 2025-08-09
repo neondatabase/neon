@@ -61,6 +61,10 @@
     clippy::too_many_lines,
     clippy::unused_self
 )]
+#![allow(
+    clippy::unsafe_derive_deserialize,
+    reason = "false positive: https://github.com/rust-lang/rust-clippy/issues/15120"
+)]
 #![cfg_attr(
     any(test, feature = "testing"),
     allow(
@@ -75,6 +79,7 @@
 pub mod binary;
 
 mod auth;
+mod batch;
 mod cache;
 mod cancellation;
 mod compute;
@@ -92,6 +97,7 @@ mod logging;
 mod metrics;
 mod parse;
 mod pglb;
+mod pqproto;
 mod protocol2;
 mod proxy;
 mod rate_limiter;
@@ -105,4 +111,5 @@ mod tls;
 mod types;
 mod url;
 mod usage_metrics;
+mod util;
 mod waiters;

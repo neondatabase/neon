@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{self, AtomicUsize};
 use std::sync::{Arc, Weak};
 
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
@@ -21,8 +23,9 @@ use crate::protocol2::ConnectionInfoExtra;
 use crate::types::EndpointCacheKey;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 
-pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
-pub(crate) type Connect = http2::Connection<TokioIo<AsyncRW>, hyper::body::Incoming, TokioExecutor>;
+pub(crate) type LocalProxyClient = http2::SendRequest<BoxBody<Bytes, hyper::Error>>;
+pub(crate) type LocalProxyConnection =
+    http2::Connection<TokioIo<AsyncRW>, BoxBody<Bytes, hyper::Error>, TokioExecutor>;
 
 #[derive(Clone)]
 pub(crate) struct ClientDataHttp();
@@ -186,14 +189,14 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C, HttpConnPool<C>> {
 }
 
 pub(crate) fn poll_http2_client(
-    global_pool: Arc<GlobalConnPool<Send, HttpConnPool<Send>>>,
+    global_pool: Arc<GlobalConnPool<LocalProxyClient, HttpConnPool<LocalProxyClient>>>,
     ctx: &RequestContext,
     conn_info: &ConnInfo,
-    client: Send,
-    connection: Connect,
+    client: LocalProxyClient,
+    connection: LocalProxyConnection,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
-) -> Client<Send> {
+) -> Client<LocalProxyClient> {
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
     let session_id = ctx.session_id();
 
@@ -237,10 +240,10 @@ pub(crate) fn poll_http2_client(
             }
 
             // remove from connection pool
-            if let Some(pool) = pool.clone().upgrade() {
-                if pool.write().remove_conn(conn_id) {
-                    info!("closed connection removed");
-                }
+            if let Some(pool) = pool.clone().upgrade()
+                && pool.write().remove_conn(conn_id)
+            {
+                info!("closed connection removed");
             }
         }
         .instrument(span),
@@ -282,7 +285,7 @@ impl<C: ClientInnerExt + Clone> Client<C> {
     }
 }
 
-impl ClientInnerExt for Send {
+impl ClientInnerExt for LocalProxyClient {
     fn is_closed(&self) -> bool {
         self.is_closed()
     }
@@ -290,5 +293,11 @@ impl ClientInnerExt for Send {
     fn get_process_id(&self) -> i32 {
         // ideally throw something meaningful
         -1
+    }
+
+    fn reset(&mut self) -> Result<(), postgres_client::Error> {
+        // We use HTTP/2.0 to talk to local proxy. HTTP is stateless,
+        // so there's nothing to reset.
+        Ok(())
     }
 }

@@ -6,8 +6,9 @@
 //! walingest.rs handles a few things like implicit relation creation and extension.
 //! Clarify that)
 //!
-use std::collections::{HashMap, HashSet, hash_map};
+use std::collections::{BTreeSet, HashMap, HashSet, hash_map};
 use std::ops::{ControlFlow, Range};
+use std::sync::Arc;
 
 use crate::walingest::{WalIngestError, WalIngestErrorKind};
 use crate::{PERF_TRACE_TARGET, ensure_walingest};
@@ -23,12 +24,11 @@ use pageserver_api::key::{
 };
 use pageserver_api::keyspace::{KeySpaceRandomAccum, SparseKeySpace};
 use pageserver_api::models::RelSizeMigration;
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use pageserver_api::value::Value;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::{BLCKSZ, Oid, RepOriginId, TimestampTz, TransactionId};
+use postgres_ffi::{BLCKSZ, PgMajorVersion, TransactionId};
+use postgres_ffi_types::forknum::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi_types::{Oid, RepOriginId, TimestampTz};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
@@ -36,6 +36,8 @@ use tracing::{debug, info, info_span, trace, warn};
 use utils::bin_ser::{BeSer, DeserializeError};
 use utils::lsn::Lsn;
 use utils::pausable_failpoint;
+use wal_decoder::models::record::NeonWalRecord;
+use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use super::tenant::{PageReconstructError, Timeline};
@@ -43,7 +45,9 @@ use crate::aux_file;
 use crate::context::{PerfInstrumentFutureExt, RequestContext, RequestContextBuilder};
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::metrics::{
-    RELSIZE_CACHE_ENTRIES, RELSIZE_CACHE_HITS, RELSIZE_CACHE_MISSES, RELSIZE_CACHE_MISSES_OLD,
+    RELSIZE_CACHE_MISSES_OLD, RELSIZE_LATEST_CACHE_ENTRIES, RELSIZE_LATEST_CACHE_HITS,
+    RELSIZE_LATEST_CACHE_MISSES, RELSIZE_SNAPSHOT_CACHE_ENTRIES, RELSIZE_SNAPSHOT_CACHE_HITS,
+    RELSIZE_SNAPSHOT_CACHE_MISSES,
 };
 use crate::span::{
     debug_assert_current_span_has_tenant_and_timeline_id,
@@ -90,6 +94,28 @@ pub enum LsnForTimestamp {
     NoData(Lsn),
 }
 
+/// Each request to page server contains LSN range: `not_modified_since..request_lsn`.
+/// See comments libs/pageserver_api/src/models.rs.
+/// Based on this range and `last_record_lsn` PS calculates `effective_lsn`.
+/// But to distinguish requests from primary and replicas we need also to pass `request_lsn`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LsnRange {
+    pub effective_lsn: Lsn,
+    pub request_lsn: Lsn,
+}
+
+impl LsnRange {
+    pub fn at(lsn: Lsn) -> LsnRange {
+        LsnRange {
+            effective_lsn: lsn,
+            request_lsn: lsn,
+        }
+    }
+    pub fn is_latest(&self) -> bool {
+        self.request_lsn == Lsn::MAX
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CalculateLogicalSizeError {
     #[error("cancelled")]
@@ -114,6 +140,23 @@ pub(crate) enum CollectKeySpaceError {
     PageRead(PageReconstructError),
     #[error("cancelled")]
     Cancelled,
+}
+
+impl CollectKeySpaceError {
+    pub(crate) fn is_cancel(&self) -> bool {
+        match self {
+            CollectKeySpaceError::Decode(_) => false,
+            CollectKeySpaceError::PageRead(e) => e.is_cancel(),
+            CollectKeySpaceError::Cancelled => true,
+        }
+    }
+    pub(crate) fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            CollectKeySpaceError::Decode(e) => anyhow::Error::new(e),
+            CollectKeySpaceError::PageRead(e) => anyhow::Error::new(e),
+            CollectKeySpaceError::Cancelled => anyhow::Error::new(self),
+        }
+    }
 }
 
 impl From<PageReconstructError> for CollectKeySpaceError {
@@ -184,6 +227,25 @@ impl Timeline {
             pending_nblocks: 0,
             pending_directory_entries: Vec::new(),
             pending_metadata_bytes: 0,
+            is_importing_pgdata: false,
+            lsn,
+        }
+    }
+
+    pub fn begin_modification_for_import(&self, lsn: Lsn) -> DatadirModification
+    where
+        Self: Sized,
+    {
+        DatadirModification {
+            tline: self,
+            pending_lsns: Vec::new(),
+            pending_metadata_pages: HashMap::new(),
+            pending_data_batch: None,
+            pending_deletions: Vec::new(),
+            pending_nblocks: 0,
+            pending_directory_entries: Vec::new(),
+            pending_metadata_bytes: 0,
+            is_importing_pgdata: true,
             lsn,
         }
     }
@@ -202,13 +264,13 @@ impl Timeline {
         io_concurrency: IoConcurrency,
     ) -> Result<Bytes, PageReconstructError> {
         match version {
-            Version::Lsn(effective_lsn) => {
+            Version::LsnRange(lsns) => {
                 let pages: smallvec::SmallVec<[_; 1]> = smallvec::smallvec![(tag, blknum)];
                 let res = self
                     .get_rel_page_at_lsn_batched(
-                        pages.iter().map(|(tag, blknum)| {
-                            (tag, blknum, effective_lsn, ctx.attached_child())
-                        }),
+                        pages
+                            .iter()
+                            .map(|(tag, blknum)| (tag, blknum, lsns, ctx.attached_child())),
                         io_concurrency.clone(),
                         ctx,
                     )
@@ -244,9 +306,13 @@ impl Timeline {
     /// Like [`Self::get_rel_page_at_lsn`], but returns a batch of pages.
     ///
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
+    ///
+    /// NB: the read path must be cancellation-safe. The Tonic gRPC service will drop the future
+    /// if the client goes away (e.g. due to timeout or cancellation).
+    /// TODO: verify that it actually is cancellation-safe.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
-        pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, Lsn, RequestContext)>,
+        pages: impl ExactSizeIterator<Item = (&RelTag, &BlockNumber, LsnRange, RequestContext)>,
         io_concurrency: IoConcurrency,
         ctx: &RequestContext,
     ) -> Vec<Result<Bytes, PageReconstructError>> {
@@ -265,7 +331,7 @@ impl Timeline {
         let mut req_keyspaces: HashMap<Lsn, KeySpaceRandomAccum> =
             HashMap::with_capacity(pages.len());
 
-        for (response_slot_idx, (tag, blknum, lsn, ctx)) in pages.enumerate() {
+        for (response_slot_idx, (tag, blknum, lsns, ctx)) in pages.enumerate() {
             if tag.relnode == 0 {
                 result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
                     RelationError::InvalidRelnode.into(),
@@ -274,7 +340,7 @@ impl Timeline {
                 slots_filled += 1;
                 continue;
             }
-
+            let lsn = lsns.effective_lsn;
             let nblocks = {
                 let ctx = RequestContextBuilder::from(&ctx)
                     .perf_span(|crnt_perf_span| {
@@ -289,7 +355,7 @@ impl Timeline {
                     .attached_child();
 
                 match self
-                    .get_rel_size(*tag, Version::Lsn(lsn), &ctx)
+                    .get_rel_size(*tag, Version::LsnRange(lsns), &ctx)
                     .maybe_perf_instrument(&ctx, |crnt_perf_span| crnt_perf_span.clone())
                     .await
                 {
@@ -407,10 +473,10 @@ impl Timeline {
                         GetVectoredError::InvalidLsn(e) => {
                             Err(anyhow::anyhow!("invalid LSN: {e:?}").into())
                         }
-                        // NB: this should never happen in practice because we limit MAX_GET_VECTORED_KEYS
+                        // NB: this should never happen in practice because we limit batch size to be smaller than max_get_vectored_keys
                         // TODO: we can prevent this error class by moving this check into the type system
-                        GetVectoredError::Oversized(err) => {
-                            Err(anyhow::anyhow!("batching oversized: {err:?}").into())
+                        GetVectoredError::Oversized(err, max) => {
+                            Err(anyhow::anyhow!("batching oversized: {err} > {max}").into())
                         }
                     };
 
@@ -447,8 +513,20 @@ impl Timeline {
 
         let rels = self.list_rels(spcnode, dbnode, version, ctx).await?;
 
+        if rels.is_empty() {
+            return Ok(0);
+        }
+
+        // Pre-deserialize the rel directory to avoid duplicated work in `get_relsize_cached`.
+        let reldir_key = rel_dir_to_key(spcnode, dbnode);
+        let buf = version.get(self, reldir_key, ctx).await?;
+        let reldir = RelDirectory::des(&buf)?;
+
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, version, ctx).await?;
+            let n_blocks = self
+                .get_rel_size_in_reldir(rel, version, Some((reldir_key, &reldir)), false, ctx)
+                .await?
+                .expect("allow_missing=false");
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -464,43 +542,134 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
+        Ok(self
+            .get_rel_size_in_reldir(tag, version, None, false, ctx)
+            .await?
+            .expect("allow_missing=false"))
+    }
+
+    /// Get size of a relation file. If `allow_missing` is true, returns None for missing relations,
+    /// otherwise errors.
+    ///
+    /// INVARIANT: never returns None if `allow_missing=false`.
+    ///
+    /// See [`Self::get_rel_exists_in_reldir`] on why we need `deserialized_reldir_v1`.
+    pub(crate) async fn get_rel_size_in_reldir(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
+        allow_missing: bool,
+        ctx: &RequestContext,
+    ) -> Result<Option<BlockNumber>, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
                 RelationError::InvalidRelnode.into(),
             ));
         }
 
-        if let Some(nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
-            return Ok(nblocks);
+        if let Some(nblocks) = self.get_cached_rel_size(&tag, version) {
+            return Ok(Some(nblocks));
+        }
+
+        if allow_missing
+            && !self
+                .get_rel_exists_in_reldir(tag, version, deserialized_reldir_v1, ctx)
+                .await?
+        {
+            return Ok(None);
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, version, ctx).await?
+            && !self
+                .get_rel_exists_in_reldir(tag, version, deserialized_reldir_v1, ctx)
+                .await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
             // without extending it.  Tolerate that by claiming that
             // any non-existent FSM fork has size 0.
-            return Ok(0);
+            return Ok(Some(0));
         }
 
         let key = rel_size_to_key(tag);
         let mut buf = version.get(self, key, ctx).await?;
         let nblocks = buf.get_u32_le();
 
-        self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
+        self.update_cached_rel_size(tag, version, nblocks);
 
-        Ok(nblocks)
+        Ok(Some(nblocks))
     }
 
     /// Does the relation exist?
     ///
     /// Only shard 0 has a full view of the relations. Other shards only know about relations that
     /// the shard stores pages for.
+    ///
     pub(crate) async fn get_rel_exists(
         &self,
         tag: RelTag,
         version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<bool, PageReconstructError> {
+        self.get_rel_exists_in_reldir(tag, version, None, ctx).await
+    }
+
+    async fn get_rel_exists_in_reldir_v1(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
+        ctx: &RequestContext,
+    ) -> Result<bool, PageReconstructError> {
+        let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
+        if let Some((cached_key, dir)) = deserialized_reldir_v1 {
+            if cached_key == key {
+                return Ok(dir.rels.contains(&(tag.relnode, tag.forknum)));
+            } else if cfg!(test) || cfg!(feature = "testing") {
+                panic!("cached reldir key mismatch: {cached_key} != {key}");
+            } else {
+                warn!("cached reldir key mismatch: {cached_key} != {key}");
+            }
+            // Fallback to reading the directory from the datadir.
+        }
+
+        let buf = version.get(self, key, ctx).await?;
+
+        let dir = RelDirectory::des(&buf)?;
+        Ok(dir.rels.contains(&(tag.relnode, tag.forknum)))
+    }
+
+    async fn get_rel_exists_in_reldir_v2(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<bool, PageReconstructError> {
+        let key = rel_tag_sparse_key(tag.spcnode, tag.dbnode, tag.relnode, tag.forknum);
+        let buf = RelDirExists::decode_option(version.sparse_get(self, key, ctx).await?).map_err(
+            |_| {
+                PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: decode failed, {}",
+                    key
+                ))
+            },
+        )?;
+        let exists_v2 = buf == RelDirExists::Exists;
+        Ok(exists_v2)
+    }
+
+    /// Does the relation exist? With a cached deserialized `RelDirectory`.
+    ///
+    /// There are some cases where the caller loops across all relations. In that specific case,
+    /// the caller should obtain the deserialized `RelDirectory` first and then call this function
+    /// to avoid duplicated work of deserliazation. This is a hack and should be removed by introducing
+    /// a new API (e.g., `get_rel_exists_batched`).
+    pub(crate) async fn get_rel_exists_in_reldir(
+        &self,
+        tag: RelTag,
+        version: Version<'_>,
+        deserialized_reldir_v1: Option<(Key, &RelDirectory)>,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
@@ -510,7 +679,7 @@ impl Timeline {
         }
 
         // first try to lookup relation in cache
-        if let Some(_nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
+        if let Some(_nblocks) = self.get_cached_rel_size(&tag, version) {
             return Ok(true);
         }
         // then check if the database was already initialized.
@@ -521,34 +690,134 @@ impl Timeline {
             return Ok(false);
         }
 
-        // Read path: first read the new reldir keyspace. Early return if the relation exists.
-        // Otherwise, read the old reldir keyspace.
-        // TODO: if IndexPart::rel_size_migration is `Migrated`, we only need to read from v2.
+        let (v2_status, migrated_lsn) = self.get_rel_size_v2_status();
 
-        if let RelSizeMigration::Migrated | RelSizeMigration::Migrating =
-            self.get_rel_size_v2_status()
-        {
-            // fetch directory listing (new)
-            let key = rel_tag_sparse_key(tag.spcnode, tag.dbnode, tag.relnode, tag.forknum);
-            let buf = RelDirExists::decode_option(version.sparse_get(self, key, ctx).await?)
-                .map_err(|_| PageReconstructError::Other(anyhow::anyhow!("invalid reldir key")))?;
-            let exists_v2 = buf == RelDirExists::Exists;
-            // Fast path: if the relation exists in the new format, return true.
-            // TODO: we should have a verification mode that checks both keyspaces
-            // to ensure the relation only exists in one of them.
-            if exists_v2 {
-                return Ok(true);
+        match v2_status {
+            RelSizeMigration::Legacy => {
+                let v1_exists = self
+                    .get_rel_exists_in_reldir_v1(tag, version, deserialized_reldir_v1, ctx)
+                    .await?;
+                Ok(v1_exists)
+            }
+            RelSizeMigration::Migrating | RelSizeMigration::Migrated
+                if version.get_lsn() < migrated_lsn.unwrap_or(Lsn(0)) =>
+            {
+                // For requests below the migrated LSN, we still use the v1 read path.
+                let v1_exists = self
+                    .get_rel_exists_in_reldir_v1(tag, version, deserialized_reldir_v1, ctx)
+                    .await?;
+                Ok(v1_exists)
+            }
+            RelSizeMigration::Migrating => {
+                let v1_exists = self
+                    .get_rel_exists_in_reldir_v1(tag, version, deserialized_reldir_v1, ctx)
+                    .await?;
+                let v2_exists_res = self.get_rel_exists_in_reldir_v2(tag, version, ctx).await;
+                match v2_exists_res {
+                    Ok(v2_exists) if v1_exists == v2_exists => {}
+                    Ok(v2_exists) => {
+                        tracing::warn!(
+                            "inconsistent v1/v2 reldir keyspace for rel {}: v1_exists={}, v2_exists={}",
+                            tag,
+                            v1_exists,
+                            v2_exists
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to get rel exists in v2: {e}");
+                    }
+                }
+                Ok(v1_exists)
+            }
+            RelSizeMigration::Migrated => {
+                let v2_exists = self.get_rel_exists_in_reldir_v2(tag, version, ctx).await?;
+                Ok(v2_exists)
             }
         }
+    }
 
-        // fetch directory listing (old)
-
-        let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
+    async fn list_rels_v1(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<HashSet<RelTag>, PageReconstructError> {
+        let key = rel_dir_to_key(spcnode, dbnode);
         let buf = version.get(self, key, ctx).await?;
-
         let dir = RelDirectory::des(&buf)?;
-        let exists_v1 = dir.rels.contains(&(tag.relnode, tag.forknum));
-        Ok(exists_v1)
+        let rels_v1: HashSet<RelTag> =
+            HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
+                spcnode,
+                dbnode,
+                relnode: *relnode,
+                forknum: *forknum,
+            }));
+        Ok(rels_v1)
+    }
+
+    async fn list_rels_v2(
+        &self,
+        spcnode: Oid,
+        dbnode: Oid,
+        version: Version<'_>,
+        ctx: &RequestContext,
+    ) -> Result<HashSet<RelTag>, PageReconstructError> {
+        let key_range = rel_tag_sparse_key_range(spcnode, dbnode);
+        let io_concurrency = IoConcurrency::spawn_from_conf(
+            self.conf.get_vectored_concurrent_io,
+            self.gate
+                .enter()
+                .map_err(|_| PageReconstructError::Cancelled)?,
+        );
+        let results = self
+            .scan(
+                KeySpace::single(key_range),
+                version.get_lsn(),
+                ctx,
+                io_concurrency,
+            )
+            .await?;
+        let mut rels = HashSet::new();
+        for (key, val) in results {
+            let val = RelDirExists::decode(&val?).map_err(|_| {
+                PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: decode failed, {}",
+                    key
+                ))
+            })?;
+            if key.field6 != 1 {
+                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: field6 != 1, {}",
+                    key
+                )));
+            }
+            if key.field2 != spcnode {
+                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: field2 != spcnode, {}",
+                    key
+                )));
+            }
+            if key.field3 != dbnode {
+                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                    "invalid reldir key: field3 != dbnode, {}",
+                    key
+                )));
+            }
+            let tag = RelTag {
+                spcnode,
+                dbnode,
+                relnode: key.field4,
+                forknum: key.field5,
+            };
+            if val == RelDirExists::Removed {
+                debug_assert!(!rels.contains(&tag), "removed reltag in v2");
+                continue;
+            }
+            let did_not_contain = rels.insert(tag);
+            debug_assert!(did_not_contain, "duplicate reltag in v2");
+        }
+        Ok(rels)
     }
 
     /// Get a list of all existing relations in given tablespace and database.
@@ -566,60 +835,45 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<HashSet<RelTag>, PageReconstructError> {
-        // fetch directory listing (old)
-        let key = rel_dir_to_key(spcnode, dbnode);
-        let buf = version.get(self, key, ctx).await?;
+        let (v2_status, migrated_lsn) = self.get_rel_size_v2_status();
 
-        let dir = RelDirectory::des(&buf)?;
-        let rels_v1: HashSet<RelTag> =
-            HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
-                spcnode,
-                dbnode,
-                relnode: *relnode,
-                forknum: *forknum,
-            }));
-
-        if let RelSizeMigration::Legacy = self.get_rel_size_v2_status() {
-            return Ok(rels_v1);
-        }
-
-        // scan directory listing (new), merge with the old results
-        let key_range = rel_tag_sparse_key_range(spcnode, dbnode);
-        let io_concurrency = IoConcurrency::spawn_from_conf(
-            self.conf,
-            self.gate
-                .enter()
-                .map_err(|_| PageReconstructError::Cancelled)?,
-        );
-        let results = self
-            .scan(
-                KeySpace::single(key_range),
-                version.get_lsn(),
-                ctx,
-                io_concurrency,
-            )
-            .await?;
-        let mut rels = rels_v1;
-        for (key, val) in results {
-            let val = RelDirExists::decode(&val?)
-                .map_err(|_| PageReconstructError::Other(anyhow::anyhow!("invalid reldir key")))?;
-            assert_eq!(key.field6, 1);
-            assert_eq!(key.field2, spcnode);
-            assert_eq!(key.field3, dbnode);
-            let tag = RelTag {
-                spcnode,
-                dbnode,
-                relnode: key.field4,
-                forknum: key.field5,
-            };
-            if val == RelDirExists::Removed {
-                debug_assert!(!rels.contains(&tag), "removed reltag in v2");
-                continue;
+        match v2_status {
+            RelSizeMigration::Legacy => {
+                let rels_v1 = self.list_rels_v1(spcnode, dbnode, version, ctx).await?;
+                Ok(rels_v1)
             }
-            let did_not_contain = rels.insert(tag);
-            debug_assert!(did_not_contain, "duplicate reltag in v2");
+            RelSizeMigration::Migrating | RelSizeMigration::Migrated
+                if version.get_lsn() < migrated_lsn.unwrap_or(Lsn(0)) =>
+            {
+                // For requests below the migrated LSN, we still use the v1 read path.
+                let rels_v1 = self.list_rels_v1(spcnode, dbnode, version, ctx).await?;
+                Ok(rels_v1)
+            }
+            RelSizeMigration::Migrating => {
+                let rels_v1 = self.list_rels_v1(spcnode, dbnode, version, ctx).await?;
+                let rels_v2_res = self.list_rels_v2(spcnode, dbnode, version, ctx).await;
+                match rels_v2_res {
+                    Ok(rels_v2) if rels_v1 == rels_v2 => {}
+                    Ok(rels_v2) => {
+                        tracing::warn!(
+                            "inconsistent v1/v2 reldir keyspace for db {} {}: v1_rels.len()={}, v2_rels.len()={}",
+                            spcnode,
+                            dbnode,
+                            rels_v1.len(),
+                            rels_v2.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to list rels in v2: {e}");
+                    }
+                }
+                Ok(rels_v1)
+            }
+            RelSizeMigration::Migrated => {
+                let rels_v2 = self.list_rels_v2(spcnode, dbnode, version, ctx).await?;
+                Ok(rels_v2)
+            }
         }
-        Ok(rels)
     }
 
     /// Get the whole SLRU segment
@@ -632,7 +886,7 @@ impl Timeline {
     ) -> Result<Bytes, PageReconstructError> {
         assert!(self.tenant_shard_id.is_shard_zero());
         let n_blocks = self
-            .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
+            .get_slru_segment_size(kind, segno, Version::at(lsn), ctx)
             .await?;
 
         let keyspace = KeySpace::single(
@@ -641,11 +895,12 @@ impl Timeline {
 
         let batches = keyspace.partition(
             self.get_shard_identity(),
-            Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+            self.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
+            BLCKSZ as u64,
         );
 
         let io_concurrency = IoConcurrency::spawn_from_conf(
-            self.conf,
+            self.conf.get_vectored_concurrent_io,
             self.gate
                 .enter()
                 .map_err(|_| PageReconstructError::Cancelled)?,
@@ -716,6 +971,7 @@ impl Timeline {
         let gc_cutoff_lsn_guard = self.get_applied_gc_cutoff_lsn();
         let gc_cutoff_planned = {
             let gc_info = self.gc_info.read().unwrap();
+            info!(cutoffs=?gc_info.cutoffs, applied_cutoff=%*gc_cutoff_lsn_guard, "starting find_lsn_for_timestamp");
             gc_info.min_cutoff()
         };
         // Usually the planned cutoff is newer than the cutoff of the last gc run,
@@ -867,11 +1123,11 @@ impl Timeline {
         mut f: impl FnMut(TimestampTz) -> ControlFlow<T>,
     ) -> Result<T, PageReconstructError> {
         for segno in self
-            .list_slru_segments(SlruKind::Clog, Version::Lsn(probe_lsn), ctx)
+            .list_slru_segments(SlruKind::Clog, Version::at(probe_lsn), ctx)
             .await?
         {
             let nblocks = self
-                .get_slru_segment_size(SlruKind::Clog, segno, Version::Lsn(probe_lsn), ctx)
+                .get_slru_segment_size(SlruKind::Clog, segno, Version::at(probe_lsn), ctx)
                 .await?;
 
             let keyspace = KeySpace::single(
@@ -881,11 +1137,12 @@ impl Timeline {
 
             let batches = keyspace.partition(
                 self.get_shard_identity(),
-                Timeline::MAX_GET_VECTORED_KEYS * BLCKSZ as u64,
+                self.conf.max_get_vectored_keys.get() as u64 * BLCKSZ as u64,
+                BLCKSZ as u64,
             );
 
             let io_concurrency = IoConcurrency::spawn_from_conf(
-                self.conf,
+                self.conf.get_vectored_concurrent_io,
                 self.gate
                     .enter()
                     .map_err(|_| PageReconstructError::Cancelled)?,
@@ -1000,7 +1257,7 @@ impl Timeline {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
 
-        if self.pg_version >= 17 {
+        if self.pg_version >= PgMajorVersion::PG17 {
             Ok(TwoPhaseDirectoryV17::des(&buf)?.xids)
         } else {
             Ok(TwoPhaseDirectory::des(&buf)?
@@ -1104,7 +1361,7 @@ impl Timeline {
             }
             let origin_id = k.field6 as RepOriginId;
             let origin_lsn = Lsn::des(&v)
-                .with_context(|| format!("decode replorigin value for {}: {v:?}", origin_id))?;
+                .with_context(|| format!("decode replorigin value for {origin_id}: {v:?}"))?;
             if origin_lsn != Lsn::INVALID {
                 result.insert(origin_id, origin_lsn);
             }
@@ -1135,11 +1392,16 @@ impl Timeline {
         let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: u64 = 0;
-        for (spcnode, dbnode) in dbdir.dbdirs.keys() {
+        let mut dbdir_cnt = 0;
+        let mut rel_cnt = 0;
+
+        for &(spcnode, dbnode) in dbdir.dbdirs.keys() {
+            dbdir_cnt += 1;
             for rel in self
-                .list_rels(*spcnode, *dbnode, Version::Lsn(lsn), ctx)
+                .list_rels(spcnode, dbnode, Version::at(lsn), ctx)
                 .await?
             {
+                rel_cnt += 1;
                 if self.cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
@@ -1150,6 +1412,10 @@ impl Timeline {
                 total_size += relsize as u64;
             }
         }
+
+        self.db_rel_count
+            .store(Some(Arc::new((dbdir_cnt, rel_cnt))));
+
         Ok(total_size * BLCKSZ as u64)
     }
 
@@ -1212,7 +1478,7 @@ impl Timeline {
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
-                .list_rels(spcnode, dbnode, Version::Lsn(lsn), ctx)
+                .list_rels(spcnode, dbnode, Version::at(lsn), ctx)
                 .await?
                 .into_iter()
                 .collect();
@@ -1329,59 +1595,75 @@ impl Timeline {
         Ok((dense_keyspace, sparse_keyspace))
     }
 
-    /// Get cached size of relation if it not updated after specified LSN
-    pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
-        let rel_size_cache = self.rel_size_cache.read().unwrap();
-        if let Some((cached_lsn, nblocks)) = rel_size_cache.map.get(tag) {
-            if lsn >= *cached_lsn {
-                RELSIZE_CACHE_HITS.inc();
-                return Some(*nblocks);
+    /// Get cached size of relation. There are two caches: one for primary updates, it captures the latest state of
+    /// of the timeline and snapshot cache, which key includes LSN and so can be used by replicas to get relation size
+    /// at the particular LSN (snapshot).
+    pub fn get_cached_rel_size(&self, tag: &RelTag, version: Version<'_>) -> Option<BlockNumber> {
+        let lsn = version.get_lsn();
+        {
+            let rel_size_cache = self.rel_size_latest_cache.read().unwrap();
+            if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
+                if lsn >= *cached_lsn {
+                    RELSIZE_LATEST_CACHE_HITS.inc();
+                    return Some(*nblocks);
+                }
+                RELSIZE_CACHE_MISSES_OLD.inc();
             }
-            RELSIZE_CACHE_MISSES_OLD.inc();
         }
-        RELSIZE_CACHE_MISSES.inc();
+        {
+            let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
+            if let Some(nblock) = rel_size_cache.get(&(lsn, *tag)) {
+                RELSIZE_SNAPSHOT_CACHE_HITS.inc();
+                return Some(*nblock);
+            }
+        }
+        if version.is_latest() {
+            RELSIZE_LATEST_CACHE_MISSES.inc();
+        } else {
+            RELSIZE_SNAPSHOT_CACHE_MISSES.inc();
+        }
         None
     }
 
     /// Update cached relation size if there is no more recent update
-    pub fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-
-        if lsn < rel_size_cache.complete_as_of {
-            // Do not cache old values. It's safe to cache the size on read, as long as
-            // the read was at an LSN since we started the WAL ingestion. Reasoning: we
-            // never evict values from the cache, so if the relation size changed after
-            // 'lsn', the new value is already in the cache.
-            return;
-        }
-
-        match rel_size_cache.map.entry(tag) {
-            hash_map::Entry::Occupied(mut entry) => {
-                let cached_lsn = entry.get_mut();
-                if lsn >= cached_lsn.0 {
-                    *cached_lsn = (lsn, nblocks);
+    pub fn update_cached_rel_size(&self, tag: RelTag, version: Version<'_>, nblocks: BlockNumber) {
+        let lsn = version.get_lsn();
+        if version.is_latest() {
+            let mut rel_size_cache = self.rel_size_latest_cache.write().unwrap();
+            match rel_size_cache.entry(tag) {
+                hash_map::Entry::Occupied(mut entry) => {
+                    let cached_lsn = entry.get_mut();
+                    if lsn >= cached_lsn.0 {
+                        *cached_lsn = (lsn, nblocks);
+                    }
+                }
+                hash_map::Entry::Vacant(entry) => {
+                    entry.insert((lsn, nblocks));
+                    RELSIZE_LATEST_CACHE_ENTRIES.inc();
                 }
             }
-            hash_map::Entry::Vacant(entry) => {
-                entry.insert((lsn, nblocks));
-                RELSIZE_CACHE_ENTRIES.inc();
+        } else {
+            let mut rel_size_cache = self.rel_size_snapshot_cache.lock().unwrap();
+            if rel_size_cache.capacity() != 0 {
+                rel_size_cache.insert((lsn, tag), nblocks);
+                RELSIZE_SNAPSHOT_CACHE_ENTRIES.set(rel_size_cache.len() as u64);
             }
         }
     }
 
     /// Store cached relation size
     pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        if rel_size_cache.map.insert(tag, (lsn, nblocks)).is_none() {
-            RELSIZE_CACHE_ENTRIES.inc();
+        let mut rel_size_cache = self.rel_size_latest_cache.write().unwrap();
+        if rel_size_cache.insert(tag, (lsn, nblocks)).is_none() {
+            RELSIZE_LATEST_CACHE_ENTRIES.inc();
         }
     }
 
     /// Remove cached relation size
     pub fn remove_cached_rel_size(&self, tag: &RelTag) {
-        let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        if rel_size_cache.map.remove(tag).is_some() {
-            RELSIZE_CACHE_ENTRIES.dec();
+        let mut rel_size_cache = self.rel_size_latest_cache.write().unwrap();
+        if rel_size_cache.remove(tag).is_some() {
+            RELSIZE_LATEST_CACHE_ENTRIES.dec();
         }
     }
 }
@@ -1421,6 +1703,9 @@ pub struct DatadirModification<'a> {
 
     /// An **approximation** of how many metadata bytes will be written to the EphemeralFile.
     pending_metadata_bytes: usize,
+
+    /// Whether we are importing a pgdata directory.
+    is_importing_pgdata: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1431,6 +1716,14 @@ pub enum MetricsUpdate {
     Add(u64),
     /// Decrement the metrics by this value
     Sub(u64),
+}
+
+/// Controls the behavior of the reldir keyspace.
+pub struct RelDirMode {
+    // Whether we can read the v2 keyspace or not.
+    current_status: RelSizeMigration,
+    // Whether we should initialize the v2 keyspace or not.
+    initialize: bool,
 }
 
 impl DatadirModification<'_> {
@@ -1516,7 +1809,7 @@ impl DatadirModification<'_> {
             .push((DirectoryKind::Db, MetricsUpdate::Set(0)));
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
-        let buf = if self.tline.pg_version >= 17 {
+        let buf = if self.tline.pg_version >= PgMajorVersion::PG17 {
             TwoPhaseDirectoryV17::ser(&TwoPhaseDirectoryV17 {
                 xids: HashSet::new(),
             })
@@ -1585,7 +1878,10 @@ impl DatadirModification<'_> {
         //       check the cache too. This is because eagerly checking the cache results in
         //       less work overall and 10% better performance. It's more work on cache miss
         //       but cache miss is rare.
-        if let Some(nblocks) = self.tline.get_cached_rel_size(&rel, self.get_lsn()) {
+        if let Some(nblocks) = self
+            .tline
+            .get_cached_rel_size(&rel, Version::Modified(self))
+        {
             Ok(nblocks)
         } else if !self
             .tline
@@ -1785,30 +2081,49 @@ impl DatadirModification<'_> {
     }
 
     /// Returns `true` if the rel_size_v2 write path is enabled. If it is the first time that
-    /// we enable it, we also need to persist it in `index_part.json`.
-    pub fn maybe_enable_rel_size_v2(&mut self) -> anyhow::Result<bool> {
-        let status = self.tline.get_rel_size_v2_status();
+    /// we enable it, we also need to persist it in `index_part.json` (initialize is true).
+    ///
+    /// As this function is only used on the write path, we do not need to read the migrated_at
+    /// field.
+    pub fn maybe_enable_rel_size_v2(&mut self, is_create: bool) -> anyhow::Result<RelDirMode> {
+        // TODO: define the behavior of the tenant-level config flag and use feature flag to enable this feature
+
+        let (status, _) = self.tline.get_rel_size_v2_status();
         let config = self.tline.get_rel_size_v2_enabled();
         match (config, status) {
             (false, RelSizeMigration::Legacy) => {
                 // tenant config didn't enable it and we didn't write any reldir_v2 key yet
-                Ok(false)
+                Ok(RelDirMode {
+                    current_status: RelSizeMigration::Legacy,
+                    initialize: false,
+                })
             }
-            (false, RelSizeMigration::Migrating | RelSizeMigration::Migrated) => {
+            (false, status @ RelSizeMigration::Migrating | status @ RelSizeMigration::Migrated) => {
                 // index_part already persisted that the timeline has enabled rel_size_v2
-                Ok(true)
+                Ok(RelDirMode {
+                    current_status: status,
+                    initialize: false,
+                })
             }
             (true, RelSizeMigration::Legacy) => {
                 // The first time we enable it, we need to persist it in `index_part.json`
-                self.tline
-                    .update_rel_size_v2_status(RelSizeMigration::Migrating)?;
-                tracing::info!("enabled rel_size_v2");
-                Ok(true)
+                // The caller should update the reldir status once the initialization is done.
+                //
+                // Only initialize the v2 keyspace on new relation creation. No initialization
+                // during `timeline_create` (TODO: fix this, we should allow, but currently it
+                // hits consistency issues).
+                Ok(RelDirMode {
+                    current_status: RelSizeMigration::Legacy,
+                    initialize: is_create && !self.is_importing_pgdata,
+                })
             }
-            (true, RelSizeMigration::Migrating | RelSizeMigration::Migrated) => {
+            (true, status @ RelSizeMigration::Migrating | status @ RelSizeMigration::Migrated) => {
                 // index_part already persisted that the timeline has enabled rel_size_v2
                 // and we don't need to do anything
-                Ok(true)
+                Ok(RelDirMode {
+                    current_status: status,
+                    initialize: false,
+                })
             }
         }
     }
@@ -1821,8 +2136,8 @@ impl DatadirModification<'_> {
         img: Bytes,
         ctx: &RequestContext,
     ) -> Result<(), WalIngestError> {
-        let v2_enabled = self
-            .maybe_enable_rel_size_v2()
+        let v2_mode = self
+            .maybe_enable_rel_size_v2(false)
             .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
 
         // Add it to the directory (if it doesn't exist already)
@@ -1838,17 +2153,19 @@ impl DatadirModification<'_> {
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         }
         if r.is_none() {
-            // Create RelDirectory
-            // TODO: if we have fully migrated to v2, no need to create this directory
+            if v2_mode.current_status != RelSizeMigration::Legacy {
+                self.pending_directory_entries
+                    .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
+            }
+
+            // Create RelDirectory in v1 keyspace. TODO: if we have fully migrated to v2, no need to create this directory.
+            // Some code path relies on this directory to be present. We should remove it once we starts to set tenants to
+            // `RelSizeMigration::Migrated` state (currently we don't, all tenants will have `RelSizeMigration::Migrating`).
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
             })?;
             self.pending_directory_entries
                 .push((DirectoryKind::Rel, MetricsUpdate::Set(0)));
-            if v2_enabled {
-                self.pending_directory_entries
-                    .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
-            }
             self.put(
                 rel_dir_to_key(spcnode, dbnode),
                 Value::Image(Bytes::from(buf)),
@@ -1867,7 +2184,7 @@ impl DatadirModification<'_> {
     ) -> Result<(), WalIngestError> {
         // Add it to the directory entry
         let dirbuf = self.get(TWOPHASEDIR_KEY, ctx).await?;
-        let newdirbuf = if self.tline.pg_version >= 17 {
+        let newdirbuf = if self.tline.pg_version >= PgMajorVersion::PG17 {
             let mut dir = TwoPhaseDirectoryV17::des(&dirbuf)?;
             if !dir.xids.insert(xid) {
                 Err(WalIngestErrorKind::FileAlreadyExists(xid))?;
@@ -1955,6 +2272,109 @@ impl DatadirModification<'_> {
         Ok(())
     }
 
+    async fn initialize_rel_size_v2_keyspace(
+        &mut self,
+        ctx: &RequestContext,
+        dbdir: &DbDirectory,
+    ) -> Result<(), WalIngestError> {
+        // Copy everything from relv1 to relv2; TODO: check if there's any key in the v2 keyspace, if so, abort.
+        tracing::info!("initializing rel_size_v2 keyspace");
+        let mut rel_cnt = 0;
+        // relmap_exists (the value of dbdirs hashmap) does not affect the migration: we need to copy things over anyways
+        for &(spcnode, dbnode) in dbdir.dbdirs.keys() {
+            let rel_dir_key = rel_dir_to_key(spcnode, dbnode);
+            let rel_dir = RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?;
+            for (relnode, forknum) in rel_dir.rels {
+                let sparse_rel_dir_key = rel_tag_sparse_key(spcnode, dbnode, relnode, forknum);
+                self.put(
+                    sparse_rel_dir_key,
+                    Value::Image(RelDirExists::Exists.encode()),
+                );
+                tracing::info!(
+                    "migrated rel_size_v2: {}",
+                    RelTag {
+                        spcnode,
+                        dbnode,
+                        relnode,
+                        forknum
+                    }
+                );
+                rel_cnt += 1;
+            }
+        }
+        tracing::info!(
+            "initialized rel_size_v2 keyspace at lsn {}: migrated {} relations",
+            self.lsn,
+            rel_cnt
+        );
+        self.tline
+            .update_rel_size_v2_status(RelSizeMigration::Migrating, Some(self.lsn))
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
+        Ok::<_, WalIngestError>(())
+    }
+
+    async fn put_rel_creation_v1(
+        &mut self,
+        rel: RelTag,
+        dbdir_exists: bool,
+        ctx: &RequestContext,
+    ) -> Result<(), WalIngestError> {
+        // Reldir v1 write path
+        let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
+        let mut rel_dir = if !dbdir_exists {
+            // Create the RelDirectory
+            RelDirectory::default()
+        } else {
+            // reldir already exists, fetch it
+            RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?
+        };
+
+        // Add the new relation to the rel directory entry, and write it back
+        if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
+            Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
+        }
+        if !dbdir_exists {
+            self.pending_directory_entries
+                .push((DirectoryKind::Rel, MetricsUpdate::Set(0)))
+        }
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, MetricsUpdate::Add(1)));
+        self.put(
+            rel_dir_key,
+            Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
+        );
+        Ok(())
+    }
+
+    async fn put_rel_creation_v2(
+        &mut self,
+        rel: RelTag,
+        dbdir_exists: bool,
+        ctx: &RequestContext,
+    ) -> Result<(), WalIngestError> {
+        // Reldir v2 write path
+        let sparse_rel_dir_key =
+            rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
+        // check if the rel_dir_key exists in v2
+        let val = self.sparse_get(sparse_rel_dir_key, ctx).await?;
+        let val = RelDirExists::decode_option(val)
+            .map_err(|_| WalIngestErrorKind::InvalidRelDirKey(sparse_rel_dir_key))?;
+        if val == RelDirExists::Exists {
+            Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
+        }
+        self.put(
+            sparse_rel_dir_key,
+            Value::Image(RelDirExists::Exists.encode()),
+        );
+        if !dbdir_exists {
+            self.pending_directory_entries
+                .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
+        }
+        self.pending_directory_entries
+            .push((DirectoryKind::RelV2, MetricsUpdate::Add(1)));
+        Ok(())
+    }
+
     /// Create a relation fork.
     ///
     /// 'nblocks' is the initial size.
@@ -1988,66 +2408,31 @@ impl DatadirModification<'_> {
                 true
             };
 
-        let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let mut rel_dir = if !dbdir_exists {
-            // Create the RelDirectory
-            RelDirectory::default()
-        } else {
-            // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?
-        };
-
-        let v2_enabled = self
-            .maybe_enable_rel_size_v2()
+        let mut v2_mode = self
+            .maybe_enable_rel_size_v2(true)
             .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
 
-        if v2_enabled {
-            if rel_dir.rels.contains(&(rel.relnode, rel.forknum)) {
-                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
+        if v2_mode.initialize {
+            if let Err(e) = self.initialize_rel_size_v2_keyspace(ctx, &dbdir).await {
+                tracing::warn!("error initializing rel_size_v2 keyspace: {}", e);
+                // TODO: circuit breaker so that it won't retry forever
+            } else {
+                v2_mode.current_status = RelSizeMigration::Migrating;
             }
-            let sparse_rel_dir_key =
-                rel_tag_sparse_key(rel.spcnode, rel.dbnode, rel.relnode, rel.forknum);
-            // check if the rel_dir_key exists in v2
-            let val = self.sparse_get(sparse_rel_dir_key, ctx).await?;
-            let val = RelDirExists::decode_option(val)
-                .map_err(|_| WalIngestErrorKind::InvalidRelDirKey(sparse_rel_dir_key))?;
-            if val == RelDirExists::Exists {
-                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
+        }
+
+        if v2_mode.current_status != RelSizeMigration::Migrated {
+            self.put_rel_creation_v1(rel, dbdir_exists, ctx).await?;
+        }
+
+        if v2_mode.current_status != RelSizeMigration::Legacy {
+            let write_v2_res = self.put_rel_creation_v2(rel, dbdir_exists, ctx).await;
+            if let Err(e) = write_v2_res {
+                if v2_mode.current_status == RelSizeMigration::Migrated {
+                    return Err(e);
+                }
+                tracing::warn!("error writing rel_size_v2 keyspace: {}", e);
             }
-            self.put(
-                sparse_rel_dir_key,
-                Value::Image(RelDirExists::Exists.encode()),
-            );
-            if !dbdir_exists {
-                self.pending_directory_entries
-                    .push((DirectoryKind::Rel, MetricsUpdate::Set(0)));
-                self.pending_directory_entries
-                    .push((DirectoryKind::RelV2, MetricsUpdate::Set(0)));
-                // We don't write `rel_dir_key -> rel_dir.rels` back to the storage in the v2 path unless it's the initial creation.
-                // TODO: if we have fully migrated to v2, no need to create this directory. Otherwise, there
-                // will be key not found errors if we don't create an empty one for rel_size_v2.
-                self.put(
-                    rel_dir_key,
-                    Value::Image(Bytes::from(RelDirectory::ser(&RelDirectory::default())?)),
-                );
-            }
-            self.pending_directory_entries
-                .push((DirectoryKind::RelV2, MetricsUpdate::Add(1)));
-        } else {
-            // Add the new relation to the rel directory entry, and write it back
-            if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-                Err(WalIngestErrorKind::RelationAlreadyExists(rel))?;
-            }
-            if !dbdir_exists {
-                self.pending_directory_entries
-                    .push((DirectoryKind::Rel, MetricsUpdate::Set(0)))
-            }
-            self.pending_directory_entries
-                .push((DirectoryKind::Rel, MetricsUpdate::Add(1)));
-            self.put(
-                rel_dir_key,
-                Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
-            );
         }
 
         // Put size
@@ -2122,15 +2507,12 @@ impl DatadirModification<'_> {
         Ok(())
     }
 
-    /// Drop some relations
-    pub(crate) async fn put_rel_drops(
+    async fn put_rel_drop_v1(
         &mut self,
         drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
         ctx: &RequestContext,
-    ) -> Result<(), WalIngestError> {
-        let v2_enabled = self
-            .maybe_enable_rel_size_v2()
-            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
+    ) -> Result<BTreeSet<RelTag>, WalIngestError> {
+        let mut dropped_rels = BTreeSet::new();
         for ((spc_node, db_node), rel_tags) in drop_relations {
             let dir_key = rel_dir_to_key(spc_node, db_node);
             let buf = self.get(dir_key, ctx).await?;
@@ -2142,25 +2524,8 @@ impl DatadirModification<'_> {
                     self.pending_directory_entries
                         .push((DirectoryKind::Rel, MetricsUpdate::Sub(1)));
                     dirty = true;
+                    dropped_rels.insert(rel_tag);
                     true
-                } else if v2_enabled {
-                    // The rel is not found in the old reldir key, so we need to check the new sparse keyspace.
-                    // Note that a relation can only exist in one of the two keyspaces (guaranteed by the ingestion
-                    // logic).
-                    let key =
-                        rel_tag_sparse_key(spc_node, db_node, rel_tag.relnode, rel_tag.forknum);
-                    let val = RelDirExists::decode_option(self.sparse_get(key, ctx).await?)
-                        .map_err(|_| WalIngestErrorKind::InvalidKey(key, self.lsn))?;
-                    if val == RelDirExists::Exists {
-                        self.pending_directory_entries
-                            .push((DirectoryKind::RelV2, MetricsUpdate::Sub(1)));
-                        // put tombstone
-                        self.put(key, Value::Image(RelDirExists::Removed.encode()));
-                        // no need to set dirty to true
-                        true
-                    } else {
-                        false
-                    }
                 } else {
                     false
                 };
@@ -2183,7 +2548,67 @@ impl DatadirModification<'_> {
                 self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
             }
         }
+        Ok(dropped_rels)
+    }
 
+    async fn put_rel_drop_v2(
+        &mut self,
+        drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
+        ctx: &RequestContext,
+    ) -> Result<BTreeSet<RelTag>, WalIngestError> {
+        let mut dropped_rels = BTreeSet::new();
+        for ((spc_node, db_node), rel_tags) in drop_relations {
+            for rel_tag in rel_tags {
+                let key = rel_tag_sparse_key(spc_node, db_node, rel_tag.relnode, rel_tag.forknum);
+                let val = RelDirExists::decode_option(self.sparse_get(key, ctx).await?)
+                    .map_err(|_| WalIngestErrorKind::InvalidKey(key, self.lsn))?;
+                if val == RelDirExists::Exists {
+                    dropped_rels.insert(rel_tag);
+                    self.pending_directory_entries
+                        .push((DirectoryKind::RelV2, MetricsUpdate::Sub(1)));
+                    // put tombstone
+                    self.put(key, Value::Image(RelDirExists::Removed.encode()));
+                }
+            }
+        }
+        Ok(dropped_rels)
+    }
+
+    /// Drop some relations
+    pub(crate) async fn put_rel_drops(
+        &mut self,
+        drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
+        ctx: &RequestContext,
+    ) -> Result<(), WalIngestError> {
+        let v2_mode = self
+            .maybe_enable_rel_size_v2(false)
+            .map_err(WalIngestErrorKind::MaybeRelSizeV2Error)?;
+        match v2_mode.current_status {
+            RelSizeMigration::Legacy => {
+                self.put_rel_drop_v1(drop_relations, ctx).await?;
+            }
+            RelSizeMigration::Migrating => {
+                let dropped_rels_v1 = self.put_rel_drop_v1(drop_relations.clone(), ctx).await?;
+                let dropped_rels_v2_res = self.put_rel_drop_v2(drop_relations, ctx).await;
+                match dropped_rels_v2_res {
+                    Ok(dropped_rels_v2) => {
+                        if dropped_rels_v1 != dropped_rels_v2 {
+                            tracing::warn!(
+                                "inconsistent v1/v2 rel drop: dropped_rels_v1.len()={}, dropped_rels_v2.len()={}",
+                                dropped_rels_v1.len(),
+                                dropped_rels_v2.len()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("error dropping rels: {}", e);
+                    }
+                }
+            }
+            RelSizeMigration::Migrated => {
+                self.put_rel_drop_v2(drop_relations, ctx).await?;
+            }
+        }
         Ok(())
     }
 
@@ -2283,7 +2708,7 @@ impl DatadirModification<'_> {
     ) -> Result<(), WalIngestError> {
         // Remove it from the directory entry
         let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
-        let newdirbuf = if self.tline.pg_version >= 17 {
+        let newdirbuf = if self.tline.pg_version >= PgMajorVersion::PG17 {
             let mut dir = TwoPhaseDirectoryV17::des(&buf)?;
 
             if !dir.xids.remove(&xid) {
@@ -2340,8 +2765,7 @@ impl DatadirModification<'_> {
             if path == p {
                 assert!(
                     modifying_file.is_none(),
-                    "duplicated entries found for {}",
-                    path
+                    "duplicated entries found for {path}"
                 );
                 modifying_file = Some(content);
             } else {
@@ -2667,7 +3091,7 @@ pub struct DatadirModificationStats {
 /// timeline to not miss the latest updates.
 #[derive(Clone, Copy)]
 pub enum Version<'a> {
-    Lsn(Lsn),
+    LsnRange(LsnRange),
     Modified(&'a DatadirModification<'a>),
 }
 
@@ -2679,7 +3103,7 @@ impl Version<'_> {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         match self {
-            Version::Lsn(lsn) => timeline.get(key, *lsn, ctx).await,
+            Version::LsnRange(lsns) => timeline.get(key, lsns.effective_lsn, ctx).await,
             Version::Modified(modification) => modification.get(key, ctx).await,
         }
     }
@@ -2701,11 +3125,25 @@ impl Version<'_> {
         }
     }
 
-    fn get_lsn(&self) -> Lsn {
+    pub fn is_latest(&self) -> bool {
         match self {
-            Version::Lsn(lsn) => *lsn,
+            Version::LsnRange(lsns) => lsns.is_latest(),
+            Version::Modified(_) => true,
+        }
+    }
+
+    pub fn get_lsn(&self) -> Lsn {
+        match self {
+            Version::LsnRange(lsns) => lsns.effective_lsn,
             Version::Modified(modification) => modification.lsn,
         }
+    }
+
+    pub fn at(lsn: Lsn) -> Self {
+        Version::LsnRange(LsnRange {
+            effective_lsn: lsn,
+            request_lsn: lsn,
+        })
     }
 }
 
@@ -2777,9 +3215,8 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 mod tests {
     use hex_literal::hex;
     use pageserver_api::models::ShardParameters;
-    use pageserver_api::shard::ShardStripeSize;
     use utils::id::TimelineId;
-    use utils::shard::{ShardCount, ShardNumber};
+    use utils::shard::{ShardCount, ShardNumber, ShardStripeSize};
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -2902,7 +3339,7 @@ mod tests {
         // This shard will get the even blocks
         let shard = ShardIdentity::from_params(
             ShardNumber(0),
-            &ShardParameters {
+            ShardParameters {
                 count: ShardCount(2),
                 stripe_size: ShardStripeSize(1),
             },

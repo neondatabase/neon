@@ -5,8 +5,9 @@ use http_utils::error::ApiError;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
-use pageserver_api::models::ShardImportStatus;
+use pageserver_api::models::{ShardImportProgress, ShardImportStatus};
 use tokio_util::sync::CancellationToken;
+use utils::sync::gate::Gate;
 use utils::{
     id::{TenantId, TimelineId},
     shard::ShardIndex,
@@ -28,7 +29,12 @@ impl ShardImportStatuses {
         ShardImportStatuses(
             shards
                 .into_iter()
-                .map(|ts_id| (ts_id, ShardImportStatus::InProgress))
+                .map(|ts_id| {
+                    (
+                        ts_id,
+                        ShardImportStatus::InProgress(None::<ShardImportProgress>),
+                    )
+                })
                 .collect(),
         )
     }
@@ -50,6 +56,8 @@ pub(crate) enum TimelineImportUpdateFollowUp {
 pub(crate) enum TimelineImportFinalizeError {
     #[error("Shut down interrupted import finalize")]
     ShuttingDown,
+    #[error("Import finalization was cancelled")]
+    Cancelled,
     #[error("Mismatched shard detected during import finalize: {0}")]
     MismatchedShards(ShardIndex),
 }
@@ -159,6 +167,11 @@ impl TimelineImport {
     }
 }
 
+pub(crate) struct FinalizingImport {
+    pub(crate) gate: Gate,
+    pub(crate) cancel: CancellationToken,
+}
+
 pub(crate) type ImportResult = Result<(), String>;
 
 pub(crate) struct UpcallClient {
@@ -182,7 +195,7 @@ impl UpcallClient {
         let authorization_header = config
             .control_plane_jwt_token
             .clone()
-            .map(|jwt| format!("Bearer {}", jwt));
+            .map(|jwt| format!("Bearer {jwt}"));
 
         let client = reqwest::ClientBuilder::new()
             .timeout(IMPORT_COMPLETE_REQUEST_TIMEOUT)

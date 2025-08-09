@@ -1,10 +1,12 @@
 /artifact_cache
+/build
 /pg_install
 /target
 /tmp_check
 /tmp_check_cli
 __pycache__/
 test_output/
+neon_previous/
 .vscode
 .idea
 *.swp
@@ -13,6 +15,7 @@ neon.iml
 /.neon
 /integration_tests/.neon
 compaction-suite-results.*
+docker-compose/docker-compose-parallel.yml
 
 # Coverage
 *.profraw
@@ -23,6 +26,14 @@ compaction-suite-results.*
 *.o
 *.so
 *.Po
+*.pid
 
 # pgindent typedef lists
 *.list
+
+# Node
+**/node_modules/
+
+# various files for local testing
+/proxy/.subzero
+local_proxy.json

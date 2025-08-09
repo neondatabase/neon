@@ -14,7 +14,7 @@
 
 use std::ffi::OsStr;
 use std::io::Write;
-use std::os::unix::prelude::AsRawFd;
+use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
@@ -356,7 +356,7 @@ where
             let file = pid_file::claim_for_current_process(&path).expect("claim pid file");
             // Remove the FD_CLOEXEC flag on the pidfile descriptor so that the pidfile
             // remains locked after exec.
-            nix::fcntl::fcntl(file.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::empty()))
+            nix::fcntl::fcntl(file.as_fd(), FcntlArg::F_SETFD(FdFlag::empty()))
                 .expect("remove FD_CLOEXEC");
             // Don't run drop(file), it would close the file before we actually exec.
             std::mem::forget(file);

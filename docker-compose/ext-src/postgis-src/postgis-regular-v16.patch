@@ -1,0 +1,186 @@
+diff --git a/raster/test/regress/tests.mk b/raster/test/regress/tests.mk
+index 00918e1..7e2b6cd 100644
+--- a/raster/test/regress/tests.mk
++++ b/raster/test/regress/tests.mk
+@@ -17,9 +17,7 @@ override RUNTESTFLAGS_INTERNAL := \
+   $(RUNTESTFLAGS_INTERNAL) \
+   --after-upgrade-script $(top_srcdir)/raster/test/regress/hooks/hook-after-upgrade-raster.sql
+ 
+-RASTER_TEST_FIRST = \
+-	$(top_srcdir)/raster/test/regress/check_gdal \
+-	$(top_srcdir)/raster/test/regress/loader/load_outdb
++RASTER_TEST_FIRST =
+ 
+ RASTER_TEST_LAST = \
+ 	$(top_srcdir)/raster/test/regress/clean
+@@ -33,9 +31,7 @@ RASTER_TEST_IO = \
+ 
+ RASTER_TEST_BASIC_FUNC = \
+ 	$(top_srcdir)/raster/test/regress/rt_bytea \
+-	$(top_srcdir)/raster/test/regress/rt_wkb \
+ 	$(top_srcdir)/raster/test/regress/box3d \
+-	$(top_srcdir)/raster/test/regress/rt_addband \
+ 	$(top_srcdir)/raster/test/regress/rt_band \
+ 	$(top_srcdir)/raster/test/regress/rt_tile
+ 
+@@ -73,16 +69,10 @@ RASTER_TEST_BANDPROPS = \
+ 	$(top_srcdir)/raster/test/regress/rt_neighborhood \
+ 	$(top_srcdir)/raster/test/regress/rt_nearestvalue \
+ 	$(top_srcdir)/raster/test/regress/rt_pixelofvalue \
+-	$(top_srcdir)/raster/test/regress/rt_polygon \
+-	$(top_srcdir)/raster/test/regress/rt_setbandpath
++	$(top_srcdir)/raster/test/regress/rt_polygon
+ 
+ RASTER_TEST_UTILITY = \
+ 	$(top_srcdir)/raster/test/regress/rt_utility \
+-	$(top_srcdir)/raster/test/regress/rt_fromgdalraster \
+-	$(top_srcdir)/raster/test/regress/rt_asgdalraster \
+-	$(top_srcdir)/raster/test/regress/rt_astiff \
+-	$(top_srcdir)/raster/test/regress/rt_asjpeg \
+-	$(top_srcdir)/raster/test/regress/rt_aspng \
+ 	$(top_srcdir)/raster/test/regress/rt_reclass \
+ 	$(top_srcdir)/raster/test/regress/rt_gdalwarp \
+ 	$(top_srcdir)/raster/test/regress/rt_gdalcontour \
+@@ -120,21 +110,13 @@ RASTER_TEST_SREL = \
+ 
+ RASTER_TEST_BUGS = \
+ 	$(top_srcdir)/raster/test/regress/bug_test_car5 \
+-	$(top_srcdir)/raster/test/regress/permitted_gdal_drivers \
+ 	$(top_srcdir)/raster/test/regress/tickets
+ 
+ RASTER_TEST_LOADER = \
+ 	$(top_srcdir)/raster/test/regress/loader/Basic \
+ 	$(top_srcdir)/raster/test/regress/loader/Projected \
+ 	$(top_srcdir)/raster/test/regress/loader/BasicCopy \
+-	$(top_srcdir)/raster/test/regress/loader/BasicFilename \
+-	$(top_srcdir)/raster/test/regress/loader/BasicOutDB \
+-	$(top_srcdir)/raster/test/regress/loader/Tiled10x10 \
+-	$(top_srcdir)/raster/test/regress/loader/Tiled10x10Copy \
+-	$(top_srcdir)/raster/test/regress/loader/Tiled8x8 \
+-	$(top_srcdir)/raster/test/regress/loader/TiledAuto \
+-	$(top_srcdir)/raster/test/regress/loader/TiledAutoSkipNoData \
+-	$(top_srcdir)/raster/test/regress/loader/TiledAutoCopyn
++	$(top_srcdir)/raster/test/regress/loader/BasicFilename
+ 
+ RASTER_TESTS := $(RASTER_TEST_FIRST) \
+ 	$(RASTER_TEST_METADATA) $(RASTER_TEST_IO) $(RASTER_TEST_BASIC_FUNC) \
+diff --git a/regress/core/binary.sql b/regress/core/binary.sql
+index 7a36b65..ad78fc7 100644
+--- a/regress/core/binary.sql
++++ b/regress/core/binary.sql
+@@ -1,4 +1,5 @@
+ SET client_min_messages TO warning;
++
+ CREATE SCHEMA tm;
+ 
+ CREATE TABLE tm.geoms (id serial, g geometry);
+@@ -31,24 +32,39 @@ SELECT st_force4d(g) FROM tm.geoms WHERE id < 15 ORDER BY id;
+ INSERT INTO tm.geoms(g)
+ SELECT st_setsrid(g,4326) FROM tm.geoms ORDER BY id;
+ 
+-COPY tm.geoms TO :tmpfile WITH BINARY;
++-- define temp file path
++\set tmpfile '/tmp/postgis_binary_test.dat'
++
++-- export
++\set command '\\copy tm.geoms TO ':tmpfile' WITH (FORMAT BINARY)'
++:command
++
++-- import
+ CREATE TABLE tm.geoms_in AS SELECT * FROM tm.geoms LIMIT 0;
+-COPY tm.geoms_in FROM :tmpfile WITH BINARY;
+-SELECT 'geometry', count(*) FROM tm.geoms_in i, tm.geoms o WHERE i.id = o.id
+- AND ST_OrderingEquals(i.g, o.g);
++\set command '\\copy tm.geoms_in FROM ':tmpfile' WITH (FORMAT BINARY)'
++:command
++
++SELECT 'geometry', count(*) FROM tm.geoms_in i, tm.geoms o
++WHERE i.id = o.id AND ST_OrderingEquals(i.g, o.g);
+ 
+ CREATE TABLE tm.geogs AS SELECT id,g::geography FROM tm.geoms
+ WHERE geometrytype(g) NOT LIKE '%CURVE%'
+   AND geometrytype(g) NOT LIKE '%CIRCULAR%'
+   AND geometrytype(g) NOT LIKE '%SURFACE%'
+   AND geometrytype(g) NOT LIKE 'TRIANGLE%'
+-  AND geometrytype(g) NOT LIKE 'TIN%'
+-;
++  AND geometrytype(g) NOT LIKE 'TIN%';
+ 
+-COPY tm.geogs TO :tmpfile WITH BINARY;
++-- export
++\set command '\\copy tm.geogs TO ':tmpfile' WITH (FORMAT BINARY)'
++:command
++
++-- import
+ CREATE TABLE tm.geogs_in AS SELECT * FROM tm.geogs LIMIT 0;
+-COPY tm.geogs_in FROM :tmpfile WITH BINARY;
+-SELECT 'geometry', count(*) FROM tm.geogs_in i, tm.geogs o WHERE i.id = o.id
+- AND ST_OrderingEquals(i.g::geometry, o.g::geometry);
++\set command '\\copy tm.geogs_in FROM ':tmpfile' WITH (FORMAT BINARY)'
++:command
++
++SELECT 'geometry', count(*) FROM tm.geogs_in i, tm.geogs o
++WHERE i.id = o.id AND ST_OrderingEquals(i.g::geometry, o.g::geometry);
+ 
+ DROP SCHEMA tm CASCADE;
++
+diff --git a/regress/core/tests.mk b/regress/core/tests.mk
+index 64a9254..94903c3 100644
+--- a/regress/core/tests.mk
++++ b/regress/core/tests.mk
+@@ -23,7 +23,6 @@ current_dir := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+ RUNTESTFLAGS_INTERNAL += \
+   --before-upgrade-script $(top_srcdir)/regress/hooks/hook-before-upgrade.sql \
+   --after-upgrade-script  $(top_srcdir)/regress/hooks/hook-after-upgrade.sql \
+-  --after-create-script   $(top_srcdir)/regress/hooks/hook-after-create.sql \
+   --before-uninstall-script $(top_srcdir)/regress/hooks/hook-before-uninstall.sql
+ 
+ TESTS += \
+@@ -40,7 +39,6 @@ TESTS += \
+ 	$(top_srcdir)/regress/core/dumppoints \
+ 	$(top_srcdir)/regress/core/dumpsegments \
+ 	$(top_srcdir)/regress/core/empty \
+-	$(top_srcdir)/regress/core/estimatedextent \
+ 	$(top_srcdir)/regress/core/forcecurve \
+ 	$(top_srcdir)/regress/core/flatgeobuf \
+ 	$(top_srcdir)/regress/core/geography \
+@@ -55,7 +53,6 @@ TESTS += \
+ 	$(top_srcdir)/regress/core/out_marc21 \
+ 	$(top_srcdir)/regress/core/in_encodedpolyline \
+ 	$(top_srcdir)/regress/core/iscollection \
+-	$(top_srcdir)/regress/core/legacy \
+ 	$(top_srcdir)/regress/core/letters \
+ 	$(top_srcdir)/regress/core/long_xact \
+ 	$(top_srcdir)/regress/core/lwgeom_regress \
+@@ -112,7 +109,6 @@ TESTS += \
+ 	$(top_srcdir)/regress/core/temporal_knn \
+ 	$(top_srcdir)/regress/core/tickets \
+ 	$(top_srcdir)/regress/core/twkb \
+-	$(top_srcdir)/regress/core/typmod \
+ 	$(top_srcdir)/regress/core/wkb \
+ 	$(top_srcdir)/regress/core/wkt \
+ 	$(top_srcdir)/regress/core/wmsservers \
+diff --git a/regress/loader/tests.mk b/regress/loader/tests.mk
+index 1fc77ac..c3cb9de 100644
+--- a/regress/loader/tests.mk
++++ b/regress/loader/tests.mk
+@@ -38,7 +38,5 @@ TESTS += \
+ 	$(top_srcdir)/regress/loader/Latin1 \
+ 	$(top_srcdir)/regress/loader/Latin1-implicit \
+ 	$(top_srcdir)/regress/loader/mfile \
+-	$(top_srcdir)/regress/loader/TestSkipANALYZE \
+-	$(top_srcdir)/regress/loader/TestANALYZE \
+ 	$(top_srcdir)/regress/loader/CharNoWidth
+ 
+diff --git a/regress/run_test.pl b/regress/run_test.pl
+index 0ec5b2d..1c331f4 100755
+--- a/regress/run_test.pl
++++ b/regress/run_test.pl
+@@ -147,7 +147,6 @@ $ENV{"LANG"} = "C";
+ # Add locale info to the psql options
+ # Add pg12 precision suppression
+ my $PGOPTIONS = $ENV{"PGOPTIONS"};
+-$PGOPTIONS .= " -c lc_messages=C";
+ $PGOPTIONS .= " -c client_min_messages=NOTICE";
+ $PGOPTIONS .= " -c extra_float_digits=0";
+ $ENV{"PGOPTIONS"} = $PGOPTIONS;

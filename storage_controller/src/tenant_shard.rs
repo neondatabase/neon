@@ -131,6 +131,17 @@ pub(crate) struct TenantShard {
     #[serde(serialize_with = "read_last_error")]
     pub(crate) last_error: std::sync::Arc<std::sync::Mutex<Option<Arc<ReconcileError>>>>,
 
+    /// Amount of consecutive [`crate::service::Service::reconcile_all`] iterations that have been
+    /// scheduled a reconciliation for this shard.
+    ///
+    /// If this reaches `MAX_CONSECUTIVE_RECONCILES`, the shard is considered "stuck" and will be
+    /// ignored when deciding whether optimizations can run. This includes both successful and failed
+    /// reconciliations.
+    ///
+    /// Incremented in [`crate::service::Service::process_result`], and reset to 0 when
+    /// [`crate::service::Service::reconcile_all`] determines no reconciliation is needed for this shard.
+    pub(crate) consecutive_reconciles_count: usize,
+
     /// If we have a pending compute notification that for some reason we weren't able to send,
     /// set this to true. If this is set, calls to [`Self::get_reconcile_needed`] will return Yes
     /// and trigger a Reconciler run.  This is the mechanism by which compute notifications are included in the scope
@@ -238,6 +249,10 @@ impl IntentState {
     }
 
     pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
+        // Every assertion here should probably have a corresponding check in
+        // `validate_optimization` unless it is an invariant that should never be violated. Note
+        // that the lock is not held between planning optimizations and applying them so you have to
+        // assume any valid state transition of the intent state may have occurred
         assert!(!self.secondary.contains(&new_secondary));
         assert!(self.attached != Some(new_secondary));
         scheduler.update_node_ref_counts(
@@ -594,6 +609,7 @@ impl TenantShard {
             waiter: Arc::new(SeqWait::new(Sequence(0))),
             error_waiter: Arc::new(SeqWait::new(Sequence(0))),
             last_error: Arc::default(),
+            consecutive_reconciles_count: 0,
             pending_compute_notification: false,
             scheduling_policy: ShardSchedulingPolicy::default(),
             preferred_node: None,
@@ -796,8 +812,6 @@ impl TenantShard {
     /// if the swap is not possible and leaves the intent state in its original state.
     ///
     /// Arguments:
-    /// `attached_to`: the currently attached location matching the intent state (may be None if the
-    /// shard is not attached)
     /// `promote_to`: an optional secondary location of this tenant shard. If set to None, we ask
     /// the scheduler to recommend a node
     pub(crate) fn reschedule_to_secondary(
@@ -1184,10 +1198,18 @@ impl TenantShard {
         for secondary in self.intent.get_secondary() {
             // Make sure we don't try to migrate a secondary to our attached location: this case happens
             // easily in environments without multiple AZs.
-            let exclude = match self.intent.attached {
+            let mut exclude = match self.intent.attached {
                 Some(attached) => vec![attached],
                 None => vec![],
             };
+
+            // Exclude all other secondaries from the scheduling process to avoid replacing
+            // one existing secondary with another existing secondary.
+            for another_secondary in self.intent.secondary.iter() {
+                if another_secondary != secondary {
+                    exclude.push(*another_secondary);
+                }
+            }
 
             let replacement = match &self.policy {
                 PlacementPolicy::Attached(_) => {
@@ -1254,13 +1276,24 @@ impl TenantShard {
     }
 
     /// Return true if the optimization was really applied: it will not be applied if the optimization's
-    /// sequence is behind this tenant shard's
+    /// sequence is behind this tenant shard's or if the intent state proposed by the optimization
+    /// is not compatible with the current intent state. The later may happen when the background
+    /// reconcile loops runs concurrently with HTTP driven optimisations.
     pub(crate) fn apply_optimization(
         &mut self,
         scheduler: &mut Scheduler,
         optimization: ScheduleOptimization,
     ) -> bool {
         if optimization.sequence != self.sequence {
+            return false;
+        }
+
+        if !self.validate_optimization(&optimization) {
+            tracing::info!(
+                "Skipping optimization for {} because it does not match current intent: {:?}",
+                self.tenant_shard_id,
+                optimization,
+            );
             return false;
         }
 
@@ -1302,6 +1335,38 @@ impl TenantShard {
         }
 
         true
+    }
+
+    /// Check that the desired modifications to the intent state are compatible with the current
+    /// intent state. Note that the lock is not held between planning optimizations and applying
+    /// them so any valid state transition of the intent state may have occurred.
+    fn validate_optimization(&self, optimization: &ScheduleOptimization) -> bool {
+        match optimization.action {
+            ScheduleOptimizationAction::MigrateAttachment(MigrateAttachment {
+                old_attached_node_id,
+                new_attached_node_id,
+            }) => {
+                self.intent.attached == Some(old_attached_node_id)
+                    && self.intent.secondary.contains(&new_attached_node_id)
+            }
+            ScheduleOptimizationAction::ReplaceSecondary(ReplaceSecondary {
+                old_node_id: _,
+                new_node_id,
+            }) => {
+                // It's legal to remove a secondary that is not present in the intent state
+                !self.intent.secondary.contains(&new_node_id)
+                    // Ensure the secondary hasn't already been promoted to attached by a concurrent
+                    // optimization/migration.
+                    && self.intent.attached != Some(new_node_id)
+            }
+            ScheduleOptimizationAction::CreateSecondary(new_node_id) => {
+                !self.intent.secondary.contains(&new_node_id)
+            }
+            ScheduleOptimizationAction::RemoveSecondary(_) => {
+                // It's legal to remove a secondary that is not present in the intent state
+                true
+            }
+        }
     }
 
     /// When a shard has several secondary locations, we need to pick one in situations where
@@ -1348,28 +1413,19 @@ impl TenantShard {
     /// Reconciliation may still be needed for other aspects of state such as secondaries (see [`Self::dirty`]): this
     /// funciton should not be used to decide whether to reconcile.
     pub(crate) fn stably_attached(&self) -> Option<NodeId> {
-        if let Some(attach_intent) = self.intent.attached {
-            match self.observed.locations.get(&attach_intent) {
-                Some(loc) => match &loc.conf {
-                    Some(conf) => match conf.mode {
-                        LocationConfigMode::AttachedMulti
-                        | LocationConfigMode::AttachedSingle
-                        | LocationConfigMode::AttachedStale => {
-                            // Our intent and observed state agree that this node is in an attached state.
-                            Some(attach_intent)
-                        }
-                        // Our observed config is not an attached state
-                        _ => None,
-                    },
-                    // Our observed state is None, i.e. in flux
-                    None => None,
-                },
-                // We have no observed state for this node
-                None => None,
-            }
-        } else {
-            // Our intent is not to attach
-            None
+        // We have an intent to attach for this node
+        let attach_intent = self.intent.attached?;
+        // We have an observed state for this node
+        let location = self.observed.locations.get(&attach_intent)?;
+        // Our observed state is not None, i.e. not in flux
+        let location_config = location.conf.as_ref()?;
+
+        // Check if our intent and observed state agree that this node is in an attached state.
+        match location_config.mode {
+            LocationConfigMode::AttachedMulti
+            | LocationConfigMode::AttachedSingle
+            | LocationConfigMode::AttachedStale => Some(attach_intent),
+            _ => None,
         }
     }
 
@@ -1382,8 +1438,13 @@ impl TenantShard {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf =
-                attached_location_conf(generation, &self.shard, &self.config, &self.policy);
+            let wanted_conf = attached_location_conf(
+                generation,
+                &self.shard,
+                &self.config,
+                &self.policy,
+                self.intent.get_secondary().len(),
+            );
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -1556,7 +1617,13 @@ impl TenantShard {
 
         // Update result counter
         let outcome_label = match &result {
-            Ok(_) => ReconcileOutcome::Success,
+            Ok(_) => {
+                if reconciler.compute_notify_failure {
+                    ReconcileOutcome::SuccessNoNotify
+                } else {
+                    ReconcileOutcome::Success
+                }
+            }
             Err(ReconcileError::Cancel) => ReconcileOutcome::Cancel,
             Err(_) => ReconcileOutcome::Error,
         };
@@ -1855,6 +1922,7 @@ impl TenantShard {
             waiter: Arc::new(SeqWait::new(Sequence::initial())),
             error_waiter: Arc::new(SeqWait::new(Sequence::initial())),
             last_error: Arc::default(),
+            consecutive_reconciles_count: 0,
             pending_compute_notification: false,
             delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
@@ -3004,21 +3072,18 @@ pub(crate) mod tests {
 
             if attachments_in_wrong_az > 0 {
                 violations.push(format!(
-                    "{} attachments scheduled to the incorrect AZ",
-                    attachments_in_wrong_az
+                    "{attachments_in_wrong_az} attachments scheduled to the incorrect AZ"
                 ));
             }
 
             if secondaries_in_wrong_az > 0 {
                 violations.push(format!(
-                    "{} secondaries scheduled to the incorrect AZ",
-                    secondaries_in_wrong_az
+                    "{secondaries_in_wrong_az} secondaries scheduled to the incorrect AZ"
                 ));
             }
 
             eprintln!(
-                "attachments_in_wrong_az={} secondaries_in_wrong_az={}",
-                attachments_in_wrong_az, secondaries_in_wrong_az
+                "attachments_in_wrong_az={attachments_in_wrong_az} secondaries_in_wrong_az={secondaries_in_wrong_az}"
             );
 
             for (node_id, stats) in &node_stats {

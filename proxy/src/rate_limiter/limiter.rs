@@ -12,46 +12,9 @@ use rand::{Rng, SeedableRng};
 use tokio::time::{Duration, Instant};
 use tracing::info;
 
+use super::LeakyBucketConfig;
 use crate::ext::LockExt;
 use crate::intern::EndpointIdInt;
-
-pub struct GlobalRateLimiter {
-    data: Vec<RateBucket>,
-    info: Vec<RateBucketInfo>,
-}
-
-impl GlobalRateLimiter {
-    pub fn new(info: Vec<RateBucketInfo>) -> Self {
-        Self {
-            data: vec![
-                RateBucket {
-                    start: Instant::now(),
-                    count: 0,
-                };
-                info.len()
-            ],
-            info,
-        }
-    }
-
-    /// Check that number of connections is below `max_rps` rps.
-    pub fn check(&mut self) -> bool {
-        let now = Instant::now();
-
-        let should_allow_request = self
-            .data
-            .iter_mut()
-            .zip(&self.info)
-            .all(|(bucket, info)| bucket.should_allow_request(info, now, 1));
-
-        if should_allow_request {
-            // only increment the bucket counts if the request will actually be accepted
-            self.data.iter_mut().for_each(|b| b.inc(1));
-        }
-
-        should_allow_request
-    }
-}
 
 // Simple per-endpoint rate limiter.
 //
@@ -138,25 +101,6 @@ impl RateBucketInfo {
         Self::new(200, Duration::from_secs(600)),
     ];
 
-    // For all the sessions will be cancel key. So this limit is essentially global proxy limit.
-    pub const DEFAULT_REDIS_SET: [Self; 2] = [
-        Self::new(100_000, Duration::from_secs(1)),
-        Self::new(50_000, Duration::from_secs(10)),
-    ];
-
-    /// All of these are per endpoint-maskedip pair.
-    /// Context: 4096 rounds of pbkdf2 take about 1ms of cpu time to execute (1 milli-cpu-second or 1mcpus).
-    ///
-    /// First bucket: 1000mcpus total per endpoint-ip pair
-    /// * 4096000 requests per second with 1 hash rounds.
-    /// * 1000 requests per second with 4096 hash rounds.
-    /// * 6.8 requests per second with 600000 hash rounds.
-    pub const DEFAULT_AUTH_SET: [Self; 3] = [
-        Self::new(1000 * 4096, Duration::from_secs(1)),
-        Self::new(600 * 4096, Duration::from_secs(60)),
-        Self::new(300 * 4096, Duration::from_secs(600)),
-    ];
-
     pub fn rps(&self) -> f64 {
         (self.max_rpi as f64) / self.interval.as_secs_f64()
     }
@@ -184,11 +128,26 @@ impl RateBucketInfo {
             max_rpi: ((max_rps as u64) * (interval.as_millis() as u64) / 1000) as u32,
         }
     }
+
+    pub fn to_leaky_bucket(this: &[Self]) -> Option<LeakyBucketConfig> {
+        // bit of a hack - find the min rps and max rps supported and turn it into
+        // leaky bucket config instead
+
+        let mut iter = this.iter().map(|info| info.rps());
+        let first = iter.next()?;
+
+        let (min, max) = (first, first);
+        let (min, max) = iter.fold((min, max), |(min, max), rps| {
+            (f64::min(min, rps), f64::max(max, rps))
+        });
+
+        Some(LeakyBucketConfig { rps: min, max })
+    }
 }
 
 impl<K: Hash + Eq> BucketRateLimiter<K> {
     pub fn new(info: impl Into<Cow<'static, [RateBucketInfo]>>) -> Self {
-        Self::new_with_rand_and_hasher(info, StdRng::from_entropy(), RandomState::new())
+        Self::new_with_rand_and_hasher(info, StdRng::from_os_rng(), RandomState::new())
     }
 }
 
@@ -214,7 +173,11 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
         //    = 30MB
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
+        if self
+            .access_count
+            .fetch_add(1, Ordering::AcqRel)
+            .is_multiple_of(2048)
+        {
             self.do_gc();
         }
 
@@ -253,7 +216,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
         let n = self.map.shards().len();
         // this lock is ok as the periodic cycle of do_gc makes this very unlikely to collide
         // (impossible, infact, unless we have 2048 threads)
-        let shard = self.rand.lock_propagate_poison().gen_range(0..n);
+        let shard = self.rand.lock_propagate_poison().random_range(0..n);
         self.map.shards()[shard].write().clear();
     }
 }

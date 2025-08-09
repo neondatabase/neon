@@ -12,9 +12,11 @@ use std::{env, fs};
 
 use anyhow::{Context, bail};
 use clap::ValueEnum;
+use pageserver_api::config::PostHogConfig;
 use pem::Pem;
 use postgres_backend::AuthType;
 use reqwest::{Certificate, Url};
+use safekeeper_api::PgMajorVersion;
 use serde::{Deserialize, Serialize};
 use utils::auth::encode_from_key_file;
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
@@ -209,6 +211,15 @@ pub struct NeonStorageControllerConf {
     pub use_https_safekeeper_api: bool,
 
     pub use_local_compute_notifications: bool,
+
+    pub timeline_safekeeper_count: Option<usize>,
+
+    pub posthog_config: Option<PostHogConfig>,
+
+    pub kick_secondary_downloads: Option<bool>,
+
+    #[serde(with = "humantime_serde")]
+    pub shard_split_request_timeout: Option<Duration>,
 }
 
 impl NeonStorageControllerConf {
@@ -236,9 +247,13 @@ impl Default for NeonStorageControllerConf {
             heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
             long_reconcile_threshold: None,
             use_https_pageserver_api: false,
-            timelines_onto_safekeepers: false,
+            timelines_onto_safekeepers: true,
             use_https_safekeeper_api: false,
             use_local_compute_notifications: true,
+            timeline_safekeeper_count: None,
+            posthog_config: None,
+            kick_secondary_downloads: None,
+            shard_split_request_timeout: None,
         }
     }
 }
@@ -254,7 +269,7 @@ impl Default for EndpointStorageConf {
 impl NeonBroker {
     pub fn client_url(&self) -> Url {
         let url = if let Some(addr) = self.listen_https_addr {
-            format!("https://{}", addr)
+            format!("https://{addr}")
         } else {
             format!(
                 "http://{}",
@@ -278,8 +293,10 @@ pub struct PageServerConf {
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
     pub listen_https_addr: Option<String>,
+    pub listen_grpc_addr: Option<String>,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    pub grpc_auth_type: AuthType,
     pub no_sync: bool,
 }
 
@@ -290,8 +307,10 @@ impl Default for PageServerConf {
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
             listen_https_addr: None,
+            listen_grpc_addr: None,
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
+            grpc_auth_type: AuthType::Trust,
             no_sync: false,
         }
     }
@@ -306,8 +325,10 @@ pub struct NeonLocalInitPageserverConf {
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
     pub listen_https_addr: Option<String>,
+    pub listen_grpc_addr: Option<String>,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    pub grpc_auth_type: AuthType,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_sync: bool,
     #[serde(flatten)]
@@ -321,8 +342,10 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_pg_addr,
             listen_http_addr,
             listen_https_addr,
+            listen_grpc_addr,
             pg_auth_type,
             http_auth_type,
+            grpc_auth_type,
             no_sync,
             other: _,
         } = conf;
@@ -331,7 +354,9 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_pg_addr: listen_pg_addr.clone(),
             listen_http_addr: listen_http_addr.clone(),
             listen_https_addr: listen_https_addr.clone(),
+            listen_grpc_addr: listen_grpc_addr.clone(),
             pg_auth_type: *pg_auth_type,
+            grpc_auth_type: *grpc_auth_type,
             http_auth_type: *http_auth_type,
             no_sync: *no_sync,
         }
@@ -408,25 +433,21 @@ impl LocalEnv {
         self.pg_distrib_dir.clone()
     }
 
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_distrib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
-        #[allow(clippy::manual_range_patterns)]
-        match pg_version {
-            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(path.join(pg_version.v_str()))
     }
 
-    pub fn pg_dir(&self, pg_version: u32, dir_name: &str) -> anyhow::Result<PathBuf> {
+    pub fn pg_dir(&self, pg_version: PgMajorVersion, dir_name: &str) -> anyhow::Result<PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join(dir_name))
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_bin_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<PathBuf> {
         self.pg_dir(pg_version, "bin")
     }
 
-    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+    pub fn pg_lib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<PathBuf> {
         self.pg_dir(pg_version, "lib")
     }
 
@@ -707,15 +728,17 @@ impl LocalEnv {
                     listen_pg_addr: String,
                     listen_http_addr: String,
                     listen_https_addr: Option<String>,
+                    listen_grpc_addr: Option<String>,
                     pg_auth_type: AuthType,
                     http_auth_type: AuthType,
+                    grpc_auth_type: AuthType,
                     #[serde(default)]
                     no_sync: bool,
                 }
                 let config_toml_path = dentry.path().join("pageserver.toml");
                 let config_toml: PageserverConfigTomlSubset = toml_edit::de::from_str(
                     &std::fs::read_to_string(&config_toml_path)
-                        .with_context(|| format!("read {:?}", config_toml_path))?,
+                        .with_context(|| format!("read {config_toml_path:?}"))?,
                 )
                 .context("parse pageserver.toml")?;
                 let identity_toml_path = dentry.path().join("identity.toml");
@@ -725,15 +748,17 @@ impl LocalEnv {
                 }
                 let identity_toml: IdentityTomlSubset = toml_edit::de::from_str(
                     &std::fs::read_to_string(&identity_toml_path)
-                        .with_context(|| format!("read {:?}", identity_toml_path))?,
+                        .with_context(|| format!("read {identity_toml_path:?}"))?,
                 )
                 .context("parse identity.toml")?;
                 let PageserverConfigTomlSubset {
                     listen_pg_addr,
                     listen_http_addr,
                     listen_https_addr,
+                    listen_grpc_addr,
                     pg_auth_type,
                     http_auth_type,
+                    grpc_auth_type,
                     no_sync,
                 } = config_toml;
                 let IdentityTomlSubset {
@@ -750,8 +775,10 @@ impl LocalEnv {
                     listen_pg_addr,
                     listen_http_addr,
                     listen_https_addr,
+                    listen_grpc_addr,
                     pg_auth_type,
                     http_auth_type,
+                    grpc_auth_type,
                     no_sync,
                 };
                 pageservers.push(conf);

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use compute_api::responses::{InstalledExtension, InstalledExtensions};
+use once_cell::sync::Lazy;
+use tokio_postgres::error::Error as PostgresError;
 use tokio_postgres::{Client, Config, NoTls};
 
 use crate::metrics::INSTALLED_EXTENSIONS;
@@ -10,14 +12,14 @@ use crate::metrics::INSTALLED_EXTENSIONS;
 /// and to make database listing query here more explicit.
 ///
 /// Limit the number of databases to 500 to avoid excessive load.
-async fn list_dbs(client: &mut Client) -> Result<Vec<String>> {
+async fn list_dbs(client: &mut Client) -> Result<Vec<String>, PostgresError> {
     // `pg_database.datconnlimit = -2` means that the database is in the
     // invalid state
     let databases = client
         .query(
             "SELECT datname FROM pg_catalog.pg_database
                 WHERE datallowconn
-                AND datconnlimit <> - 2
+                AND datconnlimit OPERATOR(pg_catalog.<>) (OPERATOR(pg_catalog.-) 2::pg_catalog.int4)
                 LIMIT 500",
             &[],
         )
@@ -37,13 +39,15 @@ async fn list_dbs(client: &mut Client) -> Result<Vec<String>> {
 /// Same extension can be installed in multiple databases with different versions,
 /// so we report a separate metric (number of databases where it is installed)
 /// for each extension version.
-pub async fn get_installed_extensions(mut conf: Config) -> Result<InstalledExtensions> {
+pub async fn get_installed_extensions(
+    mut conf: Config,
+) -> Result<InstalledExtensions, PostgresError> {
     conf.application_name("compute_ctl:get_installed_extensions");
     let databases: Vec<String> = {
         let (mut client, connection) = conf.connect(NoTls).await?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                eprintln!("connection error: {e}");
             }
         });
 
@@ -57,13 +61,13 @@ pub async fn get_installed_extensions(mut conf: Config) -> Result<InstalledExten
         let (client, connection) = conf.connect(NoTls).await?;
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                eprintln!("connection error: {e}");
             }
         });
 
         let extensions: Vec<(String, String, i32)> = client
             .query(
-                "SELECT extname, extversion, extowner::integer FROM pg_catalog.pg_extension",
+                "SELECT extname, extversion, extowner::pg_catalog.int4 FROM pg_catalog.pg_extension",
                 &[],
             )
             .await?
@@ -115,4 +119,8 @@ pub async fn get_installed_extensions(mut conf: Config) -> Result<InstalledExten
     Ok(InstalledExtensions {
         extensions: extensions_map.into_values().collect(),
     })
+}
+
+pub fn initialize_metrics() {
+    Lazy::force(&INSTALLED_EXTENSIONS);
 }

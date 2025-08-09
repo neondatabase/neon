@@ -16,18 +16,21 @@ use http_utils::tls_certs::ReloadingCertificateResolver;
 use metrics::launch_timestamp::{LaunchTimestamp, set_launch_timestamp_metric};
 use metrics::set_build_info_metric;
 use nix::sys::socket::{setsockopt, sockopt};
+use pageserver::basebackup_cache::BasebackupCache;
 use pageserver::config::{PageServerConf, PageserverIdentity, ignored_fields};
 use pageserver::controller_upcall_client::StorageControllerUpcallClient;
 use pageserver::deletion_queue::DeletionQueue;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
+use pageserver::feature_resolver::FeatureResolver;
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
+use pageserver::page_service::GrpcPageServiceHandler;
 use pageserver::task_mgr::{
     BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
 };
 use pageserver::tenant::{TenantSharedResources, mgr, secondary};
 use pageserver::{
-    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, HttpsEndpointListener, http,
-    page_cache, page_service, task_mgr, virtual_file,
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, HttpsEndpointListener,
+    MetricsCollectionTask, http, page_cache, page_service, task_mgr, virtual_file,
 };
 use postgres_backend::AuthType;
 use remote_storage::GenericRemoteStorage;
@@ -38,6 +41,7 @@ use tracing_utils::OtelGuard;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::crashsafe::syncfs;
 use utils::logging::TracingErrorLayerEnablement;
+use utils::metrics_collector::{METRICS_COLLECTION_INTERVAL, METRICS_COLLECTOR};
 use utils::sentry_init::init_sentry;
 use utils::{failpoint_support, logging, project_build_tag, project_git_version, tcp_listener};
 
@@ -122,7 +126,6 @@ fn main() -> anyhow::Result<()> {
         Some(cfg) => tracing_utils::OtelEnablement::Enabled {
             service_name: "pageserver".to_string(),
             export_config: (&cfg.export_config).into(),
-            runtime: *COMPUTE_REQUEST_RUNTIME,
         },
         None => tracing_utils::OtelEnablement::Disabled,
     };
@@ -156,7 +159,6 @@ fn main() -> anyhow::Result<()> {
     // (maybe we should automate this with a visitor?).
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
-    info!(?conf.wal_receiver_protocol, "starting with WAL receiver protocol");
     info!(?conf.validate_wal_contiguity, "starting with WAL contiguity validation");
     info!(?conf.page_service_pipelining, "starting with page service pipelining config");
     info!(?conf.get_vectored_concurrent_io, "starting with get_vectored IO concurrency config");
@@ -387,23 +389,30 @@ fn start_pageserver(
     // We need to release the lock file only when the process exits.
     std::mem::forget(lock_file);
 
-    // Bind the HTTP and libpq ports early, so that if they are in use by some other
-    // process, we error out early.
-    let http_addr = &conf.listen_http_addr;
-    info!("Starting pageserver http handler on {http_addr}");
-    let http_listener = tcp_listener::bind(http_addr)?;
+    // Bind the HTTP, libpq, and gRPC ports early, to error out if they are
+    // already in use.
+    info!(
+        "Starting pageserver http handler on {} with auth {:#?}",
+        conf.listen_http_addr, conf.http_auth_type
+    );
+    let http_listener = tcp_listener::bind(&conf.listen_http_addr)?;
 
     let https_listener = match conf.listen_https_addr.as_ref() {
         Some(https_addr) => {
-            info!("Starting pageserver https handler on {https_addr}");
+            info!(
+                "Starting pageserver https handler on {https_addr} with auth {:#?}",
+                conf.http_auth_type
+            );
             Some(tcp_listener::bind(https_addr)?)
         }
         None => None,
     };
 
-    let pg_addr = &conf.listen_pg_addr;
-    info!("Starting pageserver pg protocol handler on {pg_addr}");
-    let pageserver_listener = tcp_listener::bind(pg_addr)?;
+    info!(
+        "Starting pageserver pg protocol handler on {} with auth {:#?}",
+        conf.listen_pg_addr, conf.pg_auth_type,
+    );
+    let pageserver_listener = tcp_listener::bind(&conf.listen_pg_addr)?;
 
     // Enable SO_KEEPALIVE on the socket, to detect dead connections faster.
     // These are configured via net.ipv4.tcp_keepalive_* sysctls.
@@ -411,6 +420,15 @@ fn start_pageserver(
     // TODO: also set this on the walreceiver socket, but tokio-postgres doesn't
     // support enabling keepalives while using the default OS sysctls.
     setsockopt(&pageserver_listener, sockopt::KeepAlive, &true)?;
+
+    let mut grpc_listener = None;
+    if let Some(grpc_addr) = &conf.listen_grpc_addr {
+        info!(
+            "Starting pageserver gRPC handler on {grpc_addr} with auth {:#?}",
+            conf.grpc_auth_type
+        );
+        grpc_listener = Some(tcp_listener::bind(grpc_addr).map_err(|e| anyhow!("{e}"))?);
+    }
 
     // Launch broker client
     // The storage_broker::connect call needs to happen inside a tokio runtime thread.
@@ -439,7 +457,8 @@ fn start_pageserver(
     // Initialize authentication for incoming connections
     let http_auth;
     let pg_auth;
-    if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
+    let grpc_auth;
+    if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type].contains(&AuthType::NeonJWT) {
         // unwrap is ok because check is performed when creating config, so path is set and exists
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
         info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
@@ -447,20 +466,23 @@ fn start_pageserver(
         let jwt_auth = JwtAuth::from_key_path(key_path)?;
         let auth: Arc<SwappableJwtAuth> = Arc::new(SwappableJwtAuth::new(jwt_auth));
 
-        http_auth = match &conf.http_auth_type {
+        http_auth = match conf.http_auth_type {
             AuthType::Trust => None,
             AuthType::NeonJWT => Some(auth.clone()),
         };
-        pg_auth = match &conf.pg_auth_type {
+        pg_auth = match conf.pg_auth_type {
+            AuthType::Trust => None,
+            AuthType::NeonJWT => Some(auth.clone()),
+        };
+        grpc_auth = match conf.grpc_auth_type {
             AuthType::Trust => None,
             AuthType::NeonJWT => Some(auth),
         };
     } else {
         http_auth = None;
         pg_auth = None;
+        grpc_auth = None;
     }
-    info!("Using auth for http API: {:#?}", conf.http_auth_type);
-    info!("Using auth for pg connections: {:#?}", conf.pg_auth_type);
 
     let tls_server_config = if conf.listen_https_addr.is_some() || conf.enable_tls_page_service_api
     {
@@ -500,6 +522,12 @@ fn start_pageserver(
 
     // Set up remote storage client
     let remote_storage = BACKGROUND_RUNTIME.block_on(create_remote_storage_client(conf))?;
+
+    let feature_resolver = create_feature_resolver(
+        conf,
+        shutdown_pageserver.clone(),
+        BACKGROUND_RUNTIME.handle(),
+    )?;
 
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
@@ -541,9 +569,14 @@ fn start_pageserver(
         pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
 
     // Scan the local 'tenants/' directory and start loading the tenants
+    let (basebackup_cache, basebackup_prepare_receiver) = BasebackupCache::new(
+        conf.basebackup_cache_dir(),
+        conf.basebackup_cache_config.clone(),
+    );
     let deletion_queue_client = deletion_queue.new_client();
     let background_purges = mgr::BackgroundPurges::default();
-    let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
+
+    let tenant_manager = mgr::init(
         conf,
         background_purges.clone(),
         TenantSharedResources {
@@ -551,11 +584,20 @@ fn start_pageserver(
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
             l0_flush_global_state,
+            basebackup_cache: Arc::clone(&basebackup_cache),
+            feature_resolver: feature_resolver.clone(),
         },
-        order,
         shutdown_pageserver.clone(),
-    ))?;
+    );
     let tenant_manager = Arc::new(tenant_manager);
+    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(tenant_manager.clone(), order))?;
+
+    basebackup_cache.spawn_background_task(
+        BACKGROUND_RUNTIME.handle(),
+        basebackup_prepare_receiver,
+        Arc::clone(&tenant_manager),
+        shutdown_pageserver.child_token(),
+    );
 
     BACKGROUND_RUNTIME.spawn({
         let shutdown_pageserver = shutdown_pageserver.clone();
@@ -673,6 +715,7 @@ fn start_pageserver(
                 disk_usage_eviction_state,
                 deletion_queue.new_client(),
                 secondary_controller,
+                feature_resolver.clone(),
             )
             .context("Failed to initialize router state")?,
         );
@@ -720,6 +763,41 @@ fn start_pageserver(
         (http_task, https_task)
     };
 
+    /* BEGIN_HADRON */
+    let metrics_collection_task = {
+        let cancel = shutdown_pageserver.child_token();
+        let task = crate::BACKGROUND_RUNTIME.spawn({
+            let cancel = cancel.clone();
+            let background_jobs_barrier = background_jobs_barrier.clone();
+            async move {
+                if conf.force_metric_collection_on_scrape {
+                    return;
+                }
+
+                // first wait until background jobs are cleared to launch.
+                tokio::select! {
+                    _ = cancel.cancelled() => { return; },
+                    _ = background_jobs_barrier.wait() => {}
+                };
+                let mut interval = tokio::time::interval(METRICS_COLLECTION_INTERVAL);
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            tracing::info!("cancelled metrics collection task, exiting...");
+                             break;
+                        },
+                        _ = interval.tick() => {}
+                    }
+                    tokio::task::spawn_blocking(|| {
+                        METRICS_COLLECTOR.run_once(true);
+                    });
+                }
+            }
+        });
+        MetricsCollectionTask(CancellableTask { task, cancel })
+    };
+    /* END_HADRON */
+
     let consumption_metrics_tasks = {
         let cancel = shutdown_pageserver.child_token();
         let task = crate::BACKGROUND_RUNTIME.spawn({
@@ -763,7 +841,24 @@ fn start_pageserver(
         } else {
             None
         },
+        feature_resolver.clone(),
     );
+
+    // Spawn a Pageserver gRPC server task. It will spawn separate tasks for each request/stream.
+    // It uses a separate compute request Tokio runtime (COMPUTE_REQUEST_RUNTIME).
+    //
+    // NB: this port is exposed to computes. It should only provide services that we're okay with
+    // computes accessing. Internal services should use a separate port.
+    let mut page_service_grpc = None;
+    if let Some(grpc_listener) = grpc_listener {
+        page_service_grpc = Some(GrpcPageServiceHandler::spawn(
+            tenant_manager.clone(),
+            grpc_auth,
+            otel_guard.as_ref().map(|g| g.dispatch.clone()),
+            conf.get_vectored_concurrent_io,
+            grpc_listener,
+        )?);
+    }
 
     // All started up! Now just sit and wait for shutdown signal.
     BACKGROUND_RUNTIME.block_on(async move {
@@ -783,6 +878,8 @@ fn start_pageserver(
             http_endpoint_listener,
             https_endpoint_listener,
             page_service,
+            page_service_grpc,
+            metrics_collection_task,
             consumption_metrics_tasks,
             disk_usage_eviction_task,
             &tenant_manager,
@@ -794,6 +891,14 @@ fn start_pageserver(
         .await;
         unreachable!();
     })
+}
+
+fn create_feature_resolver(
+    conf: &'static PageServerConf,
+    shutdown_pageserver: CancellationToken,
+    handle: &tokio::runtime::Handle,
+) -> anyhow::Result<FeatureResolver> {
+    FeatureResolver::spawn(conf, shutdown_pageserver, handle)
 }
 
 async fn create_remote_storage_client(
@@ -811,17 +916,15 @@ async fn create_remote_storage_client(
     // If `test_remote_failures` is non-zero, wrap the client with a
     // wrapper that simulates failures.
     if conf.test_remote_failures > 0 {
-        if !cfg!(feature = "testing") {
-            anyhow::bail!(
-                "test_remote_failures option is not available because pageserver was compiled without the 'testing' feature"
-            );
-        }
         info!(
             "Simulating remote failures for first {} attempts of each op",
             conf.test_remote_failures
         );
-        remote_storage =
-            GenericRemoteStorage::unreliable_wrapper(remote_storage, conf.test_remote_failures);
+        remote_storage = GenericRemoteStorage::unreliable_wrapper(
+            remote_storage,
+            conf.test_remote_failures,
+            conf.test_remote_failures_probability,
+        );
     }
 
     Ok(remote_storage)

@@ -7,10 +7,9 @@ use std::time::Duration;
 
 use clashmap::ClashMap;
 use parking_lot::RwLock;
-use postgres_client::ReadyForQueryStatus;
 use rand::Rng;
 use smol_str::ToSmolStr;
-use tracing::{Span, debug, info};
+use tracing::{Span, debug, info, warn};
 
 use super::backend::HttpConnError;
 use super::conn_pool::ClientDataRemote;
@@ -188,7 +187,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
         self.pools.get_mut(&db_user)
     }
 
-    pub(crate) fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInnerCommon<C>) {
+    pub(crate) fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, mut client: ClientInnerCommon<C>) {
         let conn_id = client.get_conn_id();
         let (max_conn, conn_count, pool_name) = {
             let pool = pool.read();
@@ -201,12 +200,17 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
         };
 
         if client.inner.is_closed() {
-            info!(%conn_id, "{}: throwing away connection '{conn_info}' because connection is closed", pool_name);
+            info!(%conn_id, "{pool_name}: throwing away connection '{conn_info}' because connection is closed");
+            return;
+        }
+
+        if let Err(error) = client.inner.reset() {
+            warn!(?error, %conn_id, "{pool_name}: throwing away connection '{conn_info}' because connection could not be reset");
             return;
         }
 
         if conn_count >= max_conn {
-            info!(%conn_id, "{}: throwing away connection '{conn_info}' because pool is full", pool_name);
+            info!(%conn_id, "{pool_name}: throwing away connection '{conn_info}' because pool is full");
             return;
         }
 
@@ -428,7 +432,7 @@ where
         loop {
             interval.tick().await;
 
-            let shard = rng.gen_range(0..self.global_pool.shards().len());
+            let shard = rng.random_range(0..self.global_pool.shards().len());
             self.gc(shard);
         }
     }
@@ -691,6 +695,7 @@ impl<C: ClientInnerExt> Deref for Client<C> {
 pub(crate) trait ClientInnerExt: Sync + Send + 'static {
     fn is_closed(&self) -> bool;
     fn get_process_id(&self) -> i32;
+    fn reset(&mut self) -> Result<(), postgres_client::Error>;
 }
 
 impl ClientInnerExt for postgres_client::Client {
@@ -701,15 +706,13 @@ impl ClientInnerExt for postgres_client::Client {
     fn get_process_id(&self) -> i32 {
         self.get_process_id()
     }
+
+    fn reset(&mut self) -> Result<(), postgres_client::Error> {
+        self.reset_session_background()
+    }
 }
 
 impl<C: ClientInnerExt> Discard<'_, C> {
-    pub(crate) fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        let conn_info = &self.conn_info;
-        if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is not idle");
-        }
-    }
     pub(crate) fn discard(&mut self) {
         let conn_info = &self.conn_info;
         if std::mem::take(self.pool).strong_count() > 0 {

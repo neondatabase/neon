@@ -668,7 +668,9 @@ impl From<DownloadError> for UpdateError {
 
 impl From<std::io::Error> for UpdateError {
     fn from(value: std::io::Error) -> Self {
-        if let Some(nix::errno::Errno::ENOSPC) = value.raw_os_error().map(nix::errno::from_i32) {
+        if let Some(nix::errno::Errno::ENOSPC) =
+            value.raw_os_error().map(nix::errno::Errno::from_raw)
+        {
             UpdateError::NoSpace
         } else if value
             .get_ref()
@@ -1425,7 +1427,7 @@ async fn init_timeline_state(
         let local_meta = dentry
             .metadata()
             .await
-            .fatal_err(&format!("Read metadata on {}", file_path));
+            .fatal_err(&format!("Read metadata on {file_path}"));
 
         let file_name = file_path.file_name().expect("created it from the dentry");
         if crate::is_temporary(&file_path)

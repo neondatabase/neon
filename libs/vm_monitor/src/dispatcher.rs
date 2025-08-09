@@ -90,8 +90,7 @@ impl Dispatcher {
             Err(e) => {
                 sink.send(Message::Text(Utf8Bytes::from(
                     serde_json::to_string(&ProtocolResponse::Error(format!(
-                        "Received protocol version range {} which does not overlap with {}",
-                        agent_range, monitor_range
+                        "Received protocol version range {agent_range} which does not overlap with {monitor_range}"
                     )))
                     .unwrap(),
                 )))

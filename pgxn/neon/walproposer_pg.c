@@ -35,6 +35,7 @@
 #include "storage/proc.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
+#include "storage/pg_shmem.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
 #include "tcop/tcopprot.h"
@@ -48,6 +49,7 @@
 
 #include "libpqwalproposer.h"
 #include "neon.h"
+#include "neon_perf_counters.h"
 #include "neon_walreader.h"
 #include "walproposer.h"
 
@@ -64,6 +66,18 @@ char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 int			safekeeper_proto_version = 3;
+char	   *safekeeper_conninfo_options = "";
+/* BEGIN_HADRON */
+int         databricks_max_wal_mb_per_second = -1;
+// during throttling, we will limit the effective WAL write rate to 10KB.
+// PG can still push some WAL to SK, but at a very low rate.
+int 		databricks_throttled_max_wal_bytes_per_second = 10 * 1024;
+// The max sleep time of a batch. This is to make sure the rate limiter does not
+// overshoot too much and block PG for a very long time.
+// This is set as 5 minuetes for now. PG can send as much as 10MB of WALs to SK in one batch,
+// so this effectively caps the write rate to ~30KB/s in the worst case.
+static uint64 kRateLimitMaxBatchUSecs = 300 * USECS_PER_SEC;
+/* END_HADRON */
 
 /* Set to true in the walproposer bgw. */
 static bool am_walproposer;
@@ -78,11 +92,10 @@ static XLogRecPtr standby_flush_lsn = InvalidXLogRecPtr;
 static XLogRecPtr standby_apply_lsn = InvalidXLogRecPtr;
 static HotStandbyFeedback agg_hs_feedback;
 
-static void nwp_shmem_startup_hook(void);
 static void nwp_register_gucs(void);
 static void assign_neon_safekeepers(const char *newval, void *extra);
-static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
+static uint64 hadron_backpressure_lag_impl(void);
 static uint64 startup_backpressure_wrap(void);
 static bool backpressure_throttling_impl(void);
 static void walprop_register_bgworker(void);
@@ -94,11 +107,6 @@ static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
 static void walprop_pg_load_libpqwalreceiver(void);
 
 static process_interrupts_callback_t PrevProcessInterruptsCallback = NULL;
-static shmem_startup_hook_type prev_shmem_startup_hook_type;
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook = NULL;
-static void walproposer_shmem_request(void);
-#endif
 static void WalproposerShmemInit_SyncSafekeeper(void);
 
 
@@ -112,6 +120,22 @@ static void rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk);
 
 static void CheckGracefulShutdown(WalProposer *wp);
 
+/* BEGIN_HADRON */
+shardno_t get_num_shards(void);
+
+static int positive_mb_to_bytes(int mb)
+{
+	if (mb <= 0)
+	{
+		return mb;
+	}
+	else
+	{
+		return mb * 1024 * 1024;
+	}
+}
+/* END_HADRON */
+
 static void
 init_walprop_config(bool syncSafekeepers)
 {
@@ -119,6 +143,7 @@ init_walprop_config(bool syncSafekeepers)
 	walprop_config.neon_timeline = neon_timeline;
 	/* WalProposerCreate scribbles directly on it, so pstrdup */
 	walprop_config.safekeepers_list = pstrdup(wal_acceptors_list);
+	walprop_config.safekeeper_conninfo_options = pstrdup(safekeeper_conninfo_options);
 	walprop_config.safekeeper_reconnect_timeout = wal_acceptor_reconnect_timeout;
 	walprop_config.safekeeper_connection_timeout = wal_acceptor_connection_timeout;
 	walprop_config.wal_segment_size = wal_segment_size;
@@ -157,12 +182,19 @@ WalProposerMain(Datum main_arg)
 {
 	WalProposer *wp;
 
+	if (*wal_acceptors_list == '\0')
+	{
+		wpg_log(WARNING, "Safekeepers list is empty");
+		return;
+	}
+
 	init_walprop_config(false);
 	walprop_pg_init_bgworker();
 	am_walproposer = true;
 	walprop_pg_load_libpqwalreceiver();
 
 	wp = WalProposerCreate(&walprop_config, walprop_pg);
+	wp->localTimeLineID = GetWALInsertionTimeLine();
 	wp->last_reconnect_attempt = walprop_pg_get_current_timestamp(wp);
 
 	walprop_pg_init_walsender();
@@ -179,8 +211,6 @@ pg_init_walproposer(void)
 		return;
 
 	nwp_register_gucs();
-
-	nwp_prepare_shmem();
 
 	delay_backend_us = &startup_backpressure_wrap;
 	PrevProcessInterruptsCallback = ProcessInterruptsCallback;
@@ -202,6 +232,16 @@ nwp_register_gucs(void)
 							   GUC_LIST_INPUT,	/* extensions can't use*
 												 * GUC_LIST_QUOTE */
 							   NULL, assign_neon_safekeepers, NULL);
+
+	DefineCustomStringVariable(
+							   "neon.safekeeper_conninfo_options",
+							   "libpq keyword parameters and values to apply to safekeeper connections",
+							   NULL,
+							   &safekeeper_conninfo_options,
+							   "",
+							   PGC_POSTMASTER,
+							   0,
+							   NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_reconnect_timeout",
@@ -232,6 +272,28 @@ nwp_register_gucs(void)
 							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
+
+    /* BEGIN_HADRON */
+    DefineCustomIntVariable(
+                            "databricks.max_wal_mb_per_second",
+                            "The maximum WAL MB per second allowed. If breached, sending WAL hit the backpressure. Setting to -1 disables the limit.",
+                            NULL,
+                            &databricks_max_wal_mb_per_second,
+                            -1, -1, INT_MAX,
+                            PGC_SUSET,
+                            GUC_UNIT_MB,
+                            NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+							"databricks.throttled_max_wal_bytes_per_second",
+							"The maximum WAL bytes per second when PG is being throttled.",
+							NULL,
+							&databricks_throttled_max_wal_bytes_per_second,
+							10 * 1024, 0, INT_MAX,
+							PGC_SUSET,
+							GUC_UNIT_BYTE,
+							NULL, NULL, NULL);
+    /* END_HADRON */
 }
 
 
@@ -260,6 +322,30 @@ split_safekeepers_list(char *safekeepers_list, char *safekeepers[])
 	return n_safekeepers;
 }
 
+static char *split_off_safekeepers_generation(char *safekeepers_list, uint32 *generation)
+{
+	char	   *endptr;
+
+	if (strncmp(safekeepers_list, "g#", 2) != 0)
+	{
+		return safekeepers_list;
+	}
+	else
+	{
+		errno = 0;
+		*generation = strtoul(safekeepers_list + 2, &endptr, 10);
+		if (errno != 0)
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
+		}
+		if (*endptr != ':')
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
+		}
+		return endptr + 1;
+	}
+}
+
 /*
  * Accept two coma-separated strings with list of safekeeper host:port addresses.
  * Split them into arrays and return false if two sets do not match, ignoring the order.
@@ -271,6 +357,16 @@ safekeepers_cmp(char *old, char *new)
 	char	   *safekeepers_new[MAX_SAFEKEEPERS];
 	int			len_old = 0;
 	int			len_new = 0;
+	uint32		gen_old = INVALID_GENERATION;
+	uint32		gen_new = INVALID_GENERATION;
+
+	old = split_off_safekeepers_generation(old, &gen_old);
+	new = split_off_safekeepers_generation(new, &gen_new);
+
+	if (gen_old != gen_new)
+	{
+		return false;
+	}
 
 	len_old = split_safekeepers_list(old, safekeepers_old);
 	len_new = split_safekeepers_list(new, safekeepers_new);
@@ -304,6 +400,9 @@ assign_neon_safekeepers(const char *newval, void *extra)
 	char	   *newval_copy;
 	char	   *oldval;
 
+	if (newval && *newval != '\0' && UsedShmemSegAddr && walprop_shared && RecoveryInProgress())
+		walprop_shared->replica_promote = true;
+
 	if (!am_walproposer)
 		return;
 
@@ -332,6 +431,61 @@ assign_neon_safekeepers(const char *newval, void *extra)
 	pfree(oldval);
 }
 
+/* BEGIN_HADRON */
+static uint64 hadron_backpressure_lag_impl(void)
+{
+	struct WalproposerShmemState* state = NULL;
+	uint64 lag = 0;
+
+	if(max_cluster_size < 0){
+		// if max cluster size is not set, then we don't apply backpressure because we're reconfiguring PG
+		return 0;
+	}
+
+	lag = backpressure_lag_impl();
+	state = GetWalpropShmemState();
+	if ( state != NULL && databricks_max_wal_mb_per_second != -1 )
+	{
+		int old_limit = pg_atomic_read_u32(&state->wal_rate_limiter.effective_max_wal_bytes_per_second);
+		int new_limit = (lag == 0)? positive_mb_to_bytes(databricks_max_wal_mb_per_second) : databricks_throttled_max_wal_bytes_per_second;
+		if( old_limit != new_limit )
+		{
+			uint64 batch_start_time = pg_atomic_read_u64(&state->wal_rate_limiter.batch_start_time_us);
+			uint64 batch_end_time = pg_atomic_read_u64(&state->wal_rate_limiter.batch_end_time_us);
+			// the rate limit has changed, we need to reset the rate limiter's batch end time
+			pg_atomic_write_u32(&state->wal_rate_limiter.effective_max_wal_bytes_per_second, new_limit);
+			pg_atomic_write_u64(&state->wal_rate_limiter.batch_end_time_us, Min(batch_start_time + USECS_PER_SEC, batch_end_time));
+		}
+		if( new_limit == -1 )
+		{
+			return 0;
+		}
+
+		if (pg_atomic_read_u32(&state->wal_rate_limiter.should_limit) == true)
+		{
+			TimestampTz now = GetCurrentTimestamp();
+			struct WalRateLimiter *limiter = &state->wal_rate_limiter;
+			uint64 batch_end_time = pg_atomic_read_u64(&limiter->batch_end_time_us);
+			if ( now >= batch_end_time )
+			{
+				/*
+				* The backend has past the batch end time and it's time to push more WALs.
+				* If the backends are pushing WALs too fast, the wal proposer will rate limit them again.
+				*/
+				uint32 expected = true;
+				pg_atomic_compare_exchange_u32(&state->wal_rate_limiter.should_limit, &expected, false);
+				return 0;
+			}
+			return Max(lag, 1);
+		}
+		// rate limiter decides to not throttle, then return 0.
+		return 0;
+	}
+
+	return lag;
+}
+/* END_HADRON */
+
 /* Check if we need to suspend inserts because of lagging replication. */
 static uint64
 backpressure_lag_impl(void)
@@ -354,19 +508,45 @@ backpressure_lag_impl(void)
 			 LSN_FORMAT_ARGS(flushPtr),
 			 LSN_FORMAT_ARGS(applyPtr));
 
-		if ((writePtr != InvalidXLogRecPtr && max_replication_write_lag > 0 && myFlushLsn > writePtr + max_replication_write_lag * MB))
+		if (lakebase_mode)
 		{
-			return (myFlushLsn - writePtr - max_replication_write_lag * MB);
-		}
+			// in case PG does not have shard map initialized, we assume PG always has 1 shard at minimum.
+			shardno_t num_shards = Max(1, get_num_shards());
+			int tenant_max_replication_apply_lag = num_shards * max_replication_apply_lag;
+			int tenant_max_replication_flush_lag = num_shards * max_replication_flush_lag;
+			int tenant_max_replication_write_lag = num_shards * max_replication_write_lag;
 
-		if ((flushPtr != InvalidXLogRecPtr && max_replication_flush_lag > 0 && myFlushLsn > flushPtr + max_replication_flush_lag * MB))
-		{
-			return (myFlushLsn - flushPtr - max_replication_flush_lag * MB);
-		}
+			if ((writePtr != InvalidXLogRecPtr && tenant_max_replication_write_lag > 0 && myFlushLsn > writePtr + tenant_max_replication_write_lag * MB))
+			{
+				return (myFlushLsn - writePtr - tenant_max_replication_write_lag * MB);
+			}
 
-		if ((applyPtr != InvalidXLogRecPtr && max_replication_apply_lag > 0 && myFlushLsn > applyPtr + max_replication_apply_lag * MB))
+			if ((flushPtr != InvalidXLogRecPtr && tenant_max_replication_flush_lag > 0 && myFlushLsn > flushPtr + tenant_max_replication_flush_lag * MB))
+			{
+				return (myFlushLsn - flushPtr - tenant_max_replication_flush_lag * MB);
+			}
+
+			if ((applyPtr != InvalidXLogRecPtr && tenant_max_replication_apply_lag > 0 && myFlushLsn > applyPtr + tenant_max_replication_apply_lag * MB))
+			{
+				return (myFlushLsn - applyPtr - tenant_max_replication_apply_lag * MB);
+			}
+		}
+		else
 		{
-			return (myFlushLsn - applyPtr - max_replication_apply_lag * MB);
+			if ((writePtr != InvalidXLogRecPtr && max_replication_write_lag > 0 && myFlushLsn > writePtr + max_replication_write_lag * MB))
+			{
+				return (myFlushLsn - writePtr - max_replication_write_lag * MB);
+			}
+
+			if ((flushPtr != InvalidXLogRecPtr && max_replication_flush_lag > 0 && myFlushLsn > flushPtr + max_replication_flush_lag * MB))
+			{
+				return (myFlushLsn - flushPtr - max_replication_flush_lag * MB);
+			}
+
+			if ((applyPtr != InvalidXLogRecPtr && max_replication_apply_lag > 0 && myFlushLsn > applyPtr + max_replication_apply_lag * MB))
+			{
+				return (myFlushLsn - applyPtr - max_replication_apply_lag * MB);
+			}
 		}
 	}
 	return 0;
@@ -383,9 +563,9 @@ startup_backpressure_wrap(void)
 	if (AmStartupProcess() || !IsUnderPostmaster)
 		return 0;
 
-	delay_backend_us = &backpressure_lag_impl;
+	delay_backend_us = &hadron_backpressure_lag_impl;
 
-	return backpressure_lag_impl();
+	return hadron_backpressure_lag_impl();
 }
 
 /*
@@ -397,12 +577,11 @@ WalproposerShmemSize(void)
 	return sizeof(WalproposerShmemState);
 }
 
-static bool
+void
 WalproposerShmemInit(void)
 {
 	bool		found;
 
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	walprop_shared = ShmemInitStruct("Walproposer shared state",
 									 sizeof(WalproposerShmemState),
 									 &found);
@@ -415,10 +594,13 @@ WalproposerShmemInit(void)
 		pg_atomic_init_u64(&walprop_shared->mineLastElectedTerm, 0);
 		pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
 		pg_atomic_init_u64(&walprop_shared->currentClusterSize, 0);
+		/* BEGIN_HADRON */
+		pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.effective_max_wal_bytes_per_second, -1);
+		pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.should_limit, 0);
+		pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.batch_start_time_us, 0);
+		pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.batch_end_time_us, 0);
+		/* END_HADRON */
 	}
-	LWLockRelease(AddinShmemInitLock);
-
-	return found;
 }
 
 static void
@@ -430,6 +612,12 @@ WalproposerShmemInit_SyncSafekeeper(void)
 	pg_atomic_init_u64(&walprop_shared->propEpochStartLsn, 0);
 	pg_atomic_init_u64(&walprop_shared->mineLastElectedTerm, 0);
 	pg_atomic_init_u64(&walprop_shared->backpressureThrottlingTime, 0);
+	/* BEGIN_HADRON */
+	pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.effective_max_wal_bytes_per_second, -1);
+	pg_atomic_init_u32(&walprop_shared->wal_rate_limiter.should_limit, 0);
+	pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.batch_start_time_us, 0);
+	pg_atomic_init_u64(&walprop_shared->wal_rate_limiter.batch_end_time_us, 0);
+	/* END_HADRON */
 }
 
 #define BACK_PRESSURE_DELAY 10000L // 0.01 sec
@@ -460,10 +648,9 @@ backpressure_throttling_impl(void)
 		return retry;
 
 	/* Calculate replicas lag */
-	lag = backpressure_lag_impl();
+	lag = hadron_backpressure_lag_impl();
 	if (lag == 0)
 		return retry;
-
 
 	old_status = get_ps_display(&len);
 	new_status = (char *) palloc(len + 64 + 1);
@@ -494,15 +681,14 @@ BackpressureThrottlingTime(void)
 
 /*
  * Register a background worker proposing WAL to wal acceptors.
+ * We start walproposer bgworker even for replicas in order to support possible replica promotion.
+ * When pg_promote() function is called, then walproposer bgworker registered with BgWorkerStart_RecoveryFinished
+ * is automatically launched when promotion is completed.
  */
 static void
 walprop_register_bgworker(void)
 {
 	BackgroundWorker bgw;
-
-	/* If no wal acceptors are specified, don't start the background worker. */
-	if (*wal_acceptors_list == '\0')
-		return;
 
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS;
@@ -520,41 +706,14 @@ walprop_register_bgworker(void)
 
 /* shmem handling */
 
-static void
-nwp_prepare_shmem(void)
-{
-#if PG_VERSION_NUM >= 150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = walproposer_shmem_request;
-#else
-	RequestAddinShmemSpace(WalproposerShmemSize());
-#endif
-	prev_shmem_startup_hook_type = shmem_startup_hook;
-	shmem_startup_hook = nwp_shmem_startup_hook;
-}
-
-#if PG_VERSION_NUM >= 150000
 /*
  * shmem_request hook: request additional shared resources.  We'll allocate or
- * attach to the shared resources in nwp_shmem_startup_hook().
+ * attach to the shared resources in WalproposerShmemInit().
  */
-static void
-walproposer_shmem_request(void)
+void
+WalproposerShmemRequest(void)
 {
-	if (prev_shmem_request_hook)
-		prev_shmem_request_hook();
-
 	RequestAddinShmemSpace(WalproposerShmemSize());
-}
-#endif
-
-static void
-nwp_shmem_startup_hook(void)
-{
-	if (prev_shmem_startup_hook_type)
-		prev_shmem_startup_hook_type();
-
-	WalproposerShmemInit();
 }
 
 WalproposerShmemState *
@@ -575,18 +734,24 @@ walprop_pg_get_shmem_state(WalProposer *wp)
  * Record new ps_feedback in the array with shards and update min_feedback.
  */
 static PageserverFeedback
-record_pageserver_feedback(PageserverFeedback *ps_feedback)
+record_pageserver_feedback(PageserverFeedback *ps_feedback, shardno_t num_shards)
 {
 	PageserverFeedback min_feedback;
 
 	Assert(ps_feedback->present);
 	Assert(ps_feedback->shard_number < MAX_SHARDS);
+	Assert(ps_feedback->shard_number < num_shards);
+
+	// Begin Hadron: Record any corruption signal from the pageserver first.
+	if (ps_feedback->corruption_detected) {
+		pg_atomic_write_u32(&databricks_metrics_shared->ps_corruption_detected, 1);
+	}
 
 	SpinLockAcquire(&walprop_shared->mutex);
 
-	/* Update the number of shards */
-	if (ps_feedback->shard_number + 1 > walprop_shared->num_shards)
-		walprop_shared->num_shards = ps_feedback->shard_number + 1;
+	// Hadron: Update the num_shards from the source-of-truth (shard map) lazily when we receive
+	// a new pageserver feedback.
+	walprop_shared->num_shards = Max(walprop_shared->num_shards, num_shards);
 
 	/* Update the feedback */
 	memcpy(&walprop_shared->shard_ps_feedback[ps_feedback->shard_number], ps_feedback, sizeof(PageserverFeedback));
@@ -1280,9 +1445,7 @@ StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 
 #if PG_VERSION_NUM < 150000
 	if (ThisTimeLineID == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("IDENTIFY_SYSTEM has not been run before START_REPLICATION")));
+		ThisTimeLineID = 1;
 #endif
 
 	/*
@@ -1404,6 +1567,9 @@ XLogBroadcastWalProposer(WalProposer *wp)
 {
 	XLogRecPtr	startptr;
 	XLogRecPtr	endptr;
+	struct WalproposerShmemState *state = NULL;
+	TimestampTz now = 0;
+	int effective_max_wal_bytes_per_second = 0;
 
 	/* Start from the last sent position */
 	startptr = sentPtr;
@@ -1448,12 +1614,49 @@ XLogBroadcastWalProposer(WalProposer *wp)
 	 * that arbitrary LSN is eventually reported as written, flushed and
 	 * applied, so that it can measure the elapsed time.
 	 */
-	LagTrackerWrite(endptr, GetCurrentTimestamp());
+	now = GetCurrentTimestamp();
+	LagTrackerWrite(endptr, now);
 
 	/* Do we have any work to do? */
 	Assert(startptr <= endptr);
 	if (endptr <= startptr)
 		return;
+
+	/* BEGIN_HADRON */
+	state = GetWalpropShmemState();
+	effective_max_wal_bytes_per_second = pg_atomic_read_u32(&state->wal_rate_limiter.effective_max_wal_bytes_per_second);
+	if (effective_max_wal_bytes_per_second != -1 && state != NULL)
+	{
+		struct WalRateLimiter *limiter = &state->wal_rate_limiter;
+		uint64 batch_end_time = pg_atomic_read_u64(&limiter->batch_end_time_us);
+		if ( now >= batch_end_time )
+		{
+			// Reset the rate limiter to start a new batch
+			limiter->sent_bytes = 0;
+			pg_atomic_write_u32(&limiter->should_limit, false);
+			pg_atomic_write_u64(&limiter->batch_start_time_us, now);
+			/* tentatively assign the batch end time as 1s from now. This could result in one of the following cases:
+			1. If sent_bytes does not reach effective_max_wal_bytes_per_second in 1s,
+			then we will reset the current batch and clear sent_bytes. No throttling happens.
+			2. Otherwise, we will recompute the end time (below) based on how many bytes are actually written,
+			and throttle PG until the batch end time. */
+			pg_atomic_write_u64(&limiter->batch_end_time_us, now + USECS_PER_SEC);
+		}
+		limiter->sent_bytes += (endptr - startptr);
+		if (limiter->sent_bytes > effective_max_wal_bytes_per_second)
+		{
+			uint64_t batch_start_time = pg_atomic_read_u64(&limiter->batch_start_time_us);
+			uint64 throttle_usecs = USECS_PER_SEC * limiter->sent_bytes / Max(effective_max_wal_bytes_per_second, 1);
+			if (throttle_usecs > kRateLimitMaxBatchUSecs){
+				elog(LOG, "throttle_usecs %lu is too large, limiting to %lu", throttle_usecs, kRateLimitMaxBatchUSecs);
+				throttle_usecs = kRateLimitMaxBatchUSecs;
+			}
+
+			pg_atomic_write_u32(&limiter->should_limit, true);
+			pg_atomic_write_u64(&limiter->batch_end_time_us, batch_start_time + throttle_usecs);
+		}
+	}
+	/* END_HADRON */
 
 	WalProposerBroadcast(wp, startptr, endptr);
 	sentPtr = endptr;
@@ -1496,7 +1699,7 @@ walprop_pg_wal_reader_allocate(Safekeeper *sk)
 
 	snprintf(log_prefix, sizeof(log_prefix), WP_LOG_PREFIX "sk %s:%s nwr: ", sk->host, sk->port);
 	Assert(!sk->xlogreader);
-	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propTermStartLsn, log_prefix);
+	sk->xlogreader = NeonWALReaderAllocate(wal_segment_size, sk->wp->propTermStartLsn, log_prefix, sk->wp->localTimeLineID);
 	if (sk->xlogreader == NULL)
 		wpg_log(FATAL, "failed to allocate xlog reader");
 }
@@ -1510,7 +1713,7 @@ walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count, 
 					  buf,
 					  startptr,
 					  count,
-					  walprop_pg_get_timeline_id());
+					  sk->wp->localTimeLineID);
 
 	if (res == NEON_WALREAD_SUCCESS)
 	{
@@ -1836,7 +2039,7 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	return rc;
 }
 
-static void
+static void __attribute__((noreturn))
 walprop_pg_finish_sync_safekeepers(WalProposer *wp, XLogRecPtr lsn)
 {
 	fprintf(stdout, "%X/%X\n", LSN_FORMAT_ARGS(lsn));
@@ -1929,19 +2132,43 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 	if (wp->config->syncSafekeepers)
 		return;
 
+
 	/* handle fresh ps_feedback */
 	if (sk->appendResponse.ps_feedback.present)
 	{
-		PageserverFeedback min_feedback = record_pageserver_feedback(&sk->appendResponse.ps_feedback);
+		shardno_t num_shards = get_num_shards();
 
-		/* Only one main shard sends non-zero currentClusterSize */
-		if (sk->appendResponse.ps_feedback.currentClusterSize > 0)
-			SetNeonCurrentClusterSize(sk->appendResponse.ps_feedback.currentClusterSize);
-
-		if (min_feedback.disk_consistent_lsn != standby_apply_lsn)
+		// During shard split, we receive ps_feedback from child shards before
+		// the split commits and our shard map GUC has been updated. We must
+		// filter out such feedback here because record_pageserver_feedback()
+		// doesn't do it.
+		//
+		// NB: what we would actually want to happen is that we only receive
+		// ps_feedback from the parent shards when the split is committed, then
+		// apply the split to our set of tracked feedback and from here on only
+		// receive ps_feedback from child shards. This filter condition doesn't
+		// do that: if we split from N parent to 2N child shards, the first N
+		// child shards' feedback messages will pass this condition, even before
+		// the split is committed. That's a bit sloppy, but OK for now.
+		if (sk->appendResponse.ps_feedback.shard_number < num_shards)
 		{
-			standby_apply_lsn = min_feedback.disk_consistent_lsn;
-			needToAdvanceSlot = true;
+			PageserverFeedback min_feedback = record_pageserver_feedback(&sk->appendResponse.ps_feedback, num_shards);
+
+			/* Only one main shard sends non-zero currentClusterSize */
+			if (sk->appendResponse.ps_feedback.currentClusterSize > 0)
+				SetNeonCurrentClusterSize(sk->appendResponse.ps_feedback.currentClusterSize);
+
+			if (min_feedback.disk_consistent_lsn != standby_apply_lsn)
+			{
+				standby_apply_lsn = min_feedback.disk_consistent_lsn;
+				needToAdvanceSlot = true;
+			}
+		}
+		else
+		{
+			// HADRON
+			elog(DEBUG2, "Ignoring pageserver feedback for unknown shard %d (current shard number %d)",
+				sk->appendResponse.ps_feedback.shard_number, num_shards);
 		}
 	}
 
@@ -2034,6 +2261,27 @@ GetNeonCurrentClusterSize(void)
 }
 uint64		GetNeonCurrentClusterSize(void);
 
+/* BEGIN_HADRON */
+static void
+walprop_pg_reset_safekeeper_statuses_for_metrics(WalProposer *wp, uint32 num_safekeepers)
+{
+	WalproposerShmemState* shmem = wp->api.get_shmem_state(wp);
+	SpinLockAcquire(&shmem->mutex);
+	shmem->num_safekeepers = num_safekeepers;
+	memset(shmem->safekeeper_status, 0, sizeof(shmem->safekeeper_status));
+	SpinLockRelease(&shmem->mutex);
+}
+
+static void
+walprop_pg_update_safekeeper_status_for_metrics(WalProposer *wp, uint32 sk_index, uint8 status)
+{
+	WalproposerShmemState* shmem = wp->api.get_shmem_state(wp);
+	Assert(sk_index < MAX_SAFEKEEPERS);
+	SpinLockAcquire(&shmem->mutex);
+	shmem->safekeeper_status[sk_index] = status;
+	SpinLockRelease(&shmem->mutex);
+}
+/* END_HADRON */
 
 static const walproposer_api walprop_pg = {
 	.get_shmem_state = walprop_pg_get_shmem_state,
@@ -2067,4 +2315,6 @@ static const walproposer_api walprop_pg = {
 	.finish_sync_safekeepers = walprop_pg_finish_sync_safekeepers,
 	.process_safekeeper_feedback = walprop_pg_process_safekeeper_feedback,
 	.log_internal = walprop_pg_log_internal,
+	.reset_safekeeper_statuses_for_metrics = walprop_pg_reset_safekeeper_statuses_for_metrics,
+	.update_safekeeper_status_for_metrics = walprop_pg_update_safekeeper_status_for_metrics,
 };

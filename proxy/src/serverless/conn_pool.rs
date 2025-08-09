@@ -3,15 +3,14 @@ use std::pin::pin;
 use std::sync::{Arc, Weak};
 use std::task::{Poll, ready};
 
-use futures::Future;
 use futures::future::poll_fn;
-use postgres_client::AsyncMessage;
+use futures::{Future, FutureExt};
 use postgres_client::tls::MakeTlsConnect;
 use smallvec::SmallVec;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{error, info, info_span};
 #[cfg(test)]
 use {
     super::conn_pool_lib::GlobalConnPoolOptions,
@@ -23,12 +22,12 @@ use super::conn_pool_lib::{
     Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, EndpointConnPool,
     GlobalConnPool,
 };
+use crate::config::ComputeConfig;
 use crate::context::RequestContext;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::Metrics;
-use crate::tls::postgres_rustls::MakeRustlsConnect;
 
-type TlsStream = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::Stream;
+type TlsStream = <ComputeConfig as MakeTlsConnect<TcpStream>>::Stream;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
@@ -85,16 +84,17 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     let cancel = CancellationToken::new();
     let cancelled = cancel.clone().cancelled_owned();
 
-    tokio::spawn(
-    async move {
+    tokio::spawn(async move {
         let _conn_gauge = conn_gauge;
         let mut idle_timeout = pin!(tokio::time::sleep(idle));
         let mut cancelled = pin!(cancelled);
 
         poll_fn(move |cx| {
+            let _instrument = span.enter();
+
             if cancelled.as_mut().poll(cx).is_ready() {
                 info!("connection dropped");
-                return Poll::Ready(())
+                return Poll::Ready(());
             }
 
             match rx.has_changed() {
@@ -105,7 +105,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 }
                 Err(_) => {
                     info!("connection dropped");
-                    return Poll::Ready(())
+                    return Poll::Ready(());
                 }
                 _ => {}
             }
@@ -123,42 +123,22 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 }
             }
 
-            loop {
-                let message = ready!(connection.poll_message(cx));
-
-                match message {
-                    Some(Ok(AsyncMessage::Notice(notice))) => {
-                        info!(%session_id, "notice: {}", notice);
-                    }
-                    Some(Ok(AsyncMessage::Notification(notif))) => {
-                        warn!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
-                    }
-                    Some(Ok(_)) => {
-                        warn!(%session_id, "unknown message");
-                    }
-                    Some(Err(e)) => {
-                        error!(%session_id, "connection error: {}", e);
-                        break
-                    }
-                    None => {
-                        info!("connection closed");
-                        break
-                    }
-                }
+            match ready!(connection.poll_unpin(cx)) {
+                Err(e) => error!(%session_id, "connection error: {}", e),
+                Ok(()) => info!("connection closed"),
             }
 
             // remove from connection pool
-            if let Some(pool) = pool.clone().upgrade() {
-                if pool.write().remove_client(db_user.clone(), conn_id) {
-                    info!("closed connection removed");
-                }
+            if let Some(pool) = pool.clone().upgrade()
+                && pool.write().remove_client(db_user.clone(), conn_id)
+            {
+                info!("closed connection removed");
             }
 
             Poll::Ready(())
-        }).await;
-
-    }
-    .instrument(span));
+        })
+        .await;
+    });
     let inner = ClientInnerCommon {
         inner: client,
         aux,
@@ -209,6 +189,9 @@ mod tests {
         }
         fn get_process_id(&self) -> i32 {
             0
+        }
+        fn reset(&mut self) -> Result<(), postgres_client::Error> {
+            Ok(())
         }
     }
 

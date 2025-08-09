@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_ffi::{MAX_SEND_SIZE, TimeLineID};
+use postgres_versioninfo::{PgMajorVersion, PgVersionId};
 use pq_proto::SystemId;
 use safekeeper_api::membership::{
     INVALID_GENERATION, MemberSet, SafekeeperGeneration as Generation, SafekeeperId,
@@ -23,13 +24,13 @@ use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
 
-use crate::metrics::MISC_OPERATION_SECONDS;
+use crate::metrics::{MISC_OPERATION_SECONDS, PROPOSER_ACCEPTOR_MESSAGES_TOTAL};
 use crate::state::TimelineState;
 use crate::{control_file, wal_storage};
 
 pub const SK_PROTO_VERSION_2: u32 = 2;
 pub const SK_PROTO_VERSION_3: u32 = 3;
-pub const UNKNOWN_SERVER_VERSION: u32 = 0;
+pub const UNKNOWN_SERVER_VERSION: PgVersionId = PgVersionId::UNKNOWN;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TermLsn {
@@ -64,10 +65,10 @@ impl TermHistory {
         for i in 0..n_entries {
             let term = bytes
                 .get_u64_f()
-                .with_context(|| format!("TermHistory pos {} misses term", i))?;
+                .with_context(|| format!("TermHistory pos {i} misses term"))?;
             let lsn = bytes
                 .get_u64_f()
-                .with_context(|| format!("TermHistory pos {} misses lsn", i))?
+                .with_context(|| format!("TermHistory pos {i} misses lsn"))?
                 .into();
             res.push(TermLsn { term, lsn })
         }
@@ -121,9 +122,7 @@ impl TermHistory {
         if let Some(sk_th_last) = sk_th.last() {
             assert!(
                 sk_th_last.lsn <= sk_wal_end,
-                "safekeeper term history end {:?} LSN is higher than WAL end {:?}",
-                sk_th_last,
-                sk_wal_end
+                "safekeeper term history end {sk_th_last:?} LSN is higher than WAL end {sk_wal_end:?}"
             );
         }
 
@@ -220,7 +219,7 @@ pub struct ProposerGreeting {
     pub timeline_id: TimelineId,
     pub mconf: membership::Configuration,
     /// Postgres server version
-    pub pg_version: u32,
+    pub pg_version: PgVersionId,
     pub system_id: SystemId,
     pub wal_seg_size: u32,
 }
@@ -231,7 +230,7 @@ pub struct ProposerGreetingV2 {
     /// proposer-acceptor protocol version
     pub protocol_version: u32,
     /// Postgres server version
-    pub pg_version: u32,
+    pub pg_version: PgVersionId,
     pub proposer_id: PgUuid,
     pub system_id: SystemId,
     pub timeline_id: TimelineId,
@@ -438,11 +437,11 @@ impl ProposerAcceptorMessage {
         for i in 0..members_len {
             let id = buf
                 .get_u64_f()
-                .with_context(|| format!("reading member {} node_id", i))?;
-            let host = Self::get_cstr(buf).with_context(|| format!("reading member {} host", i))?;
+                .with_context(|| format!("reading member {i} node_id"))?;
+            let host = Self::get_cstr(buf).with_context(|| format!("reading member {i} host"))?;
             let pg_port = buf
                 .get_u16_f()
-                .with_context(|| format!("reading member {} port", i))?;
+                .with_context(|| format!("reading member {i} port"))?;
             let sk = SafekeeperId {
                 id: NodeId(id),
                 host,
@@ -463,12 +462,12 @@ impl ProposerAcceptorMessage {
             for i in 0..new_members_len {
                 let id = buf
                     .get_u64_f()
-                    .with_context(|| format!("reading new member {} node_id", i))?;
-                let host = Self::get_cstr(buf)
-                    .with_context(|| format!("reading new member {} host", i))?;
+                    .with_context(|| format!("reading new member {i} node_id"))?;
+                let host =
+                    Self::get_cstr(buf).with_context(|| format!("reading new member {i} host"))?;
                 let pg_port = buf
                     .get_u16_f()
-                    .with_context(|| format!("reading new member {} port", i))?;
+                    .with_context(|| format!("reading new member {i} port"))?;
                 let sk = SafekeeperId {
                     id: NodeId(id),
                     host,
@@ -513,7 +512,7 @@ impl ProposerAcceptorMessage {
                         tenant_id,
                         timeline_id,
                         mconf,
-                        pg_version,
+                        pg_version: PgVersionId::from_full_pg_version(pg_version),
                         system_id,
                         wal_seg_size,
                     };
@@ -939,7 +938,7 @@ where
         &mut self,
         msg: &ProposerAcceptorMessage,
     ) -> Result<Option<AcceptorProposerMessage>> {
-        match msg {
+        let res = match msg {
             ProposerAcceptorMessage::Greeting(msg) => self.handle_greeting(msg).await,
             ProposerAcceptorMessage::VoteRequest(msg) => self.handle_vote_request(msg).await,
             ProposerAcceptorMessage::Elected(msg) => self.handle_elected(msg).await,
@@ -950,7 +949,20 @@ where
                 self.handle_append_request(msg, false).await
             }
             ProposerAcceptorMessage::FlushWAL => self.handle_flush().await,
-        }
+        };
+
+        // BEGIN HADRON
+        match &res {
+            Ok(_) => PROPOSER_ACCEPTOR_MESSAGES_TOTAL
+                .with_label_values(&["success"])
+                .inc(),
+            Err(_) => PROPOSER_ACCEPTOR_MESSAGES_TOTAL
+                .with_label_values(&["error"])
+                .inc(),
+        };
+
+        res
+        // END HADRON
     }
 
     /// Handle initial message from proposer: check its sanity and send my
@@ -963,7 +975,8 @@ where
          * because safekeepers parse WAL headers and the format
          * may change between versions.
          */
-        if msg.pg_version / 10000 != self.state.server.pg_version / 10000
+        if PgMajorVersion::try_from(msg.pg_version)?
+            != PgMajorVersion::try_from(self.state.server.pg_version)?
             && self.state.server.pg_version != UNKNOWN_SERVER_VERSION
         {
             bail!(
@@ -1013,6 +1026,13 @@ where
             self.state.finish_change(&state).await?;
         }
 
+        if msg.mconf.generation > self.state.mconf.generation && !msg.mconf.contains(self.node_id) {
+            bail!(
+                "refused to switch into {}, node {} is not a member of it",
+                msg.mconf,
+                self.node_id,
+            );
+        }
         // Switch into conf given by proposer conf if it is higher.
         self.state.membership_switch(msg.mconf.clone()).await?;
 
@@ -1508,7 +1528,7 @@ mod tests {
         let mut vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
             Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given),
-            r => panic!("unexpected response: {:?}", r),
+            r => panic!("unexpected response: {r:?}"),
         }
 
         // reboot...
@@ -1523,7 +1543,7 @@ mod tests {
         vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
             Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(!resp.vote_given),
-            r => panic!("unexpected response: {:?}", r),
+            r => panic!("unexpected response: {r:?}"),
         }
     }
 
@@ -1750,7 +1770,7 @@ mod tests {
                 }]),
             },
             server: ServerInfo {
-                pg_version: 14,
+                pg_version: PgVersionId::from_full_pg_version(140000),
                 system_id: 0x1234567887654321,
                 wal_seg_size: 0x12345678,
             },

@@ -3,6 +3,7 @@
 
     "timestamp": "2021-05-23T18:25:43.511Z",
     "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8b",
+    "suspend_timeout_seconds": 3600,
 
     "cluster": {
         "cluster_id": "test-cluster-42",
@@ -85,9 +86,14 @@
                 "vartype": "bool"
             },
             {
-                "name": "prewarm_lfc_on_startup",
+                "name": "autoprewarm",
                 "value": "off",
                 "vartype": "bool"
+            },
+            {
+                "name": "offload_lfc_interval_seconds",
+                "value": "20",
+                "vartype": "integer"
             },
             {
                 "name": "neon.safekeepers",

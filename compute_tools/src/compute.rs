@@ -3,10 +3,11 @@ use chrono::{DateTime, Utc};
 use compute_api::privilege::Privilege;
 use compute_api::responses::{
     ComputeConfig, ComputeCtlConfig, ComputeMetrics, ComputeStatus, LfcOffloadState,
-    LfcPrewarmState,
+    LfcPrewarmState, PromoteState, TlsConfig,
 };
 use compute_api::spec::{
-    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, PgIdent,
+    ComputeAudit, ComputeFeature, ComputeMode, ComputeSpec, ExtVersion, GenericOption,
+    PageserverConnectionInfo, PageserverProtocol, PgIdent, Role,
 };
 use futures::StreamExt;
 use futures::future::join_all;
@@ -15,34 +16,44 @@ use itertools::Itertools;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use once_cell::sync::Lazy;
+use pageserver_page_api::{self as page_api, BaseBackupCompression};
 use postgres;
 use postgres::NoTls;
 use postgres::error::SqlState;
 use remote_storage::{DownloadError, RemotePath};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::ffi::OsString;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{env, fs};
-use tokio::spawn;
+use tokio::{spawn, sync::watch, task::JoinHandle, time};
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, instrument, warn};
+use url::Url;
+use utils::backoff::{
+    DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS, exponential_backoff_duration,
+};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 use utils::measured_stream::MeasuredReader;
+use utils::pid_file;
+use utils::shard::{ShardIndex, ShardNumber, ShardStripeSize};
 
 use crate::configurator::launch_configurator;
 use crate::disk_quota::set_disk_quota;
+use crate::hadron_metrics::COMPUTE_ATTACHED;
 use crate::installed_extensions::get_installed_extensions;
-use crate::logger::startup_context_from_env;
+use crate::logger::{self, startup_context_from_env};
 use crate::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use crate::metrics::COMPUTE_CTL_UP;
 use crate::monitor::launch_monitor;
 use crate::pg_helpers::*;
+use crate::pgbouncer::*;
 use crate::rsyslog::{
     PostgresLogsRsyslogConfig, configure_audit_rsyslog, configure_postgres_logs_export,
     launch_pgaudit_gc,
@@ -66,14 +77,23 @@ pub static BUILD_TAG: Lazy<String> = Lazy::new(|| {
         .unwrap_or(BUILD_TAG_DEFAULT)
         .to_string()
 });
+const DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL: u64 = 3600;
 
 /// Static configuration params that don't change after startup. These mostly
 /// come from the CLI args, or are derived from them.
+#[derive(Clone, Debug)]
 pub struct ComputeNodeParams {
     /// The ID of the compute
     pub compute_id: String,
-    // Url type maintains proper escaping
+
+    /// Url type maintains proper escaping
     pub connstr: url::Url,
+
+    /// The name of the 'weak' superuser role, which we give to the users.
+    /// It follows the allow list approach, i.e., we take a standard role
+    /// and grant it extra permissions with explicit GRANTs here and there,
+    /// and core patches.
+    pub privileged_role_name: String,
 
     pub resize_swap_on_bind: bool,
     pub set_disk_quota_for_fs: Option<String>,
@@ -96,8 +116,24 @@ pub struct ComputeNodeParams {
     pub internal_http_port: u16,
 
     /// the address of extension storage proxy gateway
-    pub remote_ext_base_url: Option<String>,
+    pub remote_ext_base_url: Option<Url>,
+
+    /// Interval for installed extensions collection
+    pub installed_extensions_collection_interval: Arc<AtomicU64>,
+    /// Hadron instance ID of the compute node.
+    pub instance_id: Option<String>,
+    /// Timeout of PG compute startup in the Init state.
+    pub pg_init_timeout: Option<Duration>,
+    // Path to the `pg_isready` binary.
+    pub pg_isready_bin: String,
+    pub lakebase_mode: bool,
+
+    pub build_tag: String,
+    pub control_plane_uri: Option<String>,
+    pub config_path_test_only: Option<OsString>,
 }
+
+type TaskHandle = Mutex<Option<JoinHandle<()>>>;
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -119,6 +155,10 @@ pub struct ComputeNode {
     // key: ext_archive_name, value: started download time, download_completed?
     pub ext_download_progress: RwLock<HashMap<String, (DateTime<Utc>, bool)>>,
     pub compute_ctl_config: ComputeCtlConfig,
+
+    /// Handle to the extension stats collection task
+    extension_stats_task: TaskHandle,
+    lfc_offload_task: TaskHandle,
 }
 
 // store some metrics about download size that might impact startup time
@@ -132,6 +172,7 @@ pub struct RemoteExtensionMetrics {
 #[derive(Clone, Debug)]
 pub struct ComputeState {
     pub start_time: DateTime<Utc>,
+    pub pg_start_time: Option<DateTime<Utc>>,
     pub status: ComputeStatus,
     /// Timestamp of the last Postgres activity. It could be `None` if
     /// compute wasn't used since start.
@@ -155,7 +196,13 @@ pub struct ComputeState {
     pub startup_span: Option<tracing::span::Span>,
 
     pub lfc_prewarm_state: LfcPrewarmState,
+    pub lfc_prewarm_token: CancellationToken,
     pub lfc_offload_state: LfcOffloadState,
+
+    /// WAL flush LSN that is set after terminating Postgres and syncing safekeepers if
+    /// mode == ComputeMode::Primary. None otherwise
+    pub terminate_flush_lsn: Option<Lsn>,
+    pub promote_state: Option<watch::Receiver<PromoteState>>,
 
     pub metrics: ComputeMetrics,
 }
@@ -164,6 +211,7 @@ impl ComputeState {
     pub fn new() -> Self {
         Self {
             start_time: Utc::now(),
+            pg_start_time: None,
             status: ComputeStatus::Empty,
             last_active: None,
             error: None,
@@ -172,6 +220,9 @@ impl ComputeState {
             metrics: ComputeMetrics::default(),
             lfc_prewarm_state: LfcPrewarmState::default(),
             lfc_offload_state: LfcOffloadState::default(),
+            terminate_flush_lsn: None,
+            promote_state: None,
+            lfc_prewarm_token: CancellationToken::new(),
         }
     }
 
@@ -204,33 +255,95 @@ pub struct ParsedSpec {
     pub spec: ComputeSpec,
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
-    pub pageserver_connstr: String,
+    pub pageserver_conninfo: PageserverConnectionInfo,
     pub safekeeper_connstrings: Vec<String>,
     pub storage_auth_token: Option<String>,
-    pub endpoint_storage_addr: Option<SocketAddr>,
+    /// k8s dns name and port
+    pub endpoint_storage_addr: Option<String>,
     pub endpoint_storage_token: Option<String>,
 }
 
+impl ParsedSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        // Only Primary nodes are using safekeeper_connstrings, and at the moment
+        // this method only validates that part of the specs.
+        if self.spec.mode != ComputeMode::Primary {
+            return Ok(());
+        }
+
+        // While it seems like a good idea to check for an odd number of entries in
+        // the safekeepers connection string, changes to the list of safekeepers might
+        // incur appending a new server to a list of 3, in which case a list of 4
+        // entries is okay in production.
+        //
+        // Still we want unique entries, and at least one entry in the vector
+        if self.safekeeper_connstrings.is_empty() {
+            return Err(String::from("safekeeper_connstrings is empty"));
+        }
+
+        // check for uniqueness of the connection strings in the set
+        let mut connstrings = self.safekeeper_connstrings.clone();
+
+        connstrings.sort();
+        let mut previous = &connstrings[0];
+
+        for current in connstrings.iter().skip(1) {
+            // duplicate entry?
+            if current == previous {
+                return Err(format!(
+                    "duplicate entry in safekeeper_connstrings: {current}!",
+                ));
+            }
+
+            previous = current;
+        }
+
+        Ok(())
+    }
+}
+
 impl TryFrom<ComputeSpec> for ParsedSpec {
-    type Error = String;
-    fn try_from(spec: ComputeSpec) -> Result<Self, String> {
+    type Error = anyhow::Error;
+    fn try_from(spec: ComputeSpec) -> Result<Self, anyhow::Error> {
         // Extract the options from the spec file that are needed to connect to
         // the storage system.
         //
-        // For backwards-compatibility, the top-level fields in the spec file
-        // may be empty. In that case, we need to dig them from the GUCs in the
-        // cluster.settings field.
-        let pageserver_connstr = spec
-            .pageserver_connstring
-            .clone()
-            .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
-            .ok_or("pageserver connstr should be provided")?;
+        // In compute specs generated by old control plane versions, the spec file might
+        // be missing the `pageserver_connection_info` field. In that case, we need to dig
+        // the pageserver connection info from the `pageserver_connstr` field instead, or
+        // if that's missing too, from the GUC in the cluster.settings field.
+        let mut pageserver_conninfo = spec.pageserver_connection_info.clone();
+        if pageserver_conninfo.is_none() {
+            if let Some(pageserver_connstr_field) = &spec.pageserver_connstring {
+                pageserver_conninfo = Some(PageserverConnectionInfo::from_connstr(
+                    pageserver_connstr_field,
+                    spec.shard_stripe_size,
+                )?);
+            }
+        }
+        if pageserver_conninfo.is_none() {
+            if let Some(guc) = spec.cluster.settings.find("neon.pageserver_connstring") {
+                let stripe_size = if let Some(guc) = spec.cluster.settings.find("neon.stripe_size")
+                {
+                    Some(ShardStripeSize(u32::from_str(&guc)?))
+                } else {
+                    None
+                };
+                pageserver_conninfo =
+                    Some(PageserverConnectionInfo::from_connstr(&guc, stripe_size)?);
+            }
+        }
+        let pageserver_conninfo = pageserver_conninfo.ok_or(anyhow::anyhow!(
+            "pageserver connection information should be provided"
+        ))?;
+
+        // Similarly for safekeeper connection strings
         let safekeeper_connstrings = if spec.safekeeper_connstrings.is_empty() {
             if matches!(spec.mode, ComputeMode::Primary) {
                 spec.cluster
                     .settings
                     .find("neon.safekeepers")
-                    .ok_or("safekeeper connstrings should be provided")?
+                    .ok_or(anyhow::anyhow!("safekeeper connstrings should be provided"))?
                     .split(',')
                     .map(|str| str.to_string())
                     .collect()
@@ -240,50 +353,52 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
         } else {
             spec.safekeeper_connstrings.clone()
         };
+
         let storage_auth_token = spec.storage_auth_token.clone();
         let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
             tenant_id
         } else {
-            spec.cluster
+            let guc = spec
+                .cluster
                 .settings
                 .find("neon.tenant_id")
-                .ok_or("tenant id should be provided")
-                .map(|s| TenantId::from_str(&s))?
-                .or(Err("invalid tenant id"))?
+                .ok_or(anyhow::anyhow!("tenant id should be provided"))?;
+            TenantId::from_str(&guc).context("invalid tenant id")?
         };
         let timeline_id: TimelineId = if let Some(timeline_id) = spec.timeline_id {
             timeline_id
         } else {
-            spec.cluster
+            let guc = spec
+                .cluster
                 .settings
                 .find("neon.timeline_id")
-                .ok_or("timeline id should be provided")
-                .map(|s| TimelineId::from_str(&s))?
-                .or(Err("invalid timeline id"))?
+                .ok_or(anyhow::anyhow!("timeline id should be provided"))?;
+            TimelineId::from_str(&guc).context(anyhow::anyhow!("invalid timeline id"))?
         };
 
-        let endpoint_storage_addr: Option<SocketAddr> = spec
+        let endpoint_storage_addr: Option<String> = spec
             .endpoint_storage_addr
             .clone()
-            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"))
-            .unwrap_or_default()
-            .parse()
-            .ok();
+            .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_addr"));
         let endpoint_storage_token = spec
             .endpoint_storage_token
             .clone()
             .or_else(|| spec.cluster.settings.find("neon.endpoint_storage_token"));
 
-        Ok(ParsedSpec {
+        let res = ParsedSpec {
             spec,
-            pageserver_connstr,
+            pageserver_conninfo,
             safekeeper_connstrings,
             storage_auth_token,
             tenant_id,
             timeline_id,
             endpoint_storage_addr,
             endpoint_storage_token,
-        })
+        };
+
+        // Now check validity of the parsed specification
+        res.validate().map_err(anyhow::Error::msg)?;
+        Ok(res)
     }
 }
 
@@ -310,7 +425,7 @@ fn maybe_cgexec(cmd: &str) -> Command {
 
 struct PostgresHandle {
     postgres: std::process::Child,
-    log_collector: tokio::task::JoinHandle<Result<()>>,
+    log_collector: JoinHandle<Result<()>>,
 }
 
 impl PostgresHandle {
@@ -324,7 +439,131 @@ struct StartVmMonitorResult {
     #[cfg(target_os = "linux")]
     token: tokio_util::sync::CancellationToken,
     #[cfg(target_os = "linux")]
-    vm_monitor: Option<tokio::task::JoinHandle<Result<()>>>,
+    vm_monitor: Option<JoinHandle<Result<()>>>,
+}
+
+// BEGIN_HADRON
+/// This function creates roles that are used by Databricks.
+/// These roles are not needs to be botostrapped at PG Compute provisioning time.
+/// The auth method for these roles are configured in databricks_pg_hba.conf in universe repository.
+pub(crate) fn create_databricks_roles() -> Vec<String> {
+    let roles = vec![
+        // Role for prometheus_stats_exporter
+        Role {
+            name: "databricks_monitor".to_string(),
+            // This uses "local" connection and auth method for that is "trust", so no password is needed.
+            encrypted_password: None,
+            options: Some(vec![GenericOption {
+                name: "IN ROLE pg_monitor".to_string(),
+                value: None,
+                vartype: "string".to_string(),
+            }]),
+        },
+        // Role for brickstore control plane
+        Role {
+            name: "databricks_control_plane".to_string(),
+            // Certificate user does not need password.
+            encrypted_password: None,
+            options: Some(vec![GenericOption {
+                name: "SUPERUSER".to_string(),
+                value: None,
+                vartype: "string".to_string(),
+            }]),
+        },
+        // Role for brickstore httpgateway.
+        Role {
+            name: "databricks_gateway".to_string(),
+            // Certificate user does not need password.
+            encrypted_password: None,
+            options: None,
+        },
+    ];
+
+    roles
+        .into_iter()
+        .map(|role| {
+            let query = format!(
+                r#"
+                DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT FROM pg_catalog.pg_roles WHERE rolname = '{}')
+                        THEN
+                            CREATE ROLE {} {};
+                        END IF;
+                    END
+                $$;"#,
+                role.name,
+                role.name.pg_quote(),
+                role.to_pg_options(),
+            );
+            query
+        })
+        .collect()
+}
+
+/// Databricks-specific environment variables to be passed to the `postgres` sub-process.
+pub struct DatabricksEnvVars {
+    /// The Databricks "endpoint ID" of the compute instance. Used by `postgres` to check
+    /// the token scopes of internal auth tokens.
+    pub endpoint_id: String,
+    /// Hostname of the Databricks workspace URL this compute instance belongs to.
+    /// Used by postgres to verify Databricks PAT tokens.
+    pub workspace_host: String,
+
+    pub lakebase_mode: bool,
+}
+
+impl DatabricksEnvVars {
+    pub fn new(
+        compute_spec: &ComputeSpec,
+        compute_id: Option<&String>,
+        instance_id: Option<String>,
+        lakebase_mode: bool,
+    ) -> Self {
+        let endpoint_id = if let Some(instance_id) = instance_id {
+            // Use instance_id as endpoint_id if it is set. This code path is for PuPr model.
+            instance_id
+        } else {
+            // Use compute_id as endpoint_id if instance_id is not set. The code path is for PrPr model.
+            // compute_id is a string format of "{endpoint_id}/{compute_idx}"
+            // endpoint_id is a uuid. We only need to pass down endpoint_id to postgres.
+            // Panics if compute_id is not set or not in the expected format.
+            compute_id.unwrap().split('/').next().unwrap().to_string()
+        };
+        let workspace_host = compute_spec
+            .databricks_settings
+            .as_ref()
+            .map(|s| s.databricks_workspace_host.clone())
+            .unwrap_or("".to_string());
+        Self {
+            endpoint_id,
+            workspace_host,
+            lakebase_mode,
+        }
+    }
+
+    /// Constants for the names of Databricks-specific postgres environment variables.
+    const DATABRICKS_ENDPOINT_ID_ENVVAR: &'static str = "DATABRICKS_ENDPOINT_ID";
+    const DATABRICKS_WORKSPACE_HOST_ENVVAR: &'static str = "DATABRICKS_WORKSPACE_HOST";
+
+    /// Convert DatabricksEnvVars to a list of string pairs that can be passed as env vars. Consumes `self`.
+    pub fn to_env_var_list(self) -> Vec<(String, String)> {
+        if !self.lakebase_mode {
+            // In neon env, we don't need to pass down the env vars to postgres.
+            return vec![];
+        }
+        vec![
+            (
+                Self::DATABRICKS_ENDPOINT_ID_ENVVAR.to_string(),
+                self.endpoint_id.clone(),
+            ),
+            (
+                Self::DATABRICKS_WORKSPACE_HOST_ENVVAR.to_string(),
+                self.workspace_host.clone(),
+            ),
+        ]
+    }
 }
 
 impl ComputeNode {
@@ -350,14 +589,11 @@ impl ComputeNode {
         // that can affect `compute_ctl` and prevent it from properly configuring the database schema.
         // Unset them via connection string options before connecting to the database.
         // N.B. keep it in sync with `ZENITH_OPTIONS` in `get_maintenance_client()`.
-        //
-        // TODO(ololobus): we currently pass `-c default_transaction_read_only=off` from control plane
-        // as well. After rolling out this code, we can remove this parameter from control plane.
-        // In the meantime, double-passing is fine, the last value is applied.
-        // See: <https://github.com/neondatabase/cloud/blob/133dd8c4dbbba40edfbad475bf6a45073ca63faf/goapp/controlplane/internal/pkg/compute/provisioner/provisioner_common.go#L70>
-        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+        const EXTRA_OPTIONS: &str = "-c role=cloud_admin -c default_transaction_read_only=off -c search_path='' -c statement_timeout=0 -c pgaudit.log=none";
         let options = match conn_conf.get_options() {
-            Some(options) => format!("{} {}", options, EXTRA_OPTIONS),
+            // Allow the control plane to override any options set by the
+            // compute
+            Some(options) => format!("{EXTRA_OPTIONS} {options}"),
             None => EXTRA_OPTIONS.to_string(),
         };
         conn_conf.options(&options);
@@ -366,7 +602,11 @@ impl ComputeNode {
         let mut new_state = ComputeState::new();
         if let Some(spec) = config.spec {
             let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
-            new_state.pspec = Some(pspec);
+            if params.lakebase_mode {
+                ComputeNode::set_spec(&params, &mut new_state, pspec);
+            } else {
+                new_state.pspec = Some(pspec);
+            }
         }
 
         Ok(ComputeNode {
@@ -377,6 +617,8 @@ impl ComputeNode {
             state_changed: Condvar::new(),
             ext_download_progress: RwLock::new(HashMap::new()),
             compute_ctl_config: config.compute_ctl_config,
+            extension_stats_task: Mutex::new(None),
+            lfc_offload_task: Mutex::new(None),
         })
     }
 
@@ -392,7 +634,7 @@ impl ComputeNode {
         // because QEMU will already have its memory allocated from the host, and
         // the necessary binaries will already be cached.
         if cli_spec.is_none() {
-            this.prewarm_postgres()?;
+            this.prewarm_postgres_vm_memory()?;
         }
 
         // Set the up metric with Empty status before starting the HTTP server.
@@ -409,6 +651,7 @@ impl ComputeNode {
             port: this.params.external_http_port,
             config: this.compute_ctl_config.clone(),
             compute_id: this.params.compute_id.clone(),
+            instance_id: this.params.instance_id.clone(),
         }
         .launch(&this);
 
@@ -464,6 +707,9 @@ impl ComputeNode {
             None
         };
 
+        this.terminate_extension_stats_task();
+        this.terminate_lfc_offload_task();
+
         // Terminate the vm_monitor so it releases the file watcher on
         // /sys/fs/cgroup/neon-postgres.
         // Note: the vm-monitor only runs on linux because it requires cgroups.
@@ -485,12 +731,21 @@ impl ComputeNode {
         // Reap the postgres process
         delay_exit |= this.cleanup_after_postgres_exit()?;
 
+        // /terminate returns LSN. If we don't sleep at all, connection will break and we
+        // won't get result. If we sleep too much, tests will take significantly longer
+        // and Github Action run will error out
+        let sleep_duration = if delay_exit {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_millis(300)
+        };
+
         // If launch failed, keep serving HTTP requests for a while, so the cloud
         // control plane can get the actual error.
         if delay_exit {
             info!("giving control plane 30s to collect the error before shutdown");
-            std::thread::sleep(Duration::from_secs(30));
         }
+        std::thread::sleep(sleep_duration);
         Ok(exit_code)
     }
 
@@ -566,6 +821,9 @@ impl ComputeNode {
             };
             _this_entered = start_compute_span.enter();
 
+            // Hadron: Record postgres start time (used to enforce pg_init_timeout).
+            state_guard.pg_start_time.replace(Utc::now());
+
             state_guard.set_status(ComputeStatus::Init, &self.state_changed);
             compute_state = state_guard.clone()
         }
@@ -598,6 +856,8 @@ impl ComputeNode {
                 Ok::<(), anyhow::Error>(())
             });
         }
+
+        let tls_config = self.tls_config(&pspec.spec);
 
         // If there are any remote extensions in shared_preload_libraries, start downloading them
         if pspec.spec.remote_extensions.is_some() {
@@ -655,7 +915,7 @@ impl ComputeNode {
             info!("tuning pgbouncer");
 
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let tls_config = self.compute_ctl_config.tls.clone();
+            let tls_config = tls_config.clone();
 
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
@@ -674,7 +934,10 @@ impl ComputeNode {
 
             // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
-            let local_proxy = local_proxy.clone();
+
+            let mut local_proxy = local_proxy.clone();
+            local_proxy.tls = tls_config.clone();
+
             let _handle = tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
@@ -686,34 +949,33 @@ impl ComputeNode {
         // Configure and start rsyslog for compliance audit logging
         match pspec.spec.audit_log_level {
             ComputeAudit::Hipaa | ComputeAudit::Extended | ComputeAudit::Full => {
-                let remote_endpoint =
+                let remote_tls_endpoint =
+                    std::env::var("AUDIT_LOGGING_TLS_ENDPOINT").unwrap_or("".to_string());
+                let remote_plain_endpoint =
                     std::env::var("AUDIT_LOGGING_ENDPOINT").unwrap_or("".to_string());
-                if remote_endpoint.is_empty() {
-                    anyhow::bail!("AUDIT_LOGGING_ENDPOINT is empty");
+
+                if remote_plain_endpoint.is_empty() && remote_tls_endpoint.is_empty() {
+                    anyhow::bail!(
+                        "AUDIT_LOGGING_ENDPOINT and AUDIT_LOGGING_TLS_ENDPOINT are both empty"
+                    );
                 }
 
                 let log_directory_path = Path::new(&self.params.pgdata).join("log");
                 let log_directory_path = log_directory_path.to_string_lossy().to_string();
 
-                // Add project_id,endpoint_id tag to identify the logs.
+                // Add project_id,endpoint_id to identify the logs.
                 //
                 // These ids are passed from cplane,
-                // for backwards compatibility (old computes that don't have them),
-                // we set them to None.
-                // TODO: Clean up this code when all computes have them.
-                let tag: Option<String> = match (
-                    pspec.spec.project_id.as_deref(),
-                    pspec.spec.endpoint_id.as_deref(),
-                ) {
-                    (Some(project_id), Some(endpoint_id)) => {
-                        Some(format!("{project_id}/{endpoint_id}"))
-                    }
-                    (Some(project_id), None) => Some(format!("{project_id}/None")),
-                    (None, Some(endpoint_id)) => Some(format!("None,{endpoint_id}")),
-                    (None, None) => None,
-                };
+                let endpoint_id = pspec.spec.endpoint_id.as_deref().unwrap_or("");
+                let project_id = pspec.spec.project_id.as_deref().unwrap_or("");
 
-                configure_audit_rsyslog(log_directory_path.clone(), tag, &remote_endpoint)?;
+                configure_audit_rsyslog(
+                    log_directory_path.clone(),
+                    endpoint_id,
+                    project_id,
+                    &remote_plain_endpoint,
+                    &remote_tls_endpoint,
+                )?;
 
                 // Launch a background task to clean up the audit logs
                 launch_pgaudit_gc(log_directory_path);
@@ -749,17 +1011,7 @@ impl ComputeNode {
 
             let conf = self.get_tokio_conn_conf(None);
             tokio::task::spawn(async {
-                let res = get_installed_extensions(conf).await;
-                match res {
-                    Ok(extensions) => {
-                        info!(
-                            "[NEON_EXT_STAT] {}",
-                            serde_json::to_string(&extensions)
-                                .expect("failed to serialize extensions list")
-                        );
-                    }
-                    Err(err) => error!("could not get installed extensions: {err:?}"),
-                }
+                let _ = installed_extensions(conf).await;
             });
         }
 
@@ -789,9 +1041,15 @@ impl ComputeNode {
         // Log metrics so that we can search for slow operations in logs
         info!(?metrics, postmaster_pid = %postmaster_pid, "compute start finished");
 
-        if pspec.spec.prewarm_lfc_on_startup {
-            self.prewarm_lfc();
+        self.spawn_extension_stats_task();
+
+        if pspec.spec.autoprewarm {
+            info!("autoprewarming on startup as requested");
+            self.prewarm_lfc(None);
         }
+        if let Some(seconds) = pspec.spec.offload_lfc_interval_seconds {
+            self.spawn_lfc_offload_task(Duration::from_secs(seconds.into()));
+        };
         Ok(())
     }
 
@@ -871,20 +1129,31 @@ impl ComputeNode {
         // Maybe sync safekeepers again, to speed up next startup
         let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-        if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
+        let lsn = if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
             info!("syncing safekeepers on shutdown");
             let storage_auth_token = pspec.storage_auth_token.clone();
             let lsn = self.sync_safekeepers(storage_auth_token)?;
-            info!("synced safekeepers at lsn {lsn}");
-        }
+            info!(%lsn, "synced safekeepers");
+            Some(lsn)
+        } else {
+            info!("not primary, not syncing safekeepers");
+            None
+        };
 
-        let mut delay_exit = false;
         let mut state = self.state.lock().unwrap();
-        if state.status == ComputeStatus::TerminationPending {
+        state.terminate_flush_lsn = lsn;
+
+        let delay_exit = state.status == ComputeStatus::TerminationPendingFast;
+        if state.status == ComputeStatus::TerminationPendingFast
+            || state.status == ComputeStatus::TerminationPendingImmediate
+        {
+            info!(
+                "Changing compute status from {} to {}",
+                state.status,
+                ComputeStatus::Terminated
+            );
             state.status = ComputeStatus::Terminated;
             self.state_changed.notify_all();
-            // we were asked to terminate gracefully, don't exit to avoid restart
-            delay_exit = true
         }
         drop(state);
 
@@ -935,20 +1204,114 @@ impl ComputeNode {
         // If it is something different then create_dir() will error out anyway.
         let pgdata = &self.params.pgdata;
         let _ok = fs::remove_dir_all(pgdata);
-        fs::create_dir(pgdata)?;
+        if self.params.lakebase_mode {
+            // Ignore creation errors if the directory already exists (e.g. mounting it ahead of time).
+            // If it is something different then PG startup will error out anyway.
+            let _ok = fs::create_dir(pgdata);
+        } else {
+            fs::create_dir(pgdata)?;
+        }
+
         fs::set_permissions(pgdata, fs::Permissions::from_mode(0o700))?;
 
         Ok(())
     }
 
-    // Get basebackup from the libpq connection to pageserver using `connstr` and
-    // unarchive it to `pgdata` directory overriding all its previous content.
+    /// Fetches a basebackup from the Pageserver using the compute state's Pageserver connstring and
+    /// unarchives it to `pgdata` directory, replacing any existing contents.
     #[instrument(skip_all, fields(%lsn))]
     fn try_get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
-        let start_time = Instant::now();
 
-        let shard0_connstr = spec.pageserver_connstr.split(',').next().unwrap();
+        let started = Instant::now();
+        let (connected, size) = match spec.pageserver_conninfo.prefer_protocol {
+            PageserverProtocol::Grpc => self.try_get_basebackup_grpc(spec, lsn)?,
+            PageserverProtocol::Libpq => self.try_get_basebackup_libpq(spec, lsn)?,
+        };
+
+        self.fix_zenith_signal_neon_signal()?;
+
+        let mut state = self.state.lock().unwrap();
+        state.metrics.pageserver_connect_micros =
+            connected.duration_since(started).as_micros() as u64;
+        state.metrics.basebackup_bytes = size as u64;
+        state.metrics.basebackup_ms = started.elapsed().as_millis() as u64;
+
+        Ok(())
+    }
+
+    /// Move the Zenith signal file to Neon signal file location.
+    /// This makes Compute compatible with older PageServers that don't yet
+    /// know about the Zenith->Neon rename.
+    fn fix_zenith_signal_neon_signal(&self) -> Result<()> {
+        let datadir = Path::new(&self.params.pgdata);
+
+        let neonsig = datadir.join("neon.signal");
+
+        if neonsig.is_file() {
+            return Ok(());
+        }
+
+        let zenithsig = datadir.join("zenith.signal");
+
+        if zenithsig.is_file() {
+            fs::copy(zenithsig, neonsig)?;
+        }
+
+        Ok(())
+    }
+
+    /// Fetches a basebackup via gRPC. The connstring must use grpc://. Returns the timestamp when
+    /// the connection was established, and the (compressed) size of the basebackup.
+    fn try_get_basebackup_grpc(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
+        let shard0_index = ShardIndex {
+            shard_number: ShardNumber(0),
+            shard_count: spec.pageserver_conninfo.shard_count,
+        };
+        let shard0_url = spec
+            .pageserver_conninfo
+            .shard_url(ShardNumber(0), PageserverProtocol::Grpc)?
+            .to_owned();
+        let (reader, connected) = tokio::runtime::Handle::current().block_on(async move {
+            let mut client = page_api::Client::connect(
+                shard0_url,
+                spec.tenant_id,
+                spec.timeline_id,
+                shard0_index,
+                spec.storage_auth_token.clone(),
+                None, // NB: base backups use payload compression
+            )
+            .await?;
+            let connected = Instant::now();
+            let reader = client
+                .get_base_backup(page_api::GetBaseBackupRequest {
+                    lsn: (lsn != Lsn(0)).then_some(lsn),
+                    compression: BaseBackupCompression::Gzip,
+                    replica: spec.spec.mode != ComputeMode::Primary,
+                    full: false,
+                })
+                .await?;
+            anyhow::Ok((reader, connected))
+        })?;
+
+        let mut reader = MeasuredReader::new(tokio_util::io::SyncIoBridge::new(reader));
+
+        // Set `ignore_zeros` so that unpack() reads the entire stream and doesn't just stop at the
+        // end-of-archive marker. If the server errors, the tar::Builder drop handler will write an
+        // end-of-archive marker before the error is emitted, and we would not see the error.
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut reader));
+        ar.set_ignore_zeros(true);
+        ar.unpack(&self.params.pgdata)?;
+
+        Ok((connected, reader.get_byte_count()))
+    }
+
+    /// Fetches a basebackup via libpq. The connstring must use postgresql://. Returns the timestamp
+    /// when the connection was established, and the (compressed) size of the basebackup.
+    fn try_get_basebackup_libpq(&self, spec: &ParsedSpec, lsn: Lsn) -> Result<(Instant, usize)> {
+        let shard0_connstr = spec
+            .pageserver_conninfo
+            .shard_url(ShardNumber(0), PageserverProtocol::Libpq)?;
         let mut config = postgres::Config::from_str(shard0_connstr)?;
 
         // Use the storage auth token from the config file, if given.
@@ -961,16 +1324,14 @@ impl ComputeNode {
         }
 
         config.application_name("compute_ctl");
-        if let Some(spec) = &compute_state.pspec {
-            config.options(&format!(
-                "-c neon.compute_mode={}",
-                spec.spec.mode.to_type_str()
-            ));
-        }
+        config.options(&format!(
+            "-c neon.compute_mode={}",
+            spec.spec.mode.to_type_str()
+        ));
 
         // Connect to pageserver
         let mut client = config.connect(NoTls)?;
-        let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
+        let connected = Instant::now();
 
         let basebackup_cmd = match lsn {
             Lsn(0) => {
@@ -1007,16 +1368,13 @@ impl ComputeNode {
         // Set `ignore_zeros` so that unpack() reads all the Copy data and
         // doesn't stop at the end-of-archive marker. Otherwise, if the server
         // sends an Error after finishing the tarball, we will not notice it.
+        // The tar::Builder drop handler will write an end-of-archive marker
+        // before emitting the error, and we would not see it otherwise.
         let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&mut bufreader));
         ar.set_ignore_zeros(true);
         ar.unpack(&self.params.pgdata)?;
 
-        // Report metrics
-        let mut state = self.state.lock().unwrap();
-        state.metrics.pageserver_connect_micros = pageserver_connect_micros;
-        state.metrics.basebackup_bytes = measured_reader.get_byte_count() as u64;
-        state.metrics.basebackup_ms = start_time.elapsed().as_millis() as u64;
-        Ok(())
+        Ok((connected, measured_reader.get_byte_count()))
     }
 
     // Gets the basebackup in a retry loop
@@ -1040,10 +1398,7 @@ impl ComputeNode {
                     return result;
                 }
                 Err(ref e) if attempts < max_attempts => {
-                    warn!(
-                        "Failed to get basebackup: {} (attempt {}/{})",
-                        e, attempts, max_attempts
-                    );
+                    warn!("Failed to get basebackup: {e:?} (attempt {attempts}/{max_attempts})");
                     std::thread::sleep(std::time::Duration::from_millis(retry_period_ms as u64));
                     retry_period_ms *= 1.5;
                 }
@@ -1069,7 +1424,7 @@ impl ComputeNode {
         let sk_configs = sk_connstrs.into_iter().map(|connstr| {
             // Format connstr
             let id = connstr.clone();
-            let connstr = format!("postgresql://no_user@{}", connstr);
+            let connstr = format!("postgresql://no_user@{connstr}");
             let options = format!(
                 "-c timeline_id={} tenant_id={}",
                 pspec.timeline_id, pspec.tenant_id
@@ -1116,9 +1471,7 @@ impl ComputeNode {
 
         // In case of error, log and fail the check, but don't crash.
         // We're playing it safe because these errors could be transient
-        // and we don't yet retry. Also being careful here allows us to
-        // be backwards compatible with safekeepers that don't have the
-        // TIMELINE_STATUS API yet.
+        // and we don't yet retry.
         if responses.len() < quorum {
             error!(
                 "failed sync safekeepers check {:?} {:?} {:?}",
@@ -1207,6 +1560,41 @@ impl ComputeNode {
         Ok(lsn)
     }
 
+    fn sync_safekeepers_with_retries(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
+        let max_retries = 5;
+        let mut attempts = 0;
+        loop {
+            let result = self.sync_safekeepers(storage_auth_token.clone());
+            match &result {
+                Ok(_) => {
+                    if attempts > 0 {
+                        tracing::info!("sync_safekeepers succeeded after {attempts} retries");
+                    }
+                    return result;
+                }
+                Err(e) if attempts < max_retries => {
+                    tracing::info!(
+                        "sync_safekeepers failed, will retry (attempt {attempts}): {e:#}"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "sync_safekeepers still failed after {attempts} retries, giving up: {err:?}"
+                    );
+                    return result;
+                }
+            }
+            // sleep and retry
+            let backoff = exponential_backoff_duration(
+                attempts,
+                DEFAULT_BASE_BACKOFF_SECONDS,
+                DEFAULT_MAX_BACKOFF_SECONDS,
+            );
+            std::thread::sleep(backoff);
+            attempts += 1;
+        }
+    }
+
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip_all)]
@@ -1215,13 +1603,21 @@ impl ComputeNode {
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.params.pgdata);
 
+        let tls_config = self.tls_config(&pspec.spec);
+        let databricks_settings = spec.databricks_settings.as_ref();
+        let postgres_port = self.params.connstr.port();
+
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(
             pgdata_path,
+            &self.params,
             &pspec.spec,
+            postgres_port,
             self.params.internal_http_port,
-            &self.compute_ctl_config.tls,
+            tls_config,
+            databricks_settings,
+            self.params.lakebase_mode,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1234,7 +1630,7 @@ impl ComputeNode {
                     lsn
                 } else {
                     info!("starting safekeepers syncing");
-                    self.sync_safekeepers(pspec.storage_auth_token.clone())
+                    self.sync_safekeepers_with_retries(pspec.storage_auth_token.clone())
                         .with_context(|| "failed to sync safekeepers")?
                 };
                 info!("safekeepers synced at LSN {}", lsn);
@@ -1250,19 +1646,31 @@ impl ComputeNode {
             }
         };
 
-        info!(
-            "getting basebackup@{} from pageserver {}",
-            lsn, &pspec.pageserver_connstr
-        );
-        self.get_basebackup(compute_state, lsn).with_context(|| {
-            format!(
-                "failed to get basebackup@{} from pageserver {}",
-                lsn, &pspec.pageserver_connstr
-            )
-        })?;
+        self.get_basebackup(compute_state, lsn)
+            .with_context(|| format!("failed to get basebackup@{lsn}"))?;
 
-        // Update pg_hba.conf received with basebackup.
-        update_pg_hba(pgdata_path)?;
+        if let Some(settings) = databricks_settings {
+            copy_tls_certificates(
+                &settings.pg_compute_tls_settings.key_file,
+                &settings.pg_compute_tls_settings.cert_file,
+                pgdata_path,
+            )?;
+
+            // Update pg_hba.conf received with basebackup including additional databricks settings.
+            update_pg_hba(pgdata_path, Some(&settings.databricks_pg_hba))?;
+            update_pg_ident(pgdata_path, Some(&settings.databricks_pg_ident))?;
+        } else {
+            // Update pg_hba.conf received with basebackup.
+            update_pg_hba(pgdata_path, None)?;
+        }
+
+        if let Some(databricks_settings) = spec.databricks_settings.as_ref() {
+            copy_tls_certificates(
+                &databricks_settings.pg_compute_tls_settings.key_file,
+                &databricks_settings.pg_compute_tls_settings.cert_file,
+                pgdata_path,
+            )?;
+        }
 
         // Place pg_dynshmem under /dev/shm. This allows us to use
         // 'dynamic_shared_memory_type = mmap' so that the files are placed in
@@ -1303,7 +1711,7 @@ impl ComputeNode {
         // symlink doesn't affect anything.
         //
         // See https://github.com/neondatabase/autoscaling/issues/800
-        std::fs::remove_dir(pgdata_path.join("pg_dynshmem"))?;
+        std::fs::remove_dir_all(pgdata_path.join("pg_dynshmem"))?;
         symlink("/dev/shm/", pgdata_path.join("pg_dynshmem"))?;
 
         match spec.mode {
@@ -1317,8 +1725,14 @@ impl ComputeNode {
     }
 
     /// Start and stop a postgres process to warm up the VM for startup.
-    pub fn prewarm_postgres(&self) -> Result<()> {
-        info!("prewarming");
+    pub fn prewarm_postgres_vm_memory(&self) -> Result<()> {
+        if self.params.lakebase_mode {
+            // We are running in Hadron mode. Disabling this prewarming step for now as it could run
+            // into dblet port conflicts and also doesn't add much value with our current infra.
+            info!("Skipping postgres prewarming in Hadron mode");
+            return Ok(());
+        }
+        info!("prewarming VM memory");
 
         // Create pgdata
         let pgdata = &format!("{}.warmup", self.params.pgdata);
@@ -1360,7 +1774,7 @@ impl ComputeNode {
         kill(pm_pid, Signal::SIGQUIT)?;
         info!("sent SIGQUIT signal");
         pg.wait()?;
-        info!("done prewarming");
+        info!("done prewarming vm memory");
 
         // clean up
         let _ok = fs::remove_dir_all(pgdata);
@@ -1375,14 +1789,36 @@ impl ComputeNode {
     pub fn start_postgres(&self, storage_auth_token: Option<String>) -> Result<PostgresHandle> {
         let pgdata_path = Path::new(&self.params.pgdata);
 
+        let env_vars: Vec<(String, String)> = if self.params.lakebase_mode {
+            let databricks_env_vars = {
+                let state = self.state.lock().unwrap();
+                let spec = &state.pspec.as_ref().unwrap().spec;
+                DatabricksEnvVars::new(
+                    spec,
+                    Some(&self.params.compute_id),
+                    self.params.instance_id.clone(),
+                    self.params.lakebase_mode,
+                )
+            };
+
+            info!(
+                "Starting Postgres for databricks endpoint id: {}",
+                &databricks_env_vars.endpoint_id
+            );
+
+            let mut env_vars = databricks_env_vars.to_env_var_list();
+            env_vars.extend(storage_auth_token.map(|t| ("NEON_AUTH_TOKEN".to_string(), t)));
+            env_vars
+        } else if let Some(storage_auth_token) = &storage_auth_token {
+            vec![("NEON_AUTH_TOKEN".to_owned(), storage_auth_token.to_owned())]
+        } else {
+            vec![]
+        };
+
         // Run postgres as a child process.
         let mut pg = maybe_cgexec(&self.params.pgbin)
             .args(["-D", &self.params.pgdata])
-            .envs(if let Some(storage_auth_token) = &storage_auth_token {
-                vec![("NEON_AUTH_TOKEN", storage_auth_token)]
-            } else {
-                vec![]
-            })
+            .envs(env_vars)
             .stderr(Stdio::piped())
             .spawn()
             .expect("cannot start postgres process");
@@ -1430,7 +1866,7 @@ impl ComputeNode {
                 let (mut client, connection) = conf.connect(NoTls).await?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
-                        eprintln!("connection error: {}", e);
+                        eprintln!("connection error: {e}");
                     }
                 });
 
@@ -1489,7 +1925,7 @@ impl ComputeNode {
 
                     // It doesn't matter what were the options before, here we just want
                     // to connect and create a new superuser role.
-                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path=public -c statement_timeout=0";
+                    const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path='' -c statement_timeout=0";
                     zenith_admin_conf.options(ZENITH_OPTIONS);
 
                     let mut client =
@@ -1534,7 +1970,15 @@ impl ComputeNode {
     /// Do initial configuration of the already started Postgres.
     #[instrument(skip_all)]
     pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
-        let conf = self.get_tokio_conn_conf(Some("compute_ctl:apply_config"));
+        let mut conf = self.get_tokio_conn_conf(Some("compute_ctl:apply_config"));
+
+        if self.params.lakebase_mode {
+            // Set a 2-minute statement_timeout for the session applying config. The individual SQL statements
+            // used in apply_spec_sql() should not take long (they are just creating users and installing
+            // extensions). If any of them are stuck for an extended period of time it usually indicates a
+            // pageserver connectivity problem and we should bail out.
+            conf.options("-c statement_timeout=2min");
+        }
 
         let conf = Arc::new(conf);
         let spec = Arc::new(
@@ -1546,17 +1990,29 @@ impl ComputeNode {
                 .clone(),
         );
 
+        let mut tls_config = None::<TlsConfig>;
+        if spec.features.contains(&ComputeFeature::TlsExperimental) {
+            tls_config = self.compute_ctl_config.tls.clone();
+        }
+
+        self.update_installed_extensions_collection_interval(&spec);
+
         let max_concurrent_connections = self.max_service_connections(compute_state, &spec);
 
         // Merge-apply spec & changes to PostgreSQL state.
         self.apply_spec_sql(spec.clone(), conf.clone(), max_concurrent_connections)?;
 
         if let Some(local_proxy) = &spec.clone().local_proxy_config {
+            let mut local_proxy = local_proxy.clone();
+            local_proxy.tls = tls_config.clone();
+
             info!("configuring local_proxy");
-            local_proxy::configure(local_proxy).context("apply_config local_proxy")?;
+            local_proxy::configure(&local_proxy).context("apply_config local_proxy")?;
         }
 
         // Run migrations separately to not hold up cold starts
+        let lakebase_mode = self.params.lakebase_mode;
+        let params = self.params.clone();
         tokio::spawn(async move {
             let mut conf = conf.as_ref().clone();
             conf.application_name("compute_ctl:migrations");
@@ -1565,10 +2021,10 @@ impl ComputeNode {
                 Ok((mut client, connection)) => {
                     tokio::spawn(async move {
                         if let Err(e) = connection.await {
-                            eprintln!("connection error: {}", e);
+                            eprintln!("connection error: {e}");
                         }
                     });
-                    if let Err(e) = handle_migrations(&mut client).await {
+                    if let Err(e) = handle_migrations(params, &mut client, lakebase_mode).await {
                         error!("Failed to run migrations: {}", e);
                     }
                 }
@@ -1582,6 +2038,34 @@ impl ComputeNode {
         });
 
         Ok::<(), anyhow::Error>(())
+    }
+
+    // Signal to the configurator to refresh the configuration by pulling a new spec from the HCC.
+    // Note that this merely triggers a notification on a condition variable the configurator thread
+    // waits on. The configurator thread (in configurator.rs) pulls the new spec from the HCC and
+    // applies it.
+    pub async fn signal_refresh_configuration(&self) -> Result<()> {
+        let states_allowing_configuration_refresh = [
+            ComputeStatus::Running,
+            ComputeStatus::Failed,
+            ComputeStatus::RefreshConfigurationPending,
+        ];
+
+        let mut state = self.state.lock().expect("state lock poisoned");
+        if states_allowing_configuration_refresh.contains(&state.status) {
+            state.status = ComputeStatus::RefreshConfigurationPending;
+            self.state_changed.notify_all();
+            Ok(())
+        } else if state.status == ComputeStatus::Init {
+            // If the compute is in Init state, we can't refresh the configuration immediately,
+            // but we should be able to do that soon.
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Cannot refresh compute configuration in state {:?}",
+                state.status
+            ))
+        }
     }
 
     // Wrapped this around `pg_ctl reload`, but right now we don't use
@@ -1605,11 +2089,15 @@ impl ComputeNode {
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
+        let tls_config = self.tls_config(&spec);
+
+        self.update_installed_extensions_collection_interval(&spec);
+
         if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
             info!("tuning pgbouncer");
 
             let pgbouncer_settings = pgbouncer_settings.clone();
-            let tls_config = self.compute_ctl_config.tls.clone();
+            let tls_config = tls_config.clone();
 
             // Spawn a background task to do the tuning,
             // so that we don't block the main thread that starts Postgres.
@@ -1627,7 +2115,7 @@ impl ComputeNode {
             // Spawn a background task to do the configuration,
             // so that we don't block the main thread that starts Postgres.
             let mut local_proxy = local_proxy.clone();
-            local_proxy.tls = self.compute_ctl_config.tls.clone();
+            local_proxy.tls = tls_config.clone();
             tokio::spawn(async move {
                 if let Err(err) = local_proxy::configure(&local_proxy) {
                     error!("error while configuring local_proxy: {err:?}");
@@ -1641,12 +2129,19 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.params.pgdata);
+        let postgres_port = self.params.connstr.port();
         config::write_postgres_conf(
             pgdata_path,
+            &self.params,
             &spec,
+            postgres_port,
             self.params.internal_http_port,
-            &self.compute_ctl_config.tls,
+            tls_config,
+            spec.databricks_settings.as_ref(),
+            self.params.lakebase_mode,
         )?;
+
+        self.pg_reload_conf()?;
 
         if !spec.skip_pg_catalog_updates {
             let max_concurrent_connections = spec.reconfigure_concurrency;
@@ -1667,9 +2162,8 @@ impl ComputeNode {
 
                 Ok(())
             })?;
+            self.pg_reload_conf()?;
         }
-
-        self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
@@ -1743,12 +2237,15 @@ impl ComputeNode {
 
                             // exit loop
                             ComputeStatus::Failed
-                            | ComputeStatus::TerminationPending
+                            | ComputeStatus::TerminationPendingFast
+                            | ComputeStatus::TerminationPendingImmediate
                             | ComputeStatus::Terminated => break 'cert_update,
 
                             // wait
                             ComputeStatus::Init
                             | ComputeStatus::Configuration
+                            | ComputeStatus::RefreshConfiguration
+                            | ComputeStatus::RefreshConfigurationPending
                             | ComputeStatus::Empty => {
                                 state = self.state_changed.wait(state).unwrap();
                             }
@@ -1762,6 +2259,14 @@ impl ComputeNode {
                     }
                 }
             });
+        }
+    }
+
+    pub fn tls_config(&self, spec: &ComputeSpec) -> &Option<TlsConfig> {
+        if spec.features.contains(&ComputeFeature::TlsExperimental) {
+            &self.compute_ctl_config.tls
+        } else {
+            &None::<TlsConfig>
         }
     }
 
@@ -1791,7 +2296,17 @@ impl ComputeNode {
     pub fn check_for_core_dumps(&self) -> Result<()> {
         let core_dump_dir = match std::env::consts::OS {
             "macos" => Path::new("/cores/"),
-            _ => Path::new(&self.params.pgdata),
+            // BEGIN HADRON
+            // NB: Read core dump files from a fixed location outside of
+            // the data directory since `compute_ctl` wipes the data directory
+            // across container restarts.
+            _ => {
+                if self.params.lakebase_mode {
+                    Path::new("/databricks/logs/brickstore")
+                } else {
+                    Path::new(&self.params.pgdata)
+                }
+            } // END HADRON
         };
 
         // Collect core dump paths if any
@@ -1859,19 +2374,19 @@ impl ComputeNode {
         let (client, connection) = connect_result.unwrap();
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                eprintln!("connection error: {e}");
             }
         });
         let result = client
             .simple_query(
                 "SELECT
-    row_to_json(pg_stat_statements)
+    pg_catalog.row_to_json(pss)
 FROM
-    pg_stat_statements
+    public.pg_stat_statements pss
 WHERE
-    userid != 'cloud_admin'::regrole::oid
+    pss.userid != 'cloud_admin'::pg_catalog.regrole::pg_catalog.oid
 ORDER BY
-    (mean_exec_time + mean_plan_time) DESC
+    (pss.mean_exec_time + pss.mean_plan_time) DESC
 LIMIT 100",
             )
             .await;
@@ -1999,11 +2514,11 @@ LIMIT 100",
 
         // check the role grants first - to gracefully handle read-replicas.
         let select = "SELECT privilege_type
-            FROM pg_namespace
-                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) acl ON true
-                JOIN pg_user users ON acl.grantee = users.usesysid
-            WHERE users.usename = $1
-                AND nspname = $2";
+            FROM pg_catalog.pg_namespace
+                JOIN LATERAL (SELECT * FROM aclexplode(nspacl) AS x) AS acl ON true
+                JOIN pg_catalog.pg_user users ON acl.grantee = users.usesysid
+            WHERE users.usename OPERATOR(pg_catalog.=) $1::pg_catalog.name
+                AND nspname OPERATOR(pg_catalog.=) $2::pg_catalog.name";
         let rows = db_client
             .query(select, &[role_name, schema_name])
             .await
@@ -2028,7 +2543,7 @@ LIMIT 100",
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         }
 
         Ok(())
@@ -2055,7 +2570,7 @@ LIMIT 100",
         let version: Option<ExtVersion> = db_client
             .query_opt(version_query, &[&ext_name])
             .await
-            .with_context(|| format!("Failed to execute query: {}", version_query))?
+            .with_context(|| format!("Failed to execute query: {version_query}"))?
             .map(|row| row.get(0));
 
         // sanitize the inputs as postgres idents.
@@ -2070,14 +2585,15 @@ LIMIT 100",
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         } else {
-            let query =
-                format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
+            let query = format!(
+                "CREATE EXTENSION IF NOT EXISTS {ext_name} WITH SCHEMA public VERSION {quoted_version}"
+            );
             db_client
                 .simple_query(&query)
                 .await
-                .with_context(|| format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {query}"))?;
         }
 
         Ok(ext_version)
@@ -2104,7 +2620,7 @@ LIMIT 100",
         if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
             libs_vec = libs
                 .split(&[',', '\'', ' '])
-                .filter(|s| *s != "neon" && !s.is_empty())
+                .filter(|s| *s != "neon" && *s != "databricks_auth" && !s.is_empty())
                 .map(str::to_string)
                 .collect();
         }
@@ -2123,7 +2639,7 @@ LIMIT 100",
             if let Some(libs) = shared_preload_libraries_line.split("='").nth(1) {
                 preload_libs_vec = libs
                     .split(&[',', '\'', ' '])
-                    .filter(|s| *s != "neon" && !s.is_empty())
+                    .filter(|s| *s != "neon" && *s != "databricks_auth" && !s.is_empty())
                     .map(str::to_string)
                     .collect();
             }
@@ -2176,22 +2692,22 @@ LIMIT 100",
     /// The operation will time out after a specified duration.
     pub fn wait_timeout_while_pageserver_connstr_unchanged(&self, duration: Duration) {
         let state = self.state.lock().unwrap();
-        let old_pageserver_connstr = state
+        let old_pageserver_conninfo = state
             .pspec
             .as_ref()
             .expect("spec must be set")
-            .pageserver_connstr
+            .pageserver_conninfo
             .clone();
         let mut unchanged = true;
         let _ = self
             .state_changed
             .wait_timeout_while(state, duration, |s| {
-                let pageserver_connstr = &s
+                let pageserver_conninfo = &s
                     .pspec
                     .as_ref()
                     .expect("spec must be set")
-                    .pageserver_connstr;
-                unchanged = pageserver_connstr == &old_pageserver_connstr;
+                    .pageserver_conninfo;
+                unchanged = pageserver_conninfo == &old_pageserver_conninfo;
                 unchanged
             })
             .unwrap();
@@ -2199,14 +2715,210 @@ LIMIT 100",
             info!("Pageserver config changed");
         }
     }
+
+    pub fn spawn_extension_stats_task(&self) {
+        self.terminate_extension_stats_task();
+
+        let conf = self.tokio_conn_conf.clone();
+        let atomic_interval = self.params.installed_extensions_collection_interval.clone();
+        let mut installed_extensions_collection_interval =
+            2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst);
+        info!(
+            "[NEON_EXT_SPAWN] Spawning background installed extensions worker with Timeout: {}",
+            installed_extensions_collection_interval
+        );
+        let handle = tokio::spawn(async move {
+            loop {
+                info!(
+                    "[NEON_EXT_INT_SLEEP]: Interval: {}",
+                    installed_extensions_collection_interval
+                );
+                // Sleep at the start of the loop to ensure that two collections don't happen at the same time.
+                // The first collection happens during compute startup.
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    installed_extensions_collection_interval,
+                ))
+                .await;
+                let _ = installed_extensions(conf.clone()).await;
+                // Acquire a read lock on the compute spec and then update the interval if necessary
+                installed_extensions_collection_interval = std::cmp::max(
+                    installed_extensions_collection_interval,
+                    2 * atomic_interval.load(std::sync::atomic::Ordering::SeqCst),
+                );
+            }
+        });
+
+        // Store the new task handle
+        *self.extension_stats_task.lock().unwrap() = Some(handle);
+    }
+
+    fn terminate_extension_stats_task(&self) {
+        if let Some(h) = self.extension_stats_task.lock().unwrap().take() {
+            h.abort()
+        }
+    }
+
+    pub fn spawn_lfc_offload_task(self: &Arc<Self>, interval: Duration) {
+        self.terminate_lfc_offload_task();
+        let secs = interval.as_secs();
+        let this = self.clone();
+
+        info!("spawning LFC offload worker with {secs}s interval");
+        let handle = spawn(async move {
+            let mut interval = time::interval(interval);
+            interval.tick().await; // returns immediately
+            loop {
+                interval.tick().await;
+
+                let prewarm_state = this.state.lock().unwrap().lfc_prewarm_state.clone();
+                // Do not offload LFC state if we are currently prewarming or any issue occurred.
+                // If we'd do that, we might override the LFC state in endpoint storage with some
+                // incomplete state. Imagine a situation:
+                // 1. Endpoint started with `autoprewarm: true`
+                // 2. While prewarming is not completed, we upload the new incomplete state
+                // 3. Compute gets interrupted and restarts
+                // 4. We start again and try to prewarm with the state from 2. instead of the previous complete state
+                if matches!(
+                    prewarm_state,
+                    LfcPrewarmState::Completed { .. }
+                        | LfcPrewarmState::NotPrewarmed
+                        | LfcPrewarmState::Skipped
+                ) {
+                    this.offload_lfc_async().await;
+                }
+            }
+        });
+        *self.lfc_offload_task.lock().unwrap() = Some(handle);
+    }
+
+    fn terminate_lfc_offload_task(&self) {
+        if let Some(h) = self.lfc_offload_task.lock().unwrap().take() {
+            h.abort()
+        }
+    }
+
+    fn update_installed_extensions_collection_interval(&self, spec: &ComputeSpec) {
+        // Update the interval for collecting installed extensions statistics
+        // If the value is -1, we never suspend so set the value to default collection.
+        // If the value is 0, it means default, we will just continue to use the default.
+        if spec.suspend_timeout_seconds == -1 || spec.suspend_timeout_seconds == 0 {
+            self.params.installed_extensions_collection_interval.store(
+                DEFAULT_INSTALLED_EXTENSIONS_COLLECTION_INTERVAL,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        } else {
+            self.params.installed_extensions_collection_interval.store(
+                spec.suspend_timeout_seconds as u64,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    /// Set the compute spec and update related metrics.
+    /// This is the central place where pspec is updated.
+    pub fn set_spec(params: &ComputeNodeParams, state: &mut ComputeState, pspec: ParsedSpec) {
+        state.pspec = Some(pspec);
+        ComputeNode::update_attached_metric(params, state);
+        let _ = logger::update_ids(&params.instance_id, &Some(params.compute_id.clone()));
+    }
+
+    pub fn update_attached_metric(params: &ComputeNodeParams, state: &mut ComputeState) {
+        // Update the pg_cctl_attached gauge when all identifiers are available.
+        if let Some(instance_id) = &params.instance_id {
+            if let Some(pspec) = &state.pspec {
+                // Clear all values in the metric
+                COMPUTE_ATTACHED.reset();
+
+                // Set new metric value
+                COMPUTE_ATTACHED
+                    .with_label_values(&[
+                        &params.compute_id,
+                        instance_id,
+                        &pspec.tenant_id.to_string(),
+                        &pspec.timeline_id.to_string(),
+                    ])
+                    .set(1);
+            }
+        }
+    }
 }
 
-pub fn forward_termination_signal() {
+pub async fn installed_extensions(conf: tokio_postgres::Config) -> Result<()> {
+    let res = get_installed_extensions(conf).await;
+    match res {
+        Ok(extensions) => {
+            info!(
+                "[NEON_EXT_STAT] {}",
+                serde_json::to_string(&extensions).expect("failed to serialize extensions list")
+            );
+        }
+        Err(err) => error!("could not get installed extensions: {err}"),
+    }
+    Ok(())
+}
+
+pub fn forward_termination_signal(dev_mode: bool) {
     let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
     if ss_pid != 0 {
         let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
         kill(ss_pid, Signal::SIGTERM).ok();
     }
+
+    if !dev_mode {
+        //  Terminate pgbouncer with SIGKILL
+        match pid_file::read(PGBOUNCER_PIDFILE.into()) {
+            Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+                info!("sending SIGKILL to pgbouncer process pid: {}", pid);
+                if let Err(e) = kill(pid, Signal::SIGKILL) {
+                    error!("failed to terminate pgbouncer: {}", e);
+                }
+            }
+            // pgbouncer does not lock the pid file, so we read and kill the process directly
+            Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+                if let Ok(pid_str) = std::fs::read_to_string(PGBOUNCER_PIDFILE) {
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        info!(
+                            "sending SIGKILL to pgbouncer process pid: {} (from unlocked pid file)",
+                            pid
+                        );
+                        if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGKILL) {
+                            error!("failed to terminate pgbouncer: {}", e);
+                        }
+                    }
+                } else {
+                    info!("pgbouncer pid file exists but process not running");
+                }
+            }
+            Ok(pid_file::PidFileRead::NotExist) => {
+                info!("pgbouncer pid file not found, process may not be running");
+            }
+            Err(e) => {
+                error!("error reading pgbouncer pid file: {}", e);
+            }
+        }
+
+        // Terminate local_proxy
+        match pid_file::read("/etc/local_proxy/pid".into()) {
+            Ok(pid_file::PidFileRead::LockedByOtherProcess(pid)) => {
+                info!("sending SIGTERM to local_proxy process pid: {}", pid);
+                if let Err(e) = kill(pid, Signal::SIGTERM) {
+                    error!("failed to terminate local_proxy: {}", e);
+                }
+            }
+            Ok(pid_file::PidFileRead::NotHeldByAnyProcess(_)) => {
+                info!("local_proxy PID file exists but process not running");
+            }
+            Ok(pid_file::PidFileRead::NotExist) => {
+                info!("local_proxy PID file not found, process may not be running");
+            }
+            Err(e) => {
+                error!("error reading local_proxy PID file: {}", e);
+            }
+        }
+    } else {
+        info!("Skipping pgbouncer and local_proxy termination because in dev mode");
+    }
+
     let pg_pid = PG_PID.load(Ordering::SeqCst);
     if pg_pid != 0 {
         let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
@@ -2237,5 +2949,26 @@ impl<T: 'static> JoinSetExt<T> for tokio::task::JoinSet<T> {
             let _e = sp.enter();
             f()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+
+    #[test]
+    fn duplicate_safekeeper_connstring() {
+        let file = File::open("tests/cluster_spec.json").unwrap();
+        let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
+
+        match ParsedSpec::try_from(spec.clone()) {
+            Ok(_p) => panic!("Failed to detect duplicate entry"),
+            Err(e) => assert!(
+                e.to_string()
+                    .starts_with("duplicate entry in safekeeper_connstrings:")
+            ),
+        };
     }
 }

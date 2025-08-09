@@ -7,12 +7,18 @@ use std::io::prelude::*;
 use std::path::Path;
 
 use compute_api::responses::TlsConfig;
-use compute_api::spec::{ComputeAudit, ComputeMode, ComputeSpec, GenericOption};
+use compute_api::spec::{
+    ComputeAudit, ComputeMode, ComputeSpec, DatabricksSettings, GenericOption,
+};
 
+use crate::compute::ComputeNodeParams;
 use crate::pg_helpers::{
-    GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize, escape_conf_value,
+    DatabricksSettingsExt as _, GenericOptionExt, GenericOptionsSearch, PgOptionsSerialize,
+    escape_conf_value,
 };
 use crate::tls::{self, SERVER_CRT, SERVER_KEY};
+
+use utils::shard::{ShardIndex, ShardNumber};
 
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
@@ -39,11 +45,16 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
 }
 
 /// Create or completely rewrite configuration file specified by `path`
+#[allow(clippy::too_many_arguments)]
 pub fn write_postgres_conf(
     pgdata_path: &Path,
+    params: &ComputeNodeParams,
     spec: &ComputeSpec,
+    postgres_port: Option<u16>,
     extension_server_port: u16,
     tls_config: &Option<TlsConfig>,
+    databricks_settings: Option<&DatabricksSettings>,
+    lakebase_mode: bool,
 ) -> Result<()> {
     let path = pgdata_path.join("postgresql.conf");
     // File::create() destroys the file content if it exists.
@@ -51,17 +62,81 @@ pub fn write_postgres_conf(
 
     // Write the postgresql.conf content from the spec file as is.
     if let Some(conf) = &spec.cluster.postgresql_conf {
-        writeln!(file, "{}", conf)?;
+        writeln!(file, "{conf}")?;
     }
 
     // Add options for connecting to storage
     writeln!(file, "# Neon storage settings")?;
-    if let Some(s) = &spec.pageserver_connstring {
-        writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
+    writeln!(file)?;
+    if let Some(conninfo) = &spec.pageserver_connection_info {
+        // Stripe size GUC should be defined prior to connection string
+        if let Some(stripe_size) = conninfo.stripe_size {
+            writeln!(
+                file,
+                "# from compute spec's pageserver_connection_info.stripe_size field"
+            )?;
+            writeln!(file, "neon.stripe_size={stripe_size}")?;
+        }
+
+        let mut libpq_urls: Option<Vec<String>> = Some(Vec::new());
+        let num_shards = if conninfo.shard_count.0 == 0 {
+            1 // unsharded, treat it as a single shard
+        } else {
+            conninfo.shard_count.0
+        };
+
+        for shard_number in 0..num_shards {
+            let shard_index = ShardIndex {
+                shard_number: ShardNumber(shard_number),
+                shard_count: conninfo.shard_count,
+            };
+            let info = conninfo.shards.get(&shard_index).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "shard {shard_index} missing from pageserver_connection_info shard map"
+                )
+            })?;
+
+            let first_pageserver = info
+                .pageservers
+                .first()
+                .expect("must have at least one pageserver");
+
+            // Add the libpq URL to the array, or if the URL is missing, reset the array
+            // forgetting any previous entries. All servers must have a libpq URL, or none
+            // at all.
+            if let Some(url) = &first_pageserver.libpq_url {
+                if let Some(ref mut urls) = libpq_urls {
+                    urls.push(url.clone());
+                }
+            } else {
+                libpq_urls = None
+            }
+        }
+        if let Some(libpq_urls) = libpq_urls {
+            writeln!(
+                file,
+                "# derived from compute spec's pageserver_connection_info field"
+            )?;
+            writeln!(
+                file,
+                "neon.pageserver_connstring={}",
+                escape_conf_value(&libpq_urls.join(","))
+            )?;
+        } else {
+            writeln!(file, "# no neon.pageserver_connstring")?;
+        }
+    } else {
+        // Stripe size GUC should be defined prior to connection string
+        if let Some(stripe_size) = spec.shard_stripe_size {
+            writeln!(file, "# from compute spec's shard_stripe_size field")?;
+            writeln!(file, "neon.stripe_size={stripe_size}")?;
+        }
+        if let Some(s) = &spec.pageserver_connstring {
+            writeln!(file, "# from compute spec's pageserver_connstring field")?;
+            writeln!(file, "neon.pageserver_connstring={}", escape_conf_value(s))?;
+        }
     }
-    if let Some(stripe_size) = spec.shard_stripe_size {
-        writeln!(file, "neon.stripe_size={stripe_size}")?;
-    }
+
     if !spec.safekeeper_connstrings.is_empty() {
         let mut neon_safekeepers_value = String::new();
         tracing::info!(
@@ -70,7 +145,7 @@ pub fn write_postgres_conf(
         );
         // If generation is given, prepend sk list with g#number:
         if let Some(generation) = spec.safekeepers_generation {
-            write!(neon_safekeepers_value, "g#{}:", generation)?;
+            write!(neon_safekeepers_value, "g#{generation}:")?;
         }
         neon_safekeepers_value.push_str(&spec.safekeeper_connstrings.join(","));
         writeln!(
@@ -109,8 +184,8 @@ pub fn write_postgres_conf(
         tls::update_key_path_blocking(pgdata_path, tls_config);
 
         // these are the default, but good to be explicit.
-        writeln!(file, "ssl_cert_file = '{}'", SERVER_CRT)?;
-        writeln!(file, "ssl_key_file = '{}'", SERVER_KEY)?;
+        writeln!(file, "ssl_cert_file = '{SERVER_CRT}'")?;
+        writeln!(file, "ssl_key_file = '{SERVER_KEY}'")?;
     }
 
     // Locales
@@ -161,6 +236,12 @@ pub fn write_postgres_conf(
         }
     }
 
+    writeln!(
+        file,
+        "neon.privileged_role_name={}",
+        escape_conf_value(params.privileged_role_name.as_str())
+    )?;
+
     // If there are any extra options in the 'settings' field, append those
     if spec.cluster.settings.is_some() {
         writeln!(file, "# Managed by compute_ctl: begin")?;
@@ -191,8 +272,7 @@ pub fn write_postgres_conf(
                 }
                 writeln!(
                     file,
-                    "shared_preload_libraries='{}{}'",
-                    libs, extra_shared_preload_libraries
+                    "shared_preload_libraries='{libs}{extra_shared_preload_libraries}'"
                 )?;
             } else {
                 // Typically, this should be unreacheable,
@@ -244,8 +324,7 @@ pub fn write_postgres_conf(
                 }
                 writeln!(
                     file,
-                    "shared_preload_libraries='{}{}'",
-                    libs, extra_shared_preload_libraries
+                    "shared_preload_libraries='{libs}{extra_shared_preload_libraries}'"
                 )?;
             } else {
                 // Typically, this should be unreacheable,
@@ -263,7 +342,7 @@ pub fn write_postgres_conf(
         }
     }
 
-    writeln!(file, "neon.extension_server_port={}", extension_server_port)?;
+    writeln!(file, "neon.extension_server_port={extension_server_port}")?;
 
     if spec.drop_subscriptions_before_start {
         writeln!(file, "neon.disable_logical_replication_subscribers=true")?;
@@ -276,6 +355,24 @@ pub fn write_postgres_conf(
     // further to customers' log aggregation systems.
     if spec.logs_export_host.is_some() {
         writeln!(file, "log_destination='stderr,syslog'")?;
+    }
+
+    if lakebase_mode {
+        // Explicitly set the port based on the connstr, overriding any previous port setting.
+        // Note: It is important that we don't specify a different port again after this.
+        let port = postgres_port.expect("port must be present in connstr");
+        writeln!(file, "port = {port}")?;
+
+        // This is databricks specific settings.
+        // This should be at the end of the file but before `compute_ctl_temp_override.conf` below
+        // so that it can override any settings above.
+        // `compute_ctl_temp_override.conf` is intended to override any settings above during specific operations.
+        // To prevent potential breakage in the future, we keep it above `compute_ctl_temp_override.conf`.
+        writeln!(file, "# Databricks settings start")?;
+        if let Some(settings) = databricks_settings {
+            writeln!(file, "{}", settings.as_pg_settings())?;
+        }
+        writeln!(file, "# Databricks settings end")?;
     }
 
     // This is essential to keep this line at the end of the file,
@@ -291,7 +388,7 @@ where
 {
     let path = pgdata_path.join("compute_ctl_temp_override.conf");
     let mut file = File::create(path)?;
-    write!(file, "{}", options)?;
+    write!(file, "{options}")?;
 
     let res = exec();
 

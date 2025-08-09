@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -7,7 +8,7 @@ use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, VariantNames};
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Logs a critical error, similarly to `tracing::error!`. This will:
 ///
@@ -24,9 +25,28 @@ macro_rules! critical {
         if cfg!(debug_assertions) {
             panic!($($arg)*);
         }
+        // Increment both metrics
         $crate::logging::TRACING_EVENT_COUNT_METRIC.inc_critical();
         let backtrace = std::backtrace::Backtrace::capture();
         tracing::error!("CRITICAL: {}\n{backtrace}", format!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! critical_timeline {
+    ($tenant_shard_id:expr, $timeline_id:expr, $corruption_detected:expr, $($arg:tt)*) => {{
+        if cfg!(debug_assertions) {
+            panic!($($arg)*);
+        }
+        // Increment both metrics
+        $crate::logging::TRACING_EVENT_COUNT_METRIC.inc_critical();
+        $crate::logging::HADRON_CRITICAL_STORAGE_EVENT_COUNT_METRIC.inc(&$tenant_shard_id.to_string(), &$timeline_id.to_string());
+        if let Some(c) = $corruption_detected.as_ref() {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let backtrace = std::backtrace::Backtrace::capture();
+        tracing::error!("CRITICAL: [tenant_shard_id: {}, timeline_id: {}] {}\n{backtrace}",
+                       $tenant_shard_id, $timeline_id, format!($($arg)*));
     }};
 }
 
@@ -60,6 +80,36 @@ pub struct TracingEventCountMetric {
     debug: IntCounter,
     trace: IntCounter,
 }
+
+// Begin Hadron: Add a HadronCriticalStorageEventCountMetric metric that is sliced by tenant_id and timeline_id
+pub struct HadronCriticalStorageEventCountMetric {
+    critical: IntCounterVec,
+}
+
+pub static HADRON_CRITICAL_STORAGE_EVENT_COUNT_METRIC: Lazy<HadronCriticalStorageEventCountMetric> =
+    Lazy::new(|| {
+        let vec = metrics::register_int_counter_vec!(
+            "hadron_critical_storage_event_count",
+            "Number of critical storage events, by tenant_id and timeline_id",
+            &["tenant_shard_id", "timeline_id"]
+        )
+        .expect("failed to define metric");
+        HadronCriticalStorageEventCountMetric::new(vec)
+    });
+
+impl HadronCriticalStorageEventCountMetric {
+    fn new(vec: IntCounterVec) -> Self {
+        Self { critical: vec }
+    }
+
+    // Allow public access from `critical!` macro.
+    pub fn inc(&self, tenant_shard_id: &str, timeline_id: &str) {
+        self.critical
+            .with_label_values(&[tenant_shard_id, timeline_id])
+            .inc();
+    }
+}
+// End Hadron
 
 pub static TRACING_EVENT_COUNT_METRIC: Lazy<TracingEventCountMetric> = Lazy::new(|| {
     let vec = metrics::register_int_counter_vec!(
@@ -331,10 +381,11 @@ impl std::fmt::Debug for SecretString {
 ///
 /// TODO: consider upgrading this to a warning, but currently it fires too often.
 #[inline]
-pub async fn log_slow<F, O>(name: &str, threshold: Duration, f: std::pin::Pin<&mut F>) -> O
-where
-    F: Future<Output = O>,
-{
+pub async fn log_slow<O>(
+    name: &str,
+    threshold: Duration,
+    f: Pin<&mut impl Future<Output = O>>,
+) -> O {
     monitor_slow_future(
         threshold,
         threshold, // period = threshold
@@ -348,16 +399,42 @@ where
             if !is_slow {
                 return;
             }
+            let elapsed = elapsed_total.as_secs_f64();
             if ready {
-                info!(
-                    "slow {name} completed after {:.3}s",
-                    elapsed_total.as_secs_f64()
-                );
+                info!("slow {name} completed after {elapsed:.3}s");
             } else {
-                info!(
-                    "slow {name} still running after {:.3}s",
-                    elapsed_total.as_secs_f64()
-                );
+                info!("slow {name} still running after {elapsed:.3}s");
+            }
+        },
+    )
+    .await
+}
+
+/// Logs a periodic warning if a future is slow to complete.
+#[inline]
+pub async fn warn_slow<O>(
+    name: &str,
+    threshold: Duration,
+    f: Pin<&mut impl Future<Output = O>>,
+) -> O {
+    monitor_slow_future(
+        threshold,
+        threshold, // period = threshold
+        f,
+        |MonitorSlowFutureCallback {
+             ready,
+             is_slow,
+             elapsed_total,
+             elapsed_since_last_callback: _,
+         }| {
+            if !is_slow {
+                return;
+            }
+            let elapsed = elapsed_total.as_secs_f64();
+            if ready {
+                warn!("slow {name} completed after {elapsed:.3}s");
+            } else {
+                warn!("slow {name} still running after {elapsed:.3}s");
             }
         },
     )
@@ -370,7 +447,7 @@ where
 pub async fn monitor_slow_future<F, O>(
     threshold: Duration,
     period: Duration,
-    mut fut: std::pin::Pin<&mut F>,
+    mut fut: Pin<&mut F>,
     mut cb: impl FnMut(MonitorSlowFutureCallback),
 ) -> O
 where

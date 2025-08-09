@@ -11,6 +11,7 @@ from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import wait_until_tenant_active
+from fixtures.safekeeper.http import MembershipConfiguration, TimelineCreateRequest
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
 from requests import RequestException
@@ -163,6 +164,19 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
     # pause all uploads
     ps_http.configure_failpoints(("before-upload-index-pausable", "pause"))
     env.pageserver.tenant_create(env.initial_tenant)
+
+    sk = env.safekeepers[0]
+    assert sk
+    sk.http_client().timeline_create(
+        TimelineCreateRequest(
+            env.initial_tenant,
+            env.initial_timeline,
+            MembershipConfiguration(generation=1, members=[sk.safekeeper_id()], new_members=None),
+            int(env.pg_version) * 10000,
+            Lsn(0),
+            None,
+        )
+    )
 
     initial_branch = "initial_branch"
 
@@ -402,6 +416,8 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
         # timeline creation (uploads). mask it out here to avoid flakyness.
         del success_result["remote_consistent_lsn_visible"]
         del repeat_result["remote_consistent_lsn_visible"]
+        del success_result["walreceiver_status"]
+        del repeat_result["walreceiver_status"]
         assert repeat_result == success_result
     finally:
         env.pageserver.stop(immediate=True)

@@ -5,7 +5,7 @@ use safekeeper_client::mgmt_api::{Client, Result};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
 
-use crate::metrics::PageserverRequestLabelGroup;
+use crate::metrics::SafekeeperRequestLabelGroup;
 
 /// Thin wrapper around [`safekeeper_client::mgmt_api::Client`]. It allows the storage
 /// controller to collect metrics in a non-intrusive manner.
@@ -19,8 +19,8 @@ pub(crate) struct SafekeeperClient {
 
 macro_rules! measured_request {
     ($name:literal, $method:expr, $node_id: expr, $invoke:expr) => {{
-        let labels = PageserverRequestLabelGroup {
-            pageserver_id: $node_id,
+        let labels = SafekeeperRequestLabelGroup {
+            safekeeper_id: $node_id,
             path: $name,
             method: $method,
         };
@@ -35,7 +35,7 @@ macro_rules! measured_request {
         if res.is_err() {
             let error_counters = &crate::metrics::METRICS_REGISTRY
                 .metrics_group
-                .storage_controller_pageserver_request_error;
+                .storage_controller_safekeeper_request_error;
             error_counters.inc(labels)
         }
 
@@ -54,6 +54,10 @@ impl SafekeeperClient {
             inner: Client::new(raw_client, mgmt_api_endpoint, jwt),
             node_id_label: node_id.0.to_string(),
         }
+    }
+
+    pub(crate) fn node_id_label(&self) -> &str {
+        &self.node_id_label
     }
 
     pub(crate) async fn create_timeline(
