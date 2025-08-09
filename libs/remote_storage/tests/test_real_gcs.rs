@@ -143,15 +143,19 @@ async fn gcs_test_multipart_upload_manifest_without_name_set(
 async fn gcs_test_download_manifest_without_name_set(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
     let gcs = &ctx.client;
 
-    // Failed to upload data of length 58 to storage path RemotePath("tenants/99336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json"
     let source_file = std::io::Cursor::new(vec![0; 256]);
     let file_size = 256 as usize;
     let reader = tokio_util::io::ReaderStream::with_capacity(source_file, file_size);
 
     // shared function arguments
-    let path = "tenants/99336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json";
+    let path = "tenants/89336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json";
     let remote_path = RemotePath::from_string(path)?;
     let cancel = CancellationToken::new();
+
+    // order matters and that's okay for now
+    let res = gcs
+        .upload(reader, file_size, &remote_path, None, &cancel)
+        .await?;
 
     let opts = DownloadOpts {
         etag: None,
