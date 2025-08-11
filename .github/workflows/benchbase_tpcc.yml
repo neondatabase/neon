@@ -84,8 +84,8 @@ jobs:
         region_id: aws-us-east-2
         postgres_version: ${{ env.POSTGRES_VERSION }}
         compute_units: '[${{ matrix.min_cu }}, ${{ matrix.max_cu }}]'
-        api_key: ${{ secrets.NEON_PRODUCTION_API_KEY_4_BENCHMARKS }}
-        api_host: console.neon.tech  # production (!)
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }} 
+        api_host: console-stage.neon.build  # staging
 
     - name: Initialize Neon project
       env:
@@ -380,5 +380,5 @@ jobs:
       uses: ./.github/actions/neon-project-delete
       with:
         project_id: ${{ steps.create-neon-project-tpcc.outputs.project_id }}
-        api_key: ${{ secrets.NEON_PRODUCTION_API_KEY_4_BENCHMARKS }} 
-        api_host: console.neon.tech  # production (!)
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }} 
+        api_host: console-stage.neon.build  # staging
