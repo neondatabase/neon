@@ -80,9 +80,9 @@ where
                     break;
                 }
             };
-            tracing::info!("waiting for conflicting IO {request_id} to complete");
+            // tracing::info!("waiting for conflicting IO {request_id} to complete");
             let _ = lock.lock().await;
-            tracing::info!("conflicting IO {request_id} completed");
+            // tracing::info!("conflicting IO {request_id} completed");
         }
 
         MutexHashMapGuard {

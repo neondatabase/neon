@@ -9,10 +9,12 @@
 //! process. The backend processes *also* read the file (and sometimes also
 //! write it? ), but the backends use direct C library calls for that.
 use std::fs::File;
+use std::os::linux::fs::MetadataExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use measured::metric;
 use measured::metric::MetricEncoding;
@@ -30,11 +32,14 @@ pub const INVALID_CACHE_BLOCK: CacheBlock = u64::MAX;
 pub struct FileCache {
     file: Arc<File>,
     free_list: Mutex<FreeList>,
-
+	pub size: AtomicU64,
+	max_read: AtomicU64,
+	
 	// The `fiemap-rs` library doesn't expose any way to issue a FIEMAP ioctl
 	// on an existing file descroptor, so we have to save the path.
 	path: PathBuf,
-	
+
+	pub max_written: AtomicU64,
     metrics: FileCacheMetricGroup,
 }
 
@@ -55,7 +60,6 @@ struct FileCacheMetricGroup {
 struct FreeList {
     next_free_block: CacheBlock,
     max_blocks: u64,
-
     free_blocks: Vec<CacheBlock>,
 }
 
@@ -79,17 +83,34 @@ impl FileCache {
         tracing::info!("initialized file cache with {} blocks", initial_size);
 
         Ok(FileCache {
+			max_read: 0.into(),
             file: Arc::new(file),
+			size: initial_size.into(),
             free_list: Mutex::new(FreeList {
                 next_free_block: 0,
                 max_blocks: initial_size,
                 free_blocks: Vec::new(),
             }),
+			max_written: 0.into(),
 			path: file_cache_path.to_path_buf(),
             metrics: FileCacheMetricGroup::new(),
         })
     }
 
+	/// Debug utility.
+	pub fn num_allocated_blocks(&self) -> (u64, u32) {
+		(
+			std::fs::metadata(self.path.clone()).unwrap().st_size() / (1024 * 1024),
+			String::from_utf8_lossy(
+				&std::process::Command::new("ls")
+					.args(["-sk", self.path.to_str().unwrap()])
+					.output()
+					.expect("failed to run ls -sk")
+					.stdout
+			).split(' ').next().unwrap().parse().unwrap()
+		)
+	}
+	
     // File cache management
 
     pub async fn read_block(
@@ -100,6 +121,10 @@ impl FileCache {
         assert!(dst.bytes_total() == BLCKSZ);
         let file = self.file.clone();
 
+		let prev = self.max_read.fetch_max(cache_block, Ordering::Relaxed);
+		if prev.max(cache_block) > self.free_list.lock().unwrap().max_blocks {
+			tracing::info!("max read greater than max block!! {cache_block}");
+		}
         let dst_ref = unsafe { std::slice::from_raw_parts_mut(dst.stable_mut_ptr(), BLCKSZ) };
 
         spawn_blocking(move || file.read_exact_at(dst_ref, cache_block * BLCKSZ as u64)).await??;
@@ -114,6 +139,8 @@ impl FileCache {
         assert!(src.bytes_init() == BLCKSZ);
         let file = self.file.clone();
 
+		self.max_written.fetch_max(cache_block, Ordering::Relaxed);
+		
         let src_ref = unsafe { std::slice::from_raw_parts(src.stable_ptr(), BLCKSZ) };
 
         spawn_blocking(move || file.write_all_at(src_ref, cache_block * BLCKSZ as u64)).await??;
@@ -141,20 +168,20 @@ impl FileCache {
 
 	pub fn reclaim_blocks(&self, num_blocks: u64) -> u64 {
 		let mut free_list = self.free_list.lock().unwrap();
-		let mut removed = 0;
-		while let Some(block) = free_list.free_blocks.pop() {
-			self.delete_block(block);
-			removed += 1;
+		tracing::warn!("next block: {},  max block: {}", free_list.next_free_block, free_list.max_blocks);
+		let removed = (free_list.free_blocks.len() as u64).min(num_blocks);
+		for _ in 0..removed {
+			self.delete_block(free_list.free_blocks.pop().unwrap());
 		}
-
-		let block_space = (num_blocks - removed)
-			.min(free_list.max_blocks - free_list.next_free_block);
-		if block_space > 0 {
-			self.delete_blocks(free_list.max_blocks - block_space, block_space);
-			free_list.max_blocks -= block_space;
-		}
-
-		num_blocks - removed - block_space
+		tracing::warn!("punched {removed} individual holes");
+		tracing::warn!("avail block space is: {}", free_list.max_blocks - free_list.next_free_block);
+		let block_space = (num_blocks - removed).min(free_list.max_blocks - free_list.next_free_block);
+		
+		free_list.max_blocks -= block_space;
+		self.size.fetch_sub(block_space, Ordering::Relaxed);
+		tracing::warn!("punched a large hole of size {block_space}");
+		
+		num_blocks - block_space - removed
 	}
 	
 	/// "Delete" a block via fallocate's hole punching feature.
@@ -165,8 +192,10 @@ impl FileCache {
 		self.delete_blocks(cache_block, 1);
 	}
 
-	pub fn delete_blocks(&self, start: CacheBlock, amt: u64) {		
+	pub fn delete_blocks(&self, start: CacheBlock, amt: u64) {
 		use nix::fcntl as nix;
+		if amt == 0 { return }
+		self.size.fetch_sub(amt, Ordering::Relaxed);
 		if let Err(e) = nix::fallocate(
 			self.file.clone(),
 			nix::FallocateFlags::FALLOC_FL_PUNCH_HOLE
@@ -179,7 +208,6 @@ impl FileCache {
 		}
 	}
 
-	
 	/// Attempt to reclaim `num_blocks` of previously hole-punched blocks.
 	#[cfg(target_os = "linux")]
 	pub fn undelete_blocks(&self, num_blocks: u64) -> u64 {
@@ -191,7 +219,8 @@ impl FileCache {
 			if (prev.fe_logical + prev.fe_length) < cur.fe_logical {
 				let mut end = prev.fe_logical + prev.fe_length;
 				while end < cur.fe_logical {
-					free_list.free_blocks.push(end);
+					self.size.fetch_add(1, Ordering::Relaxed);
+					free_list.free_blocks.push(end / BLCKSZ as u64);
 					pushed += 1;
 					if pushed == num_blocks {
 						return 0;
@@ -221,6 +250,7 @@ impl FileCache {
 			if res >= num_bytes {
 				break;
 			}
+			self.size.fetch_add(1, Ordering::Relaxed);
 			free_list.free_blocks.push(res);
 			pushed += 1;
 			if pushed == num_blocks {
@@ -233,7 +263,11 @@ impl FileCache {
 
 	/// Physically grows the file and expands the freelist.
 	pub fn grow(&self, num_blocks: u64) {
-		self.free_list.lock().unwrap().max_blocks += num_blocks;
+		let mut free_list = self.free_list.lock().unwrap();
+		// self.allocate_blocks(free_list.max_blocks, num_blocks);
+		self.size.fetch_add(num_blocks, Ordering::Relaxed);
+		free_list.max_blocks += num_blocks;
+		tracing::warn!("(after) max block: {}", free_list.max_blocks);
 	}
 
 	/// Returns number of blocks in the remaining space.

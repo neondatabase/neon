@@ -158,7 +158,9 @@ pub extern "C" fn communicator_worker_config_reload(
     nshards: u32,
     stripe_size: u32,
 ) {
-    proc_handle.cache.resize_file_cache(file_cache_size as u32);
+	proc_handle.runtime.spawn_blocking(move || {
+		proc_handle.cache.resize_file_cache(file_cache_size as u32);
+	});
 
     let shard_map = shard_map_to_hash(nshards, shard_map);
     let stripe_size = (nshards > 1).then_some(ShardStripeSize(stripe_size));

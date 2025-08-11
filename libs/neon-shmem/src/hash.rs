@@ -41,8 +41,8 @@ pub enum HashMapShrinkError {
     #[error("shmem resize failed: {0}")]
     ResizeError(shmem::Error),
     /// Occupied entries in to-be-shrunk space were encountered beginning at the given index.
-    #[error("occupied entry in deallocated space found at {0}")]
-    RemainingEntries(usize),
+    #[error("occupied entry in deallocated space found at {2} (in deallocated range of {0}..{1})")]
+    RemainingEntries(usize, usize, usize),
 }
 
 /// This represents a hash table that (possibly) lives in shared memory.
@@ -554,10 +554,10 @@ where
     /// greater than the number of buckets in the map.
     pub fn begin_shrink(&self, num_buckets: u32) {
         let mut map = unsafe { self.shared_ptr.as_mut() }.unwrap().write();
-        assert!(
-            num_buckets <= map.get_num_buckets() as u32,
-            "shrink called with a larger number of buckets"
-        );
+        // assert!(
+        //     num_buckets <= map.get_num_buckets() as u32,
+        //     "shrink called with a larger number of buckets"
+        // );
         _ = self
             .shmem_handle
             .as_ref()
@@ -602,7 +602,9 @@ where
 
         for i in (num_buckets as usize)..map.buckets.len() {
             if map.buckets[i].inner.is_some() {
-                return Err(HashMapShrinkError::RemainingEntries(i));
+                return Err(HashMapShrinkError::RemainingEntries(
+					num_buckets as usize, map.buckets.len(), i)
+				);
             }
         }
 

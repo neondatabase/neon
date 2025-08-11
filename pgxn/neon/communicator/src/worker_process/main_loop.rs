@@ -37,7 +37,7 @@ use utils::lsn::Lsn;
 
 pub struct CommunicatorWorkerProcessStruct<'a> {
     /// Tokio runtime that the main loop and any other related tasks runs in.
-    runtime: tokio::runtime::Runtime,
+    pub(crate) runtime: tokio::runtime::Runtime,
 
     /// Client to communicate with the pageserver
     client: PageserverClient,
