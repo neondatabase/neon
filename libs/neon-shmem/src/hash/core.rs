@@ -1,4 +1,8 @@
-//! Simple hash table with chaining.
+//! Sharded linear probing hash table.
+
+//! NOTE/FIXME: one major bug with this design is that the current hashmap DOES NOT TRACK
+//! the previous size of the hashmap and thus does lookups incorrectly/badly. This should
+//! be a reasonably minor fix?
 
 use std::cell::UnsafeCell;
 use std::hash::Hash;
@@ -11,27 +15,45 @@ use crate::hash::{
 	bucket::{BucketArray, Bucket, BucketIdx}
 };
 
+/// Metadata tag for the type of an entry in the hashmap.
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub(crate) enum EntryTag {
+	/// An occupied entry inserted after a resize operation.
 	Occupied,
+	/// An occupied entry inserted before a resize operation
+	/// a.k.a. an entry that needs to be rehashed at some point.
 	Rehash,
+	/// An entry that was once `Occupied`.
 	Tombstone,
+	/// An entry that was once `Rehash`.
 	RehashTombstone,
+	/// An empty entry.
 	Empty,
 }
 
+/// Searching the chains of a hashmap oftentimes requires interpreting
+/// a set of metadata tags differently. This enum encodes the ways a
+/// metadata tag can be treated during a lookup.
 pub(crate) enum MapEntryType {
+	/// Should be treated as if it were occupied.
 	Occupied,
+	/// Should be treated as if it were a tombstone.
 	Tombstone,
+	/// Should be treated as if it were empty.
 	Empty,
+	/// Should be ignored.
 	Skip
 }
 
+/// A key within the dictionary component of the hashmap.
 pub(crate) struct EntryKey<K> {
+	// NOTE: This could be split out to save 3 bytes per entry!
+	// Wasn't sure it was worth the penalty of another shmem area.
 	pub(crate) tag: EntryTag,
 	pub(crate) val: MaybeUninit<K>,
 }
 
+/// A shard of the dictionary.
 pub(crate) struct DictShard<'a, K> {
 	pub(crate) keys: &'a mut [EntryKey<K>],
 	pub(crate) idxs: &'a mut [BucketIdx],
@@ -43,7 +65,7 @@ impl<'a, K> DictShard<'a, K> {
 	}
 }
 
-pub(crate) struct MaybeUninitDictShard<'a, K> {
+ pub(crate) struct MaybeUninitDictShard<'a, K> {
 	pub(crate) keys: &'a mut [MaybeUninit<EntryKey<K>>],
 	pub(crate) idxs: &'a mut [MaybeUninit<BucketIdx>],
 }
@@ -52,8 +74,11 @@ pub(crate) struct MaybeUninitDictShard<'a, K> {
 pub(crate) struct CoreHashMap<'a, K, V> {
 	/// Dictionary used to map hashes to bucket indices.
     pub(crate) dict_shards: &'a mut [RwLock<DictShard<'a, K>>],
+	/// Stable bucket array used to store the values.
 	pub(crate) bucket_arr: BucketArray<'a, V>,
-	pub(crate) rehash_index: AtomicUsize,	
+	/// Index of the next entry to process for rehashing.
+	pub(crate) rehash_index: AtomicUsize,
+	/// Index of the end of the range to be rehashed.
 	pub(crate) rehash_end: AtomicUsize,
 }
 
@@ -108,11 +133,14 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 			bucket_arr: BucketArray::new(buckets_cell),
         }
     }
-	
+
+    /// Get the value associated with a key (if it exists) given its hash.
 	pub fn get_with_hash(&'a self, key: &K, hash: u64) -> Option<ValueReadGuard<'a, V>> {
 		let ind = self.rehash_index.load(Ordering::Relaxed);
 		let end = self.rehash_end.load(Ordering::Relaxed);
 
+		// First search the chains from the current context (thus treat 
+		// to-be-rehashed entries as tombstones within a current chain).
 		let res = self.get(key, hash, |tag| match tag {
 			EntryTag::Empty => MapEntryType::Empty,
 			EntryTag::Occupied => MapEntryType::Occupied,
@@ -121,8 +149,10 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 		if res.is_some() {
 			return res;
 		}
-		
+
 		if ind < end {
+			// Search chains from the previous size of the map if a rehash is in progress.
+			// Ignore any entries inserted since the resize operation occurred.
 			self.get(key, hash, |tag| match tag {
 				EntryTag::Empty => MapEntryType::Empty,
 				EntryTag::Rehash => MapEntryType::Occupied,
@@ -140,6 +170,8 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 		let res = self.entry(key.clone(), hash, |tag| match tag {
 			EntryTag::Empty => MapEntryType::Empty,
 			EntryTag::Occupied => MapEntryType::Occupied,
+			// We can't treat old entries as tombstones here, as we definitely can't
+			// insert over them! Instead we can just skip directly over them.
 			EntryTag::Rehash => MapEntryType::Skip,
 			_ => MapEntryType::Tombstone,
 		});
@@ -159,7 +191,6 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 		}
 	}
 	
-    /// Get the value associated with a key (if it exists) given its hash.
     fn get<F>(&'a self, key: &K, hash: u64, f: F) -> Option<ValueReadGuard<'a, V>>
 	    where F: Fn(EntryTag) -> MapEntryType
 	{	
@@ -191,26 +222,39 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 		None
 	}
 
+	
     pub fn entry<F>(&'a self, key: K, hash: u64, f: F) -> Result<Entry<'a, K, V>, FullError>
 	    where F: Fn(EntryTag) -> MapEntryType
 	{
 		// We need to keep holding on the locks for each shard we process since if we don't find the
 		// key anywhere, we want to insert it at the earliest possible position (which may be several
 		// shards away). Ideally cross-shard chains are quite rare, so this shouldn't be a big deal.
+		//
+		// NB: Somewhat real chance of a deadlock! E.g. one thread has a ridiculously long chain that
+		// starts at block N and wraps around the hashmap to N-1, yet another thread begins a lookup at
+		// N-1 during this and has a chain that lasts a few shards. Then thread 1 is blocked on thread 2
+		// to get to shard N-1 but thread 2 is blocked on thread 1 to get to shard N. Pretty fringe case
+		// since chains shouldn't last very long, but still a problem with this somewhat naive sharding
+		// mechanism.
+		//
+		// We could fix this by either refusing to hold locks and only inserting into the earliest entry
+		// within the current shard (which effectively means after a while we forget about certain open
+		// entries at the end of shards) or by pivoting to a more involved concurrency setup?
 		let mut shards = Vec::new();
 		let mut insert_pos = None;
 		let mut insert_shard = None;
 
 		let num_buckets = self.get_num_buckets();
 		let shard_size = num_buckets / self.dict_shards.len();
-		let bucket_pos = hash as usize % num_buckets;
-		let shard_start = bucket_pos / shard_size;
+		let mut entry_pos = hash as usize % num_buckets;
+		let shard_start = entry_pos / shard_size;
 		for off in 0..self.dict_shards.len() {
 			let shard_idx = (shard_start + off) % self.dict_shards.len();			
 			let shard = self.dict_shards[shard_idx].write();
 			let mut inserted = false;
-			let entry_start = if off == 0 { bucket_pos % shard_size } else { 0 };
+			let entry_start = if off == 0 { entry_pos % shard_size } else { 0 };
 			for entry_idx in entry_start..shard.len() {
+				entry_pos += 1;
 				match f(shard.keys[entry_idx].tag) {
 					MapEntryType::Skip => continue,
 					MapEntryType::Empty => {
@@ -243,6 +287,7 @@ impl<'a, K: Clone + Hash + Eq, V> CoreHashMap<'a, K, V> {
 								shard_pos: entry_idx,
 								bucket_pos,
 								bucket_arr: &self.bucket_arr,
+								key_pos: entry_pos,
 							}));
 						}	
 					}

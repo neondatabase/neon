@@ -8,21 +8,9 @@ use crate::sync::{RwLockWriteGuard, ValueWriteGuard};
 
 use std::hash::Hash;
 
-use super::core::EntryKey;
-
 pub enum Entry<'a, K, V> {
     Occupied(OccupiedEntry<'a, K, V>),
     Vacant(VacantEntry<'a, K, V>),
-}
-
-impl<'a, K, V> Entry<'a, K, V> {
-	pub fn loc(&self) -> (RwLockWriteGuard<'a, DictShard<'a, K>>, usize) {
-		match self {
-			Self::Occupied(o) => o.shard.keys[o.shard_pos].tag,
-			Self::Vacant(o) => o.shard.keys[o.shard_pos].tag
-		}
-	}
-
 }
 
 pub struct OccupiedEntry<'a, K, V> {
@@ -81,7 +69,7 @@ impl<'a, K: Clone + Hash + Eq, V> VacantEntry<'a, K, V> {
 			.expect("bucket is available if entry is");
 		self.shard.keys[self.shard_pos].tag = EntryTag::Occupied;
 		self.shard.keys[self.shard_pos].val.write(self._key);
-		let idx = pos.next_checkeddd().expect("position is valid");
+		let idx = pos.next_checked().expect("position is valid");
 		self.shard.idxs[self.shard_pos] = pos;
 
         RwLockWriteGuard::map(self.shard, |_| {

@@ -344,6 +344,7 @@ where
 				shard_pos: shard_off,
 				bucket_pos: pos,
 				bucket_arr: &map.bucket_arr,
+				key_pos: entry_pos,
 			}		
 		})
     }
@@ -376,7 +377,13 @@ where
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         map.clear();
 	}
-	
+
+	/// Begin a rehash operation. Converts all existing entries
+	// TODO: missing logic to prevent furhter resize operations when one is already underway.
+	// One future feature could be to allow interruptible resizes. We wouldn't pay much of a
+	// space penalty if we used something like https://crates.io/crates/u4 inside EntryTag
+	// to allow for many tiers of older chains (we would have to track previous sizes within
+	// a sliding window at the front of the memory region or something)
     fn begin_rehash(
 		&self,
 		shards: &mut Vec<RwLockWriteGuard<'_, DictShard<'_, K>>>,
@@ -402,18 +409,23 @@ where
 		true
     }
 
-	
-	// TODO(quantumish): off by one for return value logic?
+	// Unfinished, final large-ish piece standing in the way of a prototype.
+	//
+	// Based off the hashbrown implementation but adapted to an incremental context. See below:
+	// https://github.com/quantumish/hashbrown/blob/6610e6d2b1f288ef7b0709a3efefbc846395dc5e/src/raw/mod.rs#L2866
 	fn do_rehash(&self) -> bool {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 		// TODO(quantumish): refactor these out into settable quantities
 		const REHASH_CHUNK_SIZE: usize = 10;
-		const REHASH_ATTEMPTS: usize = 5;
 
 		let end = map.rehash_end.load(Ordering::Relaxed);
 		let ind = map.rehash_index.load(Ordering::Relaxed);
 		if ind >= end { return true }
 
+		// We have to use a mutex to prevent concurrent rehashes as they provide a pretty
+		// obvious chance at a deadlock: one thread wants to rehash an entry into a shard
+		// which is held by another thread which wants to rehash its block into the shard
+		// held by the first. Doesn't seem like there's an obvious way around this?
 		let _guard = self.resize_lock.try_lock();
 		if _guard.is_none() { return false }
 		
@@ -438,27 +450,31 @@ where
 					EntryTag::Tombstone => core::MapEntryType::Skip,
 					_ => core::MapEntryType::Tombstone,
 				}).unwrap();
-				let new_pos = new.pos();
 
-				match new.tag() {
-					EntryTag::Empty | EntryTag::RehashTombstone => {
-						shard.keys[shard_off].tag = EntryTag::Empty;
-						unsafe {
-							std::mem::swap(
-								shard.keys[shard_off].val.assume_init_mut(),
-								new.
-					},
-					EntryTag::Rehash => {
+				// I believe the blocker here is that this unfortunately this would require
+				// duplicating a lot of the logic of a write lookup again but with the caveat
+				// that we're already holding one of the shard locks and need to pass that
+				// context on. One thing I was considering at the time was using a hashmap to
+				// manage the lock guards and passing that around?
+				todo!("finish rehash implementation")
+				// match new.tag() {
+				// 	EntryTag::Empty | EntryTag::RehashTombstone => {
+				// 		shard.keys[shard_off].tag = EntryTag::Empty;
+				// 		unsafe {
+				// 			std::mem::swap(
+				// 				shard.keys[shard_off].val.assume_init_mut(),
+				// 				new.
+				// 	},
+				// 	EntryTag::Rehash => {
 						
-					},
-					_ => unreachable!()
-				}
+				// 	},
+				// 	_ => unreachable!()
+				// }
 			}
 		}
 		false
 	}
 
-	
 	pub fn finish_rehash(&self) {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
 		while self.do_rehash() {}
@@ -572,7 +588,7 @@ where
     pub fn shrink_goal(&self) -> Option<usize> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         let goal = map.bucket_arr.alloc_limit.load(Ordering::Relaxed);
-		goal.next_checkeddd()
+		goal.next_checked()
 	}
 
     pub fn finish_shrink(&self) -> Result<(), shmem::Error> {
@@ -582,7 +598,7 @@ where
 		
         let num_buckets = map.bucket_arr.alloc_limit
 			.load(Ordering::Relaxed)
-			.next_checkeddd()
+			.next_checked()
 			.expect("called finish_shrink when no shrink is in progress");
         
         if map.get_num_buckets() == num_buckets {

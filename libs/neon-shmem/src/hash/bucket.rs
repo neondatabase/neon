@@ -1,3 +1,20 @@
+//! Lock-free stable array of buckets managed with a freelist.
+//!
+//! Since the positions of entries in the dictionary and the bucket array are not correlated,
+//! we either had to separately shard both and deal with the overhead of two lock acquisitions
+//! per read/write, or make the bucket array lock free. This is *generally* fine since most
+//! accesses of the bucket array are done while holding the lock on the corresponding dict shard
+//! and thus synchronized. May not hold up to the removals done by the LFC which is a problem.
+//!
+//! Routines are pretty closely adapted from https://timharris.uk/papers/2001-disc.pdf 
+//! 
+//! Notable caveats:
+//! - Can only store around 2^30 entries, which is actually only 10x our current workload.
+//!  - This is because we need two tag bits to distinguish full/empty and marked/unmarked entries.
+//! - Has not been seriously tested.
+//!
+//! Full entries also store the index to their corresponding dictionary entry in order
+//! to enable .entry_at_bucket() which is needed for the clock eviction algo in the LFC.
 
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
@@ -9,6 +26,7 @@ use atomic::Atomic;
 #[repr(transparent)]
 pub(crate) struct BucketIdx(pub(super) u32);
 
+// This should always be true as `BucketIdx` is a simple newtype.
 const _: () = assert!(Atomic::<BucketIdx>::is_lock_free());
 
 impl BucketIdx {
@@ -20,8 +38,10 @@ impl BucketIdx {
 	const FULL_TAG: u32 = 0b10 << 30;
 	/// Reserved. Don't use me.
 	const RSVD_TAG: u32 = 0b11 << 30;
-	
+
+	/// Invalid index within the bucket array (can be mixed with any tag).
 	pub const INVALID: Self = Self(0x3FFFFFFF);
+	/// Max index within the bucket array (can be mixed with any tag).
 	pub const MAX: usize = Self::INVALID.0 as usize - 1;
 
 	pub(super) fn is_marked(&self) -> bool {
@@ -45,15 +65,17 @@ impl BucketIdx {
 		debug_assert!(val < Self::MAX);
 		Self(val as u32 | Self::FULL_TAG)
 	}
-	
+
+	/// Try to extract a valid index if the tag is NEXT.
 	pub fn next_checked(&self) -> Option<usize> {
-		if *self == Self::INVALID || self.is_marked() {
-			None
-		} else {
+		if self.0 & Self::RSVD_TAG == Self::NEXT_TAG && *self != Self::INVALID {
 			Some(self.0 as usize)
+		} else {
+			None
 		}
 	}
 
+	/// Try to extract an index if the tag is FULL.
 	pub fn full_checked(&self) -> Option<usize> {
 		if self.0 & Self::RSVD_TAG == Self::FULL_TAG {
 			Some((self.0 & Self::INVALID.0) as usize) 
@@ -63,24 +85,12 @@ impl BucketIdx {
 	}
 }
 
-impl std::fmt::Debug for BucketIdx {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-		let idx = self.get_unmarked().0;
-		write!(
-			f, "BucketIdx(marked={}, idx={})",
-			self.is_marked(),
-			match *self {
-				Self::INVALID => "INVALID".to_string(),
-				_ => format!("{idx}")
-			}
-		)
-	}
-}
-
-/// format storage unit within the hash table. Either empty or contains a key-value pair.
-/// Always part of a chain of some kind (either a freelist if empty or a hash chain if full).
+/// Entry within the bucket array. Value is only initialized if you 
 pub(crate) struct Bucket<V> {
-    pub val: MaybeUninit<V>,
+	// Only initialized if `next` field is tagged with FULL.
+	pub val: MaybeUninit<V>,
+	// Either points to next entry in freelist if empty or points
+	// to the corresponding entry in dictionary if full.
 	pub next: Atomic<BucketIdx>,
 }
 
@@ -92,13 +102,6 @@ impl<V> Bucket<V> {
 		}
 	}
 
-	pub fn full(val: V) -> Self {
-		Self {
-			val: MaybeUninit::new(val),
-			next: Atomic::new(BucketIdx::INVALID)
-		}
-	}
-	
 	pub fn as_ref(&self) -> &V {
 		unsafe { self.val.assume_init_ref() }
 	}
@@ -164,7 +167,9 @@ impl<'a, V> BucketArray<'a, V> {
 	pub fn len(&self) -> usize {
 		unsafe { (&*self.buckets.get()).len() }
 	}
-	
+
+	/// Deallocate a bucket, adding it to the free list.
+	// Adapted from List::insert in https://timharris.uk/papers/2001-disc.pdf
 	pub fn dealloc_bucket(&self, pos: usize) -> V {
 		loop {
 			let free = self.free_head.load(Ordering::Relaxed);
@@ -178,6 +183,8 @@ impl<'a, V> BucketArray<'a, V> {
 		}
 	}
 
+	/// Find a usable bucket at the front of the free list.
+	// Adapted from List::search in https://timharris.uk/papers/2001-disc.pdf
 	#[allow(unused_assignments)]
 	fn find_bucket(&self) -> (BucketIdx, BucketIdx) {
 		let mut left_node = BucketIdx::INVALID;
@@ -229,9 +236,10 @@ impl<'a, V> BucketArray<'a, V> {
 		}
 	}
 
+	/// Pop a bucket from the free list. 
+	// Adapted from List::delete in https://timharris.uk/papers/2001-disc.pdf
 	#[allow(unused_assignments)]
     pub(crate) fn alloc_bucket(&self, value: V, key_pos: usize) -> Option<BucketIdx> {
-		// println!("alloc()");
 		let mut right_node_next = BucketIdx::INVALID;
 		let mut left_idx = BucketIdx::INVALID;
 		let mut right_idx = BucketIdx::INVALID;
