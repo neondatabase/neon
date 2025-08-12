@@ -300,7 +300,9 @@ jobs:
 
   benchmarks:
     # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `deploy` in PRs
-    if: github.ref_name == 'main' || (contains(github.event.pull_request.labels.*.name, 'run-benchmarks') && !failure() && !cancelled())
+    # if: github.ref_name == 'main' || (contains(github.event.pull_request.labels.*.name, 'run-benchmarks') && !failure() && !cancelled())
+    # moved to another repo
+    if: false
     needs: [ check-permissions, build-build-tools-image, get-benchmarks-durations, deploy ]
     permissions:
       id-token: write # aws-actions/configure-aws-credentials
