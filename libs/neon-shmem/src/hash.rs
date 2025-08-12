@@ -1,3 +1,4 @@
+use std::cell::UnsafeCell;
 use std::hash::{BuildHasher, Hash};
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
@@ -14,7 +15,7 @@ pub mod entry;
 mod tests;
 
 use core::{
-	CoreHashMap, DictShard, EntryKey, EntryType,
+	CoreHashMap, DictShard, EntryKey, EntryTag,
 	FullError, MaybeUninitDictShard
 };
 use bucket::{Bucket, BucketIdx};
@@ -134,11 +135,13 @@ impl<'a, K: Clone + Hash + Eq, V, S> HashMapInit<'a, K, V, S> {
 		}
 		let shards: &mut [RwLock<MaybeUninitDictShard<'_, K>>] =
             unsafe { std::slice::from_raw_parts_mut(shards_ptr.cast(), num_shards) };
-        let buckets =
-            unsafe { std::slice::from_raw_parts_mut(vals_ptr.cast(), num_buckets) };
+        let buckets: *const [MaybeUninit<Bucket<V>>] = 
+            unsafe { std::slice::from_raw_parts(vals_ptr.cast(), num_buckets) };
 
-        let hashmap = CoreHashMap::new(buckets, shards);
-        unsafe { std::ptr::write(shared_ptr, hashmap); }
+		unsafe { 
+			let hashmap = CoreHashMap::new(&*(buckets as *const UnsafeCell<_>), shards);
+			std::ptr::write(shared_ptr, hashmap);
+		}
 
 		let resize_lock = Mutex::from_raw(
 			unsafe { PthreadMutex::new(NonNull::new_unchecked(mutex_ptr)) }, ()
@@ -313,18 +316,38 @@ where
 
     pub unsafe fn get_at_bucket(&self, pos: usize) -> Option<&V> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-        if pos >= map.bucket_arr.buckets.len() {
+        if pos >= map.bucket_arr.len() {
             return None;
         }
 
-		let bucket = &map.bucket_arr.buckets[pos];
-		if bucket.next.load(Ordering::Relaxed) == BucketIdx::RESERVED {
+		let bucket = &map.bucket_arr[pos];
+		if bucket.next.load(Ordering::Relaxed).full_checked().is_some() {
 			Some(unsafe { bucket.val.assume_init_ref() })
 		} else {
 			None
 		}
     }
 
+	pub unsafe fn entry_at_bucket(&self, pos: usize) -> Option<entry::OccupiedEntry<'a, K, V>> {
+        let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+        if pos >= map.bucket_arr.len() {
+            return None;
+        }
+
+		let bucket = &map.bucket_arr[pos];
+		bucket.next.load(Ordering::Relaxed).full_checked().map(|entry_pos| {
+			let shard_size = map.get_num_buckets() / map.dict_shards.len();
+			let shard_index = entry_pos / shard_size;
+			let shard_off = entry_pos % shard_size;
+			entry::OccupiedEntry {
+				shard: map.dict_shards[shard_index].write(),
+				shard_pos: shard_off,
+				bucket_pos: pos,
+				bucket_arr: &map.bucket_arr,
+			}		
+		})
+    }
+	
     /// bucket the number of buckets in the table.
     pub fn get_num_buckets(&self) -> usize {
         let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
@@ -335,9 +358,9 @@ where
     pub fn get_bucket_for_value(&self, val_ptr: *const V) -> usize {
         let map = unsafe { self.shared_ptr.as_ref() }.unwrap();
 
-        let origin = map.bucket_arr.buckets.as_ptr();
+        let origin = map.bucket_arr.as_mut_ptr() as *const _;
         let idx = (val_ptr as usize - origin as usize) / size_of::<Bucket<V>>();
-        assert!(idx < map.bucket_arr.buckets.len());
+        assert!(idx < map.bucket_arr.len());
 
         idx
     }
@@ -368,8 +391,8 @@ where
 		
 		shards.iter_mut().for_each(|x| x.keys.iter_mut().for_each(|key| {
 			match key.tag {
-				EntryType::Occupied => key.tag = EntryType::Rehash,
-				EntryType::Tombstone => key.tag = EntryType::RehashTombstone,
+				EntryTag::Occupied => key.tag = EntryTag::Rehash,
+				EntryTag::Tombstone => key.tag = EntryTag::RehashTombstone,
 				_ => (),
 			}
 		}));
@@ -379,9 +402,66 @@ where
 		true
     }
 
+	
+	// TODO(quantumish): off by one for return value logic?
+	fn do_rehash(&self) -> bool {
+		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
+		// TODO(quantumish): refactor these out into settable quantities
+		const REHASH_CHUNK_SIZE: usize = 10;
+		const REHASH_ATTEMPTS: usize = 5;
+
+		let end = map.rehash_end.load(Ordering::Relaxed);
+		let ind = map.rehash_index.load(Ordering::Relaxed);
+		if ind >= end { return true }
+
+		let _guard = self.resize_lock.try_lock();
+		if _guard.is_none() { return false }
+		
+		map.rehash_index.store((ind+REHASH_CHUNK_SIZE).min(end), Ordering::Relaxed);
+		
+		let shard_size = map.get_num_buckets() / map.dict_shards.len();
+		for i in ind..(ind+REHASH_CHUNK_SIZE).min(end) {
+			let (shard_index, shard_off) = (i / shard_size, i % shard_size);
+			let mut shard = map.dict_shards[shard_index].write();
+			if shard.keys[shard_off].tag != EntryTag::Rehash {
+				continue;
+			}
+			loop {
+				let hash = self.get_hash_value(unsafe {
+					shard.keys[shard_off].val.assume_init_ref()
+				});
+
+				let key = unsafe { shard.keys[shard_off].val.assume_init_ref() }.clone();
+				let new = map.entry(key, hash, |tag| match tag {
+					EntryTag::Empty => core::MapEntryType::Empty,
+					EntryTag::Occupied => core::MapEntryType::Occupied,
+					EntryTag::Tombstone => core::MapEntryType::Skip,
+					_ => core::MapEntryType::Tombstone,
+				}).unwrap();
+				let new_pos = new.pos();
+
+				match new.tag() {
+					EntryTag::Empty | EntryTag::RehashTombstone => {
+						shard.keys[shard_off].tag = EntryTag::Empty;
+						unsafe {
+							std::mem::swap(
+								shard.keys[shard_off].val.assume_init_mut(),
+								new.
+					},
+					EntryTag::Rehash => {
+						
+					},
+					_ => unreachable!()
+				}
+			}
+		}
+		false
+	}
+
+	
 	pub fn finish_rehash(&self) {
 		let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
-		while map.do_rehash() {}
+		while self.do_rehash() {}
 	}
 
 	pub fn shuffle(&self) {
@@ -422,7 +502,7 @@ where
 		let _resize_guard = self.resize_lock.lock();
 		let mut shards: Vec<_> = map.dict_shards.iter().map(|x| x.write()).collect();
 
-		let old_num_buckets = map.bucket_arr.buckets.len();
+		let old_num_buckets = map.bucket_arr.len();
         assert!(
             num_buckets >= old_num_buckets,
             "grow called with a smaller number of buckets"
@@ -434,7 +514,7 @@ where
 		// Grow memory areas and initialize each of them.
 		self.resize_shmem(num_buckets)?;                
         unsafe {
-			let buckets_ptr = map.bucket_arr.buckets.as_mut_ptr();
+			let buckets_ptr = map.bucket_arr.as_mut_ptr();
             for i in old_num_buckets..num_buckets {
                 let bucket = buckets_ptr.add(i);
                 bucket.write(Bucket::empty(
@@ -452,7 +532,7 @@ where
 			for i in old_num_buckets..num_buckets {
                 let key = keys_ptr.add(i);
                 key.write(EntryKey {
-					tag: EntryType::Empty,
+					tag: EntryTag::Empty,
 					val: MaybeUninit::uninit(),
 				});
             }
@@ -492,7 +572,7 @@ where
     pub fn shrink_goal(&self) -> Option<usize> {
         let map = unsafe { self.shared_ptr.as_mut() }.unwrap();
         let goal = map.bucket_arr.alloc_limit.load(Ordering::Relaxed);
-		goal.pos_checked()
+		goal.next_checkeddd()
 	}
 
     pub fn finish_shrink(&self) -> Result<(), shmem::Error> {
@@ -502,7 +582,7 @@ where
 		
         let num_buckets = map.bucket_arr.alloc_limit
 			.load(Ordering::Relaxed)
-			.pos_checked()
+			.next_checkeddd()
 			.expect("called finish_shrink when no shrink is in progress");
         
         if map.get_num_buckets() == num_buckets {

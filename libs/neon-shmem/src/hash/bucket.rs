@@ -1,5 +1,7 @@
 
-use std::{mem::MaybeUninit, sync::atomic::{AtomicUsize, Ordering}};
+use std::cell::UnsafeCell;
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use atomic::Atomic;
 
@@ -10,32 +12,53 @@ pub(crate) struct BucketIdx(pub(super) u32);
 const _: () = assert!(Atomic::<BucketIdx>::is_lock_free());
 
 impl BucketIdx {
-	const MARK_TAG: u32 = 0x80000000;
-	pub const INVALID: Self = Self(0x7FFFFFFF);
-	pub const RESERVED: Self = Self(0x7FFFFFFE);
-	pub const MAX: usize = Self::RESERVED.0 as usize - 1;
+	/// Tag for next pointers in free entries.
+	const NEXT_TAG: u32 = 0b00 << 30;
+	/// Tag for marked next pointers in free entries.
+	const MARK_TAG: u32 = 0b01 << 30;
+	/// Tag for full entries.
+	const FULL_TAG: u32 = 0b10 << 30;
+	/// Reserved. Don't use me.
+	const RSVD_TAG: u32 = 0b11 << 30;
+	
+	pub const INVALID: Self = Self(0x3FFFFFFF);
+	pub const MAX: usize = Self::INVALID.0 as usize - 1;
 
 	pub(super) fn is_marked(&self) -> bool {
-		self.0 & Self::MARK_TAG != 0
+		self.0 & Self::RSVD_TAG == Self::MARK_TAG
 	}
 
 	pub(super) fn as_marked(self) -> Self {
-		Self(self.0 | Self::MARK_TAG)
+		Self((self.0 & Self::INVALID.0) | Self::MARK_TAG)
 	}
 
 	pub(super) fn get_unmarked(self) -> Self {
-		Self(self.0 & !Self::MARK_TAG)
+		Self(self.0 & Self::INVALID.0)
 	}
 	
 	pub fn new(val: usize) -> Self {
+		debug_assert!(val < Self::MAX);
 		Self(val as u32)
 	}
+
+	pub fn new_full(val: usize) -> Self {
+		debug_assert!(val < Self::MAX);
+		Self(val as u32 | Self::FULL_TAG)
+	}
 	
-	pub fn pos_checked(&self) -> Option<usize> {
+	pub fn next_checked(&self) -> Option<usize> {
 		if *self == Self::INVALID || self.is_marked() {
 			None
 		} else {
 			Some(self.0 as usize)
+		}
+	}
+
+	pub fn full_checked(&self) -> Option<usize> {
+		if self.0 & Self::RSVD_TAG == Self::FULL_TAG {
+			Some((self.0 & Self::INVALID.0) as usize) 
+		} else {
+			None
 		}
 	}
 }
@@ -48,7 +71,6 @@ impl std::fmt::Debug for BucketIdx {
 			self.is_marked(),
 			match *self {
 				Self::INVALID => "INVALID".to_string(),
-				Self::RESERVED => "RESERVED".to_string(),
 				_ => format!("{idx}")
 			}
 		)
@@ -76,8 +98,6 @@ impl<V> Bucket<V> {
 			next: Atomic::new(BucketIdx::INVALID)
 		}
 	}
-
-	// pub is_full
 	
 	pub fn as_ref(&self) -> &V {
 		unsafe { self.val.assume_init_ref() }
@@ -94,7 +114,7 @@ impl<V> Bucket<V> {
 
 pub(crate) struct BucketArray<'a, V> {
 	/// Buckets containing values.
-    pub(crate) buckets: &'a mut [Bucket<V>],
+    pub(crate) buckets: &'a UnsafeCell<[Bucket<V>]>,
     /// Head of the freelist.
     pub(crate) free_head: Atomic<BucketIdx>,
     /// Maximum index of a bucket allowed to be allocated.
@@ -105,8 +125,24 @@ pub(crate) struct BucketArray<'a, V> {
     pub(crate) _user_list_head: Atomic<BucketIdx>,
 }
 
+impl <'a, V> std::ops::Index<usize> for BucketArray<'a, V> {
+	type Output = Bucket<V>;
+		
+	fn index(&self, index: usize) -> &Self::Output {
+		let buckets: &[_] = unsafe { &*(self.buckets.get() as *mut _) };
+		&buckets[index]
+	}
+}
+
+impl <'a, V> std::ops::IndexMut<usize> for BucketArray<'a, V> {
+	fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+		let buckets: &mut [_] = unsafe { &mut *(self.buckets.get() as *mut _) };
+		&mut buckets[index]
+	}
+}
+
 impl<'a, V> BucketArray<'a, V> {
-	pub fn new(buckets: &'a mut [Bucket<V>]) -> Self {		
+	pub fn new(buckets: &'a UnsafeCell<[Bucket<V>]>) -> Self {		
 		Self {
 			buckets,
 			free_head: Atomic::new(BucketIdx(0)),
@@ -115,18 +151,29 @@ impl<'a, V> BucketArray<'a, V> {
 			buckets_in_use: 0.into(),
 		}
 	}
+
+	pub fn as_mut_ptr(&self) -> *mut Bucket<V> {
+		unsafe { (&mut *self.buckets.get()).as_mut_ptr() }
+	}
+
+	pub fn get_mut(&self, index: usize) -> &mut Bucket<V> {
+		let buckets: &mut [_] = unsafe { &mut *(self.buckets.get() as *mut _) };
+		&mut buckets[index]
+	}
 	
-	pub fn dealloc_bucket(&mut self, pos: usize) -> V {
-		let bucket = &mut self.buckets[pos];
-		let pos = BucketIdx::new(pos);
+	pub fn len(&self) -> usize {
+		unsafe { (&*self.buckets.get()).len() }
+	}
+	
+	pub fn dealloc_bucket(&self, pos: usize) -> V {
 		loop {
 			let free = self.free_head.load(Ordering::Relaxed);
-			bucket.next.store(free, Ordering::Relaxed);
+			self[pos].next.store(free, Ordering::Relaxed);
 			if self.free_head.compare_exchange_weak(
-				free, pos, Ordering::Relaxed, Ordering::Relaxed
+				free, BucketIdx::new(pos), Ordering::Relaxed, Ordering::Relaxed
 			).is_ok() {
 				self.buckets_in_use.fetch_sub(1, Ordering::Relaxed);
-				return unsafe { bucket.val.assume_init_read() };
+				return unsafe { self[pos].val.assume_init_read() };
 			}
 		}
 	}
@@ -140,8 +187,8 @@ impl<'a, V> BucketArray<'a, V> {
 		loop { 
 			let mut t = BucketIdx::INVALID;
 			let mut t_next = self.free_head.load(Ordering::Relaxed);
-			let alloc_limit = self.alloc_limit.load(Ordering::Relaxed).pos_checked();
-			while t_next.is_marked() || t.pos_checked()
+			let alloc_limit = self.alloc_limit.load(Ordering::Relaxed).next_checked();
+			while t_next.is_marked() || t.next_checked()
 				.map_or(true, |v| alloc_limit.map_or(false, |l| v > l))
 			{
 				if !t_next.is_marked() {
@@ -150,12 +197,12 @@ impl<'a, V> BucketArray<'a, V> {
 				}
 				t = t_next.get_unmarked();
 				if t == BucketIdx::INVALID { break }
-				t_next = self.buckets[t.0 as usize].next.load(Ordering::Relaxed);
+				t_next = self[t.0 as usize].next.load(Ordering::Relaxed);
 			}
 			right_node = t;
 
 			if left_node_next == right_node {
-				if right_node != BucketIdx::INVALID && self.buckets[right_node.0 as usize]
+				if right_node != BucketIdx::INVALID && self[right_node.0 as usize]
 					.next.load(Ordering::Relaxed).is_marked()
 				{					
 					continue;
@@ -165,13 +212,13 @@ impl<'a, V> BucketArray<'a, V> {
 			}
 
 			let left_ref = if left_node != BucketIdx::INVALID {
-				&self.buckets[left_node.0 as usize].next					
+				&self[left_node.0 as usize].next					
 			} else { &self.free_head };
 			
 			if left_ref.compare_exchange_weak(
 				left_node_next, right_node, Ordering::Relaxed, Ordering::Relaxed
 			).is_ok() {
-				if right_node != BucketIdx::INVALID && self.buckets[right_node.0 as usize]
+				if right_node != BucketIdx::INVALID && self[right_node.0 as usize]
 					.next.load(Ordering::Relaxed).is_marked()
 				{
 					continue;
@@ -183,7 +230,7 @@ impl<'a, V> BucketArray<'a, V> {
 	}
 
 	#[allow(unused_assignments)]
-    pub(crate) fn alloc_bucket(&mut self, value: V) -> Option<BucketIdx> {
+    pub(crate) fn alloc_bucket(&self, value: V, key_pos: usize) -> Option<BucketIdx> {
 		// println!("alloc()");
 		let mut right_node_next = BucketIdx::INVALID;
 		let mut left_idx = BucketIdx::INVALID;
@@ -195,7 +242,7 @@ impl<'a, V> BucketArray<'a, V> {
 				return None;
 			}
 			
-			let right = &self.buckets[right_idx.0 as usize];
+			let right = &self[right_idx.0 as usize];
 			right_node_next = right.next.load(Ordering::Relaxed);
 			if !right_node_next.is_marked() {
 				if right.next.compare_exchange_weak(
@@ -208,7 +255,7 @@ impl<'a, V> BucketArray<'a, V> {
 		}
 
 		let left_ref = if left_idx != BucketIdx::INVALID {
-			&self.buckets[left_idx.0 as usize].next
+			&self[left_idx.0 as usize].next
 		} else {
 			&self.free_head
 		};
@@ -221,17 +268,17 @@ impl<'a, V> BucketArray<'a, V> {
 		}
 
         self.buckets_in_use.fetch_add(1, Ordering::Relaxed);
-		self.buckets[right_idx.0 as usize].val.write(value);
-		self.buckets[right_idx.0 as usize].next.store(
-			BucketIdx::RESERVED, Ordering::Relaxed
+		self[right_idx.0 as usize].next.store(
+			BucketIdx::new_full(key_pos), Ordering::Relaxed
 		);
+		self.get_mut(right_idx.0 as usize).val.write(value);
 		Some(right_idx)
     }
 
 	pub fn clear(&mut self) {
-		for i in 0..self.buckets.len() {
-			self.buckets[i] = Bucket::empty(
-				if i < self.buckets.len() - 1 {
+		for i in 0..self.len() {
+			self[i] = Bucket::empty(
+				if i < self.len() - 1 {
 					BucketIdx::new(i + 1)
 				} else {
 					BucketIdx::INVALID
