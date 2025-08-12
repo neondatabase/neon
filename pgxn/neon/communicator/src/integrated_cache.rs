@@ -798,7 +798,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
                     err
                 );
 			}
-			let remaining = file_cache.undelete_blocks(difference as u64);
+			let remaining = file_cache.unpunch_blocks(difference as u64);
 			file_cache.grow(remaining as u64);			
 			debug_assert!(file_cache.free_space() > remaining);
         } else if old_num_blocks > num_blocks {
@@ -832,7 +832,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 							.fetch_max(old_val.lw_lsn.into_inner().0, Ordering::Relaxed);
 						let cache_block = old_val.cache_block.into_inner();
 						if cache_block != INVALID_CACHE_BLOCK {
-							file_cache.delete_block(cache_block);
+							file_cache.punch_block(cache_block);
 							file_evictions += 1;
 							self.metrics.cache_page_evictions_counter.inc();
 						}			
@@ -850,7 +850,7 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 			while remaining > 0 as u64 {
 				if let Some(i) = self.try_evict_cache_block() {
 					if i != INVALID_CACHE_BLOCK {
-						file_cache.delete_block(i);
+						file_cache.punch_block(i);
 						remaining -= 1;
 					}
 				}

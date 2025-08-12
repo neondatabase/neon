@@ -9,7 +9,6 @@
 //! process. The backend processes *also* read the file (and sometimes also
 //! write it? ), but the backends use direct C library calls for that.
 use std::fs::File;
-use std::os::linux::fs::MetadataExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -179,7 +178,7 @@ impl FileCache {
 			nix::FallocateFlags::FALLOC_FL_ZERO_RANGE
 				.union(nix::FallocateFlags::FALLOC_FL_KEEP_SIZE),
 			(block as usize * BLCKSZ) as libc::off_t,
-			1
+			BLCKSZ as libc::off_t
 		) {
 			tracing::error!("failed to un-punch hole in LFC at {block}: {e}");
 			return;
@@ -238,7 +237,7 @@ impl FileCache {
 	/// of holes within a file. Whether we need this function at all is unclear,
 	/// as seemingly this part of the codebase only targets a system with ext4?
 	#[cfg(target_os = "macos")]
-	pub fn undelete_blocks(&self, num_blocks: u64) -> u64 {
+	pub fn unpunch_blocks(&self, num_blocks: u64) -> u64 {
 		use nix::unistd as nix;
 		let mut free_list = self.free_list.lock().unwrap();
 		let num_bytes = (free_list.next_free_block * BLOCKSZ) as i64;
