@@ -32,14 +32,19 @@ pub const INVALID_CACHE_BLOCK: CacheBlock = u64::MAX;
 pub struct FileCache {
     file: Arc<File>,
     free_list: Mutex<FreeList>,
+
+	/// The true number of writable blocks within the LFC file.
+	///
+	/// The `max_blocks` field of `FreeList` isn't sufficient once holes are
+	/// punched, so we track this manually.
 	pub size: AtomicU64,
-	max_read: AtomicU64,
-	
-	// The `fiemap-rs` library doesn't expose any way to issue a FIEMAP ioctl
-	// on an existing file descroptor, so we have to save the path.
+
+	/// The path to the LFC file.
+	///
+	/// The `fiemap-rs` library doesn't expose any way to issue a FIEMAP ioctl
+	/// on an existing file descriptor, so we have to save the path.
 	path: PathBuf,
 
-	pub max_written: AtomicU64,
     metrics: FileCacheMetricGroup,
 }
 
@@ -80,10 +85,7 @@ impl FileCache {
             .create(true)
             .open(file_cache_path)?;
 
-        tracing::info!("initialized file cache with {} blocks", initial_size);
-
         Ok(FileCache {
-			max_read: 0.into(),
             file: Arc::new(file),
 			size: initial_size.into(),
             free_list: Mutex::new(FreeList {
@@ -91,27 +93,10 @@ impl FileCache {
                 max_blocks: initial_size,
                 free_blocks: Vec::new(),
             }),
-			max_written: 0.into(),
 			path: file_cache_path.to_path_buf(),
             metrics: FileCacheMetricGroup::new(),
         })
     }
-
-	/// Debug utility.
-	pub fn num_allocated_blocks(&self) -> (u64, u32) {
-		(
-			std::fs::metadata(self.path.clone()).unwrap().st_size() / (1024 * 1024),
-			String::from_utf8_lossy(
-				&std::process::Command::new("ls")
-					.args(["-sk", self.path.to_str().unwrap()])
-					.output()
-					.expect("failed to run ls -sk")
-					.stdout
-			).split(' ').next().unwrap().parse().unwrap()
-		)
-	}
-	
-    // File cache management
 
     pub async fn read_block(
         &self,
@@ -121,10 +106,6 @@ impl FileCache {
         assert!(dst.bytes_total() == BLCKSZ);
         let file = self.file.clone();
 
-		let prev = self.max_read.fetch_max(cache_block, Ordering::Relaxed);
-		if prev.max(cache_block) > self.free_list.lock().unwrap().max_blocks {
-			tracing::info!("max read greater than max block!! {cache_block}");
-		}
         let dst_ref = unsafe { std::slice::from_raw_parts_mut(dst.stable_mut_ptr(), BLCKSZ) };
 
         spawn_blocking(move || file.read_exact_at(dst_ref, cache_block * BLCKSZ as u64)).await??;
@@ -139,8 +120,6 @@ impl FileCache {
         assert!(src.bytes_init() == BLCKSZ);
         let file = self.file.clone();
 
-		self.max_written.fetch_max(cache_block, Ordering::Relaxed);
-		
         let src_ref = unsafe { std::slice::from_raw_parts(src.stable_ptr(), BLCKSZ) };
 
         spawn_blocking(move || file.write_all_at(src_ref, cache_block * BLCKSZ as u64)).await??;
@@ -148,7 +127,8 @@ impl FileCache {
         Ok(())
     }
 
-    pub fn alloc_block(&self) -> Option<CacheBlock> {
+	/// Allocate a block within the LFC file for use by the LFC.	
+    pub fn alloc_block(&self) -> Option<CacheBlock> {		
         let mut free_list = self.free_list.lock().unwrap();
         if let Some(x) = free_list.free_blocks.pop() {
             return Some(x);
@@ -160,57 +140,74 @@ impl FileCache {
         }
         None
     }
-	
+
+	/// Mark a block used by the LFC as free for allocation.
     pub fn dealloc_block(&self, cache_block: CacheBlock) {
         let mut free_list = self.free_list.lock().unwrap();
         free_list.free_blocks.push(cache_block);
     }
 
+	/// Attempt to let the filesystem reclaim `num_blocks` of free blocks within the LFC.
+	/// Returns the number of blocks not reclaimed by the filesystem.
 	pub fn reclaim_blocks(&self, num_blocks: u64) -> u64 {
 		let mut free_list = self.free_list.lock().unwrap();
-		tracing::warn!("next block: {},  max block: {}", free_list.next_free_block, free_list.max_blocks);
-		let removed = (free_list.free_blocks.len() as u64).min(num_blocks);
-		for _ in 0..removed {
-			self.delete_block(free_list.free_blocks.pop().unwrap());
+
+		// Try to limit the maximum first so that we can shrink without doing any I/O
+		let unused_space = num_blocks.min(free_list.max_blocks - free_list.next_free_block);
+		free_list.max_blocks -= unused_space;
+		self.size.fetch_sub(unused_space, Ordering::Relaxed);
+
+		let punched = (free_list.free_blocks.len() as u64).min(num_blocks - unused_space);
+		for _ in 0..punched {
+			self.punch_block(free_list.free_blocks.pop().unwrap());
 		}
-		tracing::warn!("punched {removed} individual holes");
-		tracing::warn!("avail block space is: {}", free_list.max_blocks - free_list.next_free_block);
-		let block_space = (num_blocks - removed).min(free_list.max_blocks - free_list.next_free_block);
 		
-		free_list.max_blocks -= block_space;
-		self.size.fetch_sub(block_space, Ordering::Relaxed);
-		tracing::warn!("punched a large hole of size {block_space}");
-		
-		num_blocks - block_space - removed
+		num_blocks - unused_space - punched
 	}
 	
-	/// "Delete" a block via fallocate's hole punching feature.
+	// "Delete" a block via fallocate's hole punching feature.
 	// TODO(quantumish): possibly implement some batching? lots of syscalls...
 	// unfortunately should be at odds with our access pattern as entries in the hashmap
 	// should have no correlation with the location of blocks in the actual LFC file.
-	pub fn delete_block(&self, cache_block: CacheBlock) {		
-		self.delete_blocks(cache_block, 1);
-	}
 
-	pub fn delete_blocks(&self, start: CacheBlock, amt: u64) {
+	/// "Un-punch" a block by re-allocating it with `fallocate` and update LFC size.
+	fn unpunch_block(&self, block: CacheBlock) {
 		use nix::fcntl as nix;
-		if amt == 0 { return }
-		self.size.fetch_sub(amt, Ordering::Relaxed);
+		self.size.fetch_add(1, Ordering::Relaxed);
 		if let Err(e) = nix::fallocate(
 			self.file.clone(),
-			nix::FallocateFlags::FALLOC_FL_PUNCH_HOLE
+			nix::FallocateFlags::FALLOC_FL_ZERO_RANGE
 				.union(nix::FallocateFlags::FALLOC_FL_KEEP_SIZE),
-			(start as usize * BLCKSZ) as libc::off_t,
-			(amt as usize * BLCKSZ) as libc::off_t
+			(block as usize * BLCKSZ) as libc::off_t,
+			1
 		) {
-			tracing::error!("failed to punch {amt} hole(s) in LFC at block {start}: {e}");
+			tracing::error!("failed to un-punch hole in LFC at {block}: {e}");
 			return;
 		}
 	}
 
-	/// Attempt to reclaim `num_blocks` of previously hole-punched blocks.
+	/// "Punch" a block out of the LFC file by using `fallocate` and update LFC size.
+	pub fn punch_block(&self, block: CacheBlock) {
+		use nix::fcntl as nix;
+		self.size.fetch_sub(1, Ordering::Relaxed);
+		if let Err(e) = nix::fallocate(
+			self.file.clone(),
+			nix::FallocateFlags::FALLOC_FL_PUNCH_HOLE
+				.union(nix::FallocateFlags::FALLOC_FL_KEEP_SIZE),
+			(block as usize * BLCKSZ) as libc::off_t,
+			BLCKSZ as libc::off_t
+		) {
+			tracing::error!("failed to punch hole in LFC at {block}: {e}");
+			return;
+		}
+	}
+
+	/// Attempt to unpunch `num_blocks` of previously hole-punched blocks.
+	///
+	/// Similarly named to `unpunch_block` but does not punch a series of blocks in a row.
+	/// Instead uses FIEMAP ioctl to locate holes in the file and unpunch them!
 	#[cfg(target_os = "linux")]
-	pub fn undelete_blocks(&self, num_blocks: u64) -> u64 {
+	pub fn unpunch_blocks(&self, num_blocks: u64) -> u64 {
 		use itertools::Itertools;
 		let mut pushed = 0;
 		let mut free_list = self.free_list.lock().unwrap();
@@ -218,9 +215,9 @@ impl FileCache {
 		for (prev, cur) in res.map(|x| x.unwrap()).tuple_windows() {
 			if (prev.fe_logical + prev.fe_length) < cur.fe_logical {
 				let mut end = prev.fe_logical + prev.fe_length;
-				while end < cur.fe_logical {
-					self.size.fetch_add(1, Ordering::Relaxed);
+				while end < cur.fe_logical {					
 					free_list.free_blocks.push(end / BLCKSZ as u64);
+					self.unpunch_block(end / BLCKSZ as u64);
 					pushed += 1;
 					if pushed == num_blocks {
 						return 0;
@@ -232,8 +229,14 @@ impl FileCache {
 		num_blocks - pushed
 	}
 	
-	/// Attempt to reclaim `num_blocks` of previously hole-punched blocks.
-	// FIXME(quantumish): local tests showed this code has some buggy behavior.
+	/// Attempt to unpunch `num_blocks` of previously hole-punched blocks.
+	///
+	/// Much more expensive than the Linux variant as each hole must be located
+	/// by a separate call to `lseek`.
+	///
+	/// FIXME: Sometimes this function provides inaccurate counts of the number
+	/// of holes within a file. Whether we need this function at all is unclear,
+	/// as seemingly this part of the codebase only targets a system with ext4?
 	#[cfg(target_os = "macos")]
 	pub fn undelete_blocks(&self, num_blocks: u64) -> u64 {
 		use nix::unistd as nix;
@@ -250,7 +253,7 @@ impl FileCache {
 			if res >= num_bytes {
 				break;
 			}
-			self.size.fetch_add(1, Ordering::Relaxed);
+			self.unpunch_block(res);
 			free_list.free_blocks.push(res);
 			pushed += 1;
 			if pushed == num_blocks {
@@ -264,10 +267,8 @@ impl FileCache {
 	/// Physically grows the file and expands the freelist.
 	pub fn grow(&self, num_blocks: u64) {
 		let mut free_list = self.free_list.lock().unwrap();
-		// self.allocate_blocks(free_list.max_blocks, num_blocks);
 		self.size.fetch_add(num_blocks, Ordering::Relaxed);
 		free_list.max_blocks += num_blocks;
-		tracing::warn!("(after) max block: {}", free_list.max_blocks);
 	}
 
 	/// Returns number of blocks in the remaining space.

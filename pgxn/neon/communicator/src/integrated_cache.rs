@@ -768,18 +768,16 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 
     /// Resize the local file cache.		
     pub fn resize_file_cache(&'static self, num_blocks: u32) {
-		// let _lock = self.resize_mutex.lock().unwrap();
-		tracing::warn!("\n START OP ");
-		// TODO(quantumish): unclear what the semantics of this entire operation is
-		// if there is no file cache.
+		let _lock = self.resize_mutex.lock().unwrap();
+		// TODO: unclear what the semantics of this entire operation is if there is no file cache.
 		let file_cache = self.file_cache.as_ref().unwrap();
 		
 		if num_blocks > self.max_file_cache_size {
-				tracing::warn!(
-					"requested LFC size increase ({num_blocks}) of exceeds max size of hashmap ({})!",
-					self.max_file_cache_size
-				);
-			}
+			tracing::warn!(
+				"requested LFC size increase ({num_blocks}) of exceeds max size ({})!",
+				self.max_file_cache_size
+			)
+		}
 		let num_blocks = num_blocks.min(self.max_file_cache_size);
         let old_num_blocks = file_cache.size.load(Ordering::Relaxed) as u32;
 		if old_num_blocks != self.block_map.get_num_buckets() as u32 {
@@ -792,119 +790,81 @@ impl<'t> IntegratedCacheWriteAccess<'t> {
 		let difference = old_num_blocks.abs_diff(num_blocks);
 
         if old_num_blocks < num_blocks {
-			let (sz, blks) = file_cache.num_allocated_blocks();
-			tracing::warn!("size originally ({sz}, {blks}) ({} blocks)", blks/8);
-			tracing::warn!("max written: {}", file_cache.max_written.load(Ordering::Relaxed));
-			tracing::warn!("trying to grow to {} blocks from {}", num_blocks, old_num_blocks);
-			tracing::warn!("growing map to {} from {}", num_blocks, old_num_blocks);
-			tracing::warn!("growing table to {} from {}",
-						   num_blocks.max(self.block_map.get_num_buckets() as u32),
-						   self.block_map.get_num_buckets());
-			// if let Err(err) = self.block_map.grow(num_blocks.max(self.block_map.get_num_buckets() as u32)) {
-			// 	tracing::error!(
-            //         "could not grow file cache to {} blocks (old size {}): {}",
-            //         num_blocks,
-            //         old_num_blocks,
-            //         err
-            //     );
-			// }
-			
-			let remaining = file_cache.undelete_blocks(difference as u64);
-			if remaining > 0 {
-				let (sz, blks) = file_cache.num_allocated_blocks();
-				tracing::warn!("undeleted {} blocks", difference as u64 - remaining);
-				tracing::warn!("size after undelete ({sz}, {blks}) ({} blocks)", blks/8);
-				tracing::warn!("max written: {}", file_cache.max_written.load(Ordering::Relaxed));
-				tracing::warn!("growing to create {remaining} more blocks");
-				file_cache.grow(remaining as u64);
-				let (sz, blks) = file_cache.num_allocated_blocks();
-				tracing::warn!("size after max_block bump ({sz}, {blks}) ({} blocks)", blks/8);
-				tracing::warn!("max written: {}", file_cache.max_written.load(Ordering::Relaxed));
+			if let Err(err) = self.block_map.grow(num_blocks) {
+				tracing::error!(
+                    "could not grow file cache to {} blocks (old size {}): {}",
+                    num_blocks,
+                    old_num_blocks,
+                    err
+                );
 			}
+			let remaining = file_cache.undelete_blocks(difference as u64);
+			file_cache.grow(remaining as u64);			
 			debug_assert!(file_cache.free_space() > remaining);
         } else if old_num_blocks > num_blocks {
-			tracing::warn!("beginning table shrink to {num_blocks} from {old_num_blocks}");
-			// self.block_map.begin_shrink((num_blocks).min(self.block_map.get_num_buckets() as u32));
-			// tracing::error!("made it past table shrink");
-			// let mut old_hand = self.clock_hand.load(Ordering::Relaxed);
-			// if old_hand > num_blocks as usize {
-			// 	loop {
-			// 		match self.clock_hand.compare_exchange_weak(
-			// 			old_hand, 0, Ordering::Relaxed, Ordering::Relaxed
-			// 		) {
-			// 			Ok(_) => break,
-			// 			Err(x) => old_hand = x,
-			// 		}
-			// 	}
-			// }
+			self.block_map.begin_shrink(num_blocks);
 
-			// tracing::error!("about to check for pins");
-			// 'outer: for i in num_blocks..old_num_blocks {
-			// 	loop { 
-			// 		let Some(entry) = self.block_map.entry_at_bucket(i as usize) else {
-			// 			continue 'outer;
-			// 		};
-			// 		let old = entry.get();
-			// 		if old.pinned.load(Ordering::Relaxed) == 0 {
-			// 			let old_val = entry.remove();
-			// 			// let _ = self
-			// 			// 	.shared
-			// 			// 	.global_lw_lsn
-			// 			// 	.fetch_max(old_val.lw_lsn.into_inner().0, Ordering::Relaxed);
-			// 			// let cache_block = old_val.cache_block.into_inner();
-			// 			// if cache_block != INVALID_CACHE_BLOCK {
-			// 			// 	file_cache.delete_block(cache_block);
-			// 			// 	file_evictions += 1;
-			// 			// 	self.metrics.cache_page_evictions_counter.inc();
-			// 			// }			
-			// 			continue 'outer;
-			// 		}
-			// 		drop(entry);
-			// 		// Not great...
-			// 		std::thread::sleep(std::time::Duration::from_millis(1));
-			// 		continue;
-			// 		// TODO(quantumish): is this expected behavior?
-			// 	}
-			// }
-			// tracing::info!("removed {file_evictions} blocks from end");
+			// Reset clock hand to prevent competing with it for evicting entries at end of the map.
+			let mut old_hand = self.clock_hand.load(Ordering::Relaxed);
+			if old_hand > num_blocks as usize {
+				loop {
+					match self.clock_hand.compare_exchange_weak(
+						old_hand, 0, Ordering::Relaxed, Ordering::Relaxed
+					) {
+						Ok(_) => break,
+						Err(x) => old_hand = x,
+					}
+				}
+			}
 
-			
 			let mut file_evictions = 0;
-			let (sz, blks) = file_cache.num_allocated_blocks();
-			tracing::warn!("size originally ({sz}, {blks}) ({} blocks)", blks/8);
-			tracing::warn!("trying to shrink to {} blocks from {} ({} in use)",
-						   num_blocks, old_num_blocks, self.block_map.get_num_buckets_in_use());
-			let mut remaining = file_cache.reclaim_blocks(difference as u64 - file_evictions);
-			tracing::warn!("reclaimed {file_evictions} blocks");
+			'outer: for i in num_blocks..old_num_blocks {
+				loop { 
+					let Some(entry) = self.block_map.entry_at_bucket(i as usize) else {
+						continue 'outer;
+					};
+					let old = entry.get();
+					if old.pinned.load(Ordering::Relaxed) == 0 {
+						let old_val = entry.remove();
+						let _ = self
+							.shared
+							.global_lw_lsn
+							.fetch_max(old_val.lw_lsn.into_inner().0, Ordering::Relaxed);
+						let cache_block = old_val.cache_block.into_inner();
+						if cache_block != INVALID_CACHE_BLOCK {
+							file_cache.delete_block(cache_block);
+							file_evictions += 1;
+							self.metrics.cache_page_evictions_counter.inc();
+						}			
+						continue 'outer;
+					}
+					drop(entry);
+					// Not great, although in practice nothing should stay pinned for very long.
+					// Possible TODO: see max # of inner loops for a sample workload.
+					std::thread::sleep(std::time::Duration::from_millis(1));
+					continue;
+				}
+			}
 			
-			tracing::warn!("size before evictions: {}. {file_evictions} evictions done (out of {difference}", file_cache.size.load(Ordering::Relaxed));
-			let old = file_evictions;
-			let mut evictions = 0;
+			let mut remaining = file_cache.reclaim_blocks(difference as u64 - file_evictions);
 			while remaining > 0 as u64 {
 				if let Some(i) = self.try_evict_cache_block() {
-					evictions += 1;
 					if i != INVALID_CACHE_BLOCK {
 						file_cache.delete_block(i);
 						remaining -= 1;
 					}
 				}
 			}
-			tracing::warn!("evicted {evictions} map entries, {old} file entries");
-			let (sz, blks) = file_cache.num_allocated_blocks();
-			tracing::warn!("size now ({sz}, {blks}) (should be {} blocks, is actually {} blocks)", 
-						   file_cache.size.load(Ordering::Relaxed), blks/8);
 
-			// // self.block_map.begin_shrink(u32::MAX);
-			// if let Err(err) = self.block_map.finish_shrink() { 
-			// 	tracing::warn!(
-			// 		"could not shrink file cache to {} blocks (old size {}): {}",
-			// 		num_blocks,
-			// 		old_num_blocks,
-			// 		err
-			// 	);
-			// }
+			if let Err(err) = self.block_map.finish_shrink() { 
+				tracing::warn!(
+					"could not shrink file cache to {} blocks (old size {}): {}",
+					num_blocks,
+					old_num_blocks,
+					err
+				);
+			}
         }
-		tracing::warn!("\n END OP ");
 	}
 
     pub fn dump_map(&self, _dst: &mut dyn std::io::Write) {
