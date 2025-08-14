@@ -31,11 +31,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     container:
-      image: ${{ vars.REGISTRY }}/brickstore/neon/build-tools:pinned-bookworm
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
-        username: ${{ secrets.IMAGE_REGISTRY_USER }}
-        password: ${{ secrets.IMAGE_REGISTRY_PASSWORD }}
-      options: --init
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      # for changed limits, see comments on `options:` earlier in this file
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864 --ulimit nofile=65536:65536 --security-opt seccomp=unconfined
 
     steps:
       - name: Checkout sysbench source
