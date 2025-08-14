@@ -1,0 +1,91 @@
+name: verify runner performance with sysbench
+
+on:
+  # uncomment to run on push for debugging your PR
+  push:
+    branches: [ 'bodobolero/sysbench_4_perf_runner' ]
+  workflow_dispatch:
+    inputs:
+      runner_labels_json:
+        description: JSON array of runner labels to test (e.g. ["small-amd64","large-amd64"]) 
+        required: false
+        default: '["unit-perf-aws-arm"]'
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  group: sysbench-runner-perf
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sysbench:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner_labels_json != '' && inputs.runner_labels_json) || '["unit-perf-aws-arm"]') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    container:
+      image: ${{ vars.REGISTRY }}/brickstore/neon/build-tools:pinned-bookworm
+      credentials:
+        username: ${{ secrets.IMAGE_REGISTRY_USER }}
+        password: ${{ secrets.IMAGE_REGISTRY_PASSWORD }}
+      options: --init
+
+    steps:
+      - name: Checkout sysbench source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: akopytov/sysbench
+          ref: master
+          path: sysbench
+
+      - name: Build sysbench
+        run: |
+          cd "$GITHUB_WORKSPACE/sysbench"
+          ./autogen.sh
+          ./configure --without-mysql
+          make -j"$(nproc || sysctl -n hw.ncpu || echo 2)"
+          ./src/sysbench --version
+
+      - name: sysbench io prepare
+        run: |
+          "$GITHUB_WORKSPACE/sysbench/src/sysbench" fileio \
+            --file-total-size=2G \
+            --file-test-mode=rndrw \
+            --file-extra-flags=direct \
+            --file-fsync-freq=0 \
+            --threads=4 \
+            --time=60 prepare
+
+      - name: sysbench io run
+        run: |
+          "$GITHUB_WORKSPACE/sysbench/src/sysbench" fileio \
+            --file-total-size=2G \
+            --file-test-mode=rndrw \
+            --file-extra-flags=direct \
+            --file-fsync-freq=0 \
+            --threads=4 \
+            --time=60 run
+
+      - name: sysbench cpu
+        run: |
+          "$GITHUB_WORKSPACE/sysbench/src/sysbench" cpu \
+            --cpu-max-prime=200000 \
+            --threads=8 \
+            --time=60 run
+
+      - name: sysbench memory
+        run: |
+          "$GITHUB_WORKSPACE/sysbench/src/sysbench" memory \
+            --memory-block-size=1M \
+            --memory-total-size=8G \
+            --threads=8 \
+            --time=60 run
+
+
