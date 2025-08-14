@@ -90,8 +90,10 @@ jobs:
         run: |
           "$GITHUB_WORKSPACE/sysbench/src/sysbench" memory \
             --memory-block-size=1M \
-            --memory-total-size=8G \
+            --memory-total-size=0 \
             --threads=8 \
-            --time=60 run
+            --time=60 \
+            --memory-oper=write \
+            run
 
 
