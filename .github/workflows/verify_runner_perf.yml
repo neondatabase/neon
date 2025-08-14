@@ -28,6 +28,11 @@ jobs:
       fail-fast: false
       matrix:
         runner: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner_labels_json != '' && inputs.runner_labels_json) || '["unit-perf-aws-arm"]') }}
+    permissions:
+      id-token: write # aws-actions/configure-aws-credentials
+      statuses: write
+      contents: write
+      pull-requests: write
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     container:
