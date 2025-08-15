@@ -129,6 +129,16 @@ pub(super) fn reconcile(
     // Construct Decisions for layers that are found locally, if they're in remote metadata.  Otherwise
     // construct DismissedLayers to get rid of them.
     for (layer_name, local_metadata) in local_layers {
+        // FIXME: This should probably take generation into account. Currently it's possible to have
+        // an old generation file on disk while a newer one with same name is in index (because
+        // primary just split shard) and we miss that here. We are saved by the check below because
+        // the file size is very likely to be different (and if it isn't then the file contents will
+        // probably be the same anyway in case of shard split), but it's confusing that this logic
+        // doesn't account for name collisions from older generations. Ideally, we should consider a
+        // local file from an older generation than the one in the index to be a different file and
+        // return `DismissedLayer::LocalOnly` if generations don't match. Right now though,
+        // layer_name has the generation part stripped so we'd need to re-parse the generation from
+        // the file name here or back in scan_timeline_dir and add it to LocalLayerFileMetadata.
         let Some(remote_metadata) = index_part.layer_metadata.get(&layer_name) else {
             result.push((layer_name, Err(DismissedLayer::LocalOnly(local_metadata))));
             continue;

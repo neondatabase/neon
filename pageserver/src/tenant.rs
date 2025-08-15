@@ -1580,7 +1580,7 @@ impl TenantShard {
     }
 
     #[instrument(skip_all)]
-    pub(crate) async fn preload(
+    pub(crate) async fn  preload(
         self: &Arc<Self>,
         remote_storage: &GenericRemoteStorage,
         cancel: CancellationToken,

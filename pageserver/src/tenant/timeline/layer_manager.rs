@@ -645,8 +645,13 @@ impl OpenLayerManager {
 
     #[cfg(test)]
     pub(crate) fn force_insert_layer(&mut self, layer: ResidentLayer) {
+        self.force_insert_optionally_resident_layer(layer.as_ref().clone());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_insert_optionally_resident_layer(&mut self, layer: Layer) {
         let mut updates = self.layer_map.batch_update();
-        Self::insert_historic_layer(layer.as_ref().clone(), &mut updates, &mut self.layer_fmgr);
+        Self::insert_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
         updates.flush()
     }
 

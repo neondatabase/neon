@@ -88,7 +88,7 @@ use self::eviction_task::EvictionTaskTimelineState;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::remote_timeline_client::index::{GcCompactionState, IndexPart};
+use super::remote_timeline_client::index::{GcCompactionState, IndexPart, LayerFileMetadata};
 use super::secondary::heatmap::HeatMapLayer;
 use super::storage_layer::{LayerFringe, LayerVisibilityHint, ReadableLayer};
 use super::tasks::log_compaction_error;
@@ -4205,6 +4205,12 @@ impl Timeline {
                 let desc: PersistentLayerDesc = hl.name.clone().into();
                 let layer = guard.try_get_from_key(&desc.key())?;
 
+                // Make sure the layer in the old heatmap is the same generation one as in the layer
+                // map otherwise we can in some edge case keep old obsolete layers in the heatmap.
+                if layer.metadata().generation != hl.metadata.generation {
+                    return None;
+                }
+
                 if layer.visibility() == LayerVisibilityHint::Covered {
                     return None;
                 }
@@ -6474,6 +6480,7 @@ pub struct DeltaLayerTestDesc {
     pub lsn_range: Range<Lsn>,
     pub key_range: Range<Key>,
     pub data: Vec<(Key, Lsn, Value)>,
+    pub resident: bool,
 }
 
 #[cfg(test)]
@@ -6491,6 +6498,8 @@ impl DeltaLayerTestDesc {
             lsn_range,
             key_range,
             data,
+            // Default test code creates resident layers.
+            resident: true,
         }
     }
 
@@ -6498,12 +6507,21 @@ impl DeltaLayerTestDesc {
         lsn_range: Range<Lsn>,
         data: Vec<(Key, Lsn, Value)>,
     ) -> Self {
+        Self::new_with_inferred_key_range_and_resident_state(lsn_range, data, true)
+    }
+
+    pub fn new_with_inferred_key_range_and_resident_state(
+        lsn_range: Range<Lsn>,
+        data: Vec<(Key, Lsn, Value)>,
+        resident: bool,
+    ) -> Self {
         let key_min = data.iter().map(|(key, _, _)| key).min().unwrap();
         let key_max = data.iter().map(|(key, _, _)| key).max().unwrap();
         Self {
             key_range: (*key_min)..(key_max.next()),
             lsn_range,
             data,
+            resident
         }
     }
 
@@ -7505,6 +7523,30 @@ impl Timeline {
         check_start_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+
+        if !deltas.resident {
+            // Don't need to bother creating an on-disk file, we just want the metadata for a non-resident layer.
+            let delta_layer = Layer::for_evicted(
+                self.conf,
+                self,
+                deltas.layer_name(),
+                LayerFileMetadata {
+                    generation: self.generation,
+                    shard: self.get_shard_index(),
+                    file_size: 1024,
+                },
+            );
+            info!("force created non-resident delta layer {}", deltas.layer_name());
+            {
+                let mut guard = self.layers.write(LayerManagerLockHolder::Testing).await;
+                guard
+                    .open_mut()
+                    .unwrap()
+                    .force_insert_optionally_resident_layer(delta_layer);
+            }
+            return Ok(());
+        }
+
         let last_record_lsn = self.get_last_record_lsn();
         deltas
             .data
@@ -8261,6 +8303,148 @@ mod tests {
             timeline.previous_heatmap.load().as_deref(),
             Some(PreviousHeatmap::Obsolete)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_heatmap_generation_removes_layers_from_old_generation() {
+        use std::time::SystemTime;
+        use utils::generation::Generation;
+        use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+        use crate::tenant::secondary::heatmap::{HeatMapLayer, HeatMapTimeline as HeatMapTimelineStruct};
+
+        let harness = TenantHarness::create("heatmaheatmap_genereation_removes_layers_from_old_generationp_generation").await.unwrap();
+
+        // Create your existing layer descriptions
+        let covered_delta = DeltaLayerTestDesc::new_with_inferred_key_range(
+            Lsn(0x10)..Lsn(0x20),
+            vec![(
+                Key::from_hex("620000000033333333444444445500000000").unwrap(),
+                Lsn(0x11),
+                Value::Image(test_img("foo")),
+            )],
+        );
+        // This visible layer is non-resident on disk. This is important to reproduce the failure as
+        // a resident file will take priority over the previous heatmap even without the fix for
+        // this issue.
+        let visible_delta = DeltaLayerTestDesc::new_with_inferred_key_range_and_resident_state(
+            Lsn(0x10)..Lsn(0x20),
+            vec![(
+                Key::from_hex("720000000033333333444444445500000000").unwrap(),
+                Lsn(0x11),
+                Value::Image(test_img("foo")),
+            )],
+            false, // Non-resident
+        );
+        let l0_delta = DeltaLayerTestDesc::new(
+            Lsn(0x20)..Lsn(0x30),
+            Key::from_hex("000000000000000000000000000000000000").unwrap()
+                ..Key::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap(),
+            vec![(
+                Key::from_hex("720000000033333333444444445500000000").unwrap(),
+                Lsn(0x25),
+                Value::Image(test_img("foo")),
+            )],
+        );
+        let delta_layers = vec![
+            covered_delta.clone(),
+            visible_delta.clone(),
+            l0_delta.clone(),
+        ];
+
+        let image_layer = (
+            Lsn(0x40),
+            vec![(
+                Key::from_hex("620000000033333333444444445500000000").unwrap(),
+                test_img("bar"),
+            )],
+        );
+        let image_layers = vec![image_layer];
+
+        let (tenant, ctx) = harness.load().await;
+
+        // Create timeline with current generation (0xdeadbeef by default)
+        let timeline = tenant
+            .create_test_timeline_with_layers(
+                TimelineId::generate(),
+                Lsn(0x10),
+                PgMajorVersion::PG14,
+                &ctx,
+                Vec::new(), // in-memory layers
+                delta_layers,
+                image_layers,
+                Lsn(0x100),
+            )
+            .await
+            .unwrap();
+
+        // Now create a previous heatmap with the visible_delta layer from an older generation
+        let current_layer_metadata = LayerFileMetadata {
+            generation: timeline.generation,
+            shard: timeline.get_shard_index(),
+            file_size: 1024,
+        };
+        let old_generation = Generation::new(0x12345678); // Older than 0xdeadbeef
+        let old_layer_metadata = LayerFileMetadata {
+            generation: old_generation,
+            shard: timeline.get_shard_index(),
+            file_size: 1024,
+        };
+
+        // Create heatmap layers that reference the same keys but with old generation
+        let prev_heatmap_layers = vec![
+            HeatMapLayer::new(
+                covered_delta.layer_name(),
+                current_layer_metadata.clone(),
+                SystemTime::now(),
+                false, // not cold
+            ),
+            HeatMapLayer::new(
+                visible_delta.layer_name(),
+                // Visible delta layer is from an older generation in heatmap
+                old_layer_metadata.clone(),
+                SystemTime::now(),
+                false, // not cold
+            ),
+            HeatMapLayer::new(
+                l0_delta.layer_name(),
+                current_layer_metadata.clone(),
+                SystemTime::now(),
+                false, // not cold
+            ),
+        ];
+
+        // Create the previous heatmap with old generation layers
+        let prev_heatmap = HeatMapTimelineStruct::new(timeline.timeline_id, prev_heatmap_layers);
+
+        // Set the previous heatmap on the timeline
+        timeline
+            .previous_heatmap
+            .store(Some(Arc::new(PreviousHeatmap::Active {
+                heatmap: prev_heatmap,
+                read_at: std::time::Instant::now(),
+                end_lsn: None,
+            })));
+
+        // Layer visibility is an input to heatmap generation, so refresh it first
+        timeline.update_layer_visibility().await.unwrap();
+
+        // Generate a new heatmap - this should filter out the old generation layers
+        let heatmap = timeline
+            .generate_heatmap()
+            .await
+            .expect("Infallible while timeline is not shut down");
+
+        assert_eq!(heatmap.timeline_id, timeline.timeline_id);
+
+        // Verify that layers exist but they should be the current generation ones,
+        // not the old generation ones from previous_heatmap
+        for layer in heatmap.all_layers() {
+            assert_eq!(
+                layer.metadata.generation,
+                timeline.generation,
+                "Heatmap should only contain current generation layers, not old ones"
+            );
+        }
     }
 
     #[tokio::test]
