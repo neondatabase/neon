@@ -1046,6 +1046,7 @@ impl RemoteStorage for GCSBucket {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: &CancellationToken,
+        complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError> {
         Ok(())
     }
