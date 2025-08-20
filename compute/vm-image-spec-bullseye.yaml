@@ -42,10 +42,7 @@ commands:
   - name: enable-kernel-modules
     user: root
     sysvInitAction: sysinit
-    # Symlinking is impossible due to the files being mounted from
-    # iso9660, and many tools require mmaping the files, and iso9660
-    # doesn't support that. So we copy the files instead.
-    shell: mkdir -p /lib/modules && cp /neonvm/tools/lib/modules/* /lib/modules -R
+    shell: mkdir -p /lib/ && ln -s /neonvm/tools/lib/modules /lib/
   - name: enable-bpfs
     user: root
     sysvInitAction: sysinit
