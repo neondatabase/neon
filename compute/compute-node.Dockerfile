@@ -1510,7 +1510,8 @@ ARG PG_VERSION
 WORKDIR /ext-src
 RUN git clone --depth 1 --branch poc https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
     cd pg_mooncake-src && \
-    git submodule update --init --recursive
+    git submodule update --init --recursive && \
+    sed -i 's/pgrx = "0.16.0"/pgrx = { version = "0.16.0", features = [ "unsafe-postgres" ] }/g' Cargo.toml
 
 FROM rust-extensions-build-pgrx16 AS pg_mooncake-build
 COPY --from=pg_mooncake-src /ext-src/ /ext-src/
