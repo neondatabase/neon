@@ -1991,6 +1991,10 @@ RUN apt update && \
         locales \
         lsof \
         procps \
+        bpfcc-tools \
+        libbpfcc \
+        libbpfcc-dev \
+        libclang-dev \
         rsyslog-gnutls \
         screen \
         tcpdump \
