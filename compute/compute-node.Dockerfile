@@ -1508,7 +1508,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pg_mooncake-src
 ARG PG_VERSION
 WORKDIR /ext-src
-RUN git clone --depth 1 --branch poc https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
+RUN git clone --depth 1 --branch poc-08.22 https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
     cd pg_mooncake-src && \
     git submodule update --init --recursive && \
     sed -i 's/pgrx = "0.16.0"/pgrx = { version = "0.16.0", features = [ "unsafe-postgres" ] }/g' Cargo.toml
