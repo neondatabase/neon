@@ -49,6 +49,10 @@ jobs:
             stripe_size: null # run with neon defaults which will shard split only when reaching the threshold
             disable_sharding: false
             postgres_version: 17
+          - target_project: new_empty_project
+            stripe_size: null # run with neon defaults which will shard split only when reaching the threshold
+            disable_sharding: false
+            postgres_version: 18
           - target_project: large_existing_project
             stripe_size: null # cannot re-shared or choose different stripe size for existing, already sharded project
             disable_sharding: false
