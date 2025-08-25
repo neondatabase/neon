@@ -142,6 +142,10 @@ jobs:
             PLATFORM: "neon-staging"
             region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
             RUNNER: [ self-hosted, us-east-2, x64 ]
+          - PG_VERSION: 18
+            PLATFORM: "neon-staging"
+            region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+            RUNNER: [ self-hosted, us-east-2, x64 ]
           - PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
@@ -259,7 +263,7 @@ jobs:
       id-token: write # aws-actions/configure-aws-credentials
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 17
+      DEFAULT_PG_VERSION: 18
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
@@ -560,7 +564,7 @@ jobs:
             "neonvm-captest-reuse"
           ],
           "pg_version" : [
-            16,17
+            16,17,18
           ]
         }'
 
@@ -579,7 +583,7 @@ jobs:
             "neonvm-captest-reuse"
           ],
           "pg_version" : [
-            16,17
+            16,17,18
           ]
         }'
 
@@ -793,6 +797,9 @@ jobs:
           - PLATFORM: "neonvm-captest-pgvector-pg17"
             RUNNER: [ self-hosted, us-east-2, x64 ]
             postgres_version: 17
+          - PLATFORM: "neonvm-captest-pgvector-pg18"
+            RUNNER: [ self-hosted, us-east-2, x64 ]
+            postgres_version: 18
           - PLATFORM: "azure-captest-pgvector"
             RUNNER: [ self-hosted, eastus2, x64 ]
             postgres_version: 16
@@ -848,6 +855,9 @@ jobs:
             ;;
           neonvm-captest-pgvector-pg17)
             CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR_PG17 }}
+            ;;
+          neonvm-captest-pgvector-pg18)
+            CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR_PG18 }}
             ;;
           azure-captest-pgvector)
             CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR_AZURE }}
@@ -985,6 +995,9 @@ jobs:
               17)
                 CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_CONNSTR_PG17 }}
                 ;;
+              18)
+                CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_CONNSTR_PG18 }}
+                ;;
               *)
                 echo >&2 "Unsupported PG_VERSION=${PG_VERSION} for PLATFORM=${PLATFORM}"
                 exit 1
@@ -1110,6 +1123,9 @@ jobs:
               17)
                 CONNSTR_SECRET_NAME="BENCHMARK_CAPTEST_TPCH_CONNSTR_PG17"
                 ;;
+              18)
+                CONNSTR_SECRET_NAME="BENCHMARK_CAPTEST_TPCH_CONNSTR_PG18"
+                ;;
               *)
                 echo >&2 "Unsupported PG_VERSION=${PG_VERSION} for PLATFORM=${PLATFORM}"
                 exit 1
@@ -1234,6 +1250,9 @@ jobs:
                 ;;
               17)
                 CONNSTR=${{ secrets.BENCHMARK_CAPTEST_USER_EXAMPLE_CONNSTR_PG17 }}
+                ;;
+              18)
+                CONNSTR=${{ secrets.BENCHMARK_CAPTEST_USER_EXAMPLE_CONNSTR_PG18 }}
                 ;;
               *)
                 echo >&2 "Unsupported PG_VERSION=${PG_VERSION} for PLATFORM=${PLATFORM}"
