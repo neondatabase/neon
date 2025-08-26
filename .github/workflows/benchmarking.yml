@@ -546,7 +546,11 @@ jobs:
                       { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'"                               },
                       { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
                       { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new-many-tables","db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
-                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               }]
+                      { "pg_version": 17, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 18, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 18, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 18, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new-many-tables","db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               },
+                      { "pg_version": 18, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'"                               }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
