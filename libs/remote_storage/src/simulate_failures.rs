@@ -63,6 +63,7 @@ impl UnreliableWrapper {
             GenericRemoteStorage::Unreliable(_s) => {
                 panic!("Can't wrap unreliable wrapper unreliably")
             }
+            GenericRemoteStorage::GCS(_) => todo!(),
         };
         let actual_attempt_failure_probability = cmp::min(attempt_failure_probability, 100);
         UnreliableWrapper {
