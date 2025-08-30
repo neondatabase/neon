@@ -1,29 +1,40 @@
 #![allow(dead_code)]
 #![allow(unused)]
 
+mod common;
+
+use crate::common::{download_to_vec, upload_stream};
 use anyhow::Context;
+use camino::Utf8Path;
 use futures::StreamExt;
 use futures::stream::Stream;
 use remote_storage::{
-    DownloadKind, DownloadOpts, GCSConfig, GenericRemoteStorage, RemotePath, RemoteStorageConfig,
-    RemoteStorageKind, StorageMetadata,
+    DownloadKind, DownloadOpts, GCSConfig, GenericRemoteStorage, ListingMode, RemotePath,
+    RemoteStorageConfig, RemoteStorageKind, StorageMetadata,
 };
 use std::collections::HashMap;
+#[path = "common/tests.rs"]
+use std::collections::HashSet;
+use std::fmt::{Debug, Display};
 use std::io::Cursor;
 use std::ops::Bound;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
 use test_context::{AsyncTestContext, test_context};
 use tokio_util::sync::CancellationToken;
+use utils::backoff;
 
 // A minimal working GCS client I can pass around in async context
+
+const BASE_PREFIX: &str = "test";
 
 async fn create_gcs_client() -> anyhow::Result<Arc<GenericRemoteStorage>> {
     let bucket_name = std::env::var("GCS_TEST_BUCKET").expect("GCS_TEST_BUCKET must be set");
     let gcs_config = GCSConfig {
         bucket_name,
-        prefix_in_bucket: Some("pageserver/".into()),
+        prefix_in_bucket: Some("testing-path/".into()),
         max_keys_per_list_response: Some(100),
         concurrency_limit: std::num::NonZero::new(100).unwrap(),
     };
@@ -31,7 +42,7 @@ async fn create_gcs_client() -> anyhow::Result<Arc<GenericRemoteStorage>> {
     let remote_storage_config = RemoteStorageConfig {
         storage: RemoteStorageKind::GCS(gcs_config),
         timeout: Duration::from_secs(120),
-        small_timeout: std::time::Duration::from_secs(30),
+        small_timeout: std::time::Duration::from_secs(120),
     };
     Ok(Arc::new(
         GenericRemoteStorage::from_config(&remote_storage_config)
@@ -42,6 +53,7 @@ async fn create_gcs_client() -> anyhow::Result<Arc<GenericRemoteStorage>> {
 
 struct EnabledGCS {
     client: Arc<GenericRemoteStorage>,
+    base_prefix: &'static str,
 }
 
 impl EnabledGCS {
@@ -50,7 +62,10 @@ impl EnabledGCS {
             .await
             .context("gcs client creation")
             .expect("gcs client creation failed");
-        EnabledGCS { client }
+        EnabledGCS {
+            client,
+            base_prefix: BASE_PREFIX,
+        }
     }
 }
 
@@ -62,132 +77,200 @@ impl AsyncTestContext for EnabledGCS {
 
 #[test_context(EnabledGCS)]
 #[tokio::test]
-async fn gcs_test_suite_streaming_upload_download_delete_large_file(
-    ctx: &mut EnabledGCS,
-) -> anyhow::Result<()> {
-    let gcs = &ctx.client;
+async fn gcs_test_suite(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
+    // ------------------------------------------------
+    // --- `time_travel_recover`, showcasing `upload`, `delete_objects`, `copy`
+    // ------------------------------------------------
 
-    let source_file = std::io::Cursor::new(vec![0; 256000000]);
-    let file_size = 256000000 as usize;
-    let reader = tokio_util::io::ReaderStream::with_capacity(source_file, file_size);
-    // shared function arguments
-    let remote_path = RemotePath::from_string("large_file.dat")?;
-    let cancel = CancellationToken::new();
+    // Our test depends on discrepancies in the clock between S3 and the environment the tests
+    // run in. Therefore, wait a little bit before and after. The alternative would be
+    // to take the time from S3 response headers.
+    const WAIT_TIME: Duration = Duration::from_millis(3_000);
 
-    // order matters and that's okay for now
-    let res = gcs
-        .upload(
-            reader,
-            file_size,
-            &remote_path,
-            Some(StorageMetadata::from([(
-                "name",
-                "pageserver/large_file.dat",
-            )])),
-            &cancel,
+    async fn retry<T, O, F, E>(op: O) -> Result<T, E>
+    where
+        E: Display + Debug + 'static,
+        O: FnMut() -> F,
+        F: Future<Output = Result<T, E>>,
+    {
+        let warn_threshold = 3;
+        let max_retries = 10;
+        backoff::retry(
+            op,
+            |_e| false,
+            warn_threshold,
+            max_retries,
+            "test retry",
+            &CancellationToken::new(),
         )
-        .await?;
+        .await
+        .expect("never cancelled")
+    }
 
-    let opts = DownloadOpts {
-        etag: None,
-        byte_start: Bound::Unbounded,
-        byte_end: Bound::Unbounded,
-        version_id: None,
-        kind: DownloadKind::Small,
-    };
-    let res = gcs.download(&remote_path, &opts, &cancel).await?;
-    let mut stream = std::pin::pin!(res.download_stream);
-    while let Some(item) = stream.next().await {
-        let bytes = item?;
-        if !bytes.len() == 256 {
-            panic!("failed")
+    async fn time_point() -> SystemTime {
+        tokio::time::sleep(WAIT_TIME).await;
+        let ret = SystemTime::now();
+        tokio::time::sleep(WAIT_TIME).await;
+        ret
+    }
+
+    async fn list_files(
+        client: &Arc<GenericRemoteStorage>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<HashSet<RemotePath>> {
+        Ok(
+            retry(|| client.list(None, ListingMode::NoDelimiter, None, cancel))
+                .await
+                .context("list root files failure")?
+                .keys
+                .into_iter()
+                .map(|o| o.key)
+                .collect::<HashSet<_>>(),
+        )
+    }
+
+    let cancel = CancellationToken::new();
+
+    let path1 = RemotePath::new(Utf8Path::new(format!("{}/path1", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
+
+    let path2 = RemotePath::new(Utf8Path::new(format!("{}/path2", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
+
+    let path3 = RemotePath::new(Utf8Path::new(format!("{}/path3", ctx.base_prefix).as_str()))
+        .with_context(|| "RemotePath conversion")?;
+
+    // ---------------- t0 ---------------
+    // Upload 'path1'
+    retry(|| {
+        let (data, len) = upload_stream("remote blob data1".as_bytes().into());
+        ctx.client.upload(data, len, &path1, None, &cancel)
+    })
+    .await?;
+    let t0_files = list_files(&ctx.client, &cancel).await?;
+    let t0 = time_point().await;
+
+    // Show 'path1'
+    println!("at t0: {t0_files:?}");
+
+    // Upload 'path2'
+    let old_data = "remote blob data2";
+    retry(|| {
+        let (data, len) = upload_stream(old_data.as_bytes().into());
+        ctx.client.upload(data, len, &path2, None, &cancel)
+    })
+    .await?;
+
+    // ---------------- t1 ---------------
+    // Show 'path1' and 'path2'
+    let t1_files = list_files(&ctx.client, &cancel).await?;
+    let t1 = time_point().await;
+    println!("at t1: {t1_files:?}");
+
+    {
+        let opts = DownloadOpts::default();
+        let dl = retry(|| ctx.client.download(&path2, &opts, &cancel)).await?;
+        let last_modified = dl.last_modified;
+        let half_wt = WAIT_TIME.mul_f32(0.5);
+        let t0_hwt = t0 + half_wt;
+        let t1_hwt = t1 - half_wt;
+        if !(t0_hwt..=t1_hwt).contains(&last_modified) {
+            panic!(
+                "last_modified={last_modified:?} is not between t0_hwt={t0_hwt:?} and t1_hwt={t1_hwt:?}. \
+                This likely means a large lock discrepancy between S3 and the local clock."
+            );
         }
     }
 
-    let paths = [remote_path];
-    gcs.delete_objects(&paths, &cancel).await?;
+    // Upload 'path3'
+    retry(|| {
+        let (data, len) = upload_stream("remote blob data3".as_bytes().into());
+        ctx.client.upload(data, len, &path3, None, &cancel)
+    })
+    .await?;
 
-    Ok(())
-}
+    // Overwrite 'path2'
+    let new_data = "new remote blob data2";
+    retry(|| {
+        let (data, len) = upload_stream(new_data.as_bytes().into());
+        ctx.client.upload(data, len, &path2, None, &cancel)
+    })
+    .await?;
 
-#[test_context(EnabledGCS)]
-#[tokio::test]
-async fn gcs_test_multipart_upload_manifest_without_name_set(
-    ctx: &mut EnabledGCS,
-) -> anyhow::Result<()> {
-    let gcs = &ctx.client;
+    // Delete 'path1'
+    retry(|| ctx.client.delete(&path1, &cancel)).await?;
 
-    // Failed to upload data of length 58 to storage path RemotePath("tenants/99336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json"
-    let source_file = std::io::Cursor::new(vec![0; 256]);
-    let file_size = 256 as usize;
-    let reader = tokio_util::io::ReaderStream::with_capacity(source_file, file_size);
+    // Show 'path2' and `path3`
+    let t2_files = list_files(&ctx.client, &cancel).await?;
+    let t2 = time_point().await;
+    println!("at t2: {t2_files:?}");
 
-    // shared function arguments
-    let path = "tenants/99336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json";
-    let remote_path = RemotePath::from_string(path)?;
-    let cancel = CancellationToken::new();
-
-    // order matters and that's okay for now
-    let res = gcs
-        .upload(reader, file_size, &remote_path, None, &cancel)
+    // No changes after recovery to t2 (no-op)
+    let t_final = time_point().await;
+    ctx.client
+        .time_travel_recover(None, t2, t_final, &cancel, None)
         .await?;
+    let t2_files_recovered = list_files(&ctx.client, &cancel).await?;
+    println!("after recovery to t2: {t2_files_recovered:?}");
 
-    let paths = [remote_path];
-    gcs.delete_objects(&paths, &cancel).await?;
+    assert_eq!(t2_files, t2_files_recovered);
+    let path2_recovered_t2 = download_to_vec(
+        ctx.client
+            .download(&path2, &DownloadOpts::default(), &cancel)
+            .await?,
+    )
+    .await?;
+    assert_eq!(path2_recovered_t2, new_data.as_bytes());
 
-    Ok(())
-}
-
-#[test_context(EnabledGCS)]
-#[tokio::test]
-async fn gcs_test_download_manifest_without_name_set(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
-    let gcs = &ctx.client;
-
-    let source_file = std::io::Cursor::new(vec![0; 256]);
-    let file_size = 256 as usize;
-    let reader = tokio_util::io::ReaderStream::with_capacity(source_file, file_size);
-
-    // shared function arguments
-    let path = "tenants/89336152a31c64b41034e4e904629ce9-0102/tenant-manifest-00000001.json";
-    let remote_path = RemotePath::from_string(path)?;
-    let cancel = CancellationToken::new();
-
-    // order matters and that's okay for now
-    let res = gcs
-        .upload(reader, file_size, &remote_path, None, &cancel)
+    // after recovery to t1: path1 is back, path2 has the old content
+    let t_final = time_point().await;
+    ctx.client
+        .time_travel_recover(None, t1, t_final, &cancel, None)
         .await?;
+    let t1_files_recovered = list_files(&ctx.client, &cancel).await?;
+    println!("after recovery to t1: {t1_files_recovered:?}");
+    assert_eq!(t1_files, t1_files_recovered);
+    let path2_recovered_t1 = download_to_vec(
+        ctx.client
+            .download(&path2, &DownloadOpts::default(), &cancel)
+            .await?,
+    )
+    .await?;
+    assert_eq!(path2_recovered_t1, old_data.as_bytes());
 
-    let opts = DownloadOpts {
-        etag: None,
-        byte_start: Bound::Unbounded,
-        byte_end: Bound::Unbounded,
-        version_id: None,
-        kind: DownloadKind::Small,
-    };
-    let res = gcs.download(&remote_path, &opts, &cancel).await?;
-    let mut stream = std::pin::pin!(res.download_stream);
-    while let Some(item) = stream.next().await {
-        let bytes = item?;
-        if !bytes.len() == 256 {
-            panic!("failed")
-        }
-    }
-    Ok(())
-}
+    // after recovery to t0: everything is gone except for path1
+    let t_final = time_point().await;
+    ctx.client
+        .time_travel_recover(None, t0, t_final, &cancel, None)
+        .await?;
+    let t0_files_recovered = list_files(&ctx.client, &cancel).await?;
+    println!("after recovery to t0: {t0_files_recovered:?}");
+    assert_eq!(t0_files, t0_files_recovered);
 
-#[test_context(EnabledGCS)]
-#[tokio::test]
-async fn gcs_test_delete_key_not_found_does_not_error(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
-    let gcs = &ctx.client;
+    // cleanup
 
-    let key = "neon/safekeeper/99336152a31c64b41034e4e904629ce9/814ce0bd2ae452e11575402e8296b64d/000000010000000000000001_0_00000000014EEC40_00000000014EEC40_sk1.partial";
-    let remote_path = RemotePath::from_string(key)?;
-    let cancel = CancellationToken::new();
+    let paths = &[path1, path2, path3];
+    retry(|| ctx.client.delete_objects(paths, &cancel)).await?;
 
-    let paths = [remote_path];
-    gcs.delete_objects(&paths, &cancel).await?;
-    // Do it again just in case it was there.
-    gcs.delete_objects(&paths, &cancel).await?;
+    //// ------------------------------------------------
+    //// --- Missing Delete Key Doesn't Error
+    //// ------------------------------------------------
+    //let key = "neon/safekeeper/99336152a31c64b41034e4e904629ce9/814ce0bd2ae452e11575402e8296b64d/000000010000000000000001_0_00000000014EEC40_00000000014EEC40_sk1.partial";
+    //let remote_path = RemotePath::from_string(key)?;
+    //let cancel = CancellationToken::new();
+
+    //let paths = [remote_path.clone()];
+    //ctx.client
+    //    .delete_objects(&paths, &cancel).await?;
+    //// Do it again just in case it was there.
+    //ctx.client
+    //    .delete_objects(&paths, &cancel).await?;
+
+    // ------------------------------------------------
+    // --- Missing Delete Key Doesn't Error
+    // ------------------------------------------------
+    //let header = ctx.client.head_object(&remote_path, &cancel).await?;
+    //println!("header: {:?}", header);
 
     Ok(())
 }

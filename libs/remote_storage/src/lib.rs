@@ -188,6 +188,7 @@ pub struct VersionListing {
     pub versions: Vec<Version>,
 }
 
+#[derive(Debug)]
 pub struct Version {
     pub key: RemotePath,
     pub last_modified: SystemTime,
@@ -207,6 +208,47 @@ impl Version {
 pub enum VersionKind {
     DeletionMarker,
     Version(VersionId),
+}
+
+// I was going to do an `enum GenericVersion` but this feels cleaner.
+#[derive(Default)]
+pub struct GCSVersionListing {
+    pub versions: Vec<GCSVersion>,
+}
+
+#[derive(Debug)]
+pub struct GCSVersion {
+    pub key: RemotePath,
+    pub last_modified: SystemTime,
+    pub id: VersionId,
+    pub time_deleted: Option<SystemTime>,
+}
+
+impl From<GCSVersionListing> for VersionListing {
+    fn from(gcs_listing: GCSVersionListing) -> Self {
+        let version_listing = gcs_listing
+            .versions
+            .into_iter()
+            .map(
+                |GCSVersion {
+                     key,
+                     last_modified,
+                     id,
+                     ..
+                 }| {
+                    Version {
+                        key,
+                        last_modified,
+                        kind: VersionKind::Version(VersionId(id.0)),
+                    }
+                },
+            )
+            .collect::<Vec<Version>>();
+
+        VersionListing {
+            versions: version_listing,
+        }
+    }
 }
 
 /// Options for downloads. The default value is a plain GET.
@@ -644,7 +686,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.delete_prefix(prefix, cancel).await,
             Self::AzureBlob(s) => s.delete_prefix(prefix, cancel).await,
             Self::Unreliable(s) => s.delete_prefix(prefix, cancel).await,
-            Self::GCS(_) => todo!(),
+            Self::GCS(s) => s.delete_prefix(prefix, cancel).await,
         }
     }
 
@@ -660,7 +702,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.copy(from, to, cancel).await,
             Self::AzureBlob(s) => s.copy(from, to, cancel).await,
             Self::Unreliable(s) => s.copy(from, to, cancel).await,
-            Self::GCS(_) => todo!(),
+            Self::GCS(s) => s.copy(from, to, cancel).await,
         }
     }
 
@@ -690,7 +732,10 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
                 s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
                     .await
             }
-            Self::GCS(_) => todo!(),
+            Self::GCS(s) => {
+                s.time_travel_recover(prefix, timestamp, done_if_after, cancel, complexity_limit)
+                    .await
+            }
         }
     }
 }

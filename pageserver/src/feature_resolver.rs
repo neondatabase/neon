@@ -110,6 +110,12 @@ impl FeatureResolver {
                                 PostHogFlagFilterPropertyValue::String("local".to_string()),
                             );
                         }
+                        RemoteStorageKind::GCS { .. } => {
+                            properties.insert(
+                                "region".to_string(),
+                                PostHogFlagFilterPropertyValue::String("local".to_string()),
+                            );
+                        }
                     }
                 }
                 // TODO: move this to a background task so that we don't block startup in case of slow disk
