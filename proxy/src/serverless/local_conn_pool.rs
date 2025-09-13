@@ -16,19 +16,20 @@ use std::sync::atomic::AtomicUsize;
 use std::task::{Poll, ready};
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer, SigningKey};
-use futures::Future;
 use futures::future::poll_fn;
+use futures::{Future, FutureExt};
 use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use parking_lot::RwLock;
-use postgres_client::AsyncMessage;
 use postgres_client::tls::NoTlsStream;
 use serde_json::value::RawValue;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, info, info_span, warn};
+use tracing::{debug, error, info, info_span};
 
 use super::backend::HttpConnError;
 use super::conn_pool_lib::{
@@ -41,7 +42,7 @@ use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 
 pub(crate) const EXT_NAME: &str = "pg_session_jwt";
-pub(crate) const EXT_VERSION: &str = "0.3.0";
+pub(crate) const EXT_VERSION: &str = "0.3.1";
 pub(crate) const EXT_SCHEMA: &str = "auth";
 
 #[derive(Clone)]
@@ -184,16 +185,17 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     let cancel = CancellationToken::new();
     let cancelled = cancel.clone().cancelled_owned();
 
-    tokio::spawn(
-    async move {
+    tokio::spawn(async move {
         let _conn_gauge = conn_gauge;
         let mut idle_timeout = pin!(tokio::time::sleep(idle));
         let mut cancelled = pin!(cancelled);
 
         poll_fn(move |cx| {
+            let _instrument = span.enter();
+
             if cancelled.as_mut().poll(cx).is_ready() {
                 info!("connection dropped");
-                return Poll::Ready(())
+                return Poll::Ready(());
             }
 
             match rx.has_changed() {
@@ -204,7 +206,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 }
                 Err(_) => {
                     info!("connection dropped");
-                    return Poll::Ready(())
+                    return Poll::Ready(());
                 }
                 _ => {}
             }
@@ -216,48 +218,35 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
                 if let Some(pool) = pool.clone().upgrade() {
                     // remove client from pool - should close the connection if it's idle.
                     // does nothing if the client is currently checked-out and in-use
-                    if pool.global_pool.write().remove_client(db_user.clone(), conn_id) {
+                    if pool
+                        .global_pool
+                        .write()
+                        .remove_client(db_user.clone(), conn_id)
+                    {
                         info!("idle connection removed");
                     }
                 }
             }
 
-            loop {
-                let message = ready!(connection.poll_message(cx));
-
-                match message {
-                    Some(Ok(AsyncMessage::Notice(notice))) => {
-                        info!(%session_id, "notice: {}", notice);
-                    }
-                    Some(Ok(AsyncMessage::Notification(notif))) => {
-                        warn!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
-                    }
-                    Some(Ok(_)) => {
-                        warn!(%session_id, "unknown message");
-                    }
-                    Some(Err(e)) => {
-                        error!(%session_id, "connection error: {}", e);
-                        break
-                    }
-                    None => {
-                        info!("connection closed");
-                        break
-                    }
-                }
+            match ready!(connection.poll_unpin(cx)) {
+                Err(e) => error!(%session_id, "connection error: {}", e),
+                Ok(()) => info!("connection closed"),
             }
 
             // remove from connection pool
-            if let Some(pool) = pool.clone().upgrade() {
-                if pool.global_pool.write().remove_client(db_user.clone(), conn_id) {
-                    info!("closed connection removed");
-                }
+            if let Some(pool) = pool.clone().upgrade()
+                && pool
+                    .global_pool
+                    .write()
+                    .remove_client(db_user.clone(), conn_id)
+            {
+                info!("closed connection removed");
             }
 
             Poll::Ready(())
-        }).await;
-
-    }
-    .instrument(span));
+        })
+        .await;
+    });
 
     let inner = ClientInnerCommon {
         inner: client,
@@ -279,11 +268,6 @@ impl ClientInnerCommon<postgres_client::Client> {
         if let ClientDataEnum::Local(local_data) = &mut self.data {
             local_data.jti += 1;
             let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
-
-            self.inner
-                .discard_all()
-                .await
-                .map_err(SqlOverHttpError::InternalPostgres)?;
 
             // initiates the auth session
             // this is safe from query injections as the jwt format free of any escape characters.
@@ -346,7 +330,7 @@ fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
     jwt.push_str("eyJhbGciOiJFZERTQSJ9.");
 
     // encode the jwt payload in-place
-    base64::encode_config_buf(payload, base64::URL_SAFE_NO_PAD, &mut jwt);
+    BASE64_URL_SAFE_NO_PAD.encode_string(payload, &mut jwt);
 
     // create the signature from the encoded header || payload
     let sig: Signature = sk.sign(jwt.as_bytes());
@@ -354,7 +338,7 @@ fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
     jwt.push('.');
 
     // encode the jwt signature in-place
-    base64::encode_config_buf(sig.to_bytes(), base64::URL_SAFE_NO_PAD, &mut jwt);
+    BASE64_URL_SAFE_NO_PAD.encode_string(sig.to_bytes(), &mut jwt);
 
     debug_assert_eq!(
         jwt.len(),

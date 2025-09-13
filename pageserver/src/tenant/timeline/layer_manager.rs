@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use itertools::Itertools;
@@ -19,6 +22,156 @@ use crate::tenant::storage_layer::{
     AsLayerDesc, InMemoryLayer, Layer, LayerVisibilityHint, PersistentLayerDesc,
     PersistentLayerKey, ReadableLayerWeak, ResidentLayer,
 };
+
+/// Warn if the lock was held for longer than this threshold.
+/// It's very generous and we should bring this value down over time.
+const LAYER_MANAGER_LOCK_WARN_THRESHOLD: Duration = Duration::from_secs(5);
+const LAYER_MANAGER_LOCK_READ_WARN_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// Describes the operation that is holding the layer manager lock
+#[derive(Debug, Clone, Copy, strum_macros::Display)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum LayerManagerLockHolder {
+    GetLayerMapInfo,
+    GenerateHeatmap,
+    GetPage,
+    Init,
+    LoadLayerMap,
+    GetLayerForWrite,
+    TryFreezeLayer,
+    FlushFrozenLayer,
+    FlushLoop,
+    Compaction,
+    GarbageCollection,
+    Shutdown,
+    ImportPgData,
+    DetachAncestor,
+    Eviction,
+    ComputeImageConsistentLsn,
+    #[cfg(test)]
+    Testing,
+}
+
+/// Wrapper for the layer manager that tracks the amount of time during which
+/// it was held under read or write lock
+#[derive(Default)]
+pub(crate) struct LockedLayerManager {
+    locked: tokio::sync::RwLock<LayerManager>,
+}
+
+pub(crate) struct LayerManagerReadGuard<'a> {
+    guard: ManuallyDrop<tokio::sync::RwLockReadGuard<'a, LayerManager>>,
+    acquired_at: std::time::Instant,
+    holder: LayerManagerLockHolder,
+}
+
+pub(crate) struct LayerManagerWriteGuard<'a> {
+    guard: ManuallyDrop<tokio::sync::RwLockWriteGuard<'a, LayerManager>>,
+    acquired_at: std::time::Instant,
+    holder: LayerManagerLockHolder,
+}
+
+impl Drop for LayerManagerReadGuard<'_> {
+    fn drop(&mut self) {
+        // Drop the lock first, before potentially warning if it was held for too long.
+        // SAFETY: ManuallyDrop in Drop implementation
+        unsafe { ManuallyDrop::drop(&mut self.guard) };
+
+        let held_for = self.acquired_at.elapsed();
+        if held_for >= LAYER_MANAGER_LOCK_READ_WARN_THRESHOLD {
+            tracing::warn!(
+                holder=%self.holder,
+                "Layer manager read lock held for {}s",
+                held_for.as_secs_f64(),
+            );
+        }
+    }
+}
+
+impl Drop for LayerManagerWriteGuard<'_> {
+    fn drop(&mut self) {
+        // Drop the lock first, before potentially warning if it was held for too long.
+        // SAFETY: ManuallyDrop in Drop implementation
+        unsafe { ManuallyDrop::drop(&mut self.guard) };
+
+        let held_for = self.acquired_at.elapsed();
+        if held_for >= LAYER_MANAGER_LOCK_WARN_THRESHOLD {
+            tracing::warn!(
+                holder=%self.holder,
+                "Layer manager write lock held for {}s",
+                held_for.as_secs_f64(),
+            );
+        }
+    }
+}
+
+impl Deref for LayerManagerReadGuard<'_> {
+    type Target = LayerManager;
+
+    fn deref(&self) -> &Self::Target {
+        self.guard.deref()
+    }
+}
+
+impl Deref for LayerManagerWriteGuard<'_> {
+    type Target = LayerManager;
+
+    fn deref(&self) -> &Self::Target {
+        self.guard.deref()
+    }
+}
+
+impl DerefMut for LayerManagerWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.guard.deref_mut()
+    }
+}
+
+impl LockedLayerManager {
+    pub(crate) async fn read(&self, holder: LayerManagerLockHolder) -> LayerManagerReadGuard {
+        let guard = ManuallyDrop::new(self.locked.read().await);
+        LayerManagerReadGuard {
+            guard,
+            acquired_at: std::time::Instant::now(),
+            holder,
+        }
+    }
+
+    pub(crate) fn try_read(
+        &self,
+        holder: LayerManagerLockHolder,
+    ) -> Result<LayerManagerReadGuard, tokio::sync::TryLockError> {
+        let guard = ManuallyDrop::new(self.locked.try_read()?);
+
+        Ok(LayerManagerReadGuard {
+            guard,
+            acquired_at: std::time::Instant::now(),
+            holder,
+        })
+    }
+
+    pub(crate) async fn write(&self, holder: LayerManagerLockHolder) -> LayerManagerWriteGuard {
+        let guard = ManuallyDrop::new(self.locked.write().await);
+        LayerManagerWriteGuard {
+            guard,
+            acquired_at: std::time::Instant::now(),
+            holder,
+        }
+    }
+
+    pub(crate) fn try_write(
+        &self,
+        holder: LayerManagerLockHolder,
+    ) -> Result<LayerManagerWriteGuard, tokio::sync::TryLockError> {
+        let guard = ManuallyDrop::new(self.locked.try_write()?);
+
+        Ok(LayerManagerWriteGuard {
+            guard,
+            acquired_at: std::time::Instant::now(),
+            holder,
+        })
+    }
+}
 
 /// Provides semantic APIs to manipulate the layer map.
 pub(crate) enum LayerManager {

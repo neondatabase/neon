@@ -430,6 +430,7 @@ def test_tenant_delete_stale_shards(neon_env_builder: NeonEnvBuilder, pg_bin: Pg
     workload.init()
     workload.write_rows(256)
     workload.validate()
+    workload.stop()
 
     assert_prefix_not_empty(
         neon_env_builder.pageserver_remote_storage,

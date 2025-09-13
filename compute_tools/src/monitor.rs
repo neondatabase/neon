@@ -11,8 +11,15 @@ use tracing::{Level, error, info, instrument, span};
 use crate::compute::ComputeNode;
 use crate::metrics::{PG_CURR_DOWNTIME_MS, PG_TOTAL_DOWNTIME_MS};
 
+const PG_DEFAULT_INIT_TIMEOUIT: Duration = Duration::from_secs(60);
 const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Struct to store runtime state of the compute monitor thread.
+/// In theory, this could be a part of `Compute`, but i)
+/// this state is expected to be accessed only by single thread,
+/// so we don't need to care about locking; ii) `Compute` is
+/// already quite big. Thus, it seems to be a good idea to keep
+/// all the activity/health monitoring parts here.
 struct ComputeMonitor {
     compute: Arc<ComputeNode>,
 
@@ -70,12 +77,39 @@ impl ComputeMonitor {
         )
     }
 
+    /// Check if compute is in some terminal or soon-to-be-terminal
+    /// state, then return `true`, signalling the caller that it
+    /// should exit gracefully. Otherwise, return `false`.
+    fn check_interrupts(&mut self) -> bool {
+        let compute_status = self.compute.get_status();
+        if matches!(
+            compute_status,
+            ComputeStatus::Terminated
+                | ComputeStatus::TerminationPendingFast
+                | ComputeStatus::TerminationPendingImmediate
+                | ComputeStatus::Failed
+        ) {
+            info!(
+                "compute is in {} status, stopping compute monitor",
+                compute_status
+            );
+            return true;
+        }
+
+        false
+    }
+
     /// Spin in a loop and figure out the last activity time in the Postgres.
-    /// Then update it in the shared state. This function never errors out.
+    /// Then update it in the shared state. This function currently never
+    /// errors out explicitly, but there is a graceful termination path.
+    /// Every time we receive an error trying to check Postgres, we use
+    /// [`ComputeMonitor::check_interrupts()`] because it could be that
+    /// compute is being terminated already, then we can exit gracefully
+    /// to not produce errors' noise in the log.
     /// NB: the only expected panic is at `Mutex` unwrap(), all other errors
     /// should be handled gracefully.
     #[instrument(skip_all)]
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> anyhow::Result<()> {
         // Suppose that `connstr` doesn't change
         let connstr = self.compute.params.connstr.clone();
         let conf = self
@@ -93,6 +127,10 @@ impl ComputeMonitor {
         info!("starting compute monitor for {}", connstr);
 
         loop {
+            if self.check_interrupts() {
+                break;
+            }
+
             match &mut client {
                 Ok(cli) => {
                     if cli.is_closed() {
@@ -100,6 +138,10 @@ impl ComputeMonitor {
                             downtime_info = self.downtime_info(),
                             "connection to Postgres is closed, trying to reconnect"
                         );
+                        if self.check_interrupts() {
+                            break;
+                        }
+
                         self.report_down();
 
                         // Connection is closed, reconnect and try again.
@@ -111,15 +153,19 @@ impl ComputeMonitor {
                                 self.compute.update_last_active(self.last_active);
                             }
                             Err(e) => {
+                                error!(
+                                    downtime_info = self.downtime_info(),
+                                    "could not check Postgres: {}", e
+                                );
+                                if self.check_interrupts() {
+                                    break;
+                                }
+
                                 // Although we have many places where we can return errors in `check()`,
                                 // normally it shouldn't happen. I.e., we will likely return error if
                                 // connection got broken, query timed out, Postgres returned invalid data, etc.
                                 // In all such cases it's suspicious, so let's report this as downtime.
                                 self.report_down();
-                                error!(
-                                    downtime_info = self.downtime_info(),
-                                    "could not check Postgres: {}", e
-                                );
 
                                 // Reconnect to Postgres just in case. During tests, I noticed
                                 // that queries in `check()` can fail with `connection closed`,
@@ -136,6 +182,10 @@ impl ComputeMonitor {
                         downtime_info = self.downtime_info(),
                         "could not connect to Postgres: {}, retrying", e
                     );
+                    if self.check_interrupts() {
+                        break;
+                    }
+
                     self.report_down();
 
                     // Establish a new connection and try again.
@@ -147,6 +197,9 @@ impl ComputeMonitor {
             self.last_checked = Utc::now();
             thread::sleep(MONITOR_CHECK_INTERVAL);
         }
+
+        // Graceful termination path
+        Ok(())
     }
 
     #[instrument(skip_all)]
@@ -300,13 +353,47 @@ impl ComputeMonitor {
 // Hang on condition variable waiting until the compute status is `Running`.
 fn wait_for_postgres_start(compute: &ComputeNode) {
     let mut state = compute.state.lock().unwrap();
+    let pg_init_timeout = compute
+        .params
+        .pg_init_timeout
+        .unwrap_or(PG_DEFAULT_INIT_TIMEOUIT);
+
     while state.status != ComputeStatus::Running {
         info!("compute is not running, waiting before monitoring activity");
-        state = compute.state_changed.wait(state).unwrap();
+        if !compute.params.lakebase_mode {
+            state = compute.state_changed.wait(state).unwrap();
 
-        if state.status == ComputeStatus::Running {
-            break;
+            if state.status == ComputeStatus::Running {
+                break;
+            }
+            continue;
         }
+
+        if state.pg_start_time.is_some()
+            && Utc::now()
+                .signed_duration_since(state.pg_start_time.unwrap())
+                .to_std()
+                .unwrap_or_default()
+                > pg_init_timeout
+        {
+            // If Postgres isn't up and running with working PS/SK connections within POSTGRES_STARTUP_TIMEOUT, it is
+            // possible that we started Postgres with a wrong spec (so it is talking to the wrong PS/SK nodes). To prevent
+            // deadends we simply exit (panic) the compute node so it can restart with the latest spec.
+            //
+            // NB: We skip this check if we have not attempted to start PG yet (indicated by state.pg_start_up == None).
+            // This is to make sure the more appropriate errors are surfaced if we encounter issues before we even attempt
+            // to start PG (e.g., if we can't pull the spec, can't sync safekeepers, or can't get the basebackup).
+            error!(
+                "compute did not enter Running state in {} seconds, exiting",
+                pg_init_timeout.as_secs()
+            );
+            std::process::exit(1);
+        }
+        state = compute
+            .state_changed
+            .wait_timeout(state, Duration::from_secs(5))
+            .unwrap()
+            .0;
     }
 }
 
@@ -320,9 +407,9 @@ fn get_database_stats(cli: &mut Client) -> anyhow::Result<(f64, i64)> {
     // like `postgres_exporter` use it to query Postgres statistics.
     // Use explicit 8 bytes type casts to match Rust types.
     let stats = cli.query_one(
-        "SELECT coalesce(sum(active_time), 0.0)::float8 AS total_active_time,
-            coalesce(sum(sessions), 0)::bigint AS total_sessions
-        FROM pg_stat_database
+        "SELECT pg_catalog.coalesce(pg_catalog.sum(active_time), 0.0)::pg_catalog.float8 AS total_active_time,
+            pg_catalog.coalesce(pg_catalog.sum(sessions), 0)::pg_catalog.bigint AS total_sessions
+        FROM pg_catalog.pg_stat_database
         WHERE datname NOT IN (
                 'postgres',
                 'template0',
@@ -358,11 +445,11 @@ fn get_backends_state_change(cli: &mut Client) -> anyhow::Result<Option<DateTime
     let mut last_active: Option<DateTime<Utc>> = None;
     // Get all running client backends except ourself, use RFC3339 DateTime format.
     let backends = cli.query(
-        "SELECT state, to_char(state_change, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS state_change
+        "SELECT state, pg_catalog.to_char(state_change, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'::pg_catalog.text) AS state_change
                 FROM pg_stat_activity
-                    WHERE backend_type = 'client backend'
-                    AND pid != pg_backend_pid()
-                    AND usename != 'cloud_admin';", // XXX: find a better way to filter other monitors?
+                    WHERE backend_type OPERATOR(pg_catalog.=) 'client backend'::pg_catalog.text
+                    AND pid OPERATOR(pg_catalog.!=) pg_catalog.pg_backend_pid()
+                    AND usename OPERATOR(pg_catalog.!=) 'cloud_admin'::pg_catalog.name;", // XXX: find a better way to filter other monitors?
         &[],
     );
 
@@ -424,12 +511,15 @@ pub fn launch_monitor(compute: &Arc<ComputeNode>) -> thread::JoinHandle<()> {
         experimental,
     };
 
-    let span = span!(Level::INFO, "compute_monitor");
     thread::Builder::new()
         .name("compute-monitor".into())
         .spawn(move || {
+            let span = span!(Level::INFO, "compute_monitor");
             let _enter = span.enter();
-            monitor.run();
+            match monitor.run() {
+                Ok(_) => info!("compute monitor thread terminated gracefully"),
+                Err(err) => error!("compute monitor thread terminated abnormally {:?}", err),
+            }
         })
         .expect("cannot launch compute monitor thread")
 }

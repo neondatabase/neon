@@ -44,7 +44,6 @@ use pageserver_api::key::{DBDIR_KEY, KEY_SIZE, Key};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
-use pageserver_api::value::Value;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tokio_epoll_uring::IoBuf;
@@ -54,7 +53,9 @@ use utils::bin_ser::BeSer;
 use utils::bin_ser::SerializeError;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
+use wal_decoder::models::value::Value;
 
+use super::errors::PutError;
 use super::{
     AsLayerDesc, LayerName, OnDiskValue, OnDiskValueIo, PersistentLayerDesc, ResidentLayer,
     ValuesReconstructState,
@@ -477,12 +478,15 @@ impl DeltaLayerWriterInner {
         lsn: Lsn,
         val: Value,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         let (_, res) = self
             .put_value_bytes(
                 key,
                 lsn,
-                Value::ser(&val)?.slice_len(),
+                Value::ser(&val)
+                    .map_err(anyhow::Error::new)
+                    .map_err(PutError::Other)?
+                    .slice_len(),
                 val.will_init(),
                 ctx,
             )
@@ -497,7 +501,7 @@ impl DeltaLayerWriterInner {
         val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, anyhow::Result<()>)
+    ) -> (FullSlice<Buf>, Result<(), PutError>)
     where
         Buf: IoBuf + Send,
     {
@@ -513,19 +517,24 @@ impl DeltaLayerWriterInner {
             .blob_writer
             .write_blob_maybe_compressed(val, ctx, compression)
             .await;
+        let res = res.map_err(PutError::WriteBlob);
         let off = match res {
             Ok((off, _)) => off,
-            Err(e) => return (val, Err(anyhow::anyhow!(e))),
+            Err(e) => return (val, Err(e)),
         };
 
         let blob_ref = BlobRef::new(off, will_init);
 
         let delta_key = DeltaKey::from_key_lsn(&key, lsn);
-        let res = self.tree.append(&delta_key.0, blob_ref.0);
+        let res = self
+            .tree
+            .append(&delta_key.0, blob_ref.0)
+            .map_err(anyhow::Error::new)
+            .map_err(PutError::Other);
 
         self.num_keys += 1;
 
-        (val, res.map_err(|e| anyhow::anyhow!(e)))
+        (val, res)
     }
 
     fn size(&self) -> u64 {
@@ -694,7 +703,7 @@ impl DeltaLayerWriter {
         lsn: Lsn,
         val: Value,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PutError> {
         self.inner
             .as_mut()
             .unwrap()
@@ -709,7 +718,7 @@ impl DeltaLayerWriter {
         val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (FullSlice<Buf>, anyhow::Result<()>)
+    ) -> (FullSlice<Buf>, Result<(), PutError>)
     where
         Buf: IoBuf + Send,
     {
@@ -774,7 +783,7 @@ impl DeltaLayer {
             ctx,
         )
         .await
-        .with_context(|| format!("Failed to open file '{}'", path))?;
+        .with_context(|| format!("Failed to open file '{path}'"))?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = block_reader.read_blk(0, ctx).await?;
@@ -1297,7 +1306,7 @@ impl DeltaLayerInner {
                     // is it an image or will_init walrecord?
                     // FIXME: this could be handled by threading the BlobRef to the
                     // VectoredReadBuilder
-                    let will_init = pageserver_api::value::ValueBytes::will_init(&data)
+                    let will_init = wal_decoder::models::value::ValueBytes::will_init(&data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
                             tracing::error!(data=?utils::Hex(&data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
@@ -1360,7 +1369,7 @@ impl DeltaLayerInner {
                     format!(" img {} bytes", img.len())
                 }
                 Value::WalRecord(rec) => {
-                    let wal_desc = pageserver_api::record::describe_wal_record(&rec)?;
+                    let wal_desc = wal_decoder::models::record::describe_wal_record(&rec)?;
                     format!(
                         " rec {} bytes will_init: {} {}",
                         buf.len(),
@@ -1392,7 +1401,7 @@ impl DeltaLayerInner {
                 match val {
                     Value::Image(img) => {
                         let checkpoint = CheckPoint::decode(&img)?;
-                        println!("   CHECKPOINT: {:?}", checkpoint);
+                        println!("   CHECKPOINT: {checkpoint:?}");
                     }
                     Value::WalRecord(_rec) => {
                         println!("   unexpected walrecord value for checkpoint key");
@@ -1439,14 +1448,6 @@ impl DeltaLayerInner {
             "index_start_offset"
         );
         offset
-    }
-
-    pub fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
-        self.iter_with_options(
-            ctx,
-            1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
-            1024,        // The default value. Unit tests might use a different value
-        )
     }
 
     pub fn iter_with_options<'a>(
@@ -1621,12 +1622,6 @@ impl DeltaLayerIterator<'_> {
 pub(crate) mod test {
     use std::collections::BTreeMap;
 
-    use bytes::Bytes;
-    use itertools::MinMaxResult;
-    use pageserver_api::value::Value;
-    use rand::prelude::{SeedableRng, SliceRandom, StdRng};
-    use rand::{Rng, RngCore};
-
     use super::*;
     use crate::DEFAULT_PG_VERSION;
     use crate::context::DownloadBehavior;
@@ -1634,8 +1629,14 @@ pub(crate) mod test {
     use crate::tenant::disk_btree::tests::TestDisk;
     use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
-    use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
+    use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
     use crate::tenant::{TenantShard, Timeline};
+    use bytes::Bytes;
+    use itertools::MinMaxResult;
+    use postgres_ffi::PgMajorVersion;
+    use rand::prelude::{SeedableRng, StdRng};
+    use rand::seq::IndexedRandom;
+    use rand::{Rng, RngCore};
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -1788,14 +1789,14 @@ pub(crate) mod test {
 
         let mut entries = Vec::new();
         for _ in 0..constants::KEY_COUNT {
-            let count = rng.gen_range(1..constants::MAX_ENTRIES_PER_KEY);
+            let count = rng.random_range(1..constants::MAX_ENTRIES_PER_KEY);
             let mut lsns_iter =
                 std::iter::successors(Some(Lsn(constants::LSN_OFFSET.0 + 0x08)), |lsn| {
                     Some(Lsn(lsn.0 + 0x08))
                 });
             let mut lsns = Vec::new();
             while lsns.len() < count as usize {
-                let take = rng.gen_bool(0.5);
+                let take = rng.random_bool(0.5);
                 let lsn = lsns_iter.next().unwrap();
                 if take {
                     lsns.push(lsn);
@@ -1869,12 +1870,13 @@ pub(crate) mod test {
         for _ in 0..constants::RANGES_COUNT {
             let mut range: Option<Range<Key>> = Option::default();
             while range.is_none() || keyspace.overlaps(range.as_ref().unwrap()) {
-                let range_start = rng.gen_range(start..end);
+                let range_start = rng.random_range(start..end);
                 let range_end_offset = range_start + constants::MIN_RANGE_SIZE;
                 if range_end_offset >= end {
                     range = Some(Key::from_i128(range_start)..Key::from_i128(end));
                 } else {
-                    let range_end = rng.gen_range((range_start + constants::MIN_RANGE_SIZE)..end);
+                    let range_end =
+                        rng.random_range((range_start + constants::MIN_RANGE_SIZE)..end);
                     range = Some(Key::from_i128(range_start)..Key::from_i128(range_end));
                 }
             }
@@ -1987,7 +1989,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn copy_delta_prefix_smoke() {
         use bytes::Bytes;
-        use pageserver_api::record::NeonWalRecord;
+        use wal_decoder::models::record::NeonWalRecord;
 
         let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke")
             .await
@@ -1995,14 +1997,14 @@ pub(crate) mod test {
         let (tenant, ctx) = h.load().await;
         let ctx = &ctx;
         let timeline = tenant
-            .create_test_timeline(TimelineId::generate(), Lsn(0x10), 14, ctx)
+            .create_test_timeline(TimelineId::generate(), Lsn(0x10), PgMajorVersion::PG14, ctx)
             .await
             .unwrap();
         let ctx = &ctx.with_scope_timeline(&timeline);
 
         let initdb_layer = timeline
             .layers
-            .read()
+            .read(crate::tenant::timeline::layer_manager::LayerManagerLockHolder::Testing)
             .await
             .likely_resident_layers()
             .next()
@@ -2078,7 +2080,7 @@ pub(crate) mod test {
 
         let new_layer = timeline
             .layers
-            .read()
+            .read(LayerManagerLockHolder::Testing)
             .await
             .likely_resident_layers()
             .find(|&x| x != &initdb_layer)
@@ -2311,8 +2313,7 @@ pub(crate) mod test {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined
-                let mut iter = delta_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = delta_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 let mut num_items = 0;
                 for _ in 0..3 {
                     iter.next_batch().await.unwrap();
@@ -2329,8 +2330,7 @@ pub(crate) mod test {
                     iter.key_values_batch.clear();
                 }
                 // Test if the result is correct
-                let mut iter = delta_layer.iter(&ctx);
-                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut iter = delta_layer.iter_with_options(&ctx, max_read_size, batch_size);
                 assert_delta_iter_equal(&mut iter, &test_deltas).await;
             }
         }

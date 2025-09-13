@@ -22,7 +22,7 @@ use pageserver_api::controller_api::{
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
     NodeAvailability, NodeConfigureRequest, NodeRegisterRequest, SafekeeperSchedulingPolicyRequest,
     ShardsPreferredAzsRequest, TenantCreateRequest, TenantPolicyRequest, TenantShardMigrateRequest,
-    TimelineImportRequest,
+    TimelineImportRequest, TimelineSafekeeperMigrateRequest,
 };
 use pageserver_api::models::{
     DetachBehavior, LsnLeaseRequest, TenantConfigPatchRequest, TenantConfigRequest,
@@ -31,9 +31,10 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::upcall_api::{
-    PutTimelineImportStatusRequest, ReAttachRequest, ValidateRequest,
+    PutTimelineImportStatusRequest, ReAttachRequest, TimelineImportStatusRequest, ValidateRequest,
 };
 use pageserver_client::{BlockUnblock, mgmt_api};
+
 use routerify::Middleware;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -47,7 +48,10 @@ use crate::metrics::{
 };
 use crate::persistence::SafekeeperUpsert;
 use crate::reconciler::ReconcileError;
-use crate::service::{LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service};
+use crate::service::{
+    LeadershipStatus, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT, Service,
+    TenantMutationLocations,
+};
 
 /// State available to HTTP request handlers
 pub struct HttpState {
@@ -155,6 +159,29 @@ async fn handle_validate(req: Request<Body>) -> Result<Response<Body>, ApiError>
     let validate_req = json_request::<ValidateRequest>(&mut req).await?;
     let state = get_state(&req);
     json_response(StatusCode::OK, state.service.validate(validate_req).await?)
+}
+
+async fn handle_get_timeline_import_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::GenerationsApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let get_req = json_request::<TimelineImportStatusRequest>(&mut req).await?;
+
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state
+            .service
+            .handle_timeline_shard_import_progress(get_req)
+            .await?,
+    )
 }
 
 async fn handle_put_timeline_import_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -459,6 +486,10 @@ async fn handle_tenant_timeline_delete(
         ForwardOutcome::NotForwarded(_req) => {}
     };
 
+    service
+        .maybe_delete_timeline_import(tenant_id, timeline_id)
+        .await?;
+
     // For timeline deletions, which both implement an "initially return 202, then 404 once
     // we're done" semantic, we wrap with a retry loop to expose a simpler API upstream.
     async fn deletion_wrapper<R, F>(service: Arc<Service>, f: F) -> Result<Response<Body>, ApiError>
@@ -608,6 +639,50 @@ async fn handle_tenant_timeline_download_heatmap_layers(
     json_response(StatusCode::OK, ())
 }
 
+async fn handle_tenant_timeline_safekeeper_migrate(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    // TODO(diko): it's not PS operation, there should be a different permission scope.
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let migrate_req = json_request::<TimelineSafekeeperMigrateRequest>(&mut req).await?;
+
+    service
+        .tenant_timeline_safekeeper_migrate(tenant_id, timeline_id, migrate_req)
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn handle_tenant_timeline_safekeeper_migrate_abort(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    // TODO(diko): it's not PS operation, there should be a different permission scope.
+    check_permissions(&req, Scope::PageServerApi)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    service
+        .tenant_timeline_safekeeper_migrate_abort(tenant_id, timeline_id)
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn handle_tenant_timeline_lsn_lease(
     service: Arc<Service>,
     req: Request<Body>,
@@ -680,83 +755,104 @@ async fn handle_tenant_timeline_passthrough(
         path
     );
 
-    // Find the node that holds shard zero
-    let (node, tenant_shard_id) = if tenant_or_shard_id.is_unsharded() {
-        service
+    let tenant_shard_id = if tenant_or_shard_id.is_unsharded() {
+        // If the request contains only tenant ID, find the node that holds shard zero
+        let (_, shard_id) = service
             .tenant_shard0_node(tenant_or_shard_id.tenant_id)
-            .await?
+            .await?;
+        shard_id
     } else {
-        (
-            service.tenant_shard_node(tenant_or_shard_id).await?,
-            tenant_or_shard_id,
-        )
+        tenant_or_shard_id
     };
 
-    // Callers will always pass an unsharded tenant ID.  Before proxying, we must
-    // rewrite this to a shard-aware shard zero ID.
-    let path = format!("{}", path);
-    let tenant_str = tenant_or_shard_id.tenant_id.to_string();
-    let tenant_shard_str = format!("{}", tenant_shard_id);
-    let path = path.replace(&tenant_str, &tenant_shard_str);
+    let service_inner = service.clone();
 
-    let latency = &METRICS_REGISTRY
-        .metrics_group
-        .storage_controller_passthrough_request_latency;
-
-    let path_label = path_without_ids(&path)
-        .split('/')
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>()
-        .join("_");
-    let labels = PageserverRequestLabelGroup {
-        pageserver_id: &node.get_id().to_string(),
-        path: &path_label,
-        method: crate::metrics::Method::Get,
-    };
-
-    let _timer = latency.start_timer(labels.clone());
-
-    let client = mgmt_api::Client::new(
-        service.get_http_client().clone(),
-        node.base_url(),
-        service.get_config().pageserver_jwt_token.as_deref(),
-    );
-    let resp = client.op_raw(method, path).await.map_err(|e|
-        // We return 503 here because if we can't successfully send a request to the pageserver,
-        // either we aren't available or the pageserver is unavailable.
-        ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {node}: {e}").into()))?;
-
-    if !resp.status().is_success() {
-        let error_counter = &METRICS_REGISTRY
-            .metrics_group
-            .storage_controller_passthrough_request_error;
-        error_counter.inc(labels);
-    }
-
-    // Transform 404 into 503 if we raced with a migration
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        // Look up node again: if we migrated it will be different
-        let new_node = service.tenant_shard_node(tenant_shard_id).await?;
-        if new_node.get_id() != node.get_id() {
-            // Rather than retry here, send the client a 503 to prompt a retry: this matches
-            // the pageserver's use of 503, and all clients calling this API should retry on 503.
-            return Err(ApiError::ResourceUnavailable(
-                format!("Pageserver {node} returned 404, was migrated to {new_node}").into(),
-            ));
+    service.tenant_shard_remote_mutation(tenant_shard_id, |locations| async move {
+        let TenantMutationLocations(locations) = locations;
+        if locations.is_empty() {
+            return Err(ApiError::NotFound(anyhow::anyhow!("Tenant {} not found", tenant_or_shard_id.tenant_id).into()));
         }
-    }
 
-    // We have a reqest::Response, would like a http::Response
-    let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp.status())?);
-    for (k, v) in resp.headers() {
-        builder = builder.header(k.as_str(), v.as_bytes());
-    }
+        let (tenant_or_shard_id, locations) = locations.into_iter().next().unwrap();
+        let node = locations.latest.node;
 
-    let response = builder
-        .body(Body::wrap_stream(resp.bytes_stream()))
-        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+        // Callers will always pass an unsharded tenant ID.  Before proxying, we must
+        // rewrite this to a shard-aware shard zero ID.
+        let path = format!("{path}");
+        let tenant_str = tenant_or_shard_id.tenant_id.to_string();
+        let tenant_shard_str = format!("{tenant_shard_id}");
+        let path = path.replace(&tenant_str, &tenant_shard_str);
 
-    Ok(response)
+        let latency = &METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_passthrough_request_latency;
+
+        let path_label = path_without_ids(&path)
+            .split('/')
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>()
+            .join("_");
+        let labels = PageserverRequestLabelGroup {
+            pageserver_id: &node.get_id().to_string(),
+            path: &path_label,
+            method: crate::metrics::Method::Get,
+        };
+
+        let _timer = latency.start_timer(labels.clone());
+
+        let client = mgmt_api::Client::new(
+            service_inner.get_http_client().clone(),
+            node.base_url(),
+            service_inner.get_config().pageserver_jwt_token.as_deref(),
+        );
+        let resp = client.op_raw(method, path).await.map_err(|e|
+            // We return 503 here because if we can't successfully send a request to the pageserver,
+            // either we aren't available or the pageserver is unavailable.
+            ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {node}: {e}").into()))?;
+
+        if !resp.status().is_success() {
+            let error_counter = &METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_passthrough_request_error;
+            error_counter.inc(labels);
+        }
+        let resp_staus = resp.status();
+
+        // We have a reqest::Response, would like a http::Response
+        let mut builder = hyper::Response::builder().status(map_reqwest_hyper_status(resp_staus)?);
+        for (k, v) in resp.headers() {
+            builder = builder.header(k.as_str(), v.as_bytes());
+        }
+        let resp_bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+        // Inspect 404 errors: at this point, we know that the tenant exists, but the pageserver we route
+        // the request to might not yet be ready. Therefore, if it is a _tenant_ not found error, we can
+        // convert it into a 503. TODO: we should make this part of the check in `tenant_shard_remote_mutation`.
+        // However, `tenant_shard_remote_mutation` currently cannot inspect the HTTP error response body,
+        // so we have to do it here instead.
+        if resp_staus == reqwest::StatusCode::NOT_FOUND {
+            let resp_str = std::str::from_utf8(&resp_bytes)
+                .map_err(|e| ApiError::InternalServerError(e.into()))?;
+            // We only handle "tenant not found" errors; other 404s like timeline not found should
+            // be forwarded as-is.
+            if Service::is_tenant_not_found_error(resp_str, tenant_or_shard_id.tenant_id) {
+                // Rather than retry here, send the client a 503 to prompt a retry: this matches
+                // the pageserver's use of 503, and all clients calling this API should retry on 503.
+                return Err(ApiError::ResourceUnavailable(
+                    format!(
+                        "Pageserver {node} returned tenant 404 due to ongoing migration, retry later"
+                    )
+                    .into(),
+                ));
+            }
+        }
+        let response = builder
+            .body(Body::from(resp_bytes))
+            .map_err(|e| ApiError::InternalServerError(e.into()))?;
+        Ok(response)
+    }).await?
 }
 
 async fn handle_tenant_locate(
@@ -795,6 +891,31 @@ async fn handle_tenant_describe(
 
     json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
 }
+
+/* BEGIN_HADRON */
+async fn handle_tenant_timeline_describe(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Scrubber)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_timeline_describe(tenant_id, timeline_id)
+            .await?,
+    )
+}
+/* END_HADRON */
 
 async fn handle_tenant_list(
     service: Arc<Service>,
@@ -865,7 +986,7 @@ async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError
     json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
 }
 
-async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_node_delete_old(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
     let req = match maybe_forward(req).await {
@@ -877,7 +998,46 @@ async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiErr
 
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
-    json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
+    json_response(
+        StatusCode::OK,
+        state.service.node_delete_old(node_id).await?,
+    )
+}
+
+async fn handle_tombstone_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let mut nodes = state.service.tombstone_list().await?;
+    nodes.sort_by_key(|n| n.get_id());
+    let api_nodes = nodes.into_iter().map(|n| n.describe()).collect::<Vec<_>>();
+
+    json_response(StatusCode::OK, api_nodes)
+}
+
+async fn handle_tombstone_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::OK,
+        state.service.tombstone_delete(node_id).await?,
+    )
 }
 
 async fn handle_node_configure(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -959,6 +1119,43 @@ async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiErro
     })?;
 
     json_response(StatusCode::OK, leader)
+}
+
+async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    let force: bool = parse_query_param(&req, "force")?.unwrap_or(false);
+    json_response(
+        StatusCode::OK,
+        state.service.start_node_delete(node_id, force).await?,
+    )
+}
+
+async fn handle_cancel_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Infra)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(
+        StatusCode::ACCEPTED,
+        state.service.cancel_node_delete(node_id).await?,
+    )
 }
 
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -1335,6 +1532,31 @@ async fn handle_timeline_import(req: Request<Body>) -> Result<Response<Body>, Ap
     )
 }
 
+async fn handle_tenant_timeline_locate(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    check_permissions(&req, Scope::Admin)?;
+    maybe_rate_limit(&req, tenant_id).await;
+
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_timeline_locate(tenant_id, timeline_id)
+            .await?,
+    )
+}
+
 async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -1451,7 +1673,7 @@ async fn handle_ready(req: Request<Body>) -> Result<Response<Body>, ApiError> {
 
 impl From<ReconcileError> for ApiError {
     fn from(value: ReconcileError) -> Self {
-        ApiError::Conflict(format!("Reconciliation error: {}", value))
+        ApiError::Conflict(format!("Reconciliation error: {value}"))
     }
 }
 
@@ -1982,10 +2204,10 @@ pub fn make_router(
 
     router
         .data(Arc::new(HttpState::new(service, auth, build_info)))
+        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/metrics", |r| {
             named_request_span(r, measured_metrics_handler, RequestName("metrics"))
         })
-        // Non-prefixed generic endpoints (status, metrics, profiling)
         .get("/status", |r| {
             named_request_span(r, handle_status, RequestName("status"))
         })
@@ -2008,6 +2230,13 @@ pub fn make_router(
         .post("/upcall/v1/validate", |r| {
             named_request_span(r, handle_validate, RequestName("upcall_v1_validate"))
         })
+        .get("/upcall/v1/timeline_import_status", |r| {
+            named_request_span(
+                r,
+                handle_get_timeline_import_status,
+                RequestName("upcall_v1_timeline_import_status"),
+            )
+        })
         .post("/upcall/v1/timeline_import_status", |r| {
             named_request_span(
                 r,
@@ -2027,6 +2256,20 @@ pub fn make_router(
         })
         .post("/debug/v1/node/:node_id/drop", |r| {
             named_request_span(r, handle_node_drop, RequestName("debug_v1_node_drop"))
+        })
+        .delete("/debug/v1/tombstone/:node_id", |r| {
+            named_request_span(
+                r,
+                handle_tombstone_delete,
+                RequestName("debug_v1_tombstone_delete"),
+            )
+        })
+        .get("/debug/v1/tombstone", |r| {
+            named_request_span(
+                r,
+                handle_tombstone_list,
+                RequestName("debug_v1_tombstone_list"),
+            )
         })
         .post("/debug/v1/tenant/:tenant_id/import", |r| {
             named_request_span(
@@ -2055,6 +2298,16 @@ pub fn make_router(
                 )
             },
         )
+        .get(
+            "/debug/v1/tenant/:tenant_id/timeline/:timeline_id/locate",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_locate,
+                    RequestName("v1_tenant_timeline_locate"),
+                )
+            },
+        )
         .get("/debug/v1/scheduler", |r| {
             named_request_span(r, handle_scheduler_dump, RequestName("debug_v1_scheduler"))
         })
@@ -2075,8 +2328,14 @@ pub fn make_router(
         .post("/control/v1/node", |r| {
             named_request_span(r, handle_node_register, RequestName("control_v1_node"))
         })
+        // This endpoint is deprecated and will be removed in a future version.
+        // Use PUT /control/v1/node/:node_id/delete instead.
         .delete("/control/v1/node/:node_id", |r| {
-            named_request_span(r, handle_node_delete, RequestName("control_v1_node_delete"))
+            named_request_span(
+                r,
+                handle_node_delete_old,
+                RequestName("control_v1_node_delete"),
+            )
         })
         .get("/control/v1/node", |r| {
             named_request_span(r, handle_node_list, RequestName("control_v1_node"))
@@ -2100,6 +2359,20 @@ pub fn make_router(
         })
         .get("/control/v1/leader", |r| {
             named_request_span(r, handle_get_leader, RequestName("control_v1_get_leader"))
+        })
+        .put("/control/v1/node/:node_id/delete", |r| {
+            named_request_span(
+                r,
+                handle_node_delete,
+                RequestName("control_v1_start_node_delete"),
+            )
+        })
+        .delete("/control/v1/node/:node_id/delete", |r| {
+            named_request_span(
+                r,
+                handle_cancel_node_delete,
+                RequestName("control_v1_cancel_node_delete"),
+            )
         })
         .put("/control/v1/node/:node_id/drain", |r| {
             named_request_span(r, handle_node_drain, RequestName("control_v1_node_drain"))
@@ -2166,7 +2439,7 @@ pub fn make_router(
             named_request_span(
                 r,
                 handle_safekeeper_scheduling_policy,
-                RequestName("v1_safekeeper_status"),
+                RequestName("v1_safekeeper_scheduling_policy"),
             )
         })
         // Tenant Shard operations
@@ -2275,6 +2548,13 @@ pub fn make_router(
             )
         })
         // Timeline operations
+        .get("/control/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+            tenant_service_handler(
+                r,
+                handle_tenant_timeline_describe,
+                RequestName("v1_tenant_timeline_describe"),
+            )
+        })
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             tenant_service_handler(
                 r,
@@ -2339,6 +2619,26 @@ pub fn make_router(
                 )
             },
         )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/safekeeper_migrate",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_safekeeper_migrate,
+                    RequestName("v1_tenant_timeline_safekeeper_migrate"),
+                )
+            },
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/safekeeper_migrate_abort",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_safekeeper_migrate_abort,
+                    RequestName("v1_tenant_timeline_safekeeper_migrate_abort"),
+                )
+            },
+        )
         // LSN lease passthrough to all shards
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/lsn_lease",
@@ -2347,6 +2647,17 @@ pub fn make_router(
                     r,
                     handle_tenant_timeline_lsn_lease,
                     RequestName("v1_tenant_timeline_lsn_lease"),
+                )
+            },
+        )
+        // Tenant timeline mark_invisible passthrough to shard zero
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/mark_invisible",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_passthrough,
+                    RequestName("v1_tenant_timeline_mark_invisible_passthrough"),
                 )
             },
         )
@@ -2368,17 +2679,6 @@ pub fn make_router(
                 RequestName("v1_tenant_passthrough"),
             )
         })
-        // Tenant timeline mark_invisible passthrough to shard zero
-        .put(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/mark_invisible",
-            |r| {
-                tenant_service_handler(
-                    r,
-                    handle_tenant_timeline_passthrough,
-                    RequestName("v1_tenant_timeline_mark_invisible_passthrough"),
-                )
-            },
-        )
 }
 
 #[cfg(test)]

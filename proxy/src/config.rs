@@ -4,30 +4,44 @@ use std::time::Duration;
 
 use anyhow::{Context, Ok, bail, ensure};
 use arc_swap::ArcSwapOption;
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
+use compute_api::spec::LocalProxySpec;
 use remote_storage::RemoteStorageConfig;
+use thiserror::Error;
+use tokio::sync::Notify;
+use tracing::{debug, error, info, warn};
 
-use crate::auth::backend::AuthRateLimiter;
 use crate::auth::backend::jwt::JwkCache;
+use crate::auth::backend::local::JWKS_ROLE_MAP;
 use crate::control_plane::locks::ApiLocks;
-use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig};
-use crate::scram::threadpool::ThreadPool;
+use crate::control_plane::messages::{EndpointJwksResponse, JwksSettings};
+use crate::ext::TaskExt;
+use crate::intern::RoleNameInt;
+use crate::rate_limiter::{RateLimitAlgorithm, RateLimiterConfig};
+use crate::scram;
 use crate::serverless::GlobalConnPoolOptions;
 use crate::serverless::cancel_set::CancelSet;
+#[cfg(feature = "rest_broker")]
+use crate::serverless::rest::DbSchemaCache;
 pub use crate::tls::server_config::{TlsConfig, configure_tls};
-use crate::types::Host;
+use crate::types::{Host, RoleName};
 
 pub struct ProxyConfig {
     pub tls_config: ArcSwapOption<TlsConfig>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
+    #[cfg(feature = "rest_broker")]
+    pub rest_config: RestConfig,
     pub proxy_protocol_v2: ProxyProtocolV2,
-    pub region: String,
     pub handshake_timeout: Duration,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute: ComputeConfig,
+    pub greetings: String, // Greeting message sent to the client after connection establishment and contains session_id.
+    #[cfg(feature = "testing")]
+    pub disable_pg_session_jwt: bool,
 }
 
 pub struct ComputeConfig {
@@ -40,8 +54,6 @@ pub struct ComputeConfig {
 pub enum ProxyProtocolV2 {
     /// Connection will error if PROXY protocol v2 header is missing
     Required,
-    /// Connection will parse PROXY protocol v2 header, but accept the connection if it's missing.
-    Supported,
     /// Connection will error if PROXY protocol v2 header is provided
     Rejected,
 }
@@ -63,11 +75,8 @@ pub struct HttpConfig {
 }
 
 pub struct AuthenticationConfig {
-    pub thread_pool: Arc<ThreadPool>,
+    pub scram_thread_pool: Arc<scram::threadpool::ThreadPool>,
     pub scram_protocol_timeout: tokio::time::Duration,
-    pub rate_limiter_enabled: bool,
-    pub rate_limiter: AuthRateLimiter,
-    pub rate_limit_ip_subnet: u8,
     pub ip_allowlist_check_enabled: bool,
     pub is_vpc_acccess_proxy: bool,
     pub jwks_cache: JwkCache,
@@ -76,79 +85,14 @@ pub struct AuthenticationConfig {
     pub console_redirect_confirmation_timeout: tokio::time::Duration,
 }
 
-#[derive(Debug)]
-pub struct EndpointCacheConfig {
-    /// Batch size to receive all endpoints on the startup.
-    pub initial_batch_size: usize,
-    /// Batch size to receive endpoints.
-    pub default_batch_size: usize,
-    /// Timeouts for the stream read operation.
-    pub xread_timeout: Duration,
-    /// Stream name to read from.
-    pub stream_name: String,
-    /// Limiter info (to distinguish when to enable cache).
-    pub limiter_info: Vec<RateBucketInfo>,
-    /// Disable cache.
-    /// If true, cache is ignored, but reports all statistics.
-    pub disable_cache: bool,
-    /// Retry interval for the stream read operation.
-    pub retry_interval: Duration,
+#[cfg(feature = "rest_broker")]
+pub struct RestConfig {
+    pub is_rest_broker: bool,
+    pub db_schema_cache: Option<DbSchemaCache>,
+    pub max_schema_size: usize,
+    pub hostname_prefix: String,
 }
 
-impl EndpointCacheConfig {
-    /// Default options for [`crate::control_plane::NodeInfoCache`].
-    /// Notice that by default the limiter is empty, which means that cache is disabled.
-    pub const CACHE_DEFAULT_OPTIONS: &'static str = "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
-
-    /// Parse cache options passed via cmdline.
-    /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
-    fn parse(options: &str) -> anyhow::Result<Self> {
-        let mut initial_batch_size = None;
-        let mut default_batch_size = None;
-        let mut xread_timeout = None;
-        let mut stream_name = None;
-        let mut limiter_info = vec![];
-        let mut disable_cache = false;
-        let mut retry_interval = None;
-
-        for option in options.split(',') {
-            let (key, value) = option
-                .split_once('=')
-                .with_context(|| format!("bad key-value pair: {option}"))?;
-
-            match key {
-                "initial_batch_size" => initial_batch_size = Some(value.parse()?),
-                "default_batch_size" => default_batch_size = Some(value.parse()?),
-                "xread_timeout" => xread_timeout = Some(humantime::parse_duration(value)?),
-                "stream_name" => stream_name = Some(value.to_string()),
-                "limiter_info" => limiter_info.push(RateBucketInfo::from_str(value)?),
-                "disable_cache" => disable_cache = value.parse()?,
-                "retry_interval" => retry_interval = Some(humantime::parse_duration(value)?),
-                unknown => bail!("unknown key: {unknown}"),
-            }
-        }
-        RateBucketInfo::validate(&mut limiter_info)?;
-
-        Ok(Self {
-            initial_batch_size: initial_batch_size.context("missing `initial_batch_size`")?,
-            default_batch_size: default_batch_size.context("missing `default_batch_size`")?,
-            xread_timeout: xread_timeout.context("missing `xread_timeout`")?,
-            stream_name: stream_name.context("missing `stream_name`")?,
-            disable_cache,
-            limiter_info,
-            retry_interval: retry_interval.context("missing `retry_interval`")?,
-        })
-    }
-}
-
-impl FromStr for EndpointCacheConfig {
-    type Err = anyhow::Error;
-
-    fn from_str(options: &str) -> Result<Self, Self::Err> {
-        let error = || format!("failed to parse endpoint cache options '{options}'");
-        Self::parse(options).with_context(error)
-    }
-}
 #[derive(Debug)]
 pub struct MetricBackupCollectionConfig {
     pub remote_storage_config: Option<RemoteStorageConfig>,
@@ -163,20 +107,23 @@ pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<RemoteStorageConfig> 
 #[derive(Debug)]
 pub struct CacheOptions {
     /// Max number of entries.
-    pub size: usize,
+    pub size: Option<u64>,
     /// Entry's time-to-live.
-    pub ttl: Duration,
+    pub absolute_ttl: Option<Duration>,
+    /// Entry's time-to-idle.
+    pub idle_ttl: Option<Duration>,
 }
 
 impl CacheOptions {
-    /// Default options for [`crate::control_plane::NodeInfoCache`].
-    pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,ttl=4m";
+    /// Default options for [`crate::cache::node_info::NodeInfoCache`].
+    pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,idle_ttl=4m";
 
     /// Parse cache options passed via cmdline.
     /// Example: [`Self::CACHE_DEFAULT_OPTIONS`].
     fn parse(options: &str) -> anyhow::Result<Self> {
         let mut size = None;
-        let mut ttl = None;
+        let mut absolute_ttl = None;
+        let mut idle_ttl = None;
 
         for option in options.split(',') {
             let (key, value) = option
@@ -185,20 +132,33 @@ impl CacheOptions {
 
             match key {
                 "size" => size = Some(value.parse()?),
-                "ttl" => ttl = Some(humantime::parse_duration(value)?),
+                "absolute_ttl" | "ttl" => absolute_ttl = Some(humantime::parse_duration(value)?),
+                "idle_ttl" | "tti" => idle_ttl = Some(humantime::parse_duration(value)?),
                 unknown => bail!("unknown key: {unknown}"),
             }
         }
 
-        // TTL doesn't matter if cache is always empty.
-        if let Some(0) = size {
-            ttl.get_or_insert(Duration::default());
-        }
-
         Ok(Self {
-            size: size.context("missing `size`")?,
-            ttl: ttl.context("missing `ttl`")?,
+            size,
+            absolute_ttl,
+            idle_ttl,
         })
+    }
+
+    pub fn moka<K, V, C>(
+        &self,
+        mut builder: moka::sync::CacheBuilder<K, V, C>,
+    ) -> moka::sync::CacheBuilder<K, V, C> {
+        if let Some(size) = self.size {
+            builder = builder.max_capacity(size);
+        }
+        if let Some(ttl) = self.absolute_ttl {
+            builder = builder.time_to_live(ttl);
+        }
+        if let Some(tti) = self.idle_ttl {
+            builder = builder.time_to_idle(tti);
+        }
+        builder
     }
 }
 
@@ -215,17 +175,17 @@ impl FromStr for CacheOptions {
 #[derive(Debug)]
 pub struct ProjectInfoCacheOptions {
     /// Max number of entries.
-    pub size: usize,
+    pub size: u64,
     /// Entry's time-to-live.
     pub ttl: Duration,
     /// Max number of roles per endpoint.
-    pub max_roles: usize,
+    pub max_roles: u64,
     /// Gc interval.
     pub gc_interval: Duration,
 }
 
 impl ProjectInfoCacheOptions {
-    /// Default options for [`crate::control_plane::NodeInfoCache`].
+    /// Default options for [`crate::cache::project_info::ProjectInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
 
@@ -416,6 +376,135 @@ impl FromStr for ConcurrencyLockOptions {
     }
 }
 
+#[derive(Error, Debug)]
+pub(crate) enum RefreshConfigError {
+    #[error(transparent)]
+    Read(#[from] std::io::Error),
+    #[error(transparent)]
+    Parse(#[from] serde_json::Error),
+    #[error(transparent)]
+    Validate(anyhow::Error),
+    #[error(transparent)]
+    Tls(anyhow::Error),
+}
+
+pub(crate) async fn refresh_config_loop(config: &ProxyConfig, path: Utf8PathBuf, rx: Arc<Notify>) {
+    let mut init = true;
+    loop {
+        rx.notified().await;
+
+        match refresh_config_inner(config, &path).await {
+            std::result::Result::Ok(()) => {}
+            // don't log for file not found errors if this is the first time we are checking
+            // for computes that don't use local_proxy, this is not an error.
+            Err(RefreshConfigError::Read(e))
+                if init && e.kind() == std::io::ErrorKind::NotFound =>
+            {
+                debug!(error=?e, ?path, "could not read config file");
+            }
+            Err(RefreshConfigError::Tls(e)) => {
+                error!(error=?e, ?path, "could not read TLS certificates");
+            }
+            Err(e) => {
+                error!(error=?e, ?path, "could not read config file");
+            }
+        }
+
+        init = false;
+    }
+}
+
+pub(crate) async fn refresh_config_inner(
+    config: &ProxyConfig,
+    path: &Utf8Path,
+) -> Result<(), RefreshConfigError> {
+    let bytes = tokio::fs::read(&path).await?;
+    let data: LocalProxySpec = serde_json::from_slice(&bytes)?;
+
+    let mut jwks_set = vec![];
+
+    fn parse_jwks_settings(jwks: compute_api::spec::JwksSettings) -> anyhow::Result<JwksSettings> {
+        let mut jwks_url = url::Url::from_str(&jwks.jwks_url).context("parsing JWKS url")?;
+
+        ensure!(
+            jwks_url.has_authority()
+                && (jwks_url.scheme() == "http" || jwks_url.scheme() == "https"),
+            "Invalid JWKS url. Must be HTTP",
+        );
+
+        ensure!(
+            jwks_url.host().is_some_and(|h| h != url::Host::Domain("")),
+            "Invalid JWKS url. No domain listed",
+        );
+
+        // clear username, password and ports
+        jwks_url
+            .set_username("")
+            .expect("url can be a base and has a valid host and is not a file. should not error");
+        jwks_url
+            .set_password(None)
+            .expect("url can be a base and has a valid host and is not a file. should not error");
+        // local testing is hard if we need to have a specific restricted port
+        if cfg!(not(feature = "testing")) {
+            jwks_url.set_port(None).expect(
+                "url can be a base and has a valid host and is not a file. should not error",
+            );
+        }
+
+        // clear query params
+        jwks_url.set_fragment(None);
+        jwks_url.query_pairs_mut().clear().finish();
+
+        if jwks_url.scheme() != "https" {
+            // local testing is hard if we need to set up https support.
+            if cfg!(not(feature = "testing")) {
+                jwks_url
+                    .set_scheme("https")
+                    .expect("should not error to set the scheme to https if it was http");
+            } else {
+                warn!(scheme = jwks_url.scheme(), "JWKS url is not HTTPS");
+            }
+        }
+
+        Ok(JwksSettings {
+            id: jwks.id,
+            jwks_url,
+            _provider_name: jwks.provider_name,
+            jwt_audience: jwks.jwt_audience,
+            role_names: jwks
+                .role_names
+                .into_iter()
+                .map(RoleName::from)
+                .map(|s| RoleNameInt::from(&s))
+                .collect(),
+        })
+    }
+
+    for jwks in data.jwks.into_iter().flatten() {
+        jwks_set.push(parse_jwks_settings(jwks).map_err(RefreshConfigError::Validate)?);
+    }
+
+    info!("successfully loaded new config");
+    JWKS_ROLE_MAP.store(Some(Arc::new(EndpointJwksResponse { jwks: jwks_set })));
+
+    if let Some(tls_config) = data.tls {
+        let tls_config = tokio::task::spawn_blocking(move || {
+            crate::tls::server_config::configure_tls(
+                tls_config.key_path.as_ref(),
+                tls_config.cert_path.as_ref(),
+                None,
+                false,
+            )
+        })
+        .await
+        .propagate_task_panic()
+        .map_err(RefreshConfigError::Tls)?;
+        config.tls_config.store(Some(Arc::new(tls_config)));
+    }
+
+    std::result::Result::Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,21 +512,37 @@ mod tests {
 
     #[test]
     fn test_parse_cache_options() -> anyhow::Result<()> {
-        let CacheOptions { size, ttl } = "size=4096,ttl=5min".parse()?;
-        assert_eq!(size, 4096);
-        assert_eq!(ttl, Duration::from_secs(5 * 60));
+        let CacheOptions {
+            size,
+            absolute_ttl,
+            idle_ttl: _,
+        } = "size=4096,ttl=5min".parse()?;
+        assert_eq!(size, Some(4096));
+        assert_eq!(absolute_ttl, Some(Duration::from_secs(5 * 60)));
 
-        let CacheOptions { size, ttl } = "ttl=4m,size=2".parse()?;
-        assert_eq!(size, 2);
-        assert_eq!(ttl, Duration::from_secs(4 * 60));
+        let CacheOptions {
+            size,
+            absolute_ttl,
+            idle_ttl: _,
+        } = "ttl=4m,size=2".parse()?;
+        assert_eq!(size, Some(2));
+        assert_eq!(absolute_ttl, Some(Duration::from_secs(4 * 60)));
 
-        let CacheOptions { size, ttl } = "size=0,ttl=1s".parse()?;
-        assert_eq!(size, 0);
-        assert_eq!(ttl, Duration::from_secs(1));
+        let CacheOptions {
+            size,
+            absolute_ttl,
+            idle_ttl: _,
+        } = "size=0,ttl=1s".parse()?;
+        assert_eq!(size, Some(0));
+        assert_eq!(absolute_ttl, Some(Duration::from_secs(1)));
 
-        let CacheOptions { size, ttl } = "size=0".parse()?;
-        assert_eq!(size, 0);
-        assert_eq!(ttl, Duration::default());
+        let CacheOptions {
+            size,
+            absolute_ttl,
+            idle_ttl: _,
+        } = "size=0".parse()?;
+        assert_eq!(size, Some(0));
+        assert_eq!(absolute_ttl, None);
 
         Ok(())
     }

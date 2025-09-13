@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 
-use crate::models::{PageserverUtilization, ShardParameters, TenantConfig};
+use crate::models::{PageserverUtilization, ShardParameters, TenantConfig, TimelineInfo};
 use crate::shard::{ShardStripeSize, TenantShardId};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -52,12 +53,19 @@ pub struct NodeRegisterRequest {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
     pub listen_https_port: Option<u16>,
 
     pub availability_zone_id: AvailabilityZone,
+
+    // Reachable IP address of the PS/SK registering, if known.
+    // Hadron Cluster Coordiantor will update the DNS record of the registering node
+    // with this IP address.
+    pub node_ip_addr: Option<IpAddr>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,6 +109,8 @@ pub struct TenantLocateResponseShard {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
@@ -120,6 +130,13 @@ pub struct TenantDescribeResponse {
     pub stripe_size: ShardStripeSize,
     pub policy: PlacementPolicy,
     pub config: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TenantTimelineDescribeResponse {
+    pub shards: Vec<TimelineInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_consistent_lsn: Option<Lsn>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -152,6 +169,8 @@ pub struct NodeDescribeResponse {
 
     pub listen_pg_addr: String,
     pub listen_pg_port: u16,
+    pub listen_grpc_addr: Option<String>,
+    pub listen_grpc_port: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -345,12 +364,42 @@ impl Default for ShardSchedulingPolicy {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
+pub enum NodeLifecycle {
+    Active,
+    Deleted,
+}
+
+impl FromStr for NodeLifecycle {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "deleted" => Ok(Self::Deleted),
+            _ => Err(anyhow::anyhow!("Unknown node lifecycle '{s}'")),
+        }
+    }
+}
+
+impl From<NodeLifecycle> for String {
+    fn from(value: NodeLifecycle) -> String {
+        use NodeLifecycle::*;
+        match value {
+            Active => "active",
+            Deleted => "deleted",
+        }
+        .to_string()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum NodeSchedulingPolicy {
     Active,
     Filling,
     Pause,
     PauseForRestart,
     Draining,
+    Deleting,
 }
 
 impl FromStr for NodeSchedulingPolicy {
@@ -363,6 +412,7 @@ impl FromStr for NodeSchedulingPolicy {
             "pause" => Ok(Self::Pause),
             "pause_for_restart" => Ok(Self::PauseForRestart),
             "draining" => Ok(Self::Draining),
+            "deleting" => Ok(Self::Deleting),
             _ => Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
         }
     }
@@ -377,6 +427,7 @@ impl From<NodeSchedulingPolicy> for String {
             Pause => "pause",
             PauseForRestart => "pause_for_restart",
             Draining => "draining",
+            Deleting => "deleting",
         }
         .to_string()
     }
@@ -385,6 +436,7 @@ impl From<NodeSchedulingPolicy> for String {
 #[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, Debug)]
 pub enum SkSchedulingPolicy {
     Active,
+    Activating,
     Pause,
     Decomissioned,
 }
@@ -395,6 +447,7 @@ impl FromStr for SkSchedulingPolicy {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "active" => Self::Active,
+            "activating" => Self::Activating,
             "pause" => Self::Pause,
             "decomissioned" => Self::Decomissioned,
             _ => {
@@ -411,6 +464,7 @@ impl From<SkSchedulingPolicy> for String {
         use SkSchedulingPolicy::*;
         match value {
             Active => "active",
+            Activating => "activating",
             Pause => "pause",
             Decomissioned => "decomissioned",
         }
@@ -497,6 +551,39 @@ pub struct SafekeeperDescribeResponse {
     pub scheduling_policy: SkSchedulingPolicy,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TimelineSafekeeperPeer {
+    pub node_id: NodeId,
+    pub listen_http_addr: String,
+    pub http_port: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SCSafekeeperTimeline {
+    // SC does not know the tenant id.
+    pub timeline_id: TimelineId,
+    pub peers: Vec<NodeId>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SCSafekeeperTimelinesResponse {
+    pub timelines: Vec<SCSafekeeperTimeline>,
+    pub safekeeper_peers: Vec<TimelineSafekeeperPeer>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SafekeeperTimeline {
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub peers: Vec<NodeId>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SafekeeperTimelinesResponse {
+    pub timelines: Vec<SafekeeperTimeline>,
+    pub safekeeper_peers: Vec<TimelineSafekeeperPeer>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SafekeeperSchedulingPolicyRequest {
     pub scheduling_policy: SkSchedulingPolicy,
@@ -509,6 +596,12 @@ pub struct TimelineImportRequest {
     pub timeline_id: TimelineId,
     pub start_lsn: Lsn,
     pub sk_set: Vec<NodeId>,
+    pub force_upsert: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TimelineSafekeeperMigrateRequest {
+    pub new_sk_set: Vec<NodeId>,
 }
 
 #[cfg(test)]
@@ -542,8 +635,7 @@ mod test {
         let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
+            "expect unknown field `unknown_field` error, got: {err}"
         );
     }
 

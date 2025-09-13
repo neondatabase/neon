@@ -180,7 +180,7 @@ def test_metric_collection(
     httpserver.check()
 
     # Check that at least one bucket output object is present, and that all
-    # can be decompressed and decoded.
+    # can be decompressed and decoded as NDJSON.
     bucket_dumps = {}
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     for dirpath, _dirs, files in os.walk(env.pageserver_remote_storage.root):
@@ -188,7 +188,13 @@ def test_metric_collection(
             file_path = os.path.join(dirpath, file)
             log.info(file_path)
             if file.endswith(".gz"):
-                bucket_dumps[file_path] = json.load(gzip.open(file_path))
+                events = []
+                with gzip.open(file_path, "rt") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            events.append(json.loads(line))
+                bucket_dumps[file_path] = {"events": events}
 
     assert len(bucket_dumps) >= 1
     assert all("events" in data for data in bucket_dumps.values())
@@ -508,6 +514,9 @@ PER_METRIC_VERIFIERS = {
     "remote_storage_size": CannotVerifyAnything,
     "written_size": WrittenDataVerifier,
     "written_data_bytes_delta": WrittenDataDeltaVerifier,
+    "written_size_since_parent": WrittenDataVerifier,  # same as written_size on root
+    "pitr_cutoff": CannotVerifyAnything,
+    "pitr_history_size_since_parent": WrittenDataVerifier,  # same as written_size on root w/o GC
     "timeline_logical_size": CannotVerifyAnything,
     "synthetic_storage_size": SyntheticSizeVerifier,
 }

@@ -19,7 +19,7 @@ use utils::id::TimelineId;
 use utils::lsn::Lsn;
 use utils::sync::gate::GateError;
 
-use super::layer_manager::LayerManager;
+use super::layer_manager::{LayerManager, LayerManagerLockHolder};
 use super::{FlushLayerError, Timeline};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::TaskKind;
@@ -182,13 +182,14 @@ pub(crate) async fn generate_tombstone_image_layer(
     detached: &Arc<Timeline>,
     ancestor: &Arc<Timeline>,
     ancestor_lsn: Lsn,
+    historic_layers_to_copy: &Vec<Layer>,
     ctx: &RequestContext,
 ) -> Result<Option<ResidentLayer>, Error> {
     tracing::info!(
         "removing non-inherited keys by writing an image layer with tombstones at the detach LSN"
     );
     let io_concurrency = IoConcurrency::spawn_from_conf(
-        detached.conf,
+        detached.conf.get_vectored_concurrent_io,
         detached.gate.enter().map_err(|_| Error::ShuttingDown)?,
     );
     let mut reconstruct_state = ValuesReconstructState::new(io_concurrency);
@@ -199,7 +200,24 @@ pub(crate) async fn generate_tombstone_image_layer(
     let image_lsn = ancestor_lsn;
 
     {
-        let layers = detached.layers.read().await;
+        for layer in historic_layers_to_copy {
+            let desc = layer.layer_desc();
+            if !desc.is_delta
+                && desc.lsn_range.start == image_lsn
+                && overlaps_with(&key_range, &desc.key_range)
+            {
+                tracing::info!(
+                    layer=%layer, "will copy tombstone from ancestor instead of creating a new one"
+                );
+
+                return Ok(None);
+            }
+        }
+
+        let layers = detached
+            .layers
+            .read(LayerManagerLockHolder::DetachAncestor)
+            .await;
         for layer in layers.all_persistent_layers() {
             if !layer.is_delta
                 && layer.lsn_range.start == image_lsn
@@ -423,7 +441,7 @@ pub(super) async fn prepare(
         // we do not need to start from our layers, because they can only be layers that come
         // *after* ancestor_lsn
         let layers = tokio::select! {
-            guard = ancestor.layers.read() => guard,
+            guard = ancestor.layers.read(LayerManagerLockHolder::DetachAncestor) => guard,
             _ = detached.cancel.cancelled() => {
                 return Err(ShuttingDown);
             }
@@ -447,7 +465,8 @@ pub(super) async fn prepare(
         Vec::with_capacity(straddling_branchpoint.len() + rest_of_historic.len() + 1);
 
     if let Some(tombstone_layer) =
-        generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, ctx).await?
+        generate_tombstone_image_layer(detached, &ancestor, ancestor_lsn, &rest_of_historic, ctx)
+            .await?
     {
         new_layers.push(tombstone_layer.into());
     }
@@ -869,7 +888,12 @@ async fn remote_copy(
 
                 // Double check that the file is orphan (probably from an earlier attempt), then delete it
                 let key = file_name.clone().into();
-                if adoptee.layers.read().await.contains_key(&key) {
+                if adoptee
+                    .layers
+                    .read(LayerManagerLockHolder::DetachAncestor)
+                    .await
+                    .contains_key(&key)
+                {
                     // We are supposed to filter out such cases before coming to this function
                     return Err(Error::Prepare(anyhow::anyhow!(
                         "layer file {file_name} already present and inside layer map"
@@ -877,7 +901,7 @@ async fn remote_copy(
                 }
                 tracing::info!("Deleting orphan layer file to make way for hard linking");
                 // Delete orphan layer file and try again, to ensure this layer has a well understood source
-                std::fs::remove_file(adopted_path)
+                std::fs::remove_file(&adoptee_path)
                     .map_err(|e| Error::launder(e.into(), Error::Prepare))?;
                 std::fs::hard_link(adopted_path, &adoptee_path)
                     .map_err(|e| Error::launder(e.into(), Error::Prepare))?;

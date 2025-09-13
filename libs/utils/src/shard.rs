@@ -25,6 +25,12 @@ pub struct ShardIndex {
     pub shard_count: ShardCount,
 }
 
+/// Stripe size as number of pages.
+///
+/// NB: don't implement Default, so callers don't lazily use it by mistake. See DEFAULT_STRIPE_SIZE.
+#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
+pub struct ShardStripeSize(pub u32);
+
 /// Formatting helper, for generating the `shard_id` label in traces.
 pub struct ShardSlug<'a>(&'a TenantShardId);
 
@@ -52,6 +58,10 @@ pub struct TenantShardId {
 impl ShardCount {
     pub const MAX: Self = Self(u8::MAX);
     pub const MIN: Self = Self(0);
+
+    pub fn unsharded() -> Self {
+        ShardCount(0)
+    }
 
     /// The internal value of a ShardCount may be zero, which means "1 shard, but use
     /// legacy format for TenantShardId that excludes the shard suffix", also known
@@ -171,6 +181,18 @@ impl std::fmt::Display for ShardNumber {
     }
 }
 
+impl std::fmt::Display for ShardCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::Display for ShardStripeSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl std::fmt::Display for ShardSlug<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -196,7 +218,7 @@ impl std::fmt::Display for TenantShardId {
 impl std::fmt::Debug for TenantShardId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Debug is the same as Display: the compact hex representation
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -284,7 +306,7 @@ impl std::fmt::Display for ShardIndex {
 impl std::fmt::Debug for ShardIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Debug is the same as Display: the compact hex representation
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 

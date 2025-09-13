@@ -11,89 +11,161 @@
 //! - => S3 as the source for the PGDATA instead of local filesystem
 //!
 //! TODOs before productionization:
-//! - ChunkProcessingJob size / ImportJob::total_size does not account for sharding.
-//!   => produced image layers likely too small.
 //! - ChunkProcessingJob should cut up an ImportJob to hit exactly target image layer size.
-//! - asserts / unwraps need to be replaced with errors
-//! - don't trust remote objects will be small (=prevent OOMs in those cases)
-//!     - limit all in-memory buffers in size, or download to disk and read from there
-//! - limit task concurrency
-//! - generally play nice with other tenants in the system
-//!   - importbucket is different bucket than main pageserver storage, so, should be fine wrt S3 rate limits
-//!   - but concerns like network bandwidth, local disk write bandwidth, local disk capacity, etc
-//! - integrate with layer eviction system
-//! - audit for Tenant::cancel nor Timeline::cancel responsivity
-//! - audit for Tenant/Timeline gate holding (we spawn tokio tasks during this flow!)
 //!
 //! An incomplete set of TODOs from the Hackathon:
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::Arc;
 
-use anyhow::{bail, ensure};
+use anyhow::ensure;
 use bytes::Bytes;
+use futures::stream::FuturesOrdered;
 use itertools::Itertools;
+use pageserver_api::config::TimelineImportConfig;
 use pageserver_api::key::{
     CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, Key, TWOPHASEDIR_KEY, rel_block_to_key,
     rel_dir_to_key, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
     slru_segment_size_to_key,
 };
-use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range, singleton_range};
+use pageserver_api::keyspace::{ShardedRange, singleton_range};
+use pageserver_api::models::{ShardImportProgress, ShardImportProgressV1, ShardImportStatus};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::BLCKSZ;
 use postgres_ffi::relfile_utils::parse_relfilename;
-use postgres_ffi::{BLCKSZ, pg_constants};
 use remote_storage::RemotePath;
-use tokio::task::JoinSet;
-use tracing::{Instrument, debug, info_span, instrument};
+use tokio::sync::Semaphore;
+use tokio_stream::StreamExt;
+use tracing::{debug, instrument};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
+use utils::pausable_failpoint;
 
 use super::Timeline;
 use super::importbucket_client::{ControlFile, RemoteStorageWrapper};
 use crate::assert_u64_eq_usize::UsizeIsU64;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::controller_upcall_client::{StorageControllerUpcallApi, StorageControllerUpcallClient};
 use crate::pgdatadir_mapping::{
     DbDirectory, RelDirectory, SlruSegmentDirectory, TwoPhaseDirectory,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::storage_layer::{ImageLayerWriter, Layer};
+use crate::tenant::storage_layer::{AsLayerDesc, ImageLayerWriter, Layer};
+use crate::tenant::timeline::layer_manager::LayerManagerLockHolder;
 
 pub async fn run(
     timeline: Arc<Timeline>,
-    pgdata_lsn: Lsn,
     control_file: ControlFile,
     storage: RemoteStorageWrapper,
+    import_progress: Option<ShardImportProgress>,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
-    Flow {
-        timeline,
-        pgdata_lsn,
-        control_file,
-        tasks: Vec::new(),
-        storage,
+    // Match how we run the import based on the progress version.
+    // If there's no import progress, it means that this is a new import
+    // and we can use whichever version we want.
+    match import_progress {
+        Some(ShardImportProgress::V1(progress)) => {
+            run_v1(timeline, control_file, storage, Some(progress), ctx).await
+        }
+        None => run_v1(timeline, control_file, storage, None, ctx).await,
     }
-    .run(ctx)
-    .await
 }
 
-struct Flow {
+async fn run_v1(
     timeline: Arc<Timeline>,
-    pgdata_lsn: Lsn,
     control_file: ControlFile,
-    tasks: Vec<AnyImportTask>,
     storage: RemoteStorageWrapper,
+    import_progress: Option<ShardImportProgressV1>,
+    ctx: &RequestContext,
+) -> anyhow::Result<()> {
+    let planner = Planner {
+        control_file,
+        storage: storage.clone(),
+        shard: timeline.shard_identity,
+        tasks: Vec::default(),
+    };
+
+    // Use the job size limit encoded in the progress if we are resuming an import.
+    // This ensures that imports have stable plans even if the pageserver config changes.
+    let import_config = {
+        match &import_progress {
+            Some(progress) => {
+                let base = &timeline.conf.timeline_import_config;
+                TimelineImportConfig {
+                    import_job_soft_size_limit: NonZeroUsize::new(progress.job_soft_size_limit)
+                        .unwrap(),
+                    import_job_concurrency: base.import_job_concurrency,
+                    import_job_checkpoint_threshold: base.import_job_checkpoint_threshold,
+                    import_job_max_byte_range_size: base.import_job_max_byte_range_size,
+                }
+            }
+            None => timeline.conf.timeline_import_config.clone(),
+        }
+    };
+
+    let plan = planner.plan(&import_config).await?;
+
+    // Hash the plan and compare with the hash of the plan we got back from the storage controller.
+    // If the two match, it means that the planning stage had the same output.
+    //
+    // This is not intended to be a cryptographically secure hash.
+    const SEED: u64 = 42;
+    let mut hasher = twox_hash::XxHash64::with_seed(SEED);
+    plan.hash(&mut hasher);
+    let plan_hash = hasher.finish();
+
+    if let Some(progress) = &import_progress {
+        // Handle collisions on jobs of unequal length
+        if progress.jobs != plan.jobs.len() {
+            anyhow::bail!("Import plan job length does not match storcon metadata")
+        }
+
+        if plan_hash != progress.import_plan_hash {
+            anyhow::bail!("Import plan does not match storcon metadata");
+        }
+    }
+
+    pausable_failpoint!("import-timeline-pre-execute-pausable");
+
+    let jobs_count = import_progress.as_ref().map(|p| p.jobs);
+    let start_from_job_idx = import_progress.map(|progress| progress.completed);
+
+    tracing::info!(
+        start_from_job_idx=?start_from_job_idx,
+        jobs=?jobs_count,
+        "Executing import plan"
+    );
+
+    plan.execute(timeline, start_from_job_idx, plan_hash, &import_config, ctx)
+        .await
 }
 
-impl Flow {
-    /// Perform the ingestion into [`Self::timeline`].
-    /// Assumes the timeline is empty (= no layers).
-    pub async fn run(mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let pgdata_lsn = Lsn(self.control_file.control_file_data().checkPoint).align();
+struct Planner {
+    control_file: ControlFile,
+    storage: RemoteStorageWrapper,
+    shard: ShardIdentity,
+    tasks: Vec<AnyImportTask>,
+}
 
-        self.pgdata_lsn = pgdata_lsn;
+#[derive(Hash)]
+struct Plan {
+    jobs: Vec<ChunkProcessingJob>,
+    // Included here such that it ends up in the hash for the plan
+    shard: ShardIdentity,
+}
+
+impl Planner {
+    /// Creates an import plan
+    ///
+    /// This function is and must remain pure: given the same input, it will generate the same import plan.
+    async fn plan(mut self, import_config: &TimelineImportConfig) -> anyhow::Result<Plan> {
+        let pgdata_lsn = Lsn(self.control_file.control_file_data().checkPoint).align();
+        anyhow::ensure!(pgdata_lsn.is_valid());
 
         let datadir = PgDataDir::new(&self.storage).await?;
 
@@ -115,7 +187,7 @@ impl Flow {
         }
 
         // Import SLRUs
-        if self.timeline.tenant_shard_id.is_shard_zero() {
+        if self.shard.is_shard_zero() {
             // pg_xact (01:00 keyspace)
             self.import_slru(SlruKind::Clog, &self.storage.pgdata().join("pg_xact"))
                 .await?;
@@ -162,64 +234,58 @@ impl Flow {
                 checkpoint_buf,
             )));
 
+        // Sort the tasks by the key ranges they handle.
+        // The plan being generated here needs to be stable across invocations
+        // of this method.
+        self.tasks.sort_by_key(|task| match task {
+            AnyImportTask::SingleKey(key) => (key.key, key.key.next()),
+            AnyImportTask::RelBlocks(rel_blocks) => {
+                (rel_blocks.key_range.start, rel_blocks.key_range.end)
+            }
+            AnyImportTask::SlruBlocks(slru_blocks) => {
+                (slru_blocks.key_range.start, slru_blocks.key_range.end)
+            }
+        });
+
         // Assigns parts of key space to later parallel jobs
+        // Note: The image layers produced here may have gaps, meaning,
+        //       there is not an image for each key in the layer's key range.
+        //       The read path stops traversal at the first image layer, regardless
+        //       of whether a base image has been found for a key or not.
+        //       (Concept of sparse image layers doesn't exist.)
+        //       This behavior is exactly right for the base image layers we're producing here.
+        //       But, since no other place in the code currently produces image layers with gaps,
+        //       it seems noteworthy.
         let mut last_end_key = Key::MIN;
         let mut current_chunk = Vec::new();
         let mut current_chunk_size: usize = 0;
-        let mut parallel_jobs = Vec::new();
+        let mut jobs = Vec::new();
         for task in std::mem::take(&mut self.tasks).into_iter() {
-            if current_chunk_size + task.total_size() > 1024 * 1024 * 1024 {
+            let task_size = task.total_size(&self.shard);
+            let projected_chunk_size = current_chunk_size.saturating_add(task_size);
+            if projected_chunk_size > import_config.import_job_soft_size_limit.into() {
                 let key_range = last_end_key..task.key_range().start;
-                parallel_jobs.push(ChunkProcessingJob::new(
+                jobs.push(ChunkProcessingJob::new(
                     key_range.clone(),
                     std::mem::take(&mut current_chunk),
-                    &self,
+                    pgdata_lsn,
                 ));
                 last_end_key = key_range.end;
                 current_chunk_size = 0;
             }
-            current_chunk_size += task.total_size();
+            current_chunk_size = current_chunk_size.saturating_add(task_size);
             current_chunk.push(task);
         }
-        parallel_jobs.push(ChunkProcessingJob::new(
+        jobs.push(ChunkProcessingJob::new(
             last_end_key..Key::MAX,
             current_chunk,
-            &self,
+            pgdata_lsn,
         ));
 
-        // Start all jobs simultaneosly
-        let mut work = JoinSet::new();
-        // TODO: semaphore?
-        for job in parallel_jobs {
-            let ctx: RequestContext =
-                ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
-            work.spawn(async move { job.run(&ctx).await }.instrument(info_span!("parallel_job")));
-        }
-        let mut results = Vec::new();
-        while let Some(result) = work.join_next().await {
-            match result {
-                Ok(res) => {
-                    results.push(res);
-                }
-                Err(_joinset_err) => {
-                    results.push(Err(anyhow::anyhow!(
-                        "parallel job panicked or cancelled, check pageserver logs"
-                    )));
-                }
-            }
-        }
-
-        if results.iter().all(|r| r.is_ok()) {
-            Ok(())
-        } else {
-            let mut msg = String::new();
-            for result in results {
-                if let Err(err) = result {
-                    msg.push_str(&format!("{err:?}\n\n"));
-                }
-            }
-            bail!("Some parallel jobs failed:\n\n{msg}");
-        }
+        Ok(Plan {
+            jobs,
+            shard: self.shard,
+        })
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(dboid=%db.dboid, tablespace=%db.spcnode, path=%db.path))]
@@ -266,7 +332,7 @@ impl Flow {
             let end_key = rel_block_to_key(file.rel_tag, start_blk + (len / 8192) as u32);
             self.tasks
                 .push(AnyImportTask::RelBlocks(ImportRelBlocksTask::new(
-                    *self.timeline.get_shard_identity(),
+                    self.shard,
                     start_key..end_key,
                     &file.path,
                     self.storage.clone(),
@@ -289,7 +355,7 @@ impl Flow {
     }
 
     async fn import_slru(&mut self, kind: SlruKind, path: &RemotePath) -> anyhow::Result<()> {
-        assert!(self.timeline.tenant_shard_id.is_shard_zero());
+        assert!(self.shard.is_shard_zero());
 
         let segments = self.storage.listfilesindir(path).await?;
         let segments: Vec<(String, u32, usize)> = segments
@@ -344,6 +410,109 @@ impl Flow {
     }
 }
 
+impl Plan {
+    async fn execute(
+        self,
+        timeline: Arc<Timeline>,
+        start_after_job_idx: Option<usize>,
+        import_plan_hash: u64,
+        import_config: &TimelineImportConfig,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let storcon_client = StorageControllerUpcallClient::new(timeline.conf, &timeline.cancel);
+
+        let mut work = FuturesOrdered::new();
+        let semaphore = Arc::new(Semaphore::new(import_config.import_job_concurrency.into()));
+
+        let jobs_in_plan = self.jobs.len();
+
+        let mut jobs = self
+            .jobs
+            .into_iter()
+            .enumerate()
+            .map(|(idx, job)| (idx + 1, job))
+            .filter(|(idx, _job)| {
+                // Filter out any jobs that have been done already
+                if let Some(start_after) = start_after_job_idx {
+                    *idx > start_after
+                } else {
+                    true
+                }
+            })
+            .peekable();
+
+        let mut last_completed_job_idx = start_after_job_idx.unwrap_or(0);
+        let checkpoint_every: usize = import_config.import_job_checkpoint_threshold.into();
+        let max_byte_range_size: usize = import_config.import_job_max_byte_range_size.into();
+
+        // Run import jobs concurrently up to the limit specified by the pageserver configuration.
+        // Note that we process completed futures in the oreder of insertion. This will be the
+        // building block for resuming imports across pageserver restarts or tenant migrations.
+        while last_completed_job_idx < jobs_in_plan {
+            tokio::select! {
+                permit = semaphore.clone().acquire_owned(), if jobs.peek().is_some() => {
+                    let permit = permit.expect("never closed");
+                    let (job_idx, job) = jobs.next().expect("we peeked");
+
+                    let job_timeline = timeline.clone();
+                    let ctx = ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
+
+                    work.push_back(tokio::task::spawn(async move {
+                        let _permit = permit;
+                        let res = job.run(job_timeline, max_byte_range_size, &ctx).await;
+                        (job_idx, res)
+                    }));
+                },
+                maybe_complete_job_idx = work.next() => {
+                    pausable_failpoint!("import-task-complete-pausable");
+
+                    match maybe_complete_job_idx {
+                        Some(Ok((job_idx, res))) => {
+                            assert!(last_completed_job_idx.checked_add(1).unwrap() == job_idx);
+
+                            res?;
+                            last_completed_job_idx = job_idx;
+
+                            if last_completed_job_idx % checkpoint_every == 0 {
+                                tracing::info!(last_completed_job_idx, jobs=%jobs_in_plan, "Checkpointing import status");
+
+                                let progress = ShardImportProgressV1 {
+                                    jobs: jobs_in_plan,
+                                    completed: last_completed_job_idx,
+                                    import_plan_hash,
+                                    job_soft_size_limit: import_config.import_job_soft_size_limit.into(),
+                                };
+
+                                timeline.remote_client.schedule_index_upload_for_file_changes()?;
+                                timeline.remote_client.wait_completion().await?;
+
+                                storcon_client.put_timeline_import_status(
+                                    timeline.tenant_shard_id,
+                                    timeline.timeline_id,
+                                    timeline.generation,
+                                    ShardImportStatus::InProgress(Some(ShardImportProgress::V1(progress)))
+                                )
+                                .await
+                                .map_err(|_err| {
+                                    anyhow::anyhow!("Shut down while putting timeline import status")
+                                })?;
+                            }
+                        },
+                        Some(Err(_)) => {
+                            anyhow::bail!(
+                                "import job panicked or cancelled"
+                            );
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 //
 // dbdir iteration tools
 //
@@ -389,7 +558,7 @@ impl PgDataDir {
                 PgDataDirDb::new(
                     storage,
                     &basedir.join(dboid.to_string()),
-                    pg_constants::DEFAULTTABLESPACE_OID,
+                    postgres_ffi_types::constants::DEFAULTTABLESPACE_OID,
                     dboid,
                     &datadir_path,
                 )
@@ -402,7 +571,7 @@ impl PgDataDir {
             PgDataDirDb::new(
                 storage,
                 &datadir_path.join("global"),
-                postgres_ffi::pg_constants::GLOBALTABLESPACE_OID,
+                postgres_ffi_types::constants::GLOBALTABLESPACE_OID,
                 0,
                 &datadir_path,
             )
@@ -445,18 +614,18 @@ impl PgDataDirDb {
                 };
 
                 let path = datadir_path.join(rel_tag.to_segfile_name(segno));
-                assert!(filesize % BLCKSZ as usize == 0); // TODO: this should result in an error
+                anyhow::ensure!(filesize % BLCKSZ as usize == 0);
                 let nblocks = filesize / BLCKSZ as usize;
 
-                PgDataDirDbFile {
+                Ok(PgDataDirDbFile {
                     path,
                     filesize,
                     rel_tag,
                     segno,
                     nblocks: Some(nblocks), // first non-cummulative sizes
-                }
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_, _>>()?;
 
         // Set cummulative sizes. Do all of that math here, so that later we could easier
         // parallelize over segments and know with which segments we need to write relsize
@@ -491,18 +660,29 @@ impl PgDataDirDb {
 trait ImportTask {
     fn key_range(&self) -> Range<Key>;
 
-    fn total_size(&self) -> usize {
-        // TODO: revisit this
-        if is_contiguous_range(&self.key_range()) {
-            contiguous_range_len(&self.key_range()) as usize * 8192
+    fn total_size(&self, shard_identity: &ShardIdentity) -> usize {
+        let range = ShardedRange::new(self.key_range(), shard_identity);
+        let page_count = range.page_count();
+        if page_count == u32::MAX {
+            tracing::warn!(
+                "Import task has non contiguous key range: {}..{}",
+                self.key_range().start,
+                self.key_range().end
+            );
+
+            // Tasks should operate on contiguous ranges. It is unexpected for
+            // ranges to violate this assumption. Calling code handles this by mapping
+            // any task on a non contiguous range to its own image layer.
+            usize::MAX
         } else {
-            u32::MAX as usize
+            page_count as usize * 8192
         }
     }
 
     async fn doit(
         self,
         layer_writer: &mut ImageLayerWriter,
+        max_byte_range_size: usize,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize>;
 }
@@ -510,6 +690,19 @@ trait ImportTask {
 struct ImportSingleKeyTask {
     key: Key,
     buf: Bytes,
+}
+
+impl Hash for ImportSingleKeyTask {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ImportSingleKeyTask { key, buf } = self;
+
+        key.hash(state);
+        // The key value might not have a stable binary representation.
+        // For instance, the db directory uses an unstable hash-map.
+        // To work around this we are a bit lax here and only hash the
+        // size of the buffer which must be consistent.
+        buf.len().hash(state);
+    }
 }
 
 impl ImportSingleKeyTask {
@@ -526,6 +719,7 @@ impl ImportTask for ImportSingleKeyTask {
     async fn doit(
         self,
         layer_writer: &mut ImageLayerWriter,
+        _max_byte_range_size: usize,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         layer_writer.put_image(self.key, self.buf, ctx).await?;
@@ -538,6 +732,20 @@ struct ImportRelBlocksTask {
     key_range: Range<Key>,
     path: RemotePath,
     storage: RemoteStorageWrapper,
+}
+
+impl Hash for ImportRelBlocksTask {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ImportRelBlocksTask {
+            shard_identity: _,
+            key_range,
+            path,
+            storage: _,
+        } = self;
+
+        key_range.hash(state);
+        path.hash(state);
+    }
 }
 
 impl ImportRelBlocksTask {
@@ -565,6 +773,7 @@ impl ImportTask for ImportRelBlocksTask {
     async fn doit(
         self,
         layer_writer: &mut ImageLayerWriter,
+        max_byte_range_size: usize,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         debug!("Importing relation file");
@@ -591,7 +800,7 @@ impl ImportTask for ImportRelBlocksTask {
                 assert_eq!(key.len(), 1);
                 assert!(!acc.is_empty());
                 assert!(acc_end > acc_start);
-                if acc_end == start /* TODO additional max range check here, to limit memory consumption per task to X */ {
+                if acc_end == start && end - acc_start <= max_byte_range_size {
                     acc.push(key.pop().unwrap());
                     Ok((acc, acc_start, end))
                 } else {
@@ -606,8 +815,8 @@ impl ImportTask for ImportRelBlocksTask {
                 .get_range(&self.path, range_start.into_u64(), range_end.into_u64())
                 .await?;
             let mut buf = Bytes::from(range_buf);
-            // TODO: batched writes
             for key in keys {
+                // The writer buffers writes internally
                 let image = buf.split_to(8192);
                 layer_writer.put_image(key, image, ctx).await?;
                 nimages += 1;
@@ -622,6 +831,19 @@ struct ImportSlruBlocksTask {
     key_range: Range<Key>,
     path: RemotePath,
     storage: RemoteStorageWrapper,
+}
+
+impl Hash for ImportSlruBlocksTask {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let ImportSlruBlocksTask {
+            key_range,
+            path,
+            storage: _,
+        } = self;
+
+        key_range.hash(state);
+        path.hash(state);
+    }
 }
 
 impl ImportSlruBlocksTask {
@@ -642,11 +864,15 @@ impl ImportTask for ImportSlruBlocksTask {
     async fn doit(
         self,
         layer_writer: &mut ImageLayerWriter,
+        _max_byte_range_size: usize,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         debug!("Importing SLRU segment file {}", self.path);
         let buf = self.storage.get(&self.path).await?;
 
+        // TODO(vlad): Does timestamp to LSN work for imported timelines?
+        // Probably not since we don't append the `xact_time` to it as in
+        // [`WalIngest::ingest_xact_record`].
         let (kind, segno, start_blk) = self.key_range.start.to_slru_block()?;
         let (_kind, _segno, end_blk) = self.key_range.end.to_slru_block()?;
         let mut blknum = start_blk;
@@ -666,6 +892,7 @@ impl ImportTask for ImportSlruBlocksTask {
     }
 }
 
+#[derive(Hash)]
 enum AnyImportTask {
     SingleKey(ImportSingleKeyTask),
     RelBlocks(ImportRelBlocksTask),
@@ -684,12 +911,13 @@ impl ImportTask for AnyImportTask {
     async fn doit(
         self,
         layer_writer: &mut ImageLayerWriter,
+        max_byte_range_size: usize,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         match self {
-            Self::SingleKey(t) => t.doit(layer_writer, ctx).await,
-            Self::RelBlocks(t) => t.doit(layer_writer, ctx).await,
-            Self::SlruBlocks(t) => t.doit(layer_writer, ctx).await,
+            Self::SingleKey(t) => t.doit(layer_writer, max_byte_range_size, ctx).await,
+            Self::RelBlocks(t) => t.doit(layer_writer, max_byte_range_size, ctx).await,
+            Self::SlruBlocks(t) => t.doit(layer_writer, max_byte_range_size, ctx).await,
         }
     }
 }
@@ -712,8 +940,8 @@ impl From<ImportSlruBlocksTask> for AnyImportTask {
     }
 }
 
+#[derive(Hash)]
 struct ChunkProcessingJob {
-    timeline: Arc<Timeline>,
     range: Range<Key>,
     tasks: Vec<AnyImportTask>,
 
@@ -721,54 +949,103 @@ struct ChunkProcessingJob {
 }
 
 impl ChunkProcessingJob {
-    fn new(range: Range<Key>, tasks: Vec<AnyImportTask>, env: &Flow) -> Self {
-        assert!(env.pgdata_lsn.is_valid());
+    fn new(range: Range<Key>, tasks: Vec<AnyImportTask>, pgdata_lsn: Lsn) -> Self {
+        assert!(pgdata_lsn.is_valid());
         Self {
-            timeline: env.timeline.clone(),
             range,
             tasks,
-            pgdata_lsn: env.pgdata_lsn,
+            pgdata_lsn,
         }
     }
 
-    async fn run(self, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn run(
+        self,
+        timeline: Arc<Timeline>,
+        max_byte_range_size: usize,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         let mut writer = ImageLayerWriter::new(
-            self.timeline.conf,
-            self.timeline.timeline_id,
-            self.timeline.tenant_shard_id,
+            timeline.conf,
+            timeline.timeline_id,
+            timeline.tenant_shard_id,
             &self.range,
             self.pgdata_lsn,
-            &self.timeline.gate,
-            self.timeline.cancel.clone(),
+            &timeline.gate,
+            timeline.cancel.clone(),
             ctx,
         )
         .await?;
 
         let mut nimages = 0;
         for task in self.tasks {
-            nimages += task.doit(&mut writer, ctx).await?;
+            nimages += task.doit(&mut writer, max_byte_range_size, ctx).await?;
         }
 
         let resident_layer = if nimages > 0 {
             let (desc, path) = writer.finish(ctx).await?;
-            Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?
+
+            {
+                let guard = timeline
+                    .layers
+                    .read(LayerManagerLockHolder::ImportPgData)
+                    .await;
+                let existing_layer = guard.try_get_from_key(&desc.key());
+                if let Some(layer) = existing_layer {
+                    if layer.metadata().generation == timeline.generation {
+                        return Err(anyhow::anyhow!(
+                            "Import attempted to rewrite layer file in the same generation: {}",
+                            layer.local_path()
+                        ));
+                    }
+                }
+            }
+
+            Layer::finish_creating(timeline.conf, &timeline, desc, &path)?
         } else {
             // dropping the writer cleans up
             return Ok(());
         };
 
-        // this is sharing the same code as create_image_layers
-        let mut guard = self.timeline.layers.write().await;
-        guard
-            .open_mut()?
-            .track_new_image_layers(&[resident_layer.clone()], &self.timeline.metrics);
-        crate::tenant::timeline::drop_wlock(guard);
+        // The same import job might run multiple times since not each job is checkpointed.
+        // Hence, we must support the cases where the layer already exists. We cannot be
+        // certain that the existing layer is identical to the new one, so in that case
+        // we replace the old layer with the one we just generated.
 
-        // Schedule the layer for upload but don't add barriers such as
-        // wait for completion or index upload, so we don't inhibit upload parallelism.
-        // TODO: limit upload parallelism somehow (e.g. by limiting concurrency of jobs?)
-        // TODO: or regulate parallelism by upload queue depth? Prob should happen at a higher level.
-        self.timeline
+        let mut guard = timeline
+            .layers
+            .write(LayerManagerLockHolder::ImportPgData)
+            .await;
+
+        let existing_layer = guard
+            .try_get_from_key(&resident_layer.layer_desc().key())
+            .cloned();
+        match existing_layer {
+            Some(existing) => {
+                // Unlink the remote layer from the index without scheduling its deletion.
+                // When `existing_layer` drops [`LayerInner::drop`] will schedule its deletion from
+                // remote storage, but that assumes that the layer was unlinked from the index first.
+                timeline
+                    .remote_client
+                    .schedule_unlinking_of_layers_from_index_part(std::iter::once(
+                        existing.layer_desc().layer_name(),
+                    ))?;
+
+                guard.open_mut()?.rewrite_layers(
+                    &[(existing.clone(), resident_layer.clone())],
+                    &[],
+                    &timeline.metrics,
+                );
+            }
+            None => {
+                guard
+                    .open_mut()?
+                    .track_new_image_layers(&[resident_layer.clone()], &timeline.metrics);
+            }
+        }
+
+        crate::tenant::timeline::drop_layer_manager_wlock(guard);
+
+        timeline
             .remote_client
             .schedule_layer_file_upload(resident_layer)?;
 

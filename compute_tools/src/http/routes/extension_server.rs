@@ -22,7 +22,7 @@ pub(in crate::http) async fn download_extension(
     State(compute): State<Arc<ComputeNode>>,
 ) -> Response {
     // Don't even try to download extensions if no remote storage is configured
-    if compute.params.ext_remote_storage.is_none() {
+    if compute.params.remote_ext_base_url.is_none() {
         return JsonResponse::error(
             StatusCode::PRECONDITION_FAILED,
             "remote storage is not configured",

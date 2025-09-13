@@ -94,10 +94,23 @@ impl Header {
 pub enum WriteBlobError {
     #[error(transparent)]
     Flush(FlushTaskError),
-    #[error("blob too large ({len} bytes)")]
-    BlobTooLarge { len: usize },
     #[error(transparent)]
-    WriteBlobRaw(anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl WriteBlobError {
+    pub fn is_cancel(&self) -> bool {
+        match self {
+            WriteBlobError::Flush(e) => e.is_cancel(),
+            WriteBlobError::Other(_) => false,
+        }
+    }
+    pub fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            WriteBlobError::Flush(e) => e.into_anyhow(),
+            WriteBlobError::Other(e) => e,
+        }
+    }
 }
 
 impl BlockCursor<'_> {
@@ -327,7 +340,9 @@ where
                     return (
                         (
                             io_buf.slice_len(),
-                            Err(WriteBlobError::BlobTooLarge { len }),
+                            Err(WriteBlobError::Other(anyhow::anyhow!(
+                                "blob too large ({len} bytes)"
+                            ))),
                         ),
                         srcbuf,
                     );
@@ -391,7 +406,7 @@ where
         // Verify the header, to ensure we don't write invalid/corrupt data.
         let header = match Header::decode(&raw_with_header)
             .context("decoding blob header")
-            .map_err(WriteBlobError::WriteBlobRaw)
+            .map_err(WriteBlobError::Other)
         {
             Ok(header) => header,
             Err(err) => return (raw_with_header, Err(err)),
@@ -401,7 +416,7 @@ where
             let raw_len = raw_with_header.len();
             return (
                 raw_with_header,
-                Err(WriteBlobError::WriteBlobRaw(anyhow::anyhow!(
+                Err(WriteBlobError::Other(anyhow::anyhow!(
                     "header length mismatch: {header_total_len} != {raw_len}"
                 ))),
             );
@@ -520,8 +535,8 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn random_array(len: usize) -> Vec<u8> {
-        let mut rng = rand::thread_rng();
-        (0..len).map(|_| rng.r#gen()).collect::<_>()
+        let mut rng = rand::rng();
+        (0..len).map(|_| rng.random()).collect::<_>()
     }
 
     #[tokio::test]
@@ -573,9 +588,9 @@ pub(crate) mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let blobs = (0..1024)
             .map(|_| {
-                let mut sz: u16 = rng.r#gen();
+                let mut sz: u16 = rng.random();
                 // Make 50% of the arrays small
-                if rng.r#gen() {
+                if rng.random() {
                     sz &= 63;
                 }
                 random_array(sz.into())

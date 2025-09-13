@@ -4,8 +4,8 @@ use std::ops::Range;
 use anyhow::{Result, bail};
 use byteorder::{BE, ByteOrder};
 use bytes::Bytes;
-use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::{Oid, RepOriginId};
+use postgres_ffi_types::forknum::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi_types::{Oid, RepOriginId};
 use serde::{Deserialize, Serialize};
 use utils::const_assert;
 
@@ -194,7 +194,7 @@ impl Key {
     /// will be rejected on the write path.
     #[allow(dead_code)]
     pub fn is_valid_key_on_write_path_strong(&self) -> bool {
-        use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+        use postgres_ffi_types::constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
         if !self.is_i128_representable() {
             return false;
         }
@@ -911,6 +911,11 @@ impl Key {
     }
 
     #[inline(always)]
+    pub fn is_rel_block_of_rel(&self, rel: Oid) -> bool {
+        self.is_rel_block_key() && self.field4 == rel
+    }
+
+    #[inline(always)]
     pub fn is_rel_dir_key(&self) -> bool {
         self.field1 == 0x00
             && self.field2 != 0
@@ -976,12 +981,12 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         let key = Key {
-            field1: rng.r#gen(),
-            field2: rng.r#gen(),
-            field3: rng.r#gen(),
-            field4: rng.r#gen(),
-            field5: rng.r#gen(),
-            field6: rng.r#gen(),
+            field1: rng.random(),
+            field2: rng.random(),
+            field3: rng.random(),
+            field4: rng.random(),
+            field5: rng.random(),
+            field6: rng.random(),
         };
 
         assert_eq!(key, Key::from_str(&format!("{key}")).unwrap());

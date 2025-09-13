@@ -380,7 +380,7 @@ impl<B: Buffer> std::fmt::Debug for LogicalReadState<B> {
                 write!(f, "Ongoing({:?})", BufferDebug::from(b as &dyn Buffer))
             }
             LogicalReadState::Ok(b) => write!(f, "Ok({:?})", BufferDebug::from(b as &dyn Buffer)),
-            LogicalReadState::Error(e) => write!(f, "Error({:?})", e),
+            LogicalReadState::Error(e) => write!(f, "Error({e:?})"),
             LogicalReadState::Undefined => write!(f, "Undefined"),
         }
     }
@@ -440,8 +440,8 @@ mod tests {
     impl InMemoryFile {
         fn new_random(len: usize) -> Self {
             Self {
-                content: rand::thread_rng()
-                    .sample_iter(rand::distributions::Standard)
+                content: rand::rng()
+                    .sample_iter(rand::distr::StandardUniform)
                     .take(len)
                     .collect(),
             }
@@ -498,7 +498,7 @@ mod tests {
                     len
                 }
             };
-            rand::Rng::fill(&mut rand::thread_rng(), &mut dst_slice[nread..]); // to discover bugs
+            rand::Rng::fill(&mut rand::rng(), &mut dst_slice[nread..]); // to discover bugs
             Ok((dst, nread))
         }
     }
@@ -763,7 +763,7 @@ mod tests {
                     let len = std::cmp::min(dst.bytes_total(), mocked_bytes.len());
                     let dst_slice: &mut [u8] = dst.as_mut_rust_slice_full_zeroed();
                     dst_slice[..len].copy_from_slice(&mocked_bytes[..len]);
-                    rand::Rng::fill(&mut rand::thread_rng(), &mut dst_slice[len..]); // to discover bugs
+                    rand::Rng::fill(&mut rand::rng(), &mut dst_slice[len..]); // to discover bugs
                     Ok((dst, len))
                 }
                 Err(e) => Err(std::io::Error::other(e)),

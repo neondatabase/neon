@@ -13,6 +13,8 @@ use utils::backoff::retry;
 pub fn app(state: Arc<Storage>) -> Router<()> {
     use axum::routing::{delete as _delete, get as _get};
     let delete_prefix = _delete(delete_prefix);
+    // NB: On any changes do not forget to update the OpenAPI spec
+    // in /endpoint_storage/src/openapi_spec.yml.
     Router::new()
         .route(
             "/{tenant_id}/{timeline_id}/{endpoint_id}/{*path}",
@@ -231,7 +233,7 @@ mod tests {
                 .unwrap()
                 .as_millis();
             use rand::Rng;
-            let random = rand::thread_rng().r#gen::<u32>();
+            let random = rand::rng().random::<u32>();
 
             let s3_config = remote_storage::S3Config {
                 bucket_name: var(REAL_S3_BUCKET).unwrap(),
@@ -343,7 +345,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         TimelineId::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3, 4, 5, 7]);
     const ENDPOINT_ID: &str = "ep-winter-frost-a662z3vg";
     fn token() -> String {
-        let claims = endpoint_storage::Claims {
+        let claims = endpoint_storage::claims::EndpointStorageClaims {
             tenant_id: TENANT_ID,
             timeline_id: TIMELINE_ID,
             endpoint_id: ENDPOINT_ID.into(),
@@ -374,7 +376,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
             let request = Request::builder()
                 .uri(format!("/{tenant}/{timeline}/{endpoint}/sub/path/key"))
                 .method(method)
-                .header("Authorization", format!("Bearer {}", token))
+                .header("Authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap();
             let status = ServiceExt::ready(&mut app)
@@ -462,6 +464,8 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         if var(REAL_S3_ENV).is_ok() {
             assert!(body.contains("remote_storage_s3_deleted_objects_total"));
         }
+
+        #[cfg(target_os = "linux")]
         assert!(body.contains("process_threads"));
     }
 
@@ -489,16 +493,8 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
     }
 
     fn delete_prefix_token(uri: &str) -> String {
-        use serde::Serialize;
         let parts = uri.split("/").collect::<Vec<&str>>();
-        #[derive(Serialize)]
-        struct PrefixClaims {
-            tenant_id: TenantId,
-            timeline_id: Option<TimelineId>,
-            endpoint_id: Option<endpoint_storage::EndpointId>,
-            exp: u64,
-        }
-        let claims = PrefixClaims {
+        let claims = endpoint_storage::claims::DeletePrefixClaims {
             tenant_id: parts.get(1).map(|c| c.parse().unwrap()).unwrap(),
             timeline_id: parts.get(2).map(|c| c.parse().unwrap()),
             endpoint_id: parts.get(3).map(ToString::to_string),

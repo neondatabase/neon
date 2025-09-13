@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use futures::Future;
 use pageserver_api::config::NodeMetadata;
@@ -7,7 +8,7 @@ use pageserver_api::models::ShardImportStatus;
 use pageserver_api::shard::TenantShardId;
 use pageserver_api::upcall_api::{
     PutTimelineImportStatusRequest, ReAttachRequest, ReAttachResponse, ReAttachResponseTenant,
-    ValidateRequest, ValidateRequestTenant, ValidateResponse,
+    TimelineImportStatusRequest, ValidateRequest, ValidateRequestTenant, ValidateResponse,
 };
 use reqwest::Certificate;
 use serde::Serialize;
@@ -16,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
-use utils::{backoff, failpoint_support};
+use utils::{backoff, failpoint_support, ip_address};
 
 use crate::config::PageServerConf;
 use crate::virtual_file::on_fatal_io_error;
@@ -27,6 +28,7 @@ pub struct StorageControllerUpcallClient {
     http_client: reqwest::Client,
     base_url: Url,
     node_id: NodeId,
+    node_ip_addr: Option<IpAddr>,
     cancel: CancellationToken,
 }
 
@@ -40,6 +42,7 @@ pub trait StorageControllerUpcallApi {
     fn re_attach(
         &self,
         conf: &PageServerConf,
+        empty_local_disk: bool,
     ) -> impl Future<
         Output = Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError>,
     > + Send;
@@ -51,8 +54,15 @@ pub trait StorageControllerUpcallApi {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        generation: Generation,
         status: ShardImportStatus,
     ) -> impl Future<Output = Result<(), RetryForeverError>> + Send;
+    fn get_timeline_import_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        generation: Generation,
+    ) -> impl Future<Output = Result<ShardImportStatus, RetryForeverError>> + Send;
 }
 
 impl StorageControllerUpcallClient {
@@ -84,11 +94,18 @@ impl StorageControllerUpcallClient {
             );
         }
 
+        // Intentionally panics if we encountered any errors parsing or reading the IP address.
+        // Note that if the required environment variable is not set, `read_node_ip_addr_from_env` returns `Ok(None)`
+        // instead of an error.
+        let node_ip_addr =
+            ip_address::read_node_ip_addr_from_env().expect("Error reading node IP address.");
+
         Self {
             http_client: client.build().expect("Failed to construct HTTP client"),
             base_url: url,
             node_id: conf.id,
             cancel: cancel.clone(),
+            node_ip_addr,
         }
     }
 
@@ -97,6 +114,7 @@ impl StorageControllerUpcallClient {
         &self,
         url: &url::Url,
         request: R,
+        method: reqwest::Method,
     ) -> Result<T, RetryForeverError>
     where
         R: Serialize,
@@ -106,7 +124,7 @@ impl StorageControllerUpcallClient {
             || async {
                 let response = self
                     .http_client
-                    .post(url.clone())
+                    .request(method.clone(), url.clone())
                     .json(&request)
                     .send()
                     .await?;
@@ -138,6 +156,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
     async fn re_attach(
         &self,
         conf: &PageServerConf,
+        empty_local_disk: bool,
     ) -> Result<HashMap<TenantShardId, ReAttachResponseTenant>, RetryForeverError> {
         let url = self
             .base_url
@@ -151,14 +170,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
                 Ok(m) => {
                     // Since we run one time at startup, be generous in our logging and
                     // dump all metadata.
-                    tracing::info!(
-                        "Loaded node metadata: postgres {}:{}, http {}:{}, other fields: {:?}",
-                        m.postgres_host,
-                        m.postgres_port,
-                        m.http_host,
-                        m.http_port,
-                        m.other
-                    );
+                    tracing::info!("Loaded node metadata: {m}");
 
                     let az_id = {
                         let az_id_from_metadata = m
@@ -187,9 +199,12 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
                         node_id: conf.id,
                         listen_pg_addr: m.postgres_host,
                         listen_pg_port: m.postgres_port,
+                        listen_grpc_addr: m.grpc_host,
+                        listen_grpc_port: m.grpc_port,
                         listen_http_addr: m.http_host,
                         listen_http_port: m.http_port,
                         listen_https_port: m.https_port,
+                        node_ip_addr: self.node_ip_addr,
                         availability_zone_id: az_id.expect("Checked above"),
                     })
                 }
@@ -213,9 +228,12 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         let request = ReAttachRequest {
             node_id: self.node_id,
             register: register.clone(),
+            empty_local_disk: Some(empty_local_disk),
         };
 
-        let response: ReAttachResponse = self.retry_http_forever(&url, request).await?;
+        let response: ReAttachResponse = self
+            .retry_http_forever(&url, request, reqwest::Method::POST)
+            .await?;
         tracing::info!(
             "Received re-attach response with {} tenants (node {}, register: {:?})",
             response.tenants.len(),
@@ -268,7 +286,9 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
                 return Err(RetryForeverError::ShuttingDown);
             }
 
-            let response: ValidateResponse = self.retry_http_forever(&url, request).await?;
+            let response: ValidateResponse = self
+                .retry_http_forever(&url, request, reqwest::Method::POST)
+                .await?;
             for rt in response.tenants {
                 result.insert(rt.id, rt.valid);
             }
@@ -287,6 +307,7 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         &self,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        generation: Generation,
         status: ShardImportStatus,
     ) -> Result<(), RetryForeverError> {
         let url = self
@@ -297,9 +318,35 @@ impl StorageControllerUpcallApi for StorageControllerUpcallClient {
         let request = PutTimelineImportStatusRequest {
             tenant_shard_id,
             timeline_id,
+            generation,
             status,
         };
 
-        self.retry_http_forever(&url, request).await
+        self.retry_http_forever(&url, request, reqwest::Method::POST)
+            .await
+    }
+
+    #[tracing::instrument(skip_all)] // so that warning logs from retry_http_forever have context
+    async fn get_timeline_import_status(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        generation: Generation,
+    ) -> Result<ShardImportStatus, RetryForeverError> {
+        let url = self
+            .base_url
+            .join("timeline_import_status")
+            .expect("Failed to build path");
+
+        let request = TimelineImportStatusRequest {
+            tenant_shard_id,
+            timeline_id,
+            generation,
+        };
+
+        let response: ShardImportStatus = self
+            .retry_http_forever(&url, request, reqwest::Method::GET)
+            .await?;
+        Ok(response)
     }
 }

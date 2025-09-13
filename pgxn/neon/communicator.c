@@ -65,6 +65,7 @@
 #include "port/pg_iovec.h"
 #include "postmaster/interrupt.h"
 #include "replication/walsender.h"
+#include "storage/ipc.h"
 #include "utils/timeout.h"
 
 #include "bitmap.h"
@@ -76,10 +77,6 @@
 
 #if PG_VERSION_NUM >= 150000
 #include "access/xlogrecovery.h"
-#endif
-
-#if PG_VERSION_NUM < 160000
-typedef PGAlignedBlock PGIOAlignedBlock;
 #endif
 
 #define NEON_PANIC_CONNECTION_STATE(shard_no, elvl, message, ...) \
@@ -413,6 +410,47 @@ compact_prefetch_buffers(void)
 }
 
 /*
+ * Check that prefetch response matches the slot
+ */
+static void
+check_getpage_response(PrefetchRequest* slot, NeonResponse* resp)
+{
+	if (resp->tag != T_NeonGetPageResponse && resp->tag != T_NeonErrorResponse)
+	{
+		neon_shard_log(slot->shard_no, PANIC, "Unexpected prefetch response %d, ring_receive=" UINT64_FORMAT ", ring_flush=" UINT64_FORMAT ", ring_unused=" UINT64_FORMAT "",
+					   resp->tag, MyPState->ring_receive, MyPState->ring_flush, MyPState->ring_unused);
+	}
+	if (neon_protocol_version >= 3)
+	{
+		NRelFileInfo rinfo = BufTagGetNRelFileInfo(slot->buftag);
+		if (resp->tag == T_NeonGetPageResponse)
+		{
+			NeonGetPageResponse * getpage_resp = (NeonGetPageResponse *)resp;
+			if (resp->reqid != slot->reqid ||
+				resp->lsn != slot->request_lsns.request_lsn ||
+				resp->not_modified_since != slot->request_lsns.not_modified_since ||
+				!RelFileInfoEquals(getpage_resp->req.rinfo, rinfo) ||
+				getpage_resp->req.forknum != slot->buftag.forkNum ||
+				getpage_resp->req.blkno != slot->buftag.blockNum)
+			{
+				NEON_PANIC_CONNECTION_STATE(slot->shard_no, PANIC,
+											"Receive unexpected getpage response {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u} to get page request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u}",
+											resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(getpage_resp->req.rinfo), getpage_resp->req.forknum, getpage_resp->req.blkno,
+											slot->reqid, LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since), RelFileInfoFmt(rinfo), slot->buftag.forkNum, slot->buftag.blockNum);
+			}
+		}
+		else if (resp->reqid != slot->reqid ||
+				 resp->lsn != slot->request_lsns.request_lsn ||
+				 resp->not_modified_since != slot->request_lsns.not_modified_since)
+		{
+			elog(WARNING, NEON_TAG "Error message {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X} doesn't match exists request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X}",
+				 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
+				 slot->reqid, LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since));
+		}
+	}
+}
+
+/*
  * If there might be responses still in the TCP buffer, then we should try to
  * use those, to reduce any TCP backpressure on the OS/PS side.
  *
@@ -425,15 +463,12 @@ compact_prefetch_buffers(void)
  * point inside and outside PostgreSQL.
  *
  * This still does throw errors when it receives malformed responses from PS.
- *
- * When we're not called from CHECK_FOR_INTERRUPTS (indicated by
- * IsHandlingInterrupts) we also report we've ended prefetch receive work,
- * just in case state tracking was lost due to an error in the sync getPage
- * response code.
  */
 void
-communicator_prefetch_pump_state(bool IsHandlingInterrupts)
+communicator_prefetch_pump_state(void)
 {
+	START_PREFETCH_RECEIVE_WORK();
+
 	while (MyPState->ring_receive != MyPState->ring_flush)
 	{
 		NeonResponse   *response;
@@ -449,15 +484,18 @@ communicator_prefetch_pump_state(bool IsHandlingInterrupts)
 		if (response == NULL)
 			break;
 
+		check_getpage_response(slot, response);
+
 		/* The slot should still be valid */
 		if (slot->status != PRFS_REQUESTED ||
 			slot->response != NULL ||
 			slot->my_ring_index != MyPState->ring_receive)
-			neon_shard_log(slot->shard_no, ERROR,
-						   "Incorrect prefetch slot state after receive: status=%d response=%p my=%lu receive=%lu",
+		{
+			neon_shard_log(slot->shard_no, PANIC,
+						   "Incorrect prefetch slot state after receive: status=%d response=%p my=" UINT64_FORMAT " receive=" UINT64_FORMAT "",
 						   slot->status, slot->response,
-						   (long) slot->my_ring_index, (long) MyPState->ring_receive);
-
+						   slot->my_ring_index, MyPState->ring_receive);
+		}
 		/* update prefetch state */
 		MyPState->n_responses_buffered += 1;
 		MyPState->n_requests_inflight -= 1;
@@ -482,9 +520,7 @@ communicator_prefetch_pump_state(bool IsHandlingInterrupts)
 		}
 	}
 
-	/* We never pump the prefetch state while handling other pages */
-	if (!IsHandlingInterrupts)
-		END_PREFETCH_RECEIVE_WORK();
+	END_PREFETCH_RECEIVE_WORK();
 
 	communicator_reconfigure_timeout_if_needed();
 }
@@ -598,6 +634,21 @@ readahead_buffer_resize(int newsize, void *extra)
 }
 
 
+/*
+ * Callback to be called on backend exit to ensure correct state of compute-PS communication
+ * in case of backend cancel
+ */
+static void
+prefetch_on_exit(int code, Datum arg)
+{
+	if (code != 0) /* do disconnect only on abnormal backend termination */
+	{
+		shardno_t shard_no = DatumGetInt32(arg);
+		prefetch_on_ps_disconnect();
+		page_server->disconnect(shard_no);
+	}
+}
+
 
 /*
  * Make sure that there are no responses still in the buffer.
@@ -610,6 +661,11 @@ consume_prefetch_responses(void)
 {
 	if (MyPState->ring_receive < MyPState->ring_unused)
 		prefetch_wait_for(MyPState->ring_unused - 1);
+	/*
+	 * We know for sure we're not working on any prefetch pages after
+	 * this.
+	 */
+	END_PREFETCH_RECEIVE_WORK();
 }
 
 static void
@@ -672,9 +728,10 @@ prefetch_wait_for(uint64 ring_index)
 
 	Assert(MyPState->ring_unused > ring_index);
 
+	START_PREFETCH_RECEIVE_WORK();
+
 	while (MyPState->ring_receive <= ring_index)
 	{
-		START_PREFETCH_RECEIVE_WORK();
 		entry = GetPrfSlot(MyPState->ring_receive);
 
 		Assert(entry->status == PRFS_REQUESTED);
@@ -683,12 +740,19 @@ prefetch_wait_for(uint64 ring_index)
 			result = false;
 			break;
 		}
-
-		END_PREFETCH_RECEIVE_WORK();
 		CHECK_FOR_INTERRUPTS();
 	}
 
+	if (result)
+	{
+		/* Check that slot is actually received (srver can be disconnected in prefetch_pump_state called from CHECK_FOR_INTERRUPTS */
+		PrefetchRequest *slot = GetPrfSlot(ring_index);
+		result = slot->status == PRFS_RECEIVED;
+	}
+	END_PREFETCH_RECEIVE_WORK();
+
 	return result;
+;
 }
 
 /*
@@ -714,14 +778,17 @@ prefetch_read(PrefetchRequest *slot)
 	Assert(slot->status == PRFS_REQUESTED);
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_receive);
+	Assert(readpage_reentrant_guard || AmPrewarmWorker);
 
 	if (slot->status != PRFS_REQUESTED ||
 		slot->response != NULL ||
 		slot->my_ring_index != MyPState->ring_receive)
-		neon_shard_log(slot->shard_no, ERROR,
-					   "Incorrect prefetch read: status=%d response=%p my=%lu receive=%lu",
+	{
+		neon_shard_log(slot->shard_no, PANIC,
+					   "Incorrect prefetch read: status=%d response=%p my=" UINT64_FORMAT " receive=" UINT64_FORMAT "",
 					   slot->status, slot->response,
-					   (long)slot->my_ring_index, (long)MyPState->ring_receive);
+					   slot->my_ring_index, MyPState->ring_receive);
+	}
 
 	/*
 	 * Copy the request info so that if an error happens and the prefetch
@@ -737,14 +804,18 @@ prefetch_read(PrefetchRequest *slot)
 	MemoryContextSwitchTo(old);
 	if (response)
 	{
+		check_getpage_response(slot, response);
+
 		/* The slot should still be valid */
 		if (slot->status != PRFS_REQUESTED ||
 			slot->response != NULL ||
 			slot->my_ring_index != MyPState->ring_receive)
-			neon_shard_log(shard_no, ERROR,
-						   "Incorrect prefetch slot state after receive: status=%d response=%p my=%lu receive=%lu",
+		{
+			neon_shard_log(shard_no, PANIC,
+						   "Incorrect prefetch slot state after receive: status=%d response=%p my=" UINT64_FORMAT " receive=" UINT64_FORMAT "",
 						   slot->status, slot->response,
-						   (long) slot->my_ring_index, (long) MyPState->ring_receive);
+						   slot->my_ring_index, MyPState->ring_receive);
+		}
 
 		/* update prefetch state */
 		MyPState->n_responses_buffered += 1;
@@ -777,8 +848,8 @@ prefetch_read(PrefetchRequest *slot)
 		 * and the prefetch queue was flushed during the receive call
 		 */
 		neon_shard_log(shard_no, LOG,
-					   "No response from reading prefetch entry %lu: %u/%u/%u.%u block %u. This can be caused by a concurrent disconnect",
-					   (long) my_ring_index,
+					   "No response from reading prefetch entry " UINT64_FORMAT ": %u/%u/%u.%u block %u. This can be caused by a concurrent disconnect",
+					   my_ring_index,
 					   RelFileInfoFmt(BufTagGetNRelFileInfo(buftag)),
 					   buftag.forkNum, buftag.blockNum);
 		return false;
@@ -796,6 +867,7 @@ communicator_prefetch_receive(BufferTag tag)
 	PrfHashEntry *entry;
 	PrefetchRequest hashkey;
 
+	Assert(readpage_reentrant_guard || AmPrewarmWorker); /* do not pump prefetch state in prewarm worker */
 	hashkey.buftag = tag;
 	entry = prfh_lookup(MyPState->prf_hash, &hashkey);
 	if (entry != NULL && prefetch_wait_for(entry->slot->my_ring_index))
@@ -816,6 +888,9 @@ void
 prefetch_on_ps_disconnect(void)
 {
 	MyPState->ring_flush = MyPState->ring_unused;
+
+	/* Nothing should cancel disconnect: we should not leave connection in opaque state */
+	HOLD_INTERRUPTS();
 
 	while (MyPState->ring_receive < MyPState->ring_unused)
 	{
@@ -853,6 +928,8 @@ prefetch_on_ps_disconnect(void)
 		MyPState->n_requests_inflight;
 	MyNeonCounters->getpage_prefetches_buffered =
 		MyPState->n_responses_buffered;
+
+	RESUME_INTERRUPTS();
 }
 
 /*
@@ -1015,16 +1092,11 @@ communicator_prefetch_lookupv(NRelFileInfo rinfo, ForkNumber forknum, BlockNumbe
 			/*
 			 * Ignore errors
 			 */
-			if (slot->response->tag != T_NeonGetPageResponse)
+			if (slot->response->tag == T_NeonErrorResponse)
 			{
-				if (slot->response->tag != T_NeonErrorResponse)
-				{
-					NEON_PANIC_CONNECTION_STATE(slot->shard_no, PANIC,
-											"Expected GetPage (0x%02x) or Error (0x%02x) response to GetPageRequest, but got 0x%02x",
-											T_NeonGetPageResponse, T_NeonErrorResponse, slot->response->tag);
-				}
 				continue;
 			}
+			Assert(slot->response->tag == T_NeonGetPageResponse); /* checked by check_getpage_response when response was assigned to the slot */
 			memcpy(buffers[i], ((NeonGetPageResponse*)slot->response)->page, BLCKSZ);
 
 
@@ -1080,13 +1152,15 @@ communicator_prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 		   MyPState->ring_last <= ring_index);
 }
 
-/* internal version. Returns the ring index */
+/* Internal version. Returns the ring index of the last block (result of this function is used only
+*  when nblocks==1)
+*/
 static uint64
 prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 						  BlockNumber nblocks, const bits8 *mask,
 						  bool is_prefetch)
 {
-	uint64		min_ring_index;
+	uint64		last_ring_index;
 	PrefetchRequest hashkey;
 #ifdef USE_ASSERT_CHECKING
 	bool		any_hits = false;
@@ -1110,13 +1184,12 @@ Retry:
 		MyPState->ring_unused - MyPState->ring_receive;
 	MyNeonCounters->getpage_prefetches_buffered =
 		MyPState->n_responses_buffered;
+	last_ring_index = UINT64_MAX;
 
-	min_ring_index = UINT64_MAX;
 	for (int i = 0; i < nblocks; i++)
 	{
 		PrefetchRequest *slot = NULL;
 		PrfHashEntry *entry = NULL;
-		uint64		ring_index;
 		neon_request_lsns *lsns;
 
 		if (PointerIsValid(mask) && BITMAP_ISSET(mask, i))
@@ -1140,12 +1213,12 @@ Retry:
 		if (entry != NULL)
 		{
 			slot = entry->slot;
-			ring_index = slot->my_ring_index;
-			Assert(slot == GetPrfSlot(ring_index));
+			last_ring_index = slot->my_ring_index;
+			Assert(slot == GetPrfSlot(last_ring_index));
 
 			Assert(slot->status != PRFS_UNUSED);
-			Assert(MyPState->ring_last <= ring_index &&
-				   ring_index < MyPState->ring_unused);
+			Assert(MyPState->ring_last <= last_ring_index &&
+				   last_ring_index < MyPState->ring_unused);
 			Assert(BufferTagsEqual(&slot->buftag, &hashkey.buftag));
 
 			/*
@@ -1157,9 +1230,9 @@ Retry:
 				if (!neon_prefetch_response_usable(lsns, slot))
 				{
 					/* Wait for the old request to finish and discard it */
-					if (!prefetch_wait_for(ring_index))
+					if (!prefetch_wait_for(last_ring_index))
 						goto Retry;
-					prefetch_set_unused(ring_index);
+					prefetch_set_unused(last_ring_index);
 					entry = NULL;
 					slot = NULL;
 					pgBufferUsage.prefetch.expired += 1;
@@ -1176,13 +1249,12 @@ Retry:
 				 */
 				if (slot->status == PRFS_TAG_REMAINS)
 				{
-					prefetch_set_unused(ring_index);
+					prefetch_set_unused(last_ring_index);
 					entry = NULL;
 					slot = NULL;
 				}
 				else
 				{
-					min_ring_index = Min(min_ring_index, ring_index);
 					/* The buffered request is good enough, return that index */
 					if (is_prefetch)
 						pgBufferUsage.prefetch.duplicates++;
@@ -1271,12 +1343,12 @@ Retry:
 		 * The next buffer pointed to by `ring_unused` is now definitely empty, so
 		 * we can insert the new request to it.
 		 */
-		ring_index = MyPState->ring_unused;
+		last_ring_index = MyPState->ring_unused;
 
-		Assert(MyPState->ring_last <= ring_index &&
-			   ring_index <= MyPState->ring_unused);
+		Assert(MyPState->ring_last <= last_ring_index &&
+			   last_ring_index <= MyPState->ring_unused);
 
-		slot = GetPrfSlotNoCheck(ring_index);
+		slot = GetPrfSlotNoCheck(last_ring_index);
 
 		Assert(slot->status == PRFS_UNUSED);
 
@@ -1286,10 +1358,8 @@ Retry:
 		 */
 		slot->buftag = hashkey.buftag;
 		slot->shard_no = get_shard_number(&tag);
-		slot->my_ring_index = ring_index;
+		slot->my_ring_index = last_ring_index;
 		slot->flags = 0;
-
-		min_ring_index = Min(min_ring_index, ring_index);
 
 		if (is_prefetch)
 			MyNeonCounters->getpage_prefetch_requests_total++;
@@ -1303,11 +1373,12 @@ Retry:
 		MyPState->ring_unused - MyPState->ring_receive;
 
 	Assert(any_hits);
+	Assert(last_ring_index != UINT64_MAX);
 
-	Assert(GetPrfSlot(min_ring_index)->status == PRFS_REQUESTED ||
-		   GetPrfSlot(min_ring_index)->status == PRFS_RECEIVED);
-	Assert(MyPState->ring_last <= min_ring_index &&
-		   min_ring_index < MyPState->ring_unused);
+	Assert(GetPrfSlot(last_ring_index)->status == PRFS_REQUESTED ||
+		   GetPrfSlot(last_ring_index)->status == PRFS_RECEIVED);
+	Assert(MyPState->ring_last <= last_ring_index &&
+		   last_ring_index < MyPState->ring_unused);
 
 	if (flush_every_n_requests > 0 &&
 		MyPState->ring_unused - MyPState->ring_flush >= flush_every_n_requests)
@@ -1323,7 +1394,7 @@ Retry:
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
-	return min_ring_index;
+	return last_ring_index;
 }
 
 static bool
@@ -1340,7 +1411,7 @@ equal_requests(NeonRequest* a, NeonRequest* b)
 static NeonResponse *
 page_server_request(void const *req)
 {
-	NeonResponse *resp;
+	NeonResponse *resp = NULL;
 	BufferTag tag = {0};
 	shardno_t shard_no;
 
@@ -1360,7 +1431,7 @@ page_server_request(void const *req)
 			tag.blockNum = ((NeonGetPageRequest *) req)->blkno;
 			break;
 		default:
-			neon_log(ERROR, "Unexpected request tag: %d", messageTag(req));
+			neon_log(PANIC, "Unexpected request tag: %d", messageTag(req));
 	}
 	shard_no = get_shard_number(&tag);
 
@@ -1373,9 +1444,12 @@ page_server_request(void const *req)
 		shard_no = 0;
 	}
 
-	do
+	consume_prefetch_responses();
+
+	PG_TRY();
 	{
-		PG_TRY();
+		before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+		do
 		{
 			while (!page_server->send(shard_no, (NeonRequest *) req)
 				   || !page_server->flush(shard_no))
@@ -1383,30 +1457,24 @@ page_server_request(void const *req)
 				/* do nothing */
 			}
 			MyNeonCounters->pageserver_open_requests++;
-			consume_prefetch_responses();
 			resp = page_server->receive(shard_no);
 			MyNeonCounters->pageserver_open_requests--;
-		}
-		PG_CATCH();
-		{
-			/*
-			 * Cancellation in this code needs to be handled better at some
-			 * point, but this currently seems fine for now.
-			 */
-			page_server->disconnect(shard_no);
-			MyNeonCounters->pageserver_open_requests = 0;
+		} while (resp == NULL);
+		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+	}
+	PG_CATCH();
+	{
+		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+		/* Nothing should cancel disconnect: we should not leave connection in opaque state */
+		HOLD_INTERRUPTS();
+		page_server->disconnect(shard_no);
+		MyNeonCounters->pageserver_open_requests = 0;
+		RESUME_INTERRUPTS();
 
-			/*
-			 * We know for sure we're not working on any prefetch pages after
-			 * this.
-			 */
-			END_PREFETCH_RECEIVE_WORK();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-
-	} while (resp == NULL);
 
 	return resp;
 }
@@ -1491,7 +1559,7 @@ nm_pack_request(NeonRequest *msg)
 		case T_NeonDbSizeResponse:
 		case T_NeonGetSlruSegmentResponse:
 		default:
-			neon_log(ERROR, "unexpected neon message tag 0x%02x", msg->tag);
+			neon_log(PANIC, "unexpected neon message tag 0x%02x", msg->tag);
 			break;
 	}
 	return s;
@@ -1643,7 +1711,7 @@ nm_unpack_response(StringInfo s)
 		case T_NeonDbSizeRequest:
 		case T_NeonGetSlruSegmentRequest:
 		default:
-			neon_log(ERROR, "unexpected neon message tag 0x%02x", tag);
+			neon_log(PANIC, "unexpected neon message tag 0x%02x", tag);
 			break;
 	}
 
@@ -1748,12 +1816,12 @@ nm_to_string(NeonMessage *msg)
 			}
 		case T_NeonGetPageResponse:
 			{
-#if 0
 				NeonGetPageResponse *msg_resp = (NeonGetPageResponse *) msg;
-#endif
 
 				appendStringInfoString(&s, "{\"type\": \"NeonGetPageResponse\"");
-				appendStringInfo(&s, ", \"page\": \"XXX\"}");
+				appendStringInfo(&s, ", \"rinfo\": %u/%u/%u", RelFileInfoFmt(msg_resp->req.rinfo));
+				appendStringInfo(&s, ", \"forknum\": %d", msg_resp->req.forknum);
+				appendStringInfo(&s, ", \"blkno\": %u", msg_resp->req.blkno);
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -1772,7 +1840,7 @@ nm_to_string(NeonMessage *msg)
 				NeonDbSizeResponse *msg_resp = (NeonDbSizeResponse *) msg;
 
 				appendStringInfoString(&s, "{\"type\": \"NeonDbSizeResponse\"");
-				appendStringInfo(&s, ", \"db_size\": %ld}",
+				appendStringInfo(&s, ", \"db_size\": " INT64_FORMAT "}",
 								 msg_resp->db_size);
 				appendStringInfoChar(&s, '}');
 
@@ -1972,8 +2040,8 @@ communicator_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *r
 						!RelFileInfoEquals(exists_resp->req.rinfo, request.rinfo) ||
 						exists_resp->req.forknum != request.forknum)
 					{
-						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to exits request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
+						NEON_PANIC_CONNECTION_STATE(0, PANIC,
+													"Unexpect response {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to exits request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
 													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(exists_resp->req.rinfo), exists_resp->req.forknum,
 													request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), RelFileInfoFmt(request.rinfo), request.forknum);
 					}
@@ -1986,14 +2054,14 @@ communicator_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *r
 				{
 					if (!equal_requests(resp, &request.hdr))
 					{
-						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match exists request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
+						elog(WARNING, NEON_TAG "Error message {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X} doesn't match exists request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X}",
 							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
 							 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
 					}
 				}
 				ereport(ERROR,
 						(errcode(ERRCODE_IO_ERROR),
-						 errmsg(NEON_TAG "[reqid %lx] could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+						 errmsg(NEON_TAG "[reqid " UINT64_HEX_FORMAT "] could not read relation existence of rel %u/%u/%u.%u from page server at lsn %X/%08X",
 								resp->reqid,
 								RelFileInfoFmt(rinfo),
 								forkNum,
@@ -2003,7 +2071,7 @@ communicator_exists(NRelFileInfo rinfo, ForkNumber forkNum, neon_request_lsns *r
 				break;
 
 			default:
-				NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+				NEON_PANIC_CONNECTION_STATE(0, PANIC,
 											"Expected Exists (0x%02x) or Error (0x%02x) response to ExistsRequest, but got 0x%02x",
 											T_NeonExistsResponse, T_NeonErrorResponse, resp->tag);
 		}
@@ -2147,6 +2215,7 @@ Retry:
 		Assert(memcmp(&hashkey.buftag, &slot->buftag, sizeof(BufferTag)) == 0);
 		Assert(hashkey.buftag.blockNum == base_blockno + i);
 
+		/* We already checked that response match request when storing it in slot */
 		resp = slot->response;
 
 		switch (resp->tag)
@@ -2154,21 +2223,6 @@ Retry:
 			case T_NeonGetPageResponse:
 			{
 				NeonGetPageResponse* getpage_resp = (NeonGetPageResponse *) resp;
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != slot->reqid ||
-						resp->lsn != slot->request_lsns.request_lsn ||
-						resp->not_modified_since != slot->request_lsns.not_modified_since ||
-						!RelFileInfoEquals(getpage_resp->req.rinfo, rinfo) ||
-						getpage_resp->req.forknum != forkNum ||
-						getpage_resp->req.blkno != base_blockno + i)
-					{
-						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u} to get page request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u, block=%u}",
-													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(getpage_resp->req.rinfo), getpage_resp->req.forknum, getpage_resp->req.blkno,
-													slot->reqid, LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since), RelFileInfoFmt(rinfo), forkNum, base_blockno + i);
-					}
-				}
 				memcpy(buffer, getpage_resp->page, BLCKSZ);
 
 				/*
@@ -2181,20 +2235,9 @@ Retry:
 				break;
 			}
 			case T_NeonErrorResponse:
-				if (neon_protocol_version >= 3)
-				{
-					if (resp->reqid != slot->reqid ||
-						resp->lsn != slot->request_lsns.request_lsn ||
-						resp->not_modified_since != slot->request_lsns.not_modified_since)
-					{
-						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
-							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
-							 slot->reqid, LSN_FORMAT_ARGS(slot->request_lsns.request_lsn), LSN_FORMAT_ARGS(slot->request_lsns.not_modified_since));
-					}
-				}
 				ereport(ERROR,
 						(errcode(ERRCODE_IO_ERROR),
-						 errmsg(NEON_TAG "[shard %d, reqid %lx] could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
+						 errmsg(NEON_TAG "[shard %d, reqid " UINT64_HEX_FORMAT "] could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
 								slot->shard_no, resp->reqid, blockno, RelFileInfoFmt(rinfo),
 								forkNum, LSN_FORMAT_ARGS(reqlsns->effective_request_lsn)),
 						 errdetail("page server returned error: %s",
@@ -2246,8 +2289,8 @@ communicator_nblocks(NRelFileInfo rinfo, ForkNumber forknum, neon_request_lsns *
 						!RelFileInfoEquals(relsize_resp->req.rinfo, request.rinfo) ||
 						relsize_resp->req.forknum != forknum)
 					{
-						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
+						NEON_PANIC_CONNECTION_STATE(0, PANIC,
+													"Unexpect response {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u} to get relsize request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, rel=%u/%u/%u.%u}",
 													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), RelFileInfoFmt(relsize_resp->req.rinfo), relsize_resp->req.forknum,
 													request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), RelFileInfoFmt(request.rinfo), forknum);
 					}
@@ -2260,14 +2303,14 @@ communicator_nblocks(NRelFileInfo rinfo, ForkNumber forknum, neon_request_lsns *
 				{
 					if (!equal_requests(resp, &request.hdr))
 					{
-						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get relsize request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
+						elog(WARNING, NEON_TAG "Error message {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X} doesn't match get relsize request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X}",
 							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
 							 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
 					}
 				}
 				ereport(ERROR,
 						(errcode(ERRCODE_IO_ERROR),
-						 errmsg(NEON_TAG "[reqid %lx] could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
+						 errmsg(NEON_TAG "[reqid " UINT64_HEX_FORMAT "] could not read relation size of rel %u/%u/%u.%u from page server at lsn %X/%08X",
 								resp->reqid,
 								RelFileInfoFmt(rinfo),
 								forknum,
@@ -2277,7 +2320,7 @@ communicator_nblocks(NRelFileInfo rinfo, ForkNumber forknum, neon_request_lsns *
 				break;
 
 			default:
-				NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+				NEON_PANIC_CONNECTION_STATE(0, PANIC,
 											"Expected Nblocks (0x%02x) or Error (0x%02x) response to NblocksRequest, but got 0x%02x",
 											T_NeonNblocksResponse, T_NeonErrorResponse, resp->tag);
 		}
@@ -2316,8 +2359,8 @@ communicator_dbsize(Oid dbNode, neon_request_lsns *request_lsns)
 					if (!equal_requests(resp, &request.hdr) ||
 						dbsize_resp->req.dbNode != dbNode)
 					{
-						NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-													"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, dbNode=%u} to get DB size request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, dbNode=%u}",
+						NEON_PANIC_CONNECTION_STATE(0, PANIC,
+													"Unexpect response {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, dbNode=%u} to get DB size request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, dbNode=%u}",
 													resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), dbsize_resp->req.dbNode,
 													request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), dbNode);
 					}
@@ -2330,14 +2373,14 @@ communicator_dbsize(Oid dbNode, neon_request_lsns *request_lsns)
 				{
 					if (!equal_requests(resp, &request.hdr))
 					{
-						elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get DB size request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
+						elog(WARNING, NEON_TAG "Error message {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X} doesn't match get DB size request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X}",
 							 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
 							 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
 					}
 				}
 				ereport(ERROR,
 						(errcode(ERRCODE_IO_ERROR),
-						 errmsg(NEON_TAG "[reqid %lx] could not read db size of db %u from page server at lsn %X/%08X",
+						 errmsg(NEON_TAG "[reqid " UINT64_HEX_FORMAT "] could not read db size of db %u from page server at lsn %X/%08X",
 								resp->reqid,
 								dbNode, LSN_FORMAT_ARGS(request_lsns->effective_request_lsn)),
 						 errdetail("page server returned error: %s",
@@ -2345,7 +2388,7 @@ communicator_dbsize(Oid dbNode, neon_request_lsns *request_lsns)
 				break;
 
 			default:
-				NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+				NEON_PANIC_CONNECTION_STATE(0, PANIC,
 											"Expected DbSize (0x%02x) or Error (0x%02x) response to DbSizeRequest, but got 0x%02x",
 											T_NeonDbSizeResponse, T_NeonErrorResponse, resp->tag);
 		}
@@ -2361,7 +2404,7 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 {
 	int			n_blocks;
 	shardno_t	shard_no = 0; /* All SLRUs are at shard 0 */
-	NeonResponse *resp;
+	NeonResponse *resp = NULL;
 	NeonGetSlruSegmentRequest request;
 
 	request = (NeonGetSlruSegmentRequest) {
@@ -2372,14 +2415,29 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 		.segno = segno
 	};
 
-	do
+	consume_prefetch_responses();
+
+	PG_TRY();
 	{
-		while (!page_server->send(shard_no, &request.hdr) || !page_server->flush(shard_no));
+		before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+		do
+		{
+			while (!page_server->send(shard_no, &request.hdr) || !page_server->flush(shard_no));
+			resp = page_server->receive(shard_no);
+		} while (resp == NULL);
+		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+	}
+	PG_CATCH();
+	{
+		cancel_before_shmem_exit(prefetch_on_exit, Int32GetDatum(shard_no));
+		/* Nothing should cancel disconnect: we should not leave connection in opaque state */
+		HOLD_INTERRUPTS();
+		page_server->disconnect(shard_no);
+		RESUME_INTERRUPTS();
 
-		consume_prefetch_responses();
-
-		resp = page_server->receive(shard_no);
-	} while (resp == NULL);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	switch (resp->tag)
 	{
@@ -2392,8 +2450,8 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 					slru_resp->req.kind != kind ||
 					slru_resp->req.segno != segno)
 				{
-					NEON_PANIC_CONNECTION_STATE(-1, PANIC,
-												"Unexpect response {reqid=%lx,lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%u} to get SLRU segment request {reqid=%lx,lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%lluu}",
+					NEON_PANIC_CONNECTION_STATE(0, PANIC,
+												"Unexpect response {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%u} to get SLRU segment request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X, kind=%u, segno=%lluu}",
 												resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since), slru_resp->req.kind, slru_resp->req.segno,
 												request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since), kind, (unsigned long long) segno);
 				}
@@ -2407,14 +2465,14 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 			{
 				if (!equal_requests(resp, &request.hdr))
 				{
-					elog(WARNING, NEON_TAG "Error message {reqid=%lx,lsn=%X/%08X, since=%X/%08X} doesn't match get SLRU segment request {reqid=%lx,lsn=%X/%08X, since=%X/%08X}",
+					elog(WARNING, NEON_TAG "Error message {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X} doesn't match get SLRU segment request {reqid=" UINT64_HEX_FORMAT ",lsn=%X/%08X, since=%X/%08X}",
 						 resp->reqid, LSN_FORMAT_ARGS(resp->lsn), LSN_FORMAT_ARGS(resp->not_modified_since),
 						 request.hdr.reqid, LSN_FORMAT_ARGS(request.hdr.lsn), LSN_FORMAT_ARGS(request.hdr.not_modified_since));
 				}
 			}
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
-					 errmsg(NEON_TAG "[reqid %lx] could not read SLRU %d segment %llu at lsn %X/%08X",
+					 errmsg(NEON_TAG "[reqid " UINT64_HEX_FORMAT "] could not read SLRU %d segment %llu at lsn %X/%08X",
 							resp->reqid,
 							kind,
 							(unsigned long long) segno,
@@ -2424,7 +2482,7 @@ communicator_read_slru_segment(SlruKind kind, int64 segno, neon_request_lsns *re
 			break;
 
 		default:
-			NEON_PANIC_CONNECTION_STATE(-1, PANIC,
+			NEON_PANIC_CONNECTION_STATE(0, PANIC,
 										"Expected GetSlruSegment (0x%02x) or Error (0x%02x) response to GetSlruSegmentRequest, but got 0x%02x",
 										T_NeonGetSlruSegmentResponse, T_NeonErrorResponse, resp->tag);
 	}
@@ -2438,6 +2496,7 @@ void
 communicator_reconfigure_timeout_if_needed(void)
 {
 	bool	needs_set = MyPState->ring_receive != MyPState->ring_unused &&
+						!AmPrewarmWorker && /* do not pump prefetch state in prewarm worker */
 						readahead_getpage_pull_timeout_ms > 0;
 
 	if (needs_set != timeout_set)
@@ -2503,7 +2562,7 @@ communicator_processinterrupts(void)
 	if (timeout_signaled)
 	{
 		if (!readpage_reentrant_guard && readahead_getpage_pull_timeout_ms > 0)
-			communicator_prefetch_pump_state(true);
+			communicator_prefetch_pump_state();
 
 		timeout_signaled = false;
 		communicator_reconfigure_timeout_if_needed();

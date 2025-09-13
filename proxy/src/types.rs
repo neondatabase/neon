@@ -107,13 +107,3 @@ smol_str_wrapper!(DbName);
 
 // postgres hostname, will likely be a port:ip addr
 smol_str_wrapper!(Host);
-
-// Endpoints are a bit tricky. Rare they might be branches or projects.
-impl EndpointId {
-    pub(crate) fn is_endpoint(&self) -> bool {
-        self.0.starts_with("ep-")
-    }
-    pub(crate) fn is_branch(&self) -> bool {
-        self.0.starts_with("br-")
-    }
-}

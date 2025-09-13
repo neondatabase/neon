@@ -58,6 +58,71 @@ pub static FLUSH_WAL_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_flush_wal_seconds histogram")
 });
+/* BEGIN_HADRON */
+// Counter of all ProposerAcceptorMessage requests received
+pub static PROPOSER_ACCEPTOR_MESSAGES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_proposer_acceptor_messages_total",
+        "Total number of ProposerAcceptorMessage requests received by the Safekeeper.",
+        &["outcome"]
+    )
+    .expect("Failed to register safekeeper_proposer_acceptor_messages_total counter")
+});
+pub static WAL_DISK_IO_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_wal_disk_io_errors",
+        "Number of disk I/O errors when creating and flushing WALs and control files"
+    )
+    .expect("Failed to register safekeeper_wal_disk_io_errors counter")
+});
+pub static WAL_STORAGE_LIMIT_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_wal_storage_limit_errors",
+        concat!(
+            "Number of errors due to timeline WAL storage utilization exceeding configured limit. ",
+            "An increase in this metric indicates issues backing up or removing WALs."
+        )
+    )
+    .expect("Failed to register safekeeper_wal_storage_limit_errors counter")
+});
+pub static SK_RECOVERY_PULL_TIMELINE_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_recovery_pull_timeline_errors",
+        concat!(
+            "Number of errors due to pull_timeline errors during SK lost disk recovery.",
+            "An increase in this metric indicates pull timelines runs into error."
+        )
+    )
+    .expect("Failed to register safekeeper_recovery_pull_timeline_errors counter")
+});
+pub static SK_RECOVERY_PULL_TIMELINE_OKS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_recovery_pull_timeline_oks",
+        concat!(
+            "Number of successful pull_timeline during SK lost disk recovery.",
+            "An increase in this metric indicates pull timelines is successful."
+        )
+    )
+    .expect("Failed to register safekeeper_recovery_pull_timeline_oks counter")
+});
+pub static SK_RECOVERY_PULL_TIMELINES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_recovery_pull_timelines_seconds",
+        "Seconds to pull timelines",
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_recovery_pull_timelines_seconds histogram")
+});
+pub static SK_RECOVERY_PULL_TIMELINE_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "safekeeper_recovery_pull_timeline_seconds",
+        "Seconds to pull timeline",
+        &["tenant_id", "timeline_id"],
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_recovery_pull_timeline_seconds histogram vec")
+});
+/* END_HADRON */
 pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_persist_control_file_seconds",
@@ -138,6 +203,15 @@ pub static BACKUP_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_backup_errors_total counter")
 });
+/* BEGIN_HADRON */
+pub static BACKUP_REELECT_LEADER_COUNT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backup_reelect_leader_total",
+        "Number of times the backup leader was reelected"
+    )
+    .expect("Failed to register safekeeper_backup_reelect_leader_total counter")
+});
+/* END_HADRON */
 pub static BROKER_PUSH_ALL_UPDATES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_broker_push_update_seconds",
@@ -444,6 +518,7 @@ pub async fn time_io_closure<E: Into<anyhow::Error>>(
 pub struct FullTimelineInfo {
     pub ttid: TenantTimelineId,
     pub ps_feedback_count: u64,
+    pub ps_corruption_detected: bool,
     pub last_ps_feedback: PageserverFeedback,
     pub wal_backup_active: bool,
     pub timeline_is_active: bool,
@@ -473,6 +548,7 @@ pub struct TimelineCollector {
     ps_last_received_lsn: GenericGaugeVec<AtomicU64>,
     feedback_last_time_seconds: GenericGaugeVec<AtomicU64>,
     ps_feedback_count: GenericGaugeVec<AtomicU64>,
+    ps_corruption_detected: IntGaugeVec,
     timeline_active: GenericGaugeVec<AtomicU64>,
     wal_backup_active: GenericGaugeVec<AtomicU64>,
     connected_computes: IntGaugeVec,
@@ -575,6 +651,15 @@ impl TimelineCollector {
             Opts::new(
                 "safekeeper_ps_feedback_count_total",
                 "Number of feedbacks received from the pageserver",
+            ),
+            &["tenant_id", "timeline_id"],
+        )
+        .unwrap();
+
+        let ps_corruption_detected = IntGaugeVec::new(
+            Opts::new(
+                "safekeeper_ps_corruption_detected",
+                "1 if corruption was detected in the timeline according to feedback from the pageserver, 0 otherwise",
             ),
             &["tenant_id", "timeline_id"],
         )
@@ -700,6 +785,7 @@ impl TimelineCollector {
             ps_last_received_lsn,
             feedback_last_time_seconds,
             ps_feedback_count,
+            ps_corruption_detected,
             timeline_active,
             wal_backup_active,
             connected_computes,
@@ -818,6 +904,9 @@ impl Collector for TimelineCollector {
             self.ps_feedback_count
                 .with_label_values(labels)
                 .set(tli.ps_feedback_count);
+            self.ps_corruption_detected
+                .with_label_values(labels)
+                .set(tli.ps_corruption_detected as i64);
             if let Ok(unix_time) = tli
                 .last_ps_feedback
                 .replytime
@@ -851,6 +940,7 @@ impl Collector for TimelineCollector {
         mfs.extend(self.ps_last_received_lsn.collect());
         mfs.extend(self.feedback_last_time_seconds.collect());
         mfs.extend(self.ps_feedback_count.collect());
+        mfs.extend(self.ps_corruption_detected.collect());
         mfs.extend(self.timeline_active.collect());
         mfs.extend(self.wal_backup_active.collect());
         mfs.extend(self.connected_computes.collect());
@@ -889,3 +979,17 @@ async fn collect_timeline_metrics(global_timelines: Arc<GlobalTimelines>) -> Vec
     }
     res
 }
+
+/* BEGIN_HADRON */
+// Metrics reporting the time spent to perform each safekeeper filesystem utilization check.
+pub static GLOBAL_DISK_UTIL_CHECK_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    // Buckets from 1ms up to 10s
+    let buckets = vec![0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0];
+    register_histogram!(
+        "safekeeper_global_disk_utilization_check_seconds",
+        "Seconds spent to perform each safekeeper filesystem utilization check",
+        buckets
+    )
+    .expect("Failed to register safekeeper_global_disk_utilization_check_seconds histogram")
+});
+/* END_HADRON */

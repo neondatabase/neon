@@ -5,8 +5,9 @@ use http_utils::error::ApiError;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
-use pageserver_api::models::ShardImportStatus;
+use pageserver_api::models::{ShardImportProgress, ShardImportStatus};
 use tokio_util::sync::CancellationToken;
+use utils::sync::gate::Gate;
 use utils::{
     id::{TenantId, TimelineId},
     shard::ShardIndex,
@@ -28,7 +29,12 @@ impl ShardImportStatuses {
         ShardImportStatuses(
             shards
                 .into_iter()
-                .map(|ts_id| (ts_id, ShardImportStatus::InProgress))
+                .map(|ts_id| {
+                    (
+                        ts_id,
+                        ShardImportStatus::InProgress(None::<ShardImportProgress>),
+                    )
+                })
                 .collect(),
         )
     }
@@ -44,6 +50,16 @@ pub(crate) struct TimelineImport {
 pub(crate) enum TimelineImportUpdateFollowUp {
     Persist,
     None,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum TimelineImportFinalizeError {
+    #[error("Shut down interrupted import finalize")]
+    ShuttingDown,
+    #[error("Import finalization was cancelled")]
+    Cancelled,
+    #[error("Mismatched shard detected during import finalize: {0}")]
+    MismatchedShards(ShardIndex),
 }
 
 pub(crate) enum TimelineImportUpdateError {
@@ -151,6 +167,13 @@ impl TimelineImport {
     }
 }
 
+pub(crate) struct FinalizingImport {
+    pub(crate) gate: Gate,
+    pub(crate) cancel: CancellationToken,
+}
+
+pub(crate) type ImportResult = Result<(), String>;
+
 pub(crate) struct UpcallClient {
     authorization_header: Option<String>,
     client: reqwest::Client,
@@ -172,7 +195,7 @@ impl UpcallClient {
         let authorization_header = config
             .control_plane_jwt_token
             .clone()
-            .map(|jwt| format!("Bearer {}", jwt));
+            .map(|jwt| format!("Bearer {jwt}"));
 
         let client = reqwest::ClientBuilder::new()
             .timeout(IMPORT_COMPLETE_REQUEST_TIMEOUT)
@@ -198,7 +221,9 @@ impl UpcallClient {
     /// eventual cplane availability. The cplane API is idempotent.
     pub(crate) async fn notify_import_complete(
         &self,
-        import: &TimelineImport,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        import_result: ImportResult,
     ) -> anyhow::Result<()> {
         let endpoint = if self.base_url.ends_with('/') {
             format!("{}import_complete", self.base_url)
@@ -206,15 +231,13 @@ impl UpcallClient {
             format!("{}/import_complete", self.base_url)
         };
 
-        tracing::info!("Endpoint is {endpoint}");
-
         let request = self
             .client
             .request(Method::PUT, endpoint)
             .json(&ImportCompleteRequest {
-                tenant_id: import.tenant_id,
-                timeline_id: import.timeline_id,
-                error: import.completion_error(),
+                tenant_id,
+                timeline_id,
+                error: import_result.err(),
             })
             .timeout(IMPORT_COMPLETE_REQUEST_TIMEOUT);
 

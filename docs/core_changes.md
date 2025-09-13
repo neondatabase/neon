@@ -129,9 +129,10 @@ segment to bootstrap the WAL writing, but it doesn't contain the checkpoint reco
 changes in xlog.c, to allow starting the compute node without reading the last checkpoint record
 from WAL.
 
-This includes code to read the `zenith.signal` file, which tells the startup code the LSN to start
-at. When the `zenith.signal` file is present, the startup uses that LSN instead of the last
-checkpoint's LSN. The system is known to be consistent at that LSN, without any WAL redo.
+This includes code to read the `neon.signal` (also `zenith.signal`) file, which tells the startup 
+code the LSN to start at. When the `neon.signal` file is present, the startup uses that LSN
+instead of the last checkpoint's LSN. The system is known to be consistent at that LSN, without 
+any WAL redo.
 
 
 ### How to get rid of the patch

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -eux -o pipefail
 cd "$(dirname "${0}")"
 # Takes a variable name as argument. The result is stored in that variable.
@@ -60,8 +60,8 @@ function check_timeline() {
 # Restarts the compute node with the required compute tag and timeline.
 # Accepts the tag for the compute node and the timeline as parameters.
 function restart_compute() {
-  docker compose down compute compute_is_ready
-  COMPUTE_TAG=${1} TENANT_ID=${tenant_id} TIMELINE_ID=${2} docker compose up --quiet-pull -d --build compute compute_is_ready
+  docker compose down compute1 compute_is_ready
+  COMPUTE_TAG=${1} TENANT_ID=${tenant_id} TIMELINE_ID=${2} docker compose up --quiet-pull -d --build compute1 compute_is_ready
   wait_for_ready
   check_timeline ${2}
 }
@@ -82,7 +82,8 @@ EXTENSIONS='[
 {"extname": "pg_ivm", "extdir": "pg_ivm-src"},
 {"extname": "pgjwt", "extdir": "pgjwt-src"},
 {"extname": "pgtap", "extdir": "pgtap-src"},
-{"extname": "pg_repack", "extdir": "pg_repack-src"}
+{"extname": "pg_repack", "extdir": "pg_repack-src"},
+{"extname": "h3", "extdir": "h3-pg-src"}
 ]'
 EXTNAMES=$(echo ${EXTENSIONS} | jq -r '.[].extname' | paste -sd ' ' -)
 COMPUTE_TAG=${NEW_COMPUTE_TAG} docker compose --profile test-extensions up --quiet-pull --build -d

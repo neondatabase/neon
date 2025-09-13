@@ -3,12 +3,14 @@
 
 mod auth;
 pub mod basebackup;
+pub mod basebackup_cache;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;
 pub mod controller_upcall_client;
 pub mod deletion_queue;
 pub mod disk_usage_eviction_task;
+pub mod feature_resolver;
 pub mod http;
 pub mod import_datadir;
 pub mod l0_flush;
@@ -36,6 +38,7 @@ pub mod walredo;
 
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
+use postgres_ffi::PgMajorVersion;
 use tenant::mgr::{BackgroundPurges, TenantManager};
 use tenant::secondary;
 use tracing::{info, info_span};
@@ -49,7 +52,7 @@ use tracing::{info, info_span};
 /// backwards-compatible changes to the metadata format.
 pub const STORAGE_FORMAT_VERSION: u16 = 3;
 
-pub const DEFAULT_PG_VERSION: u32 = 17;
+pub const DEFAULT_PG_VERSION: PgMajorVersion = PgMajorVersion::PG17;
 
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
@@ -70,6 +73,9 @@ pub struct HttpEndpointListener(pub CancellableTask);
 pub struct HttpsEndpointListener(pub CancellableTask);
 pub struct ConsumptionMetricsTasks(pub CancellableTask);
 pub struct DiskUsageEvictionTask(pub CancellableTask);
+// HADRON
+pub struct MetricsCollectionTask(pub CancellableTask);
+
 impl CancellableTask {
     pub async fn shutdown(self) {
         self.cancel.cancel();
@@ -83,6 +89,8 @@ pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
     https_listener: Option<HttpsEndpointListener>,
     page_service: page_service::Listener,
+    grpc_task: Option<CancellableTask>,
+    metrics_collection_task: MetricsCollectionTask,
     consumption_metrics_worker: ConsumptionMetricsTasks,
     disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
     tenant_manager: &TenantManager,
@@ -176,6 +184,16 @@ pub async fn shutdown_pageserver(
     )
     .await;
 
+    // Shut down the gRPC server task, including request handlers.
+    if let Some(grpc_task) = grpc_task {
+        timed(
+            grpc_task.shutdown(),
+            "shutdown gRPC PageRequestHandler",
+            Duration::from_secs(3),
+        )
+        .await;
+    }
+
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
     timed(
@@ -196,6 +214,14 @@ pub async fn shutdown_pageserver(
 
     // Best effort to persist any outstanding deletions, to avoid leaking objects
     deletion_queue.shutdown(Duration::from_secs(5)).await;
+
+    // HADRON
+    timed(
+        metrics_collection_task.0.shutdown(),
+        "shutdown metrics collections metrics",
+        Duration::from_secs(1),
+    )
+    .await;
 
     timed(
         consumption_metrics_worker.0.shutdown(),

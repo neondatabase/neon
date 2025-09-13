@@ -4,6 +4,7 @@
 !Cargo.lock
 !Cargo.toml
 !Makefile
+!postgres.mk
 !rust-toolchain.toml
 !scripts/ninstall.sh
 !docker-compose/run-tests.sh
@@ -26,4 +27,4 @@
 !storage_controller/
 !vendor/postgres-*/
 !workspace_hack/
-!build_tools/patches
+!build-tools/patches

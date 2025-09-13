@@ -12,54 +12,79 @@ testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing", "
 
 fuzz-read-path = ["testing"]
 
+# Enables benchmarking only APIs
+benchmarking = []
+
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
-bit_field.workspace = true
 bincode.workspace = true
+bit_field.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
-camino.workspace = true
 camino-tempfile.workspace = true
+camino.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
 consumption_metrics.workspace = true
 crc32c.workspace = true
 either.workspace = true
+enum-map.workspace = true
+enumset = { workspace = true, features = ["serde"]}
 fail.workspace = true
 futures.workspace = true
+hashlink.workspace = true
 hex.workspace = true
-humantime.workspace = true
+http.workspace = true
+http-utils.workspace = true
 humantime-serde.workspace = true
+humantime.workspace = true
 hyper0.workspace = true
 itertools.workspace = true
 jsonwebtoken.workspace = true
 md5.workspace = true
+metrics.workspace = true
 nix.workspace = true
-# hack to get the number of worker threads tokio uses
-num_cpus.workspace = true
+num_cpus.workspace = true # hack to get the number of worker threads tokio uses
 num-traits.workspace = true
 once_cell.workspace = true
+pageserver_api.workspace = true
+pageserver_client.workspace = true # for ResponseErrorMessageExt TOOD refactor that
+pageserver_compaction.workspace = true
+pageserver_page_api.workspace = true
+pem.workspace = true
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
+postgres_connection.workspace = true
+postgres_ffi.workspace = true
+postgres_ffi_types.workspace = true
+postgres_initdb.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
-postgres_initdb.workspace = true
+posthog_client_lite.workspace = true
 pprof.workspace = true
+pq_proto.workspace = true
 rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
+remote_storage.workspace = true
+reqwest.workspace = true
+rpds.workspace = true
 rustls.workspace = true
 scopeguard.workspace = true
 send-future.workspace = true
-serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_path_to_error.workspace = true
 serde_with.workspace = true
+serde.workspace = true
+smallvec.workspace = true
+storage_broker.workspace = true
+strum_macros.workspace = true
+strum.workspace = true
 sysinfo.workspace = true
-tokio-tar.workspace = true
+tenant_size_model.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
@@ -68,39 +93,26 @@ tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true
 tokio-stream.workspace = true
+tokio-tar.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
+tonic.workspace = true
+tonic-reflection.workspace = true
+tower.workspace = true
 tracing.workspace = true
 tracing-utils.workspace = true
 url.workspace = true
-walkdir.workspace = true
-metrics.workspace = true
-pageserver_api.workspace = true
-pageserver_client.workspace = true # for ResponseErrorMessageExt TOOD refactor that
-pageserver_compaction.workspace = true
-pem.workspace = true
-postgres_connection.workspace = true
-postgres_ffi.workspace = true
-pq_proto.workspace = true
-remote_storage.workspace = true
-storage_broker.workspace = true
-tenant_size_model.workspace = true
-http-utils.workspace = true
 utils.workspace = true
-workspace_hack.workspace = true
-reqwest.workspace = true
-rpds.workspace = true
-enum-map.workspace = true
-enumset = { workspace = true, features = ["serde"]}
-strum.workspace = true
-strum_macros.workspace = true
 wal_decoder.workspace = true
-smallvec.workspace = true
+walkdir.workspace = true
+workspace_hack.workspace = true
+twox-hash.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }
@@ -119,6 +131,7 @@ harness = false
 [[bench]]
 name = "bench_ingest"
 harness = false
+required-features = ["benchmarking"]
 
 [[bench]]
 name = "upload_queue"

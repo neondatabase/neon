@@ -98,6 +98,7 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	wp = palloc0(sizeof(WalProposer));
 	wp->config = config;
 	wp->api = api;
+	wp->localTimeLineID = config->pgTimeline;
 	wp->state = WPS_COLLECTING_TERMS;
 	wp->mconf.generation = INVALID_GENERATION;
 	wp->mconf.members.len = 0;
@@ -119,11 +120,16 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 		{
 			wp_log(FATAL, "failed to parse neon.safekeepers generation number: %m");
 		}
+		if (*endptr != ':')
+		{
+			wp_log(FATAL, "failed to parse neon.safekeepers: no colon after generation");
+		}
 		/* Skip past : to the first hostname. */
 		host = endptr + 1;
 	}
 	else
 	{
+		wp->safekeepers_generation = INVALID_GENERATION;
 		host = wp->config->safekeepers_list;
 	}
 	wp_log(LOG, "safekeepers_generation=%u", wp->safekeepers_generation);
@@ -148,14 +154,17 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 		wp->safekeeper[wp->n_safekeepers].state = SS_OFFLINE;
 		wp->safekeeper[wp->n_safekeepers].active_state = SS_ACTIVE_SEND;
 		wp->safekeeper[wp->n_safekeepers].wp = wp;
-
+		/* BEGIN_HADRON */
+		wp->safekeeper[wp->n_safekeepers].index = wp->n_safekeepers;
+		/* END_HADRON */
 		{
 			Safekeeper *sk = &wp->safekeeper[wp->n_safekeepers];
 			int			written = 0;
 
 			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-							   sk->host, sk->port, wp->config->neon_timeline, wp->config->neon_tenant);
+							   "%s host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+							   wp->config->safekeeper_conninfo_options, sk->host, sk->port,
+							   wp->config->neon_timeline, wp->config->neon_tenant);
 			if (written > MAXCONNINFO || written < 0)
 				wp_log(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
@@ -176,6 +185,10 @@ WalProposerCreate(WalProposerConfig *config, walproposer_api api)
 	if (wp->safekeepers_generation > INVALID_GENERATION && wp->config->proto_version < 3)
 		wp_log(FATAL, "enabling generations requires protocol version 3");
 	wp_log(LOG, "using safekeeper protocol version %d", wp->config->proto_version);
+	
+	/* BEGIN_HADRON */
+	wp->api.reset_safekeeper_statuses_for_metrics(wp, wp->n_safekeepers);
+	/* END_HADRON */
 
 	/* Fill the greeting package */
 	wp->greetRequest.pam.tag = 'g';
@@ -347,6 +360,10 @@ ShutdownConnection(Safekeeper *sk)
 {
 	sk->state = SS_OFFLINE;
 	sk->streamingAt = InvalidXLogRecPtr;
+
+	/* BEGIN_HADRON */
+	sk->wp->api.update_safekeeper_status_for_metrics(sk->wp, sk->index, 0);
+	/* END_HADRON */
 
 	MembershipConfigurationFree(&sk->greetResponse.mconf);
 	if (sk->voteResponse.termHistory.entries)
@@ -756,7 +773,7 @@ UpdateMemberSafekeeperPtr(WalProposer *wp, Safekeeper *sk)
 	{
 		SafekeeperId *sk_id = &wp->mconf.members.m[i];
 
-		if (wp->mconf.members.m[i].node_id == sk->greetResponse.nodeId)
+		if (sk_id->node_id == sk->greetResponse.nodeId)
 		{
 			/*
 			 * If mconf or list of safekeepers to connect to changed (the
@@ -781,7 +798,7 @@ UpdateMemberSafekeeperPtr(WalProposer *wp, Safekeeper *sk)
 	{
 		SafekeeperId *sk_id = &wp->mconf.new_members.m[i];
 
-		if (wp->mconf.new_members.m[i].node_id == sk->greetResponse.nodeId)
+		if (sk_id->node_id == sk->greetResponse.nodeId)
 		{
 			if (wp->new_members_safekeepers[i] != NULL && wp->new_members_safekeepers[i] != sk)
 			{
@@ -836,7 +853,7 @@ TermsCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 {
 	uint32		n_greeted = 0;
 
-	for (uint32 i = 0; i < wp->mconf.members.len; i++)
+	for (uint32 i = 0; i < mset->len; i++)
 	{
 		Safekeeper *sk = msk[i];
 
@@ -1071,7 +1088,6 @@ RecvVoteResponse(Safekeeper *sk)
 	/* ready for elected message */
 	sk->state = SS_WAIT_ELECTED;
 
-	wp->n_votes++;
 	/* Are we already elected? */
 	if (wp->state == WPS_CAMPAIGN)
 	{
@@ -1106,7 +1122,7 @@ VotesCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 {
 	uint32		n_votes = 0;
 
-	for (uint32 i = 0; i < wp->mconf.members.len; i++)
+	for (uint32 i = 0; i < mset->len; i++)
 	{
 		Safekeeper *sk = msk[i];
 
@@ -1129,7 +1145,7 @@ VotesCollectedMset(WalProposer *wp, MemberSet *mset, Safekeeper **msk, StringInf
 				wp->propTermStartLsn = sk->voteResponse.flushLsn;
 				wp->donor = sk;
 			}
-			wp->truncateLsn = Max(wp->safekeeper[i].voteResponse.truncateLsn, wp->truncateLsn);
+			wp->truncateLsn = Max(sk->voteResponse.truncateLsn, wp->truncateLsn);
 
 			if (n_votes > 0)
 				appendStringInfoString(s, ", ");
@@ -1379,7 +1395,7 @@ ProcessPropStartPos(WalProposer *wp)
 	 * we must bail out, as clog and other non rel data is inconsistent.
 	 */
 	walprop_shared = wp->api.get_shmem_state(wp);
-	if (!wp->config->syncSafekeepers)
+	if (!wp->config->syncSafekeepers && !walprop_shared->replica_promote)
 	{
 		/*
 		 * Basebackup LSN always points to the beginning of the record (not
@@ -1523,6 +1539,10 @@ StartStreaming(Safekeeper *sk)
 	sk->state = SS_ACTIVE;
 	sk->active_state = SS_ACTIVE_SEND;
 	sk->streamingAt = sk->startStreamingAt;
+
+	/* BEGIN_HADRON */
+	sk->wp->api.update_safekeeper_status_for_metrics(sk->wp, sk->index, 1);
+	/* END_HADRON */
 
 	/*
 	 * Donors can only be in SS_ACTIVE state, so we potentially update the
@@ -1880,6 +1900,12 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 			Assert(value_len == sizeof(uint32));
 			ps_feedback->shard_number = pq_getmsgint(reply_message, sizeof(uint32));
 			psfeedback_log("%u", key, ps_feedback->shard_number);
+		}
+		else if (strcmp(key, "corruption_detected") == 0)
+		{
+			Assert(value_len == 1);
+			ps_feedback->corruption_detected = pq_getmsgbyte(reply_message) != 0;
+			psfeedback_log("%s", key, ps_feedback->corruption_detected ? "true" : "false");
 		}
 		else
 		{

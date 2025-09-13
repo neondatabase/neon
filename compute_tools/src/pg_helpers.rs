@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use compute_api::responses::TlsConfig;
-use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
+use compute_api::spec::{
+    Database, DatabricksSettings, GenericOption, GenericOptions, PgIdent, Role,
+};
 use futures::StreamExt;
 use indexmap::IndexMap;
 use ini::Ini;
@@ -36,9 +38,9 @@ pub fn escape_literal(s: &str) -> String {
     let res = s.replace('\'', "''").replace('\\', "\\\\");
 
     if res.contains('\\') {
-        format!("E'{}'", res)
+        format!("E'{res}'")
     } else {
-        format!("'{}'", res)
+        format!("'{res}'")
     }
 }
 
@@ -46,7 +48,7 @@ pub fn escape_literal(s: &str) -> String {
 /// with `'{}'` is not required, as it returns a ready-to-use config string.
 pub fn escape_conf_value(s: &str) -> String {
     let res = s.replace('\'', "''").replace('\\', "\\\\");
-    format!("'{}'", res)
+    format!("'{res}'")
 }
 
 pub trait GenericOptionExt {
@@ -184,6 +186,42 @@ impl DatabaseExt for Database {
     }
 }
 
+pub trait DatabricksSettingsExt {
+    fn as_pg_settings(&self) -> String;
+}
+
+impl DatabricksSettingsExt for DatabricksSettings {
+    fn as_pg_settings(&self) -> String {
+        // Postgres GUCs rendered from DatabricksSettings
+        vec![
+            // ssl_ca_file
+            Some(format!(
+                "ssl_ca_file = '{}'",
+                self.pg_compute_tls_settings.ca_file
+            )),
+            // [Optional] databricks.workspace_url
+            Some(format!(
+                "databricks.workspace_url = '{}'",
+                &self.databricks_workspace_host
+            )),
+            // todo(vikas.jain): these are not required anymore as they are moved to static
+            // conf but keeping these to avoid image mismatch between hcc and pg.
+            // Once hcc and pg are in sync, we can remove these.
+            //
+            // databricks.enable_databricks_identity_login
+            Some("databricks.enable_databricks_identity_login = true".to_string()),
+            // databricks.enable_sql_restrictions
+            Some("databricks.enable_sql_restrictions = true".to_string()),
+        ]
+        .into_iter()
+        // Removes `None`s
+        .flatten()
+        .collect::<Vec<String>>()
+        .join("\n")
+            + "\n"
+    }
+}
+
 /// Generic trait used to provide quoting / encoding for strings used in the
 /// Postgres SQL queries and DATABASE_URL.
 pub trait Escaping {
@@ -213,8 +251,10 @@ impl Escaping for PgIdent {
 
         // Find the first suitable tag that is not present in the string.
         // Postgres' max role/DB name length is 63 bytes, so even in the
-        // worst case it won't take long.
-        while self.contains(&format!("${tag}$")) || self.contains(&format!("${outer_tag}$")) {
+        // worst case it won't take long. Outer tag is always `tag + "x"`,
+        // so if `tag` is not present in the string, `outer_tag` is not
+        // present in the string either.
+        while self.contains(&tag.to_string()) {
             tag += "x";
             outer_tag = tag.clone() + "x";
         }
@@ -259,9 +299,9 @@ pub async fn get_existing_dbs_async(
         .query_raw::<str, &String, &[String; 0]>(
             "SELECT
                 datname AS name,
-                (SELECT rolname FROM pg_roles WHERE oid = datdba) AS owner,
+                (SELECT rolname FROM pg_catalog.pg_roles WHERE oid OPERATOR(pg_catalog.=) datdba) AS owner,
                 NOT datallowconn AS restrict_conn,
-                datconnlimit = - 2 AS invalid
+                datconnlimit OPERATOR(pg_catalog.=) (OPERATOR(pg_catalog.-) 2) AS invalid
             FROM
                 pg_catalog.pg_database;",
             &[],
@@ -444,7 +484,7 @@ pub async fn tune_pgbouncer(
         let mut pgbouncer_connstr =
             "host=localhost port=6432 dbname=pgbouncer user=postgres sslmode=disable".to_string();
         if let Ok(pass) = std::env::var("PGBOUNCER_PASSWORD") {
-            pgbouncer_connstr.push_str(format!(" password={}", pass).as_str());
+            pgbouncer_connstr.push_str(format!(" password={pass}").as_str());
         }
         pgbouncer_connstr
     };
@@ -462,7 +502,7 @@ pub async fn tune_pgbouncer(
             Ok((client, connection)) => {
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
-                        eprintln!("connection error: {}", e);
+                        eprintln!("connection error: {e}");
                     }
                 });
                 break client;

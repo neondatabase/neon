@@ -10,6 +10,7 @@ default = []
 testing = ["fail/failpoints"]
 
 [dependencies]
+async-compression.workspace = true
 base64.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
@@ -26,7 +27,12 @@ fail.workspace = true
 flate2.workspace = true
 futures.workspace = true
 http.workspace = true
+http-body-util.workspace = true
+hostname-validator = "1.1"
+hyper.workspace = true
+hyper-util.workspace = true
 indexmap.workspace = true
+itertools.workspace = true
 jsonwebtoken.workspace = true
 metrics.workspace = true
 nix.workspace = true
@@ -36,10 +42,12 @@ once_cell.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 p256 = { version = "0.13", features = ["pem"] }
+pageserver_page_api.workspace = true
 postgres.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 ring = "0.17"
+scopeguard.workspace = true
 serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
@@ -51,8 +59,10 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
+tonic.workspace = true
 tower-otel.workspace = true
 tracing.workspace = true
+tracing-appender.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
@@ -61,7 +71,8 @@ url.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
 x509-cert.workspace = true
-
+postgres-types.workspace = true
+postgres_versioninfo.workspace = true
 postgres_initdb.workspace = true
 compute_api.workspace = true
 utils.workspace = true

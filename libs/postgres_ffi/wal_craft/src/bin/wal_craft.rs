@@ -4,6 +4,7 @@ use std::str::FromStr;
 use anyhow::*;
 use clap::{Arg, ArgMatches, Command, value_parser};
 use postgres::Client;
+use postgres_ffi::PgMajorVersion;
 use wal_craft::*;
 
 fn main() -> Result<()> {
@@ -48,7 +49,7 @@ fn main() -> Result<()> {
         Some(("with-initdb", arg_matches)) => {
             let cfg = Conf {
                 pg_version: *arg_matches
-                    .get_one::<u32>("pg-version")
+                    .get_one::<PgMajorVersion>("pg-version")
                     .context("'pg-version' is required")?,
                 pg_distrib_dir: arg_matches
                     .get_one::<PathBuf>("pg-distrib-dir")

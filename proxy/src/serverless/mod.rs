@@ -11,6 +11,8 @@ mod http_conn_pool;
 mod http_util;
 mod json;
 mod local_conn_pool;
+#[cfg(feature = "rest_broker")]
+pub mod rest;
 mod sql_over_http;
 mod websocket;
 
@@ -29,13 +31,13 @@ use futures::future::{Either, select};
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
+use http_util::{NEON_REQUEST_ID, uuid_to_header_value};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use sql_over_http::{NEON_REQUEST_ID, uuid_to_header_value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -49,13 +51,14 @@ use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestContext;
 use crate::ext::TaskExt;
 use crate::metrics::Metrics;
-use crate::protocol2::{ChainRW, ConnectHeader, ConnectionInfo, read_proxy_protocol};
-use crate::proxy::run_until_cancelled;
+use crate::protocol2::{ConnectHeader, ConnectionInfo, read_proxy_protocol};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
+use crate::util::run_until_cancelled;
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
+pub(crate) const AUTH_BROKER_SNI: &str = "apiauth";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -74,7 +77,7 @@ pub async fn task_main(
     {
         let conn_pool = Arc::clone(&conn_pool);
         tokio::spawn(async move {
-            conn_pool.gc_worker(StdRng::from_entropy()).await;
+            conn_pool.gc_worker(StdRng::from_os_rng()).await;
         });
     }
 
@@ -94,7 +97,7 @@ pub async fn task_main(
     {
         let http_conn_pool = Arc::clone(&http_conn_pool);
         tokio::spawn(async move {
-            http_conn_pool.gc_worker(StdRng::from_entropy()).await;
+            http_conn_pool.gc_worker(StdRng::from_os_rng()).await;
         });
     }
 
@@ -206,12 +209,12 @@ pub(crate) type AsyncRW = Pin<Box<dyn AsyncReadWrite>>;
 
 #[async_trait]
 trait MaybeTlsAcceptor: Send + Sync + 'static {
-    async fn accept(&self, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW>;
+    async fn accept(&self, conn: TcpStream) -> std::io::Result<AsyncRW>;
 }
 
 #[async_trait]
 impl MaybeTlsAcceptor for &'static ArcSwapOption<crate::config::TlsConfig> {
-    async fn accept(&self, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW> {
+    async fn accept(&self, conn: TcpStream) -> std::io::Result<AsyncRW> {
         match &*self.load() {
             Some(config) => Ok(Box::pin(
                 TlsAcceptor::from(config.http_config.clone())
@@ -234,33 +237,30 @@ async fn connection_startup(
     peer_addr: SocketAddr,
 ) -> Option<(AsyncRW, ConnectionInfo)> {
     // handle PROXY protocol
-    let (conn, peer) = match read_proxy_protocol(conn).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
-            return None;
+    let (conn, conn_info) = match config.proxy_protocol_v2 {
+        ProxyProtocolV2::Required => {
+            match read_proxy_protocol(conn).await {
+                Err(e) => {
+                    warn!("per-client task finished with an error: {e:#}");
+                    return None;
+                }
+                // our load balancers will not send any more data. let's just exit immediately
+                Ok((_conn, ConnectHeader::Local)) => {
+                    tracing::debug!("healthcheck received");
+                    return None;
+                }
+                Ok((conn, ConnectHeader::Proxy(info))) => (conn, info),
+            }
         }
-    };
-
-    let conn_info = match peer {
-        // our load balancers will not send any more data. let's just exit immediately
-        ConnectHeader::Local => {
-            tracing::debug!("healthcheck received");
-            return None;
-        }
-        ConnectHeader::Missing if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
-            tracing::warn!("missing required proxy protocol header");
-            return None;
-        }
-        ConnectHeader::Proxy(_) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
-            tracing::warn!("proxy protocol header not supported");
-            return None;
-        }
-        ConnectHeader::Proxy(info) => info,
-        ConnectHeader::Missing => ConnectionInfo {
-            addr: peer_addr,
-            extra: None,
-        },
+        // ignore the header - it cannot be confused for a postgres or http connection so will
+        // error later.
+        ProxyProtocolV2::Rejected => (
+            conn,
+            ConnectionInfo {
+                addr: peer_addr,
+                extra: None,
+            },
+        ),
     };
 
     let has_private_peer_addr = match conn_info.addr.ip() {
@@ -419,12 +419,7 @@ async fn request_handler(
     if config.http_config.accept_websockets
         && framed_websockets::upgrade::is_upgrade_request(&request)
     {
-        let ctx = RequestContext::new(
-            session_id,
-            conn_info,
-            crate::metrics::Protocol::Ws,
-            &config.region,
-        );
+        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Ws);
 
         ctx.set_user_agent(
             request
@@ -464,12 +459,7 @@ async fn request_handler(
         // Return the response so the spawned future can continue.
         Ok(response.map(|b| b.map_err(|x| match x {}).boxed()))
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
-        let ctx = RequestContext::new(
-            session_id,
-            conn_info,
-            crate::metrics::Protocol::Http,
-            &config.region,
-        );
+        let ctx = RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
         let span = ctx.span();
 
         let testodrome_id = request
@@ -499,6 +489,42 @@ async fn request_handler(
             .body(Empty::new().map_err(|x| match x {}).boxed())
             .map_err(|e| ApiError::InternalServerError(e.into()))
     } else {
-        json_response(StatusCode::BAD_REQUEST, "query is not supported")
+        #[cfg(feature = "rest_broker")]
+        {
+            if config.rest_config.is_rest_broker
+            // we are testing for the path to be /database_name/rest/...
+                && request
+                    .uri()
+                    .path()
+                    .split('/')
+                    .nth(2)
+                    .is_some_and(|part| part.starts_with("rest"))
+            {
+                let ctx =
+                    RequestContext::new(session_id, conn_info, crate::metrics::Protocol::Http);
+                let span = ctx.span();
+
+                let testodrome_id = request
+                    .headers()
+                    .get("X-Neon-Query-ID")
+                    .and_then(|value| value.to_str().ok())
+                    .map(|s| s.to_string());
+
+                if let Some(query_id) = testodrome_id {
+                    info!(parent: &span, "testodrome query ID: {query_id}");
+                    ctx.set_testodrome_id(query_id.into());
+                }
+
+                rest::handle(config, ctx, request, backend, http_cancellation_token)
+                    .instrument(span)
+                    .await
+            } else {
+                json_response(StatusCode::BAD_REQUEST, "query is not supported")
+            }
+        }
+        #[cfg(not(feature = "rest_broker"))]
+        {
+            json_response(StatusCode::BAD_REQUEST, "query is not supported")
+        }
     }
 }

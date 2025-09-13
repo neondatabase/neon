@@ -153,7 +153,10 @@ pub async fn scan_pageserver_metadata(
     const CONCURRENCY: usize = 32;
 
     // Generate a stream of TenantTimelineId
-    let timelines = tenants.map_ok(|t| stream_tenant_timelines(&remote_client, &target, t));
+    let timelines = tenants.map_ok(|t| {
+        tracing::info!("Found tenant: {}", t);
+        stream_tenant_timelines(&remote_client, &target, t)
+    });
     let timelines = timelines.try_buffered(CONCURRENCY);
     let timelines = timelines.try_flatten();
 

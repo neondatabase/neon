@@ -1,9 +1,11 @@
 #include "postgres.h"
 
+#include "neon.h"
 #include "neon_lwlsncache.h"
 
 #include "miscadmin.h"
 #include "access/xlog.h"
+#include "access/xlog_internal.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "storage/buf_internals.h"
@@ -80,14 +82,6 @@ static set_max_lwlsn_hook_type prev_set_max_lwlsn_hook = NULL;
 static set_lwlsn_relation_hook_type prev_set_lwlsn_relation_hook = NULL;
 static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
 
-static shmem_startup_hook_type prev_shmem_startup_hook;
-
-#if PG_VERSION_NUM >= 150000
-static shmem_request_hook_type prev_shmem_request_hook;
-#endif
-
-static void shmemrequest(void);
-static void shmeminit(void);
 static void neon_set_max_lwlsn(XLogRecPtr lsn);
 
 void
@@ -98,16 +92,6 @@ init_lwlsncache(void)
 	
 	lwlc_register_gucs();
 
-	prev_shmem_startup_hook = shmem_startup_hook;
-	shmem_startup_hook = shmeminit;
-
-	#if PG_VERSION_NUM >= 150000
-	prev_shmem_request_hook = shmem_request_hook;
-	shmem_request_hook = shmemrequest;
-	#else
-	shmemrequest();
-	#endif
-	
 	prev_set_lwlsn_block_range_hook = set_lwlsn_block_range_hook;
 	set_lwlsn_block_range_hook = neon_set_lwlsn_block_range;
 	prev_set_lwlsn_block_v_hook = set_lwlsn_block_v_hook;
@@ -123,20 +107,19 @@ init_lwlsncache(void)
 }
 
 
-static void shmemrequest(void) {
+void
+LwLsnCacheShmemRequest(void)
+{
 	Size requested_size = sizeof(LwLsnCacheCtl);
-	
+
 	requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
 
 	RequestAddinShmemSpace(requested_size);
-
-	#if PG_VERSION_NUM >= 150000
-	if (prev_shmem_request_hook)
-			prev_shmem_request_hook();
-	#endif
 }
 
-static void shmeminit(void) {
+void
+LwLsnCacheShmemInit(void)
+{
 	static HASHCTL info;
 	bool found;
 	if (lwlsn_cache_size > 0)
@@ -156,9 +139,6 @@ static void shmeminit(void) {
 	}
 	dlist_init(&LwLsnCache->lastWrittenLsnLRU);
     LwLsnCache->maxLastWrittenLsn = GetRedoRecPtr();
-	if (prev_shmem_startup_hook) {
-		prev_shmem_startup_hook();
-	}
 }
 
 /*
@@ -396,9 +376,10 @@ SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 XLogRecPtr
 neon_set_lwlsn_block_range(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum, BlockNumber from, BlockNumber n_blocks)
 {
-	if (lsn < FirstNormalUnloggedLSN || n_blocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0)
+	if (lsn == InvalidXLogRecPtr || n_blocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0)
 		return lsn;
 
+	Assert(lsn >= WalSegMinSize);
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
 	lsn = SetLastWrittenLSNForBlockRangeInternal(lsn, rlocator, forknum, from, n_blocks);
 	LWLockRelease(LastWrittenLsnLock);
@@ -435,7 +416,6 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 		NInfoGetRelNumber(relfilenode) == InvalidOid)
 		return InvalidXLogRecPtr;
 
-	
 	BufTagInit(key,  relNumber, forknum, blockno, spcOid, dbOid);
 
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
@@ -444,6 +424,10 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 	{
 		XLogRecPtr	lsn = lsns[i];
 
+		if (lsn == InvalidXLogRecPtr)
+			continue;
+
+		Assert(lsn >= WalSegMinSize);
 		key.blockNum = blockno + i;
 		entry = hash_search(lastWrittenLsnCache, &key, HASH_ENTER, &found);
 		if (found)

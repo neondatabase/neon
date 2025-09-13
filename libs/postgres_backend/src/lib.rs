@@ -78,7 +78,13 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(
         e.kind(),
-        BrokenPipe | ConnectionRefused | ConnectionAborted | ConnectionReset | TimedOut
+        HostUnreachable
+            | NetworkUnreachable
+            | BrokenPipe
+            | ConnectionRefused
+            | ConnectionAborted
+            | ConnectionReset
+            | TimedOut,
     )
 }
 
@@ -743,7 +749,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 trace!("got query {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
                     match e {
-                        QueryError::Shutdown => return Ok(ProcessMsgResult::Break),
+                        err @ QueryError::Shutdown => {
+                            // Notify postgres of the connection shutdown at the libpq
+                            // protocol level. This avoids postgres having to tell apart
+                            // from an idle connection and a stale one, which is bug prone.
+                            let shutdown_error = short_error(&err);
+                            self.write_message_noflush(&BeMessage::ErrorResponse(
+                                &shutdown_error,
+                                Some(err.pg_error_code()),
+                            ))?;
+
+                            return Ok(ProcessMsgResult::Break);
+                        }
                         QueryError::SimulatedConnectionError => {
                             return Err(QueryError::SimulatedConnectionError);
                         }
@@ -841,6 +858,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
         let expected_end = match &end {
             ServerInitiated(_) | CopyDone | CopyFail | Terminate | EOF | Cancelled => true,
+            // The timeline doesn't exist and we have been requested to not auto-create it.
+            // Compute requests for timelines that haven't been created yet
+            // might reach us before the storcon request to create those timelines.
+            TimelineNoCreate => true,
             CopyStreamHandlerEnd::Disconnected(ConnectionError::Io(io_error))
                 if is_expected_io_error(io_error) =>
             {
@@ -935,7 +956,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackendReader<IO> {
                 FeMessage::CopyFail => Err(CopyStreamHandlerEnd::CopyFail),
                 FeMessage::Terminate => Err(CopyStreamHandlerEnd::Terminate),
                 _ => Err(CopyStreamHandlerEnd::from(ConnectionError::Protocol(
-                    ProtocolError::Protocol(format!("unexpected message in COPY stream {:?}", msg)),
+                    ProtocolError::Protocol(format!("unexpected message in COPY stream {msg:?}")),
                 ))),
             },
             None => Err(CopyStreamHandlerEnd::EOF),
@@ -1059,6 +1080,8 @@ pub enum CopyStreamHandlerEnd {
     Terminate,
     #[error("EOF on COPY stream")]
     EOF,
+    #[error("timeline not found, and allow_timeline_creation is false")]
+    TimelineNoCreate,
     /// The connection was lost
     #[error("connection error: {0}")]
     Disconnected(#[from] ConnectionError),

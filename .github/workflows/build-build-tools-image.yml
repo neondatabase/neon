@@ -72,7 +72,7 @@ jobs:
           ARCHS: ${{ inputs.archs || '["x64","arm64"]' }}
           DEBIANS: ${{ inputs.debians || '["bullseye","bookworm"]' }}
           IMAGE_TAG: |
-            ${{ hashFiles('build-tools.Dockerfile',
+            ${{ hashFiles('build-tools/Dockerfile',
                           '.github/workflows/build-build-tools-image.yml') }}
         run: |
           echo "archs=${ARCHS}"           | tee -a ${GITHUB_OUTPUT}
@@ -144,9 +144,11 @@ jobs:
 
       - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
-          file: build-tools.Dockerfile
+          file: build-tools/Dockerfile
           context: .
-          provenance: false
+          attests: |
+            type=provenance,mode=max
+            type=sbom,generator=docker.io/docker/buildkit-syft-scanner:1
           push: true
           pull: true
           build-args: |

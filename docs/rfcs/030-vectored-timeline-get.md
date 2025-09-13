@@ -7,6 +7,8 @@ Author: Christian Schwarz
 
 A brief RFC / GitHub Epic describing a vectored version of the `Timeline::get` method that is at the heart of Pageserver.
 
+**EDIT**: the implementation of this feature is described in [Vlad's (internal) tech talk](https://drive.google.com/file/d/1vfY24S869UP8lEUUDHRWKF1AJn8fpWoJ/view?usp=drive_link).
+
 # Motivation
 
 During basebackup, we issue many `Timeline::get` calls for SLRU pages that are *adjacent* in key space.

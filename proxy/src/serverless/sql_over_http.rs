@@ -11,38 +11,35 @@ use http_body_util::{BodyExt, Full};
 use http_utils::error::ApiError;
 use hyper::body::Incoming;
 use hyper::http::{HeaderName, HeaderValue};
-use hyper::{HeaderMap, Request, Response, StatusCode, header};
+use hyper::{Request, Response, StatusCode, header};
 use indexmap::IndexMap;
 use postgres_client::error::{DbError, ErrorPosition, SqlState};
 use postgres_client::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
-use pq_proto::StartupMessageParamsBuilder;
-use serde::Serialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{Level, debug, error, info};
 use typed_json::json;
-use url::Url;
-use uuid::Uuid;
 
 use super::backend::{LocalProxyConnError, PoolingBackend};
-use super::conn_pool::{AuthData, ConnInfoWithAuth};
+use super::conn_pool::AuthData;
 use super::conn_pool_lib::{self, ConnInfo};
-use super::error::HttpCodeError;
-use super::http_util::json_response;
+use super::error::{ConnInfoError, HttpCodeError, ReadPayloadError};
+use super::http_util::{
+    ALLOW_POOL, ARRAY_MODE, CONN_STRING, NEON_REQUEST_ID, RAW_TEXT_OUTPUT, TXN_DEFERRABLE,
+    TXN_ISOLATION_LEVEL, TXN_READ_ONLY, get_conn_info, json_response, uuid_to_header_value,
+};
 use super::json::{JsonConversionError, json_to_pg_text, pg_text_row_to_json};
-use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
-use crate::auth::{ComputeUserInfoParseError, endpoint_sni};
-use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
+use crate::auth::backend::ComputeCredentialKeys;
+use crate::config::{HttpConfig, ProxyConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::http::{ReadBodyError, read_body_with_limit};
+use crate::http::read_body_with_limit;
 use crate::metrics::{HttpDirection, Metrics};
-use crate::proxy::{NeonOptions, run_until_cancelled};
 use crate::serverless::backend::HttpConnError;
-use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
+use crate::util::run_until_cancelled;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,17 +64,7 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
-
-static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
-static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
-static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
-static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
-static TXN_ISOLATION_LEVEL: HeaderName = HeaderName::from_static("neon-batch-isolation-level");
-static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only");
-static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
-
-static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
+pub(super) const HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
 where
@@ -86,163 +73,6 @@ where
     // TODO: consider avoiding the allocation here.
     let json: Vec<Value> = serde::de::Deserialize::deserialize(deserializer)?;
     Ok(json_to_pg_text(json))
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ConnInfoError {
-    #[error("invalid header: {0}")]
-    InvalidHeader(&'static HeaderName),
-    #[error("invalid connection string: {0}")]
-    UrlParseError(#[from] url::ParseError),
-    #[error("incorrect scheme")]
-    IncorrectScheme,
-    #[error("missing database name")]
-    MissingDbName,
-    #[error("invalid database name")]
-    InvalidDbName,
-    #[error("missing username")]
-    MissingUsername,
-    #[error("invalid username: {0}")]
-    InvalidUsername(#[from] std::string::FromUtf8Error),
-    #[error("missing authentication credentials: {0}")]
-    MissingCredentials(Credentials),
-    #[error("missing hostname")]
-    MissingHostname,
-    #[error("invalid hostname: {0}")]
-    InvalidEndpoint(#[from] ComputeUserInfoParseError),
-    #[error("malformed endpoint")]
-    MalformedEndpoint,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum Credentials {
-    #[error("required password")]
-    Password,
-    #[error("required authorization bearer token in JWT format")]
-    BearerJwt,
-}
-
-impl ReportableError for ConnInfoError {
-    fn get_error_kind(&self) -> ErrorKind {
-        ErrorKind::User
-    }
-}
-
-impl UserFacingError for ConnInfoError {
-    fn to_string_client(&self) -> String {
-        self.to_string()
-    }
-}
-
-fn get_conn_info(
-    config: &'static AuthenticationConfig,
-    ctx: &RequestContext,
-    headers: &HeaderMap,
-    tls: Option<&TlsConfig>,
-) -> Result<ConnInfoWithAuth, ConnInfoError> {
-    let connection_string = headers
-        .get(&CONN_STRING)
-        .ok_or(ConnInfoError::InvalidHeader(&CONN_STRING))?
-        .to_str()
-        .map_err(|_| ConnInfoError::InvalidHeader(&CONN_STRING))?;
-
-    let connection_url = Url::parse(connection_string)?;
-
-    let protocol = connection_url.scheme();
-    if protocol != "postgres" && protocol != "postgresql" {
-        return Err(ConnInfoError::IncorrectScheme);
-    }
-
-    let mut url_path = connection_url
-        .path_segments()
-        .ok_or(ConnInfoError::MissingDbName)?;
-
-    let dbname: DbName =
-        urlencoding::decode(url_path.next().ok_or(ConnInfoError::InvalidDbName)?)?.into();
-    ctx.set_dbname(dbname.clone());
-
-    let username = RoleName::from(urlencoding::decode(connection_url.username())?);
-    if username.is_empty() {
-        return Err(ConnInfoError::MissingUsername);
-    }
-    ctx.set_user(username.clone());
-
-    let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
-        if !config.accept_jwts {
-            return Err(ConnInfoError::MissingCredentials(Credentials::Password));
-        }
-
-        let auth = auth
-            .to_str()
-            .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
-        AuthData::Jwt(
-            auth.strip_prefix("Bearer ")
-                .ok_or(ConnInfoError::MissingCredentials(Credentials::BearerJwt))?
-                .into(),
-        )
-    } else if let Some(pass) = connection_url.password() {
-        // wrong credentials provided
-        if config.accept_jwts {
-            return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
-        }
-
-        AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
-            std::borrow::Cow::Borrowed(b) => b.into(),
-            std::borrow::Cow::Owned(b) => b.into(),
-        })
-    } else if config.accept_jwts {
-        return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
-    } else {
-        return Err(ConnInfoError::MissingCredentials(Credentials::Password));
-    };
-
-    let endpoint = match connection_url.host() {
-        Some(url::Host::Domain(hostname)) => {
-            if let Some(tls) = tls {
-                endpoint_sni(hostname, &tls.common_names)?
-                    .ok_or(ConnInfoError::MalformedEndpoint)?
-            } else {
-                hostname
-                    .split_once('.')
-                    .map_or(hostname, |(prefix, _)| prefix)
-                    .into()
-            }
-        }
-        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
-            return Err(ConnInfoError::MissingHostname);
-        }
-    };
-    ctx.set_endpoint_id(endpoint.clone());
-
-    let pairs = connection_url.query_pairs();
-
-    let mut options = Option::None;
-
-    let mut params = StartupMessageParamsBuilder::default();
-    params.insert("user", &username);
-    params.insert("database", &dbname);
-    for (key, value) in pairs {
-        params.insert(&key, &value);
-        if key == "options" {
-            options = Some(NeonOptions::parse_options_raw(&value));
-        }
-    }
-
-    ctx.set_user_agent(
-        headers
-            .get(hyper::header::USER_AGENT)
-            .and_then(|h| h.to_str().ok())
-            .map(Into::into),
-    );
-
-    let user_info = ComputeUserInfo {
-        endpoint,
-        user: username,
-        options: options.unwrap_or_default(),
-    };
-
-    let conn_info = ConnInfo { user_info, dbname };
-    Ok(ConnInfoWithAuth { conn_info, auth })
 }
 
 pub(crate) async fn handle(
@@ -362,12 +192,30 @@ pub(crate) async fn handle(
             let line = get(db_error, |db| db.line().map(|l| l.to_string()));
             let routine = get(db_error, |db| db.routine());
 
-            tracing::info!(
-                kind=error_kind.to_metric_label(),
-                error=%e,
-                msg=message,
-                "forwarding error to user"
-            );
+            if db_error.is_some() && error_kind == ErrorKind::User {
+                // this error contains too much info, and it's not an error we care about.
+                if tracing::enabled!(Level::DEBUG) {
+                    debug!(
+                        kind=error_kind.to_metric_label(),
+                        error=%e,
+                        msg=message,
+                        "forwarding error to user"
+                    );
+                } else {
+                    info!(
+                        kind = error_kind.to_metric_label(),
+                        error = "bad query",
+                        "forwarding error to user"
+                    );
+                }
+            } else {
+                info!(
+                    kind=error_kind.to_metric_label(),
+                    error=%e,
+                    msg=message,
+                    "forwarding error to user"
+                );
+            }
 
             json_response(
                 e.get_http_status_code(),
@@ -432,7 +280,15 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
             SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
-            SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            // customer initiated SQL errors.
+            SqlOverHttpError::Postgres(p) => {
+                if p.as_db_error().is_some() {
+                    ErrorKind::User
+                } else {
+                    ErrorKind::Compute
+                }
+            }
+            // proxy initiated SQL errors.
             SqlOverHttpError::InternalPostgres(p) => {
                 if p.as_db_error().is_some() {
                     ErrorKind::Service
@@ -440,6 +296,7 @@ impl ReportableError for SqlOverHttpError {
                     ErrorKind::Compute
                 }
             }
+            // postgres returned a bad row format that we couldn't parse.
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
             SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
         }
@@ -477,45 +334,6 @@ impl HttpCodeError for SqlOverHttpError {
             SqlOverHttpError::InternalPostgres(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::Cancelled(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ReadPayloadError {
-    #[error("could not read the HTTP request body: {0}")]
-    Read(#[from] hyper::Error),
-    #[error("request is too large (max is {limit} bytes)")]
-    BodyTooLarge { limit: usize },
-    #[error("could not parse the HTTP request body: {0}")]
-    Parse(#[from] serde_json::Error),
-}
-
-impl From<ReadBodyError<hyper::Error>> for ReadPayloadError {
-    fn from(value: ReadBodyError<hyper::Error>) -> Self {
-        match value {
-            ReadBodyError::BodyTooLarge { limit } => Self::BodyTooLarge { limit },
-            ReadBodyError::Read(e) => Self::Read(e),
-        }
-    }
-}
-
-impl ReportableError for ReadPayloadError {
-    fn get_error_kind(&self) -> ErrorKind {
-        match self {
-            ReadPayloadError::Read(_) => ErrorKind::ClientDisconnect,
-            ReadPayloadError::BodyTooLarge { .. } => ErrorKind::User,
-            ReadPayloadError::Parse(_) => ErrorKind::User,
-        }
-    }
-}
-
-impl HttpCodeError for ReadPayloadError {
-    fn get_http_status_code(&self) -> StatusCode {
-        match self {
-            ReadPayloadError::Read(_) => StatusCode::BAD_REQUEST,
-            ReadPayloadError::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            ReadPayloadError::Parse(_) => StatusCode::BAD_REQUEST,
         }
     }
 }
@@ -610,14 +428,7 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    let conn_info = get_conn_info(
-        &config.authentication_config,
-        ctx,
-        request.headers(),
-        // todo: race condition?
-        // we're unlikely to change the common names.
-        config.tls_config.load().as_deref(),
-    )?;
+    let conn_info = get_conn_info(&config.authentication_config, ctx, None, request.headers())?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
         "credentials"
@@ -703,9 +514,17 @@ async fn handle_db_inner(
                 ComputeCredentialKeys::JwtPayload(payload)
                     if backend.auth_backend.is_local_proxy() =>
                 {
-                    let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
-                    let (cli_inner, _dsc) = client.client_inner();
-                    cli_inner.set_jwt_session(&payload).await?;
+                    #[cfg(feature = "testing")]
+                    let disable_pg_session_jwt = config.disable_pg_session_jwt;
+                    #[cfg(not(feature = "testing"))]
+                    let disable_pg_session_jwt = false;
+                    let mut client = backend
+                        .connect_to_local_postgres(ctx, conn_info, disable_pg_session_jwt)
+                        .await?;
+                    if !disable_pg_session_jwt {
+                        let (cli_inner, _dsc) = client.client_inner();
+                        cli_inner.set_jwt_session(&payload).await?;
+                    }
                     Client::Local(client)
                 }
                 _ => {
@@ -804,12 +623,6 @@ static HEADERS_TO_FORWARD: &[&HeaderName] = &[
     &TXN_DEFERRABLE,
 ];
 
-pub(crate) fn uuid_to_header_value(id: Uuid) -> HeaderValue {
-    let mut uuid = [0; uuid::fmt::Hyphenated::LENGTH];
-    HeaderValue::from_str(id.as_hyphenated().encode_lower(&mut uuid[..]))
-        .expect("uuid hyphenated format should be all valid header characters")
-}
-
 async fn handle_auth_broker_inner(
     ctx: &RequestContext,
     request: Request<Incoming>,
@@ -839,7 +652,7 @@ async fn handle_auth_broker_inner(
     req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
 
     let req = req
-        .body(body)
+        .body(body.map_err(|e| e).boxed()) //TODO: is there a potential for a regression here?
         .expect("all headers and params received via hyper should be valid for request");
 
     // todo: map body to count egress
@@ -866,32 +679,21 @@ impl QueryData {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
-        match select(
+        let mut json_buf = vec![];
+
+        let batch_result = match select(
             pin!(query_to_json(
                 config,
                 &mut *inner,
                 self,
-                &mut 0,
+                json::ValueSer::new(&mut json_buf),
                 parsed_headers
             )),
             pin!(cancel.cancelled()),
         )
         .await
         {
-            // The query successfully completed.
-            Either::Left((Ok((status, results)), __not_yet_cancelled)) => {
-                discard.check_idle(status);
-
-                let json_output =
-                    serde_json::to_string(&results).expect("json serialization should not fail");
-                Ok(json_output)
-            }
-            // The query failed with an error
-            Either::Left((Err(e), __not_yet_cancelled)) => {
-                discard.discard();
-                Err(e)
-            }
-            // The query was cancelled.
+            Either::Left((res, __not_yet_cancelled)) => res,
             Either::Right((_cancelled, query)) => {
                 tracing::info!("cancelling query");
                 if let Err(err) = cancel_token.cancel_query(NoTls).await {
@@ -900,13 +702,7 @@ impl QueryData {
                 // wait for the query cancellation
                 match time::timeout(time::Duration::from_millis(100), query).await {
                     // query successed before it was cancelled.
-                    Ok(Ok((status, results))) => {
-                        discard.check_idle(status);
-
-                        let json_output = serde_json::to_string(&results)
-                            .expect("json serialization should not fail");
-                        Ok(json_output)
-                    }
+                    Ok(Ok(status)) => Ok(status),
                     // query failed or was cancelled.
                     Ok(Err(error)) => {
                         let db_error = match &error {
@@ -922,13 +718,26 @@ impl QueryData {
                             discard.discard();
                         }
 
-                        Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres))
+                        return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
                     }
                     Err(_timeout) => {
                         discard.discard();
-                        Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres))
+                        return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
                     }
                 }
+            }
+        };
+
+        match batch_result {
+            // The query successfully completed.
+            Ok(_) => {
+                let json_output = String::from_utf8(json_buf).expect("json should be valid utf8");
+                Ok(json_output)
+            }
+            // The query failed with an error
+            Err(e) => {
+                discard.discard();
+                Err(e)
             }
         }
     }
@@ -966,7 +775,7 @@ impl BatchQueryData {
             })
             .map_err(SqlOverHttpError::Postgres)?;
 
-        let json_output = match query_batch(
+        let json_output = match query_batch_to_json(
             config,
             cancel.child_token(),
             &mut transaction,
@@ -977,7 +786,7 @@ impl BatchQueryData {
         {
             Ok(json_output) => {
                 info!("commit");
-                let status = transaction
+                transaction
                     .commit()
                     .await
                     .inspect_err(|_| {
@@ -986,7 +795,6 @@ impl BatchQueryData {
                         discard.discard();
                     })
                     .map_err(SqlOverHttpError::Postgres)?;
-                discard.check_idle(status);
                 json_output
             }
             Err(SqlOverHttpError::Cancelled(_)) => {
@@ -999,17 +807,6 @@ impl BatchQueryData {
                 return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
             }
             Err(err) => {
-                info!("rollback");
-                let status = transaction
-                    .rollback()
-                    .await
-                    .inspect_err(|_| {
-                        // if we cannot rollback - for now don't return connection to pool
-                        // TODO: get a query status from the error
-                        discard.discard();
-                    })
-                    .map_err(SqlOverHttpError::Postgres)?;
-                discard.check_idle(status);
                 return Err(err);
             }
         };
@@ -1024,24 +821,21 @@ async fn query_batch(
     transaction: &mut Transaction<'_>,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
-) -> Result<String, SqlOverHttpError> {
-    let mut results = Vec::with_capacity(queries.queries.len());
-    let mut current_size = 0;
+    results: &mut json::ListSer<'_>,
+) -> Result<(), SqlOverHttpError> {
     for stmt in queries.queries {
         let query = pin!(query_to_json(
             config,
             transaction,
             stmt,
-            &mut current_size,
+            results.entry(),
             parsed_headers,
         ));
         let cancelled = pin!(cancel.cancelled());
         let res = select(query, cancelled).await;
         match res {
             // TODO: maybe we should check that the transaction bit is set here
-            Either::Left((Ok((_, values)), _cancelled)) => {
-                results.push(values);
-            }
+            Either::Left((Ok(_), _cancelled)) => {}
             Either::Left((Err(e), _cancelled)) => {
                 return Err(e);
             }
@@ -1051,8 +845,22 @@ async fn query_batch(
         }
     }
 
-    let results = json!({ "results": results });
-    let json_output = serde_json::to_string(&results).expect("json serialization should not fail");
+    Ok(())
+}
+
+async fn query_batch_to_json(
+    config: &'static HttpConfig,
+    cancel: CancellationToken,
+    tx: &mut Transaction<'_>,
+    queries: BatchQueryData,
+    headers: HttpHeaders,
+) -> Result<String, SqlOverHttpError> {
+    let json_output = json::value_to_string!(|obj| json::value_as_object!(|obj| {
+        let results = obj.key("results");
+        json::value_as_list!(|results| {
+            query_batch(config, cancel, tx, queries, headers, results).await?;
+        });
+    }));
 
     Ok(json_output)
 }
@@ -1061,42 +869,69 @@ async fn query_to_json<T: GenericClient>(
     config: &'static HttpConfig,
     client: &mut T,
     data: QueryData,
-    current_size: &mut usize,
+    output: json::ValueSer<'_>,
     parsed_headers: HttpHeaders,
-) -> Result<(ReadyForQueryStatus, impl Serialize + use<T>), SqlOverHttpError> {
+) -> Result<ReadyForQueryStatus, SqlOverHttpError> {
     let query_start = Instant::now();
 
-    let query_params = data.params;
-    let mut row_stream = std::pin::pin!(
-        client
-            .query_raw_txt(&data.query, query_params)
-            .await
-            .map_err(SqlOverHttpError::Postgres)?
-    );
+    let mut output = json::ObjectSer::new(output);
+    let mut row_stream = client
+        .query_raw_txt(&data.query, data.params)
+        .await
+        .map_err(SqlOverHttpError::Postgres)?;
     let query_acknowledged = Instant::now();
+
+    let mut json_fields = output.key("fields").list();
+    for c in row_stream.statement.columns() {
+        let json_field = json_fields.entry();
+        json::value_as_object!(|json_field| {
+            json_field.entry("name", c.name());
+            json_field.entry("dataTypeID", c.type_().oid());
+            json_field.entry("tableID", c.table_oid());
+            json_field.entry("columnID", c.column_id());
+            json_field.entry("dataTypeSize", c.type_size());
+            json_field.entry("dataTypeModifier", c.type_modifier());
+            json_field.entry("format", "text");
+        });
+    }
+    json_fields.finish();
+
+    let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
+    let raw_output = parsed_headers.raw_output;
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
     // big.
-    let mut rows: Vec<postgres_client::Row> = Vec::new();
+    let mut rows = 0;
+    let mut json_rows = output.key("rows").list();
     while let Some(row) = row_stream.next().await {
         let row = row.map_err(SqlOverHttpError::Postgres)?;
-        *current_size += row.body_len();
-        rows.push(row);
+
         // we don't have a streaming response support yet so this is to prevent OOM
         // from a malicious query (eg a cross join)
-        if *current_size > config.max_response_size_bytes {
+        if json_rows.as_buffer().len() > config.max_response_size_bytes {
             return Err(SqlOverHttpError::ResponseTooLarge(
                 config.max_response_size_bytes,
             ));
         }
+
+        pg_text_row_to_json(json_rows.entry(), &row, raw_output, array_mode)?;
+        rows += 1;
+
+        // assumption: parsing pg text and converting to json takes CPU time.
+        // let's assume it is slightly expensive, so we should consume some cooperative budget.
+        // Especially considering that `RowStream::next` might be pulling from a batch
+        // of rows and never hit the tokio mpsc for a long time (although unlikely).
+        tokio::task::consume_budget().await;
     }
+    json_rows.finish();
 
     let query_resp_end = Instant::now();
-    let ready = row_stream.ready_status();
+
+    let ready = row_stream.status;
 
     // grab the command tag and number of rows affected
-    let command_tag = row_stream.command_tag().unwrap_or_default();
+    let command_tag = row_stream.command_tag.unwrap_or_default();
     let mut command_tag_split = command_tag.split(' ');
     let command_tag_name = command_tag_split.next().unwrap_or_default();
     let command_tag_count = if command_tag_name == "INSERT" {
@@ -1109,7 +944,7 @@ async fn query_to_json<T: GenericClient>(
     .and_then(|s| s.parse::<i64>().ok());
 
     info!(
-        rows = rows.len(),
+        rows,
         ?ready,
         command_tag,
         acknowledgement = ?(query_acknowledged - query_start),
@@ -1117,48 +952,12 @@ async fn query_to_json<T: GenericClient>(
         "finished executing query"
     );
 
-    let columns_len = row_stream.columns().len();
-    let mut fields = Vec::with_capacity(columns_len);
-    let mut columns = Vec::with_capacity(columns_len);
+    output.entry("command", command_tag_name);
+    output.entry("rowCount", command_tag_count);
+    output.entry("rowAsArray", array_mode);
 
-    for c in row_stream.columns() {
-        fields.push(json!({
-            "name": c.name().to_owned(),
-            "dataTypeID": c.type_().oid(),
-            "tableID": c.table_oid(),
-            "columnID": c.column_id(),
-            "dataTypeSize": c.type_size(),
-            "dataTypeModifier": c.type_modifier(),
-            "format": "text",
-        }));
-
-        match client.get_type(c.type_oid()).await {
-            Ok(t) => columns.push(t),
-            Err(err) => {
-                tracing::warn!(?err, "unable to query type information");
-                return Err(SqlOverHttpError::InternalPostgres(err));
-            }
-        }
-    }
-
-    let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
-
-    // convert rows to JSON
-    let rows = rows
-        .iter()
-        .map(|row| pg_text_row_to_json(row, &columns, parsed_headers.raw_output, array_mode))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Resulting JSON format is based on the format of node-postgres result.
-    let results = json!({
-        "command": command_tag_name.to_string(),
-        "rowCount": command_tag_count,
-        "rows": rows,
-        "fields": fields,
-        "rowAsArray": array_mode,
-    });
-
-    Ok((ready, results))
+    output.finish();
+    Ok(ready)
 }
 
 enum Client {
@@ -1194,12 +993,6 @@ impl Client {
 }
 
 impl Discard<'_> {
-    fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        match self {
-            Discard::Remote(discard) => discard.check_idle(status),
-            Discard::Local(discard) => discard.check_idle(status),
-        }
-    }
     fn discard(&mut self) {
         match self {
             Discard::Remote(discard) => discard.discard(),

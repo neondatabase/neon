@@ -43,28 +43,35 @@ impl UserFacingError for ControlPlaneError {
 }
 
 impl ReportableError for ControlPlaneError {
-    fn get_error_kind(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> ErrorKind {
         match self {
             ControlPlaneError::Message(e) => match e.get_reason() {
-                Reason::RoleProtected => ErrorKind::User,
-                Reason::ResourceNotFound => ErrorKind::User,
-                Reason::ProjectNotFound => ErrorKind::User,
-                Reason::EndpointNotFound => ErrorKind::User,
-                Reason::BranchNotFound => ErrorKind::User,
+                Reason::RoleProtected
+                | Reason::ResourceNotFound
+                | Reason::ProjectNotFound
+                | Reason::EndpointNotFound
+                | Reason::EndpointDisabled
+                | Reason::BranchNotFound
+                | Reason::WrongLsnOrTimestamp => ErrorKind::User,
+
                 Reason::RateLimitExceeded => ErrorKind::ServiceRateLimit,
-                Reason::NonDefaultBranchComputeTimeExceeded => ErrorKind::Quota,
-                Reason::ActiveTimeQuotaExceeded => ErrorKind::Quota,
-                Reason::ComputeTimeQuotaExceeded => ErrorKind::Quota,
-                Reason::WrittenDataQuotaExceeded => ErrorKind::Quota,
-                Reason::DataTransferQuotaExceeded => ErrorKind::Quota,
-                Reason::LogicalSizeQuotaExceeded => ErrorKind::Quota,
-                Reason::ConcurrencyLimitReached => ErrorKind::ControlPlane,
-                Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
-                Reason::RunningOperations => ErrorKind::ControlPlane,
-                Reason::ActiveEndpointsLimitExceeded => ErrorKind::ControlPlane,
-                Reason::Unknown => ErrorKind::ControlPlane,
+
+                Reason::NonDefaultBranchComputeTimeExceeded
+                | Reason::ActiveTimeQuotaExceeded
+                | Reason::ComputeTimeQuotaExceeded
+                | Reason::WrittenDataQuotaExceeded
+                | Reason::DataTransferQuotaExceeded
+                | Reason::LogicalSizeQuotaExceeded
+                | Reason::ActiveEndpointsLimitExceeded => ErrorKind::Quota,
+
+                Reason::ConcurrencyLimitReached
+                | Reason::LockAlreadyTaken
+                | Reason::RunningOperations
+                | Reason::EndpointIdle
+                | Reason::ProjectUnderMaintenance
+                | Reason::Unknown => ErrorKind::ControlPlane,
             },
-            ControlPlaneError::Transport(_) => crate::error::ErrorKind::ControlPlane,
+            ControlPlaneError::Transport(_) => ErrorKind::ControlPlane,
         }
     }
 }
@@ -120,10 +127,10 @@ impl UserFacingError for GetAuthInfoError {
 }
 
 impl ReportableError for GetAuthInfoError {
-    fn get_error_kind(&self) -> crate::error::ErrorKind {
+    fn get_error_kind(&self) -> ErrorKind {
         match self {
-            Self::BadSecret => crate::error::ErrorKind::ControlPlane,
-            Self::ApiError(_) => crate::error::ErrorKind::ControlPlane,
+            Self::BadSecret => ErrorKind::ControlPlane,
+            Self::ApiError(_) => ErrorKind::ControlPlane,
         }
     }
 }
@@ -192,9 +199,6 @@ impl CouldRetry for WakeComputeError {
 
 #[derive(Debug, Error)]
 pub enum GetEndpointJwksError {
-    #[error("endpoint not found")]
-    EndpointNotFound,
-
     #[error("failed to build control plane request: {0}")]
     RequestBuild(#[source] reqwest::Error),
 

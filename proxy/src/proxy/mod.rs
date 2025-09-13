@@ -1,342 +1,70 @@
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod connect_auth;
 pub(crate) mod connect_compute;
-mod copy_bidirectional;
-pub(crate) mod handshake;
-pub(crate) mod passthrough;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
+
+use std::collections::HashSet;
+use std::convert::Infallible;
 use std::sync::Arc;
 
-pub use copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
-use futures::{FutureExt, TryFutureExt};
+use futures::TryStreamExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
-use pq_proto::{BeMessage as Be, CancelKeyData, StartupMessageParams};
+use postgres_client::RawCancelToken;
+use postgres_client::connect_raw::StartupStream;
+use postgres_protocol::message::backend::Message;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use smol_str::{SmolStr, ToSmolStr, format_smolstr};
-use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, info, warn};
+use smol_str::{SmolStr, format_smolstr};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
+use tokio::sync::oneshot;
+use tracing::Instrument;
 
-use self::connect_compute::{TcpMechanism, connect_to_compute};
-use self::passthrough::ProxyPassthrough;
-use crate::cancellation::{self, CancellationHandler};
-use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
+use crate::cancellation::{CancelClosure, CancellationHandler};
+use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
+use crate::config::ProxyConfig;
 use crate::context::RequestContext;
-use crate::error::ReportableError;
-use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::protocol2::{ConnectHeader, ConnectionInfo, ConnectionInfoExtra, read_proxy_protocol};
-use crate::proxy::handshake::{HandshakeData, handshake};
+pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
+use crate::pglb::{ClientMode, ClientRequestError};
+use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
 use crate::types::EndpointCacheKey;
 use crate::{auth, compute};
 
-const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
-
-pub async fn run_until_cancelled<F: std::future::Future>(
-    f: F,
-    cancellation_token: &CancellationToken,
-) -> Option<F::Output> {
-    match futures::future::select(
-        std::pin::pin!(f),
-        std::pin::pin!(cancellation_token.cancelled()),
-    )
-    .await
-    {
-        futures::future::Either::Left((f, _)) => Some(f),
-        futures::future::Either::Right(((), _)) => None,
-    }
-}
-
-pub async fn task_main(
-    config: &'static ProxyConfig,
-    auth_backend: &'static auth::Backend<'static, ()>,
-    listener: tokio::net::TcpListener,
-    cancellation_token: CancellationToken,
-    cancellation_handler: Arc<CancellationHandler>,
-    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> anyhow::Result<()> {
-    scopeguard::defer! {
-        info!("proxy has shut down");
-    }
-
-    // When set for the server socket, the keepalive setting
-    // will be inherited by all accepted client sockets.
-    socket2::SockRef::from(&listener).set_keepalive(true)?;
-
-    let connections = tokio_util::task::task_tracker::TaskTracker::new();
-    let cancellations = tokio_util::task::task_tracker::TaskTracker::new();
-
-    while let Some(accept_result) =
-        run_until_cancelled(listener.accept(), &cancellation_token).await
-    {
-        let (socket, peer_addr) = accept_result?;
-
-        let conn_gauge = Metrics::get()
-            .proxy
-            .client_connections
-            .guard(crate::metrics::Protocol::Tcp);
-
-        let session_id = uuid::Uuid::new_v4();
-        let cancellation_handler = Arc::clone(&cancellation_handler);
-        let cancellations = cancellations.clone();
-
-        debug!(protocol = "tcp", %session_id, "accepted new TCP connection");
-        let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
-
-        connections.spawn(async move {
-            let (socket, conn_info) = match read_proxy_protocol(socket).await {
-                Err(e) => {
-                    warn!("per-client task finished with an error: {e:#}");
-                    return;
-                }
-                // our load balancers will not send any more data. let's just exit immediately
-                Ok((_socket, ConnectHeader::Local)) => {
-                    debug!("healthcheck received");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Missing))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Required =>
-                {
-                    warn!("missing required proxy protocol header");
-                    return;
-                }
-                Ok((_socket, ConnectHeader::Proxy(_)))
-                    if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected =>
-                {
-                    warn!("proxy protocol header not supported");
-                    return;
-                }
-                Ok((socket, ConnectHeader::Proxy(info))) => (socket, info),
-                Ok((socket, ConnectHeader::Missing)) => (
-                    socket,
-                    ConnectionInfo {
-                        addr: peer_addr,
-                        extra: None,
-                    },
-                ),
-            };
-
-            match socket.inner.set_nodelay(true) {
-                Ok(()) => {}
-                Err(e) => {
-                    error!(
-                        "per-client task finished with an error: failed to set socket option: {e:#}"
-                    );
-                    return;
-                }
-            }
-
-            let ctx = RequestContext::new(
-                session_id,
-                conn_info,
-                crate::metrics::Protocol::Tcp,
-                &config.region,
-            );
-
-            let res = handle_client(
-                config,
-                auth_backend,
-                &ctx,
-                cancellation_handler,
-                socket,
-                ClientMode::Tcp,
-                endpoint_rate_limiter2,
-                conn_gauge,
-                cancellations,
-            )
-            .instrument(ctx.span())
-            .boxed()
-            .await;
-
-            match res {
-                Err(e) => {
-                    ctx.set_error_kind(e.get_error_kind());
-                    warn!(parent: &ctx.span(), "per-client task finished with an error: {e:#}");
-                }
-                Ok(None) => {
-                    ctx.set_success();
-                }
-                Ok(Some(p)) => {
-                    ctx.set_success();
-                    let _disconnect = ctx.log_connect();
-                    match p.proxy_pass(&config.connect_to_compute).await {
-                        Ok(()) => {}
-                        Err(ErrorSource::Client(e)) => {
-                            warn!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the client: {e:#}"
-                            );
-                        }
-                        Err(ErrorSource::Compute(e)) => {
-                            error!(
-                                ?session_id,
-                                "per-client task finished with an IO error from the compute: {e:#}"
-                            );
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    connections.close();
-    cancellations.close();
-    drop(listener);
-
-    // Drain connections
-    connections.wait().await;
-    cancellations.wait().await;
-
-    Ok(())
-}
-
-pub(crate) enum ClientMode {
-    Tcp,
-    Websockets { hostname: Option<String> },
-}
-
-/// Abstracts the logic of handling TCP vs WS clients
-impl ClientMode {
-    pub(crate) fn allow_cleartext(&self) -> bool {
-        match self {
-            ClientMode::Tcp => false,
-            ClientMode::Websockets { .. } => true,
-        }
-    }
-
-    fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
-        match self {
-            ClientMode::Tcp => s.sni_hostname(),
-            ClientMode::Websockets { hostname } => hostname.as_deref(),
-        }
-    }
-
-    fn handshake_tls<'a>(&self, tls: Option<&'a TlsConfig>) -> Option<&'a TlsConfig> {
-        match self {
-            ClientMode::Tcp => tls,
-            // TLS is None here if using websockets, because the connection is already encrypted.
-            ClientMode::Websockets { .. } => None,
-        }
-    }
-}
-
-#[derive(Debug, Error)]
-// almost all errors should be reported to the user, but there's a few cases where we cannot
-// 1. Cancellation: we are not allowed to tell the client any cancellation statuses for security reasons
-// 2. Handshake: handshake reports errors if it can, otherwise if the handshake fails due to protocol violation,
-//    we cannot be sure the client even understands our error message
-// 3. PrepareClient: The client disconnected, so we can't tell them anyway...
-pub(crate) enum ClientRequestError {
-    #[error("{0}")]
-    Cancellation(#[from] cancellation::CancelError),
-    #[error("{0}")]
-    Handshake(#[from] handshake::HandshakeError),
-    #[error("{0}")]
-    HandshakeTimeout(#[from] tokio::time::error::Elapsed),
-    #[error("{0}")]
-    PrepareClient(#[from] std::io::Error),
-    #[error("{0}")]
-    ReportedError(#[from] crate::stream::ReportedError),
-}
-
-impl ReportableError for ClientRequestError {
-    fn get_error_kind(&self) -> crate::error::ErrorKind {
-        match self {
-            ClientRequestError::Cancellation(e) => e.get_error_kind(),
-            ClientRequestError::Handshake(e) => e.get_error_kind(),
-            ClientRequestError::HandshakeTimeout(_) => crate::error::ErrorKind::RateLimit,
-            ClientRequestError::ReportedError(e) => e.get_error_kind(),
-            ClientRequestError::PrepareClient(_) => crate::error::ErrorKind::ClientDisconnect,
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &'static ProxyConfig,
     auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestContext,
     cancellation_handler: Arc<CancellationHandler>,
-    stream: S,
-    mode: ClientMode,
+    client: &mut PqStream<Stream<S>>,
+    mode: &ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    conn_gauge: NumClientConnectionsGuard<'static>,
-    cancellations: tokio_util::task::task_tracker::TaskTracker,
-) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
-    debug!(
-        protocol = %ctx.protocol(),
-        "handling interactive connection from client"
-    );
-
-    let metrics = &Metrics::get().proxy;
-    let proto = ctx.protocol();
-    let request_gauge = metrics.connection_requests.guard(proto);
-
-    let tls = config.tls_config.load();
-    let tls = tls.as_deref();
-
-    let record_handshake_error = !ctx.has_private_peer_addr();
-    let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
-
-    let (mut stream, params) = match tokio::time::timeout(config.handshake_timeout, do_handshake)
-        .await??
-    {
-        HandshakeData::Startup(stream, params) => (stream, params),
-        HandshakeData::Cancel(cancel_key_data) => {
-            // spawn a task to cancel the session, but don't wait for it
-            cancellations.spawn({
-                let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-                let ctx = ctx.clone();
-                let cancel_span = tracing::span!(parent: None, tracing::Level::INFO, "cancel_session", session_id = ?ctx.session_id());
-                cancel_span.follows_from(tracing::Span::current());
-                async move {
-                    cancellation_handler_clone
-                        .cancel_session(
-                            cancel_key_data,
-                            ctx,
-                            config.authentication_config.ip_allowlist_check_enabled,
-                            config.authentication_config.is_vpc_acccess_proxy,
-                            auth_backend.get_api(),
-                        )
-                        .await
-                        .inspect_err(|e | debug!(error = ?e, "cancel_session failed")).ok();
-                }.instrument(cancel_span)
-            });
-
-            return Ok(None);
-        }
-    };
-    drop(pause);
-
-    ctx.set_db_options(params.clone());
-
-    let hostname = mode.hostname(stream.get_ref());
-
-    let common_names = tls.map(|tls| &tls.common_names);
-
+    common_names: Option<&HashSet<String>>,
+    params: &StartupMessageParams,
+) -> Result<(ComputeConnection, oneshot::Sender<Infallible>), ClientRequestError> {
+    let hostname = mode.hostname(client.get_ref());
     // Extract credentials which we're going to use for auth.
     let result = auth_backend
         .as_ref()
-        .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
+        .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, params, hostname, common_names))
         .transpose();
 
     let user_info = match result {
         Ok(user_info) => user_info,
-        Err(e) => stream.throw_error(e, Some(ctx)).await?,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
 
     let user = user_info.get_user().to_owned();
-    let (user_info, _ip_allowlist) = match user_info
+    let user_info = match user_info
         .authenticate(
             ctx,
-            &mut stream,
+            client,
             mode.allow_cleartext(),
             &config.authentication_config,
             endpoint_rate_limiter,
@@ -349,97 +77,173 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             let app = params.get("application_name");
             let params_span = tracing::info_span!("", ?user, ?db, ?app);
 
-            return stream
+            return Err(client
                 .throw_error(e, Some(ctx))
                 .instrument(params_span)
-                .await?;
+                .await)?;
         }
     };
 
-    let compute_user_info = match &user_info {
-        auth::Backend::ControlPlane(_, info) => &info.info,
+    let (cplane, creds) = match user_info {
+        auth::Backend::ControlPlane(cplane, creds) => (cplane, creds),
         auth::Backend::Local(_) => unreachable!("local proxy does not run tcp proxy service"),
     };
-    let params_compat = compute_user_info
-        .options
-        .get(NeonOptions::PARAMS_COMPAT)
-        .is_some();
+    let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
+    let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
+    auth_info.set_startup_params(params, params_compat);
 
-    let mut node = connect_to_compute(
+    let backend = auth::Backend::ControlPlane(cplane, creds.info);
+
+    // TODO: callback to pglb
+    let res = connect_auth::connect_to_compute_and_auth(
         ctx,
-        &TcpMechanism {
-            user_info: compute_user_info.clone(),
-            params_compat,
-            params: &params,
-            locks: &config.connect_compute_locks,
-        },
-        &user_info,
-        config.wake_compute_retry_config,
-        &config.connect_to_compute,
+        config,
+        &backend,
+        auth_info,
+        connect_compute::TlsNegotiation::Postgres,
     )
-    .or_else(|e| stream.throw_error(e, Some(ctx)))
-    .await?;
+    .await;
 
-    let cancellation_handler_clone = Arc::clone(&cancellation_handler);
-    let session = cancellation_handler_clone.get_key();
-
-    session
-        .write_cancel_key(node.cancel_closure.clone())
-        .await?;
-
-    prepare_client_connection(&node, *session.key(), &mut stream).await?;
-
-    // Before proxy passing, forward to compute whatever data is left in the
-    // PqStream input buffer. Normally there is none, but our serverless npm
-    // driver in pipeline mode sends startup, password and first query
-    // immediately after opening the connection.
-    let (stream, read_buf) = stream.into_inner();
-    node.stream.write_all(&read_buf).await?;
-
-    let private_link_id = match ctx.extra() {
-        Some(ConnectionInfoExtra::Aws { vpce_id }) => Some(vpce_id.clone()),
-        Some(ConnectionInfoExtra::Azure { link_id }) => Some(link_id.to_smolstr()),
-        None => None,
+    let mut node = match res {
+        Ok(node) => node,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
 
-    Ok(Some(ProxyPassthrough {
-        client: stream,
-        aux: node.aux.clone(),
-        private_link_id,
-        compute: node,
-        session_id: ctx.session_id(),
-        cancel: session,
-        _req: request_gauge,
-        _conn: conn_gauge,
-    }))
+    send_client_greeting(ctx, &config.greetings, client);
+
+    let auth::Backend::ControlPlane(_, user_info) = backend else {
+        unreachable!("ensured above");
+    };
+
+    let session = cancellation_handler.get_key();
+
+    let (process_id, secret_key) =
+        forward_compute_params_to_client(ctx, *session.key(), client, &mut node.stream).await?;
+    let hostname = node.hostname.to_string();
+
+    let session_id = ctx.session_id();
+    let (cancel_on_shutdown, cancel) = oneshot::channel();
+    tokio::spawn(async move {
+        session
+            .maintain_cancel_key(
+                session_id,
+                cancel,
+                &CancelClosure {
+                    socket_addr: node.socket_addr,
+                    cancel_token: RawCancelToken {
+                        ssl_mode: node.ssl_mode,
+                        process_id,
+                        secret_key,
+                    },
+                    hostname,
+                    user_info,
+                },
+                &config.connect_to_compute,
+            )
+            .await;
+    });
+
+    Ok((node, cancel_on_shutdown))
 }
 
-/// Finish client connection initialization: confirm auth success, send params, etc.
-#[tracing::instrument(skip_all)]
-pub(crate) async fn prepare_client_connection(
-    node: &compute::PostgresConnection,
+/// Greet the client with any useful information.
+pub(crate) fn send_client_greeting(
+    ctx: &RequestContext,
+    greetings: &String,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+) {
+    // Expose session_id to clients if we have a greeting message.
+    if !greetings.is_empty() {
+        let session_msg = format!("{}, session_id: {}", greetings, ctx.session_id());
+        client.write_message(BeMessage::NoticeResponse(session_msg.as_str()));
+    }
+
+    // Forward recorded latencies for probing requests
+    if let Some(testodrome_id) = ctx.get_testodrome_id() {
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.testodrome_id".as_bytes(),
+            value: testodrome_id.as_bytes(),
+        });
+
+        let latency_measured = ctx.get_proxy_latency();
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.cplane_latency".as_bytes(),
+            value: latency_measured.cplane.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.client_latency".as_bytes(),
+            value: latency_measured.client.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.compute_latency".as_bytes(),
+            value: latency_measured.compute.as_micros().to_string().as_bytes(),
+        });
+
+        client.write_message(BeMessage::ParameterStatus {
+            name: "neon.retry_latency".as_bytes(),
+            value: latency_measured.retry.as_micros().to_string().as_bytes(),
+        });
+    }
+}
+
+pub(crate) async fn forward_compute_params_to_client(
+    ctx: &RequestContext,
     cancel_key_data: CancelKeyData,
-    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> Result<(), std::io::Error> {
-    // Forward all deferred notices to the client.
-    for notice in &node.delayed_notice {
-        stream.write_message_noflush(&Be::Raw(b'N', notice.as_bytes()))?;
-    }
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    compute: &mut StartupStream<TcpStream, RustlsStream>,
+) -> Result<(i32, i32), ClientRequestError> {
+    let mut process_id = 0;
+    let mut secret_key = 0;
 
-    // Forward all postgres connection params to the client.
-    for (name, value) in &node.params {
-        stream.write_message_noflush(&Be::ParameterStatus {
-            name: name.as_bytes(),
-            value: value.as_bytes(),
-        })?;
-    }
+    let err = loop {
+        // if the client buffer is too large, let's write out some bytes now to save some space
+        client.write_if_full().await?;
 
-    stream
-        .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
-        .write_message(&Be::ReadyForQuery)
-        .await?;
+        let msg = match compute.try_next().await {
+            Ok(msg) => msg,
+            Err(e) => break postgres_client::Error::io(e),
+        };
 
-    Ok(())
+        match msg {
+            // Send our cancellation key data instead.
+            Some(Message::BackendKeyData(body)) => {
+                client.write_message(BeMessage::BackendKeyData(cancel_key_data));
+                process_id = body.process_id();
+                secret_key = body.secret_key();
+            }
+            // Forward all postgres connection params to the client.
+            Some(Message::ParameterStatus(body)) => {
+                if let Ok(name) = body.name()
+                    && let Ok(value) = body.value()
+                {
+                    client.write_message(BeMessage::ParameterStatus {
+                        name: name.as_bytes(),
+                        value: value.as_bytes(),
+                    });
+                }
+            }
+            // Forward all notices to the client.
+            Some(Message::NoticeResponse(notice)) => {
+                client.write_raw(notice.as_bytes().len(), b'N', |buf| {
+                    buf.extend_from_slice(notice.as_bytes());
+                });
+            }
+            Some(Message::ReadyForQuery(_)) => {
+                client.write_message(BeMessage::ReadyForQuery);
+                return Ok((process_id, secret_key));
+            }
+            Some(Message::ErrorResponse(body)) => break postgres_client::Error::db(body),
+            Some(_) => break postgres_client::Error::unexpected_message(),
+            None => break postgres_client::Error::closed(),
+        }
+    };
+
+    Err(client
+        .throw_error(PostgresError::Postgres(err), Some(ctx))
+        .await)?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -449,15 +253,18 @@ impl NeonOptions {
     // proxy options:
 
     /// `PARAMS_COMPAT` allows opting in to forwarding all startup parameters from client to compute.
-    const PARAMS_COMPAT: &str = "proxy_params_compat";
+    pub const PARAMS_COMPAT: &'static str = "proxy_params_compat";
 
     // cplane options:
 
     /// `LSN` allows provisioning an ephemeral compute with time-travel to the provided LSN.
-    const LSN: &str = "lsn";
+    const LSN: &'static str = "lsn";
+
+    /// `TIMESTAMP` allows provisioning an ephemeral compute with time-travel to the provided timestamp.
+    const TIMESTAMP: &'static str = "timestamp";
 
     /// `ENDPOINT_TYPE` allows configuring an ephemeral compute to be read_only or read_write.
-    const ENDPOINT_TYPE: &str = "endpoint_type";
+    const ENDPOINT_TYPE: &'static str = "endpoint_type";
 
     pub(crate) fn parse_params(params: &StartupMessageParams) -> Self {
         params
@@ -482,6 +289,7 @@ impl NeonOptions {
             // This is not a cplane option, we know it does not create ephemeral computes.
             Self::PARAMS_COMPAT => false,
             Self::LSN => true,
+            Self::TIMESTAMP => true,
             Self::ENDPOINT_TYPE => true,
             // err on the side of caution. any cplane options we don't know about
             // might lead to ephemeral computes.

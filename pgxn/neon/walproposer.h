@@ -374,7 +374,40 @@ typedef struct PageserverFeedback
 	XLogRecPtr	remote_consistent_lsn;
 	TimestampTz replytime;
 	uint32		shard_number;
+	/* true if the pageserver has detected data corruption in the timeline */
+	bool		corruption_detected;
 } PageserverFeedback;
+
+/* BEGIN_HADRON */
+/**
+ * WAL proposer is the only backend that will update `sent_bytes` and `last_recorded_time_us`.
+ * Once the `sent_bytes` reaches the limit, it puts backpressure on PG backends.
+ *
+ * A PG backend checks `should_limit` to see if it should hit backpressure.
+ * - If yes, it also checks the `last_recorded_time_us` to see
+ *   if it's time to push more WALs. This is because the WAL proposer
+ *   only resets `should_limit` to 0 after it is notified about new WALs
+ *   which might take a while.
+ */
+typedef struct WalRateLimiter
+{
+	/* The effective wal write rate. Could be changed dynamically
+	based on whether PG has backpressure or not.*/
+	pg_atomic_uint32 effective_max_wal_bytes_per_second;
+	/* If the value is 1, PG backends will hit backpressure until the time has past batch_end_time_us. */
+	pg_atomic_uint32 should_limit;
+	/* The number of bytes sent in the current second. */
+	uint64		sent_bytes;
+	/* The timestamp when the write starts in the current batch. A batch is a time interval (e.g., )that we 
+	track and throttle writes. Most times a batch is 1s, but it could become larger if the PG overwrites the WALs
+	and we will adjust the batch accordingly to compensate (e.g., if PG writes 10MB at once and max WAL write rate
+	is 1MB/s, then the current batch will become 10s). */
+	pg_atomic_uint64 batch_start_time_us;
+	/* The timestamp (in the future) that the current batch should end and accept more writes
+	(after should_limit is set to 1). */
+	pg_atomic_uint64 batch_end_time_us;
+} WalRateLimiter;
+/* END_HADRON */
 
 typedef struct WalproposerShmemState
 {
@@ -391,9 +424,19 @@ typedef struct WalproposerShmemState
 	/* last feedback from each shard */
 	PageserverFeedback shard_ps_feedback[MAX_SHARDS];
 	int			num_shards;
+	bool		replica_promote;
 
 	/* aggregated feedback with min LSNs across shards */
 	PageserverFeedback min_ps_feedback;
+
+	/* BEGIN_HADRON */
+	/* The WAL rate limiter */
+	WalRateLimiter wal_rate_limiter;
+	/* Number of safekeepers in the config */
+	uint32 num_safekeepers;
+	/* Per-safekeeper status flags: 0=inactive, 1=active */
+	uint8 safekeeper_status[MAX_SAFEKEEPERS];
+	/* END_HADRON */
 } WalproposerShmemState;
 
 /*
@@ -443,6 +486,11 @@ typedef struct Safekeeper
 
 	char const *host;
 	char const *port;
+
+	/* BEGIN_HADRON */
+	/* index of this safekeeper in the WalProposer array */
+	uint32 index;
+	/* END_HADRON */
 
 	/*
 	 * connection string for connecting/reconnecting.
@@ -678,8 +726,7 @@ typedef struct walproposer_api
 	 * Finish sync safekeepers with the given LSN. This function should not
 	 * return and should exit the program.
 	 */
-	void		(*finish_sync_safekeepers) (WalProposer *wp, XLogRecPtr lsn);
-
+	void		(*finish_sync_safekeepers) (WalProposer *wp, XLogRecPtr lsn) __attribute__((noreturn)) ;
 	/*
 	 * Called after every AppendResponse from the safekeeper. Used to
 	 * propagate backpressure feedback and to confirm WAL persistence (has
@@ -693,6 +740,23 @@ typedef struct walproposer_api
 	 * handled by elog().
 	 */
 	void		(*log_internal) (WalProposer *wp, int level, const char *line);
+
+	/*
+	 * BEGIN_HADRON
+	 * APIs manipulating shared memory state used for Safekeeper quorum health metrics.
+	 */
+
+	/*
+	 * Reset the safekeeper statuses in shared memory for metric purposes.
+	 */
+	void		(*reset_safekeeper_statuses_for_metrics) (WalProposer *wp, uint32 num_safekeepers);
+
+	/*
+	 * Update the safekeeper status in shared memory for metric purposes.
+	 */
+	void		(*update_safekeeper_status_for_metrics) (WalProposer *wp, uint32 sk_index, uint8 status);
+
+	/* END_HADRON */
 } walproposer_api;
 
 /*
@@ -713,6 +777,9 @@ typedef struct WalProposerConfig
 	 * This cstr should be editable.
 	 */
 	char	   *safekeepers_list;
+
+	/* libpq connection info options. */
+	char	   *safekeeper_conninfo_options;
 
 	/*
 	 * WalProposer reconnects to offline safekeepers once in this interval.
@@ -803,6 +870,9 @@ typedef struct WalProposer
 	/* Safekeepers walproposer is connecting to. */
 	Safekeeper	safekeeper[MAX_SAFEKEEPERS];
 
+	/* Current local TimeLineId in use */
+	TimeLineID	localTimeLineID;
+
 	/* WAL has been generated up to this point */
 	XLogRecPtr	availableLsn;
 
@@ -844,9 +914,6 @@ typedef struct WalProposer
 
 	/* timeline globally starts at this LSN */
 	XLogRecPtr	timelineStartLsn;
-
-	/* number of votes collected from safekeepers */
-	int			n_votes;
 
 	/* number of successful connections over the lifetime of walproposer */
 	int			n_connected;

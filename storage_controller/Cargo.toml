@@ -20,6 +20,7 @@ camino.workspace = true
 chrono.workspace = true
 clap.workspace = true
 clashmap.workspace = true
+compute_api.workspace = true
 cron.workspace = true
 fail.workspace = true
 futures.workspace = true
@@ -27,6 +28,7 @@ governor.workspace = true
 hex.workspace = true
 hyper0.workspace = true
 humantime.workspace = true
+humantime-serde.workspace = true
 itertools.workspace = true
 json-structural-diff.workspace = true
 lasso.workspace = true
@@ -34,6 +36,7 @@ once_cell.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 postgres_connection.workspace = true
+posthog_client_lite.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 routerify.workspace = true
@@ -49,6 +52,7 @@ tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 measured.workspace = true
 rustls.workspace = true
 scopeguard.workspace = true
@@ -60,6 +64,7 @@ tokio-postgres-rustls.workspace = true
 diesel = { version = "2.2.6", features = [
     "serde_json",
     "chrono",
+    "uuid",
 ] }
 diesel-async = { version = "0.5.2", features = ["postgres", "bb8", "async-connection-wrapper"] }
 diesel_migrations = { version = "2.2.0" }

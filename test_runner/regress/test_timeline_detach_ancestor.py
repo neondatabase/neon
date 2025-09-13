@@ -10,6 +10,7 @@ from queue import Empty, Queue
 from threading import Barrier
 
 import pytest
+import requests
 from fixtures.common_types import Lsn, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -20,7 +21,10 @@ from fixtures.neon_fixtures import (
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
+from fixtures.pageserver.http import (
+    HistoricLayerInfo,
+    PageserverApiException,
+)
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import assert_pageserver_backups_equal, skip_in_debug_build, wait_until
@@ -205,9 +209,9 @@ def test_ancestor_detach_branched_from(
     client.timeline_delete(env.initial_tenant, env.initial_timeline)
     wait_timeline_detail_404(client, env.initial_tenant, env.initial_timeline)
 
-    # because we do the fullbackup from ancestor at the branch_lsn, the zenith.signal is always different
-    # as there is always "PREV_LSN: invalid" for "before"
-    skip_files = {"zenith.signal"}
+    # because we do the fullbackup from ancestor at the branch_lsn, the neon.signal and/or zenith.signal is always
+    # different as there is always "PREV_LSN: invalid" for "before"
+    skip_files = {"zenith.signal", "neon.signal"}
 
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, skip_files)
 
@@ -320,7 +324,7 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
             # it is to be in line with the deletion timestamp.. well, almost.
             when = original_ancestor[2][:26]
             when_ts = datetime.datetime.fromisoformat(when).replace(tzinfo=datetime.UTC)
-            now = datetime.datetime.utcnow().replace(tzinfo=datetime.UTC)
+            now = datetime.datetime.now(datetime.UTC)
             assert when_ts < now
             assert len(lineage.get("reparenting_history", [])) == 0
         elif expected_ancestor == timeline_id:
@@ -401,8 +405,26 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
         "earlier", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_pipe
     )
 
-    snapshot_branchpoint_old = env.create_branch(
-        "snapshot_branchpoint_old", ancestor_branch_name="main", ancestor_start_lsn=branchpoint_y
+    snapshot_branchpoint_old = TimelineId.generate()
+
+    env.storage_controller.timeline_create(
+        env.initial_tenant,
+        {
+            "new_timeline_id": str(snapshot_branchpoint_old),
+            "ancestor_start_lsn": str(branchpoint_y),
+            "ancestor_timeline_id": str(env.initial_timeline),
+            "read_only": True,
+        },
+    )
+
+    sk = env.safekeepers[0]
+    assert sk
+    with pytest.raises(requests.exceptions.HTTPError, match="Not Found"):
+        sk.http_client().timeline_status(
+            tenant_id=env.initial_tenant, timeline_id=snapshot_branchpoint_old
+        )
+    env.neon_cli.mappings_map_branch(
+        "snapshot_branchpoint_old", env.initial_tenant, snapshot_branchpoint_old
     )
 
     snapshot_branchpoint = env.create_branch(
@@ -436,19 +458,20 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
 
     env.pageserver.quiesce_tenants()
 
-    # checking the ancestor after is much faster than waiting for the endpoint not start
+    # checking the ancestor after is much faster than waiting for the endpoint to start
     expected_result = [
-        ("main", env.initial_timeline, None, 24576, 1),
-        ("after", after, env.initial_timeline, 24576, 1),
-        ("snapshot_branchpoint_old", snapshot_branchpoint_old, env.initial_timeline, 8192, 1),
-        ("snapshot_branchpoint", snapshot_branchpoint, env.initial_timeline, 16384, 1),
-        ("branch_to_detach", branch_to_detach, None, 16384, 1),
-        ("earlier", earlier, env.initial_timeline, 0, 1),
+        # (branch_name, queried_timeline, expected_ancestor, rows, starts, read_only)
+        ("main", env.initial_timeline, None, 24576, 1, False),
+        ("after", after, env.initial_timeline, 24576, 1, False),
+        ("snapshot_branchpoint_old", snapshot_branchpoint_old, env.initial_timeline, 8192, 1, True),
+        ("snapshot_branchpoint", snapshot_branchpoint, env.initial_timeline, 16384, 1, False),
+        ("branch_to_detach", branch_to_detach, None, 16384, 1, False),
+        ("earlier", earlier, env.initial_timeline, 0, 1, False),
     ]
 
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
-    for branch_name, queried_timeline, expected_ancestor, _, _ in expected_result:
+    for branch_name, queried_timeline, expected_ancestor, _, _, _ in expected_result:
         details = client.timeline_detail(env.initial_tenant, queried_timeline)
         ancestor_timeline_id = details["ancestor_timeline_id"]
         if expected_ancestor is None:
@@ -486,8 +509,19 @@ def test_ancestor_detach_behavior_v2(neon_env_builder: NeonEnvBuilder, snapshots
             assert len(lineage.get("original_ancestor", [])) == 0
             assert len(lineage.get("reparenting_history", [])) == 0
 
-    for name, _, _, rows, starts in expected_result:
-        with env.endpoints.create_start(name, tenant_id=env.initial_tenant) as ep:
+    for branch_name, queried_timeline, _, rows, starts, read_only in expected_result:
+        last_record_lsn = None
+        if read_only:
+            # specifying the lsn makes the endpoint read-only and not connect to safekeepers
+            details = client.timeline_detail(env.initial_tenant, queried_timeline)
+            last_record_lsn = Lsn(details["last_record_lsn"])
+
+        log.info(f"reading data from branch {branch_name} at {last_record_lsn}")
+        with env.endpoints.create(
+            branch_name,
+            lsn=last_record_lsn,
+        ) as ep:
+            ep.start(safekeeper_generation=1)
             assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
             assert ep.safe_psql(f"SELECT count(*) FROM audit WHERE starts = {starts}")[0][0] == 1
 
@@ -733,7 +767,7 @@ def test_compaction_induced_by_detaches_in_history(
         env.pageserver, env.initial_tenant, branch_timeline_id, branch_lsn, fullbackup_after
     )
 
-    # we don't need to skip any files, because zenith.signal will be identical
+    # we don't need to skip any files, because neon.signal will be identical
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
 
 
@@ -1070,6 +1104,9 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
 
     for ps in env.pageservers:
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
 
     pageservers = dict((int(p.id), p) for p in env.pageservers)
 
@@ -1191,6 +1228,9 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
 
     for ps in env.pageservers:
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+        ps.allowed_errors.extend(
+            [".*Timeline.* has been deleted.*", ".*Timeline.*was cancelled and cannot be used"]
+        )
 
     pageservers = dict((int(p.id), p) for p in env.pageservers)
 
@@ -1822,7 +1862,7 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
     endpoint2.safe_psql(
         "SELECT pg_create_logical_replication_slot('test_slot_restore', 'pgoutput')"
     )
-    lsn3 = wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    lsn3 = wait_for_last_flush_lsn(env, endpoint2, env.initial_tenant, branch_timeline_id)
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn3).keys()) == set(
         ["pg_replslot/test_slot_restore/state"]
@@ -1839,7 +1879,7 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
     assert all_reparented == set([])
 
     # We need to ensure all safekeeper data are ingested before checking aux files: the API does not wait for LSN.
-    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, branch_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint2, env.initial_tenant, branch_timeline_id)
     assert set(http.list_aux_files(env.initial_tenant, env.initial_timeline, lsn2).keys()) == set(
         ["pg_replslot/test_slot_parent_1/state", "pg_replslot/test_slot_parent_2/state"]
     ), "main branch unaffected"
@@ -1847,6 +1887,31 @@ def test_timeline_detach_with_aux_files_with_detach_v1(
         ["pg_replslot/test_slot_restore/state"]
     )
     assert set(http.list_aux_files(env.initial_tenant, branch_timeline_id, lsn1).keys()) == set([])
+
+
+def test_detach_ancestors_with_no_writes(
+    neon_env_builder: NeonEnvBuilder,
+):
+    env = neon_env_builder.init_start()
+
+    endpoint = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.safe_psql(
+        "SELECT pg_create_logical_replication_slot('test_slot_parent_1', 'pgoutput')"
+    )
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
+    endpoint.stop()
+
+    for i in range(0, 5):
+        if i == 0:
+            ancestor_name = "main"
+        else:
+            ancestor_name = f"b{i}"
+
+        tlid = env.create_branch(f"b{i + 1}", ancestor_branch_name=ancestor_name)
+
+        client = env.pageserver.http_client()
+        client.detach_ancestor(tenant_id=env.initial_tenant, timeline_id=tlid)
 
 
 # TODO:

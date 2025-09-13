@@ -26,7 +26,13 @@ commands:
   - name: postgres-exporter
     user: nobody
     sysvInitAction: respawn
-    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres application_name=postgres-exporter" /bin/postgres_exporter --config.file=/etc/postgres_exporter.yml'
+    # Turn off database collector (`--no-collector.database`), we don't use `pg_database_size_bytes` metric anyway, see
+    # https://github.com/neondatabase/flux-fleet/blob/5e19b3fd897667b70d9a7ad4aa06df0ca22b49ff/apps/base/compute-metrics/scrape-compute-pg-exporter-neon.yaml#L29
+    # but it's enabled by default and it doesn't filter out invalid databases, see
+    # https://github.com/prometheus-community/postgres_exporter/blob/06a553c8166512c9d9c5ccf257b0f9bba8751dbc/collector/pg_database.go#L67
+    # so if it hits one, it starts spamming logs
+    #   ERROR:  [NEON_SMGR] [reqid d9700000018] could not read db size of db 705302 from page server at lsn 5/A2457EB0
+    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres application_name=postgres-exporter pgaudit.log=none" /bin/postgres_exporter --no-collector.database --config.file=/etc/postgres_exporter.yml'
   - name: pgbouncer-exporter
     user: postgres
     sysvInitAction: respawn
@@ -59,7 +65,7 @@ files:
       # the rules use ALL as the hostname. Avoid the pointless lookups and the "unable to
       # resolve host" log messages that they generate.
       Defaults !fqdn
-      
+
       # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
       # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
       # regardless of hostname (ALL)

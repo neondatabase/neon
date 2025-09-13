@@ -111,7 +111,7 @@ NeonWALPageRead(
 											readBuf,
 											targetPagePtr,
 											count,
-											walprop_pg_get_timeline_id());
+											NeonWALReaderLocalActiveTimeLineID(wal_reader));
 
 		if (res == NEON_WALREAD_SUCCESS)
 		{
@@ -202,7 +202,7 @@ NeonOnDemandXLogReaderRoutines(XLogReaderRoutine *xlr)
 		{
 			elog(ERROR, "unable to start walsender when basebackupLsn is 0");
 		}
-		wal_reader = NeonWALReaderAllocate(wal_segment_size, basebackupLsn, "[walsender] ");
+		wal_reader = NeonWALReaderAllocate(wal_segment_size, basebackupLsn, "[walsender] ", 1);
 	}
 	xlr->page_read = NeonWALPageRead;
 	xlr->segment_open = NeonWALReadSegmentOpen;

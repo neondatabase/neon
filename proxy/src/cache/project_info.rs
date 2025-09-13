@@ -1,152 +1,19 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::time::Duration;
 
-use async_trait::async_trait;
 use clashmap::ClashMap;
-use rand::{Rng, thread_rng};
-use smol_str::SmolStr;
-use tokio::sync::Mutex;
-use tokio::time::Instant;
+use moka::sync::Cache;
 use tracing::{debug, info};
 
-use super::{Cache, Cached};
-use crate::auth::IpPattern;
+use crate::cache::common::{
+    ControlPlaneResult, CplaneExpiry, count_cache_insert, count_cache_outcome, eviction_listener,
+};
 use crate::config::ProjectInfoCacheOptions;
-use crate::control_plane::{AccessBlockerFlags, AuthSecret};
+use crate::control_plane::messages::{ControlPlaneErrorMessage, Reason};
+use crate::control_plane::{EndpointAccessControl, RoleAccessControl};
 use crate::intern::{AccountIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
+use crate::metrics::{CacheKind, Metrics};
 use crate::types::{EndpointId, RoleName};
-
-#[async_trait]
-pub(crate) trait ProjectInfoCache {
-    fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt);
-    fn invalidate_allowed_vpc_endpoint_ids_for_projects(&self, project_ids: Vec<ProjectIdInt>);
-    fn invalidate_allowed_vpc_endpoint_ids_for_org(&self, account_id: AccountIdInt);
-    fn invalidate_block_public_or_vpc_access_for_project(&self, project_id: ProjectIdInt);
-    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
-    async fn decrement_active_listeners(&self);
-    async fn increment_active_listeners(&self);
-}
-
-struct Entry<T> {
-    created_at: Instant,
-    value: T,
-}
-
-impl<T> Entry<T> {
-    pub(crate) fn new(value: T) -> Self {
-        Self {
-            created_at: Instant::now(),
-            value,
-        }
-    }
-}
-
-impl<T> From<T> for Entry<T> {
-    fn from(value: T) -> Self {
-        Self::new(value)
-    }
-}
-
-#[derive(Default)]
-struct EndpointInfo {
-    secret: std::collections::HashMap<RoleNameInt, Entry<Option<AuthSecret>>>,
-    allowed_ips: Option<Entry<Arc<Vec<IpPattern>>>>,
-    block_public_or_vpc_access: Option<Entry<AccessBlockerFlags>>,
-    allowed_vpc_endpoint_ids: Option<Entry<Arc<Vec<String>>>>,
-}
-
-impl EndpointInfo {
-    fn check_ignore_cache(ignore_cache_since: Option<Instant>, created_at: Instant) -> bool {
-        match ignore_cache_since {
-            None => false,
-            Some(t) => t < created_at,
-        }
-    }
-    pub(crate) fn get_role_secret(
-        &self,
-        role_name: RoleNameInt,
-        valid_since: Instant,
-        ignore_cache_since: Option<Instant>,
-    ) -> Option<(Option<AuthSecret>, bool)> {
-        if let Some(secret) = self.secret.get(&role_name) {
-            if valid_since < secret.created_at {
-                return Some((
-                    secret.value.clone(),
-                    Self::check_ignore_cache(ignore_cache_since, secret.created_at),
-                ));
-            }
-        }
-        None
-    }
-
-    pub(crate) fn get_allowed_ips(
-        &self,
-        valid_since: Instant,
-        ignore_cache_since: Option<Instant>,
-    ) -> Option<(Arc<Vec<IpPattern>>, bool)> {
-        if let Some(allowed_ips) = &self.allowed_ips {
-            if valid_since < allowed_ips.created_at {
-                return Some((
-                    allowed_ips.value.clone(),
-                    Self::check_ignore_cache(ignore_cache_since, allowed_ips.created_at),
-                ));
-            }
-        }
-        None
-    }
-    pub(crate) fn get_allowed_vpc_endpoint_ids(
-        &self,
-        valid_since: Instant,
-        ignore_cache_since: Option<Instant>,
-    ) -> Option<(Arc<Vec<String>>, bool)> {
-        if let Some(allowed_vpc_endpoint_ids) = &self.allowed_vpc_endpoint_ids {
-            if valid_since < allowed_vpc_endpoint_ids.created_at {
-                return Some((
-                    allowed_vpc_endpoint_ids.value.clone(),
-                    Self::check_ignore_cache(
-                        ignore_cache_since,
-                        allowed_vpc_endpoint_ids.created_at,
-                    ),
-                ));
-            }
-        }
-        None
-    }
-    pub(crate) fn get_block_public_or_vpc_access(
-        &self,
-        valid_since: Instant,
-        ignore_cache_since: Option<Instant>,
-    ) -> Option<(AccessBlockerFlags, bool)> {
-        if let Some(block_public_or_vpc_access) = &self.block_public_or_vpc_access {
-            if valid_since < block_public_or_vpc_access.created_at {
-                return Some((
-                    block_public_or_vpc_access.value.clone(),
-                    Self::check_ignore_cache(
-                        ignore_cache_since,
-                        block_public_or_vpc_access.created_at,
-                    ),
-                ));
-            }
-        }
-        None
-    }
-
-    pub(crate) fn invalidate_allowed_ips(&mut self) {
-        self.allowed_ips = None;
-    }
-    pub(crate) fn invalidate_allowed_vpc_endpoint_ids(&mut self) {
-        self.allowed_vpc_endpoint_ids = None;
-    }
-    pub(crate) fn invalidate_block_public_or_vpc_access(&mut self) {
-        self.block_public_or_vpc_access = None;
-    }
-    pub(crate) fn invalidate_role_secret(&mut self, role_name: RoleNameInt) {
-        self.secret.remove(&role_name);
-    }
-}
 
 /// Cache for project info.
 /// This is used to cache auth data for endpoints.
@@ -155,92 +22,52 @@ impl EndpointInfo {
 /// We also store endpoint-to-project mapping in the cache, to be able to access per-endpoint data.
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
-pub struct ProjectInfoCacheImpl {
-    cache: ClashMap<EndpointIdInt, EndpointInfo>,
+pub struct ProjectInfoCache {
+    role_controls: Cache<(EndpointIdInt, RoleNameInt), ControlPlaneResult<RoleAccessControl>>,
+    ep_controls: Cache<EndpointIdInt, ControlPlaneResult<EndpointAccessControl>>,
 
     project2ep: ClashMap<ProjectIdInt, HashSet<EndpointIdInt>>,
     // FIXME(stefan): we need a way to GC the account2ep map.
     account2ep: ClashMap<AccountIdInt, HashSet<EndpointIdInt>>,
-    config: ProjectInfoCacheOptions,
 
-    start_time: Instant,
-    ttl_disabled_since_us: AtomicU64,
-    active_listeners_lock: Mutex<usize>,
+    config: ProjectInfoCacheOptions,
 }
 
-#[async_trait]
-impl ProjectInfoCache for ProjectInfoCacheImpl {
-    fn invalidate_allowed_vpc_endpoint_ids_for_projects(&self, project_ids: Vec<ProjectIdInt>) {
-        info!(
-            "invalidating allowed vpc endpoint ids for projects `{}`",
-            project_ids
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        for project_id in project_ids {
-            let endpoints = self
-                .project2ep
-                .get(&project_id)
-                .map(|kv| kv.value().clone())
-                .unwrap_or_default();
-            for endpoint_id in endpoints {
-                if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
-                    endpoint_info.invalidate_allowed_vpc_endpoint_ids();
-                }
-            }
+impl ProjectInfoCache {
+    pub fn invalidate_endpoint_access(&self, endpoint_id: EndpointIdInt) {
+        info!("invalidating endpoint access for `{endpoint_id}`");
+        self.ep_controls.invalidate(&endpoint_id);
+    }
+
+    pub fn invalidate_endpoint_access_for_project(&self, project_id: ProjectIdInt) {
+        info!("invalidating endpoint access for project `{project_id}`");
+        let endpoints = self
+            .project2ep
+            .get(&project_id)
+            .map(|kv| kv.value().clone())
+            .unwrap_or_default();
+        for endpoint_id in endpoints {
+            self.ep_controls.invalidate(&endpoint_id);
         }
     }
 
-    fn invalidate_allowed_vpc_endpoint_ids_for_org(&self, account_id: AccountIdInt) {
-        info!(
-            "invalidating allowed vpc endpoint ids for org `{}`",
-            account_id
-        );
+    pub fn invalidate_endpoint_access_for_org(&self, account_id: AccountIdInt) {
+        info!("invalidating endpoint access for org `{account_id}`");
         let endpoints = self
             .account2ep
             .get(&account_id)
             .map(|kv| kv.value().clone())
             .unwrap_or_default();
         for endpoint_id in endpoints {
-            if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
-                endpoint_info.invalidate_allowed_vpc_endpoint_ids();
-            }
+            self.ep_controls.invalidate(&endpoint_id);
         }
     }
 
-    fn invalidate_block_public_or_vpc_access_for_project(&self, project_id: ProjectIdInt) {
-        info!(
-            "invalidating block public or vpc access for project `{}`",
-            project_id
-        );
-        let endpoints = self
-            .project2ep
-            .get(&project_id)
-            .map(|kv| kv.value().clone())
-            .unwrap_or_default();
-        for endpoint_id in endpoints {
-            if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
-                endpoint_info.invalidate_block_public_or_vpc_access();
-            }
-        }
-    }
-
-    fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt) {
-        info!("invalidating allowed ips for project `{}`", project_id);
-        let endpoints = self
-            .project2ep
-            .get(&project_id)
-            .map(|kv| kv.value().clone())
-            .unwrap_or_default();
-        for endpoint_id in endpoints {
-            if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
-                endpoint_info.invalidate_allowed_ips();
-            }
-        }
-    }
-    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt) {
+    pub fn invalidate_role_secret_for_project(
+        &self,
+        project_id: ProjectIdInt,
+        role_name: RoleNameInt,
+    ) {
         info!(
             "invalidating role secret for project_id `{}` and role_name `{}`",
             project_id, role_name,
@@ -251,45 +78,46 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             .map(|kv| kv.value().clone())
             .unwrap_or_default();
         for endpoint_id in endpoints {
-            if let Some(mut endpoint_info) = self.cache.get_mut(&endpoint_id) {
-                endpoint_info.invalidate_role_secret(role_name);
-            }
-        }
-    }
-    async fn decrement_active_listeners(&self) {
-        let mut listeners_guard = self.active_listeners_lock.lock().await;
-        if *listeners_guard == 0 {
-            tracing::error!("active_listeners count is already 0, something is broken");
-            return;
-        }
-        *listeners_guard -= 1;
-        if *listeners_guard == 0 {
-            self.ttl_disabled_since_us
-                .store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    async fn increment_active_listeners(&self) {
-        let mut listeners_guard = self.active_listeners_lock.lock().await;
-        *listeners_guard += 1;
-        if *listeners_guard == 1 {
-            let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
-            self.ttl_disabled_since_us
-                .store(new_ttl, std::sync::atomic::Ordering::SeqCst);
+            self.role_controls.invalidate(&(endpoint_id, role_name));
         }
     }
 }
 
-impl ProjectInfoCacheImpl {
+impl ProjectInfoCache {
     pub(crate) fn new(config: ProjectInfoCacheOptions) -> Self {
+        Metrics::get().cache.capacity.set(
+            CacheKind::ProjectInfoRoles,
+            (config.size * config.max_roles) as i64,
+        );
+        Metrics::get()
+            .cache
+            .capacity
+            .set(CacheKind::ProjectInfoEndpoints, config.size as i64);
+
+        // we cache errors for 30 seconds, unless retry_at is set.
+        let expiry = CplaneExpiry::default();
         Self {
-            cache: ClashMap::new(),
+            role_controls: Cache::builder()
+                .name("project_info_roles")
+                .eviction_listener(|_k, _v, cause| {
+                    eviction_listener(CacheKind::ProjectInfoRoles, cause);
+                })
+                .max_capacity(config.size * config.max_roles)
+                .time_to_live(config.ttl)
+                .expire_after(expiry)
+                .build(),
+            ep_controls: Cache::builder()
+                .name("project_info_endpoints")
+                .eviction_listener(|_k, _v, cause| {
+                    eviction_listener(CacheKind::ProjectInfoEndpoints, cause);
+                })
+                .max_capacity(config.size)
+                .time_to_live(config.ttl)
+                .expire_after(expiry)
+                .build(),
             project2ep: ClashMap::new(),
             account2ep: ClashMap::new(),
             config,
-            ttl_disabled_since_us: AtomicU64::new(u64::MAX),
-            start_time: Instant::now(),
-            active_listeners_lock: Mutex::new(0),
         }
     }
 
@@ -297,151 +125,90 @@ impl ProjectInfoCacheImpl {
         &self,
         endpoint_id: &EndpointId,
         role_name: &RoleName,
-    ) -> Option<Cached<&Self, Option<AuthSecret>>> {
+    ) -> Option<ControlPlaneResult<RoleAccessControl>> {
         let endpoint_id = EndpointIdInt::get(endpoint_id)?;
         let role_name = RoleNameInt::get(role_name)?;
-        let (valid_since, ignore_cache_since) = self.get_cache_times();
-        let endpoint_info = self.cache.get(&endpoint_id)?;
-        let (value, ignore_cache) =
-            endpoint_info.get_role_secret(role_name, valid_since, ignore_cache_since)?;
-        if !ignore_cache {
-            let cached = Cached {
-                token: Some((
-                    self,
-                    CachedLookupInfo::new_role_secret(endpoint_id, role_name),
-                )),
-                value,
-            };
-            return Some(cached);
-        }
-        Some(Cached::new_uncached(value))
-    }
-    pub(crate) fn get_allowed_ips(
-        &self,
-        endpoint_id: &EndpointId,
-    ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
-        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
-        let (valid_since, ignore_cache_since) = self.get_cache_times();
-        let endpoint_info = self.cache.get(&endpoint_id)?;
-        let value = endpoint_info.get_allowed_ips(valid_since, ignore_cache_since);
-        let (value, ignore_cache) = value?;
-        if !ignore_cache {
-            let cached = Cached {
-                token: Some((self, CachedLookupInfo::new_allowed_ips(endpoint_id))),
-                value,
-            };
-            return Some(cached);
-        }
-        Some(Cached::new_uncached(value))
-    }
-    pub(crate) fn get_allowed_vpc_endpoint_ids(
-        &self,
-        endpoint_id: &EndpointId,
-    ) -> Option<Cached<&Self, Arc<Vec<String>>>> {
-        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
-        let (valid_since, ignore_cache_since) = self.get_cache_times();
-        let endpoint_info = self.cache.get(&endpoint_id)?;
-        let value = endpoint_info.get_allowed_vpc_endpoint_ids(valid_since, ignore_cache_since);
-        let (value, ignore_cache) = value?;
-        if !ignore_cache {
-            let cached = Cached {
-                token: Some((
-                    self,
-                    CachedLookupInfo::new_allowed_vpc_endpoint_ids(endpoint_id),
-                )),
-                value,
-            };
-            return Some(cached);
-        }
-        Some(Cached::new_uncached(value))
-    }
-    pub(crate) fn get_block_public_or_vpc_access(
-        &self,
-        endpoint_id: &EndpointId,
-    ) -> Option<Cached<&Self, AccessBlockerFlags>> {
-        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
-        let (valid_since, ignore_cache_since) = self.get_cache_times();
-        let endpoint_info = self.cache.get(&endpoint_id)?;
-        let value = endpoint_info.get_block_public_or_vpc_access(valid_since, ignore_cache_since);
-        let (value, ignore_cache) = value?;
-        if !ignore_cache {
-            let cached = Cached {
-                token: Some((
-                    self,
-                    CachedLookupInfo::new_block_public_or_vpc_access(endpoint_id),
-                )),
-                value,
-            };
-            return Some(cached);
-        }
-        Some(Cached::new_uncached(value))
+
+        count_cache_outcome(
+            CacheKind::ProjectInfoRoles,
+            self.role_controls.get(&(endpoint_id, role_name)),
+        )
     }
 
-    pub(crate) fn insert_role_secret(
+    pub(crate) fn get_endpoint_access(
         &self,
-        project_id: ProjectIdInt,
-        endpoint_id: EndpointIdInt,
-        role_name: RoleNameInt,
-        secret: Option<AuthSecret>,
-    ) {
-        if self.cache.len() >= self.config.size {
-            // If there are too many entries, wait until the next gc cycle.
-            return;
-        }
-        self.insert_project2endpoint(project_id, endpoint_id);
-        let mut entry = self.cache.entry(endpoint_id).or_default();
-        if entry.secret.len() < self.config.max_roles {
-            entry.secret.insert(role_name, secret.into());
-        }
+        endpoint_id: &EndpointId,
+    ) -> Option<ControlPlaneResult<EndpointAccessControl>> {
+        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
+
+        count_cache_outcome(
+            CacheKind::ProjectInfoEndpoints,
+            self.ep_controls.get(&endpoint_id),
+        )
     }
-    pub(crate) fn insert_allowed_ips(
-        &self,
-        project_id: ProjectIdInt,
-        endpoint_id: EndpointIdInt,
-        allowed_ips: Arc<Vec<IpPattern>>,
-    ) {
-        if self.cache.len() >= self.config.size {
-            // If there are too many entries, wait until the next gc cycle.
-            return;
-        }
-        self.insert_project2endpoint(project_id, endpoint_id);
-        self.cache.entry(endpoint_id).or_default().allowed_ips = Some(allowed_ips.into());
-    }
-    pub(crate) fn insert_allowed_vpc_endpoint_ids(
+
+    pub(crate) fn insert_endpoint_access(
         &self,
         account_id: Option<AccountIdInt>,
-        project_id: ProjectIdInt,
+        project_id: Option<ProjectIdInt>,
         endpoint_id: EndpointIdInt,
-        allowed_vpc_endpoint_ids: Arc<Vec<String>>,
+        role_name: RoleNameInt,
+        controls: EndpointAccessControl,
+        role_controls: RoleAccessControl,
     ) {
-        if self.cache.len() >= self.config.size {
-            // If there are too many entries, wait until the next gc cycle.
-            return;
-        }
         if let Some(account_id) = account_id {
             self.insert_account2endpoint(account_id, endpoint_id);
         }
-        self.insert_project2endpoint(project_id, endpoint_id);
-        self.cache
-            .entry(endpoint_id)
-            .or_default()
-            .allowed_vpc_endpoint_ids = Some(allowed_vpc_endpoint_ids.into());
-    }
-    pub(crate) fn insert_block_public_or_vpc_access(
-        &self,
-        project_id: ProjectIdInt,
-        endpoint_id: EndpointIdInt,
-        access_blockers: AccessBlockerFlags,
-    ) {
-        if self.cache.len() >= self.config.size {
-            // If there are too many entries, wait until the next gc cycle.
-            return;
+        if let Some(project_id) = project_id {
+            self.insert_project2endpoint(project_id, endpoint_id);
         }
-        self.insert_project2endpoint(project_id, endpoint_id);
-        self.cache
-            .entry(endpoint_id)
-            .or_default()
-            .block_public_or_vpc_access = Some(access_blockers.into());
+
+        debug!(
+            key = &*endpoint_id,
+            "created a cache entry for endpoint access"
+        );
+
+        count_cache_insert(CacheKind::ProjectInfoEndpoints);
+        count_cache_insert(CacheKind::ProjectInfoRoles);
+
+        self.ep_controls.insert(endpoint_id, Ok(controls));
+        self.role_controls
+            .insert((endpoint_id, role_name), Ok(role_controls));
+    }
+
+    pub(crate) fn insert_endpoint_access_err(
+        &self,
+        endpoint_id: EndpointIdInt,
+        role_name: RoleNameInt,
+        msg: Box<ControlPlaneErrorMessage>,
+    ) {
+        debug!(
+            key = &*endpoint_id,
+            "created a cache entry for an endpoint access error"
+        );
+
+        // RoleProtected is the only role-specific error that control plane can give us.
+        // If a given role name does not exist, it still returns a successful response,
+        // just with an empty secret.
+        if msg.get_reason() != Reason::RoleProtected {
+            // We can cache all the other errors in ep_controls because they don't
+            // depend on what role name we pass to control plane.
+            self.ep_controls
+                .entry(endpoint_id)
+                .and_compute_with(|entry| match entry {
+                    // leave the entry alone if it's already Ok
+                    Some(entry) if entry.value().is_ok() => moka::ops::compute::Op::Nop,
+                    // replace the entry
+                    _ => {
+                        count_cache_insert(CacheKind::ProjectInfoEndpoints);
+                        moka::ops::compute::Op::Put(Err(msg.clone()))
+                    }
+                });
+        }
+
+        count_cache_insert(CacheKind::ProjectInfoRoles);
+        self.role_controls
+            .insert((endpoint_id, role_name), Err(msg));
     }
 
     fn insert_project2endpoint(&self, project_id: ProjectIdInt, endpoint_id: EndpointIdInt) {
@@ -452,6 +219,7 @@ impl ProjectInfoCacheImpl {
                 .insert(project_id, HashSet::from([endpoint_id]));
         }
     }
+
     fn insert_account2endpoint(&self, account_id: AccountIdInt, endpoint_id: EndpointIdInt) {
         if let Some(mut endpoints) = self.account2ep.get_mut(&account_id) {
             endpoints.insert(endpoint_id);
@@ -460,147 +228,44 @@ impl ProjectInfoCacheImpl {
                 .insert(account_id, HashSet::from([endpoint_id]));
         }
     }
-    fn get_cache_times(&self) -> (Instant, Option<Instant>) {
-        let mut valid_since = Instant::now() - self.config.ttl;
-        // Only ignore cache if ttl is disabled.
-        let ttl_disabled_since_us = self
-            .ttl_disabled_since_us
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let ignore_cache_since = if ttl_disabled_since_us == u64::MAX {
-            None
-        } else {
-            let ignore_cache_since = self.start_time + Duration::from_micros(ttl_disabled_since_us);
-            // We are fine if entry is not older than ttl or was added before we are getting notifications.
-            valid_since = valid_since.min(ignore_cache_since);
-            Some(ignore_cache_since)
-        };
-        (valid_since, ignore_cache_since)
+
+    pub fn maybe_invalidate_role_secret(&self, _endpoint_id: &EndpointId, _role_name: &RoleName) {
+        // TODO: Expire the value early if the key is idle.
+        // Currently not an issue as we would just use the TTL to decide, which is what already happens.
     }
 
     pub async fn gc_worker(&self) -> anyhow::Result<Infallible> {
-        let mut interval =
-            tokio::time::interval(self.config.gc_interval / (self.cache.shards().len()) as u32);
+        let mut interval = tokio::time::interval(self.config.gc_interval);
         loop {
             interval.tick().await;
-            if self.cache.len() < self.config.size {
-                // If there are not too many entries, wait until the next gc cycle.
-                continue;
-            }
-            self.gc();
-        }
-    }
-
-    fn gc(&self) {
-        let shard = thread_rng().gen_range(0..self.project2ep.shards().len());
-        debug!(shard, "project_info_cache: performing epoch reclamation");
-
-        // acquire a random shard lock
-        let mut removed = 0;
-        let shard = self.project2ep.shards()[shard].write();
-        for (_, endpoints) in shard.iter() {
-            for endpoint in endpoints {
-                self.cache.remove(endpoint);
-                removed += 1;
-            }
-        }
-        // We can drop this shard only after making sure that all endpoints are removed.
-        drop(shard);
-        info!("project_info_cache: removed {removed} endpoints");
-    }
-}
-
-/// Lookup info for project info cache.
-/// This is used to invalidate cache entries.
-pub(crate) struct CachedLookupInfo {
-    /// Search by this key.
-    endpoint_id: EndpointIdInt,
-    lookup_type: LookupType,
-}
-
-impl CachedLookupInfo {
-    pub(self) fn new_role_secret(endpoint_id: EndpointIdInt, role_name: RoleNameInt) -> Self {
-        Self {
-            endpoint_id,
-            lookup_type: LookupType::RoleSecret(role_name),
-        }
-    }
-    pub(self) fn new_allowed_ips(endpoint_id: EndpointIdInt) -> Self {
-        Self {
-            endpoint_id,
-            lookup_type: LookupType::AllowedIps,
-        }
-    }
-    pub(self) fn new_allowed_vpc_endpoint_ids(endpoint_id: EndpointIdInt) -> Self {
-        Self {
-            endpoint_id,
-            lookup_type: LookupType::AllowedVpcEndpointIds,
-        }
-    }
-    pub(self) fn new_block_public_or_vpc_access(endpoint_id: EndpointIdInt) -> Self {
-        Self {
-            endpoint_id,
-            lookup_type: LookupType::BlockPublicOrVpcAccess,
-        }
-    }
-}
-
-enum LookupType {
-    RoleSecret(RoleNameInt),
-    AllowedIps,
-    AllowedVpcEndpointIds,
-    BlockPublicOrVpcAccess,
-}
-
-impl Cache for ProjectInfoCacheImpl {
-    type Key = SmolStr;
-    // Value is not really used here, but we need to specify it.
-    type Value = SmolStr;
-
-    type LookupInfo<Key> = CachedLookupInfo;
-
-    fn invalidate(&self, key: &Self::LookupInfo<SmolStr>) {
-        match &key.lookup_type {
-            LookupType::RoleSecret(role_name) => {
-                if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {
-                    endpoint_info.invalidate_role_secret(*role_name);
-                }
-            }
-            LookupType::AllowedIps => {
-                if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {
-                    endpoint_info.invalidate_allowed_ips();
-                }
-            }
-            LookupType::AllowedVpcEndpointIds => {
-                if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {
-                    endpoint_info.invalidate_allowed_vpc_endpoint_ids();
-                }
-            }
-            LookupType::BlockPublicOrVpcAccess => {
-                if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {
-                    endpoint_info.invalidate_block_public_or_vpc_access();
-                }
-            }
+            self.ep_controls.run_pending_tasks();
+            self.role_controls.run_pending_tasks();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use super::*;
+    use crate::control_plane::messages::{Details, EndpointRateLimitConfig, ErrorInfo, Status};
+    use crate::control_plane::{AccessBlockerFlags, AuthSecret};
     use crate::scram::ServerSecret;
-    use crate::types::ProjectId;
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {
-        tokio::time::pause();
-        let cache = ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
-            size: 2,
+        let cache = ProjectInfoCache::new(ProjectInfoCacheOptions {
+            size: 1,
             max_roles: 2,
             ttl: Duration::from_secs(1),
             gc_interval: Duration::from_secs(600),
         });
-        let project_id: ProjectId = "project".into();
+        let project_id: Option<ProjectIdInt> = Some(ProjectIdInt::from(&"project".into()));
         let endpoint_id: EndpointId = "endpoint".into();
+        let account_id = None;
+
         let user1: RoleName = "user1".into();
         let user2: RoleName = "user2".into();
         let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
@@ -609,183 +274,175 @@ mod tests {
             "127.0.0.1".parse().unwrap(),
             "127.0.0.2".parse().unwrap(),
         ]);
-        cache.insert_role_secret(
-            (&project_id).into(),
+
+        cache.insert_endpoint_access(
+            account_id,
+            project_id,
             (&endpoint_id).into(),
             (&user1).into(),
-            secret1.clone(),
+            EndpointAccessControl {
+                allowed_ips: allowed_ips.clone(),
+                allowed_vpce: Arc::new(vec![]),
+                flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
+            },
+            RoleAccessControl {
+                secret: secret1.clone(),
+            },
         );
-        cache.insert_role_secret(
-            (&project_id).into(),
+
+        cache.insert_endpoint_access(
+            account_id,
+            project_id,
             (&endpoint_id).into(),
             (&user2).into(),
-            secret2.clone(),
-        );
-        cache.insert_allowed_ips(
-            (&project_id).into(),
-            (&endpoint_id).into(),
-            allowed_ips.clone(),
+            EndpointAccessControl {
+                allowed_ips: allowed_ips.clone(),
+                allowed_vpce: Arc::new(vec![]),
+                flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
+            },
+            RoleAccessControl {
+                secret: secret2.clone(),
+            },
         );
 
         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
-        assert!(cached.cached());
-        assert_eq!(cached.value, secret1);
+        assert_eq!(cached.unwrap().secret, secret1);
+
         let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
-        assert!(cached.cached());
-        assert_eq!(cached.value, secret2);
+        assert_eq!(cached.unwrap().secret, secret2);
 
         // Shouldn't add more than 2 roles.
         let user3: RoleName = "user3".into();
         let secret3 = Some(AuthSecret::Scram(ServerSecret::mock([3; 32])));
-        cache.insert_role_secret(
-            (&project_id).into(),
+
+        cache.role_controls.run_pending_tasks();
+        cache.insert_endpoint_access(
+            account_id,
+            project_id,
             (&endpoint_id).into(),
             (&user3).into(),
-            secret3.clone(),
+            EndpointAccessControl {
+                allowed_ips: allowed_ips.clone(),
+                allowed_vpce: Arc::new(vec![]),
+                flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
+            },
+            RoleAccessControl {
+                secret: secret3.clone(),
+            },
         );
-        assert!(cache.get_role_secret(&endpoint_id, &user3).is_none());
 
-        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
-        assert!(cached.cached());
-        assert_eq!(cached.value, allowed_ips);
+        cache.role_controls.run_pending_tasks();
+        assert_eq!(cache.role_controls.entry_count(), 2);
 
-        tokio::time::advance(Duration::from_secs(2)).await;
-        let cached = cache.get_role_secret(&endpoint_id, &user1);
-        assert!(cached.is_none());
-        let cached = cache.get_role_secret(&endpoint_id, &user2);
-        assert!(cached.is_none());
-        let cached = cache.get_allowed_ips(&endpoint_id);
-        assert!(cached.is_none());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        cache.role_controls.run_pending_tasks();
+        assert_eq!(cache.role_controls.entry_count(), 0);
     }
 
     #[tokio::test]
-    async fn test_project_info_cache_invalidations() {
-        tokio::time::pause();
-        let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
-            size: 2,
-            max_roles: 2,
+    async fn test_caching_project_info_errors() {
+        let cache = ProjectInfoCache::new(ProjectInfoCacheOptions {
+            size: 10,
+            max_roles: 10,
             ttl: Duration::from_secs(1),
             gc_interval: Duration::from_secs(600),
-        }));
-        cache.clone().increment_active_listeners().await;
-        tokio::time::advance(Duration::from_secs(2)).await;
-
-        let project_id: ProjectId = "project".into();
+        });
+        let project_id = Some(ProjectIdInt::from(&"project".into()));
         let endpoint_id: EndpointId = "endpoint".into();
+        let account_id = None;
+
         let user1: RoleName = "user1".into();
         let user2: RoleName = "user2".into();
-        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
-        let secret2 = Some(AuthSecret::Scram(ServerSecret::mock([2; 32])));
-        let allowed_ips = Arc::new(vec![
-            "127.0.0.1".parse().unwrap(),
-            "127.0.0.2".parse().unwrap(),
-        ]);
-        cache.insert_role_secret(
-            (&project_id).into(),
+        let secret = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
+
+        let role_msg = Box::new(ControlPlaneErrorMessage {
+            error: "role is protected and cannot be used for password-based authentication"
+                .to_owned()
+                .into_boxed_str(),
+            http_status_code: http::StatusCode::NOT_FOUND,
+            status: Some(Status {
+                code: "PERMISSION_DENIED".to_owned().into_boxed_str(),
+                message: "role is protected and cannot be used for password-based authentication"
+                    .to_owned()
+                    .into_boxed_str(),
+                details: Details {
+                    error_info: Some(ErrorInfo {
+                        reason: Reason::RoleProtected,
+                    }),
+                    retry_info: None,
+                    user_facing_message: None,
+                },
+            }),
+        });
+
+        let generic_msg = Box::new(ControlPlaneErrorMessage {
+            error: "oh noes".to_owned().into_boxed_str(),
+            http_status_code: http::StatusCode::NOT_FOUND,
+            status: None,
+        });
+
+        let get_role_secret =
+            |endpoint_id, role_name| cache.get_role_secret(endpoint_id, role_name).unwrap();
+        let get_endpoint_access = |endpoint_id| cache.get_endpoint_access(endpoint_id).unwrap();
+
+        // stores role-specific errors only for get_role_secret
+        cache.insert_endpoint_access_err((&endpoint_id).into(), (&user1).into(), role_msg.clone());
+        assert_eq!(
+            get_role_secret(&endpoint_id, &user1).unwrap_err().error,
+            role_msg.error
+        );
+        assert!(cache.get_endpoint_access(&endpoint_id).is_none());
+
+        // stores non-role specific errors for both get_role_secret and get_endpoint_access
+        cache.insert_endpoint_access_err(
             (&endpoint_id).into(),
             (&user1).into(),
-            secret1.clone(),
+            generic_msg.clone(),
         );
-        cache.insert_role_secret(
-            (&project_id).into(),
+        assert_eq!(
+            get_role_secret(&endpoint_id, &user1).unwrap_err().error,
+            generic_msg.error
+        );
+        assert_eq!(
+            get_endpoint_access(&endpoint_id).unwrap_err().error,
+            generic_msg.error
+        );
+
+        // error isn't returned for other roles in the same endpoint
+        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
+
+        // success for a role does not overwrite errors for other roles
+        cache.insert_endpoint_access(
+            account_id,
+            project_id,
             (&endpoint_id).into(),
             (&user2).into(),
-            secret2.clone(),
+            EndpointAccessControl {
+                allowed_ips: Arc::new(vec![]),
+                allowed_vpce: Arc::new(vec![]),
+                flags: AccessBlockerFlags::default(),
+                rate_limits: EndpointRateLimitConfig::default(),
+            },
+            RoleAccessControl {
+                secret: secret.clone(),
+            },
         );
-        cache.insert_allowed_ips(
-            (&project_id).into(),
-            (&endpoint_id).into(),
-            allowed_ips.clone(),
-        );
+        assert!(get_role_secret(&endpoint_id, &user1).is_err());
+        assert!(get_role_secret(&endpoint_id, &user2).is_ok());
+        // ...but does clear the access control error
+        assert!(get_endpoint_access(&endpoint_id).is_ok());
 
-        tokio::time::advance(Duration::from_secs(2)).await;
-        // Nothing should be invalidated.
-
-        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
-        // TTL is disabled, so it should be impossible to invalidate this value.
-        assert!(!cached.cached());
-        assert_eq!(cached.value, secret1);
-
-        cached.invalidate(); // Shouldn't do anything.
-        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
-        assert_eq!(cached.value, secret1);
-
-        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
-        assert!(!cached.cached());
-        assert_eq!(cached.value, secret2);
-
-        // The only way to invalidate this value is to invalidate via the api.
-        cache.invalidate_role_secret_for_project((&project_id).into(), (&user2).into());
-        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
-
-        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
-        assert!(!cached.cached());
-        assert_eq!(cached.value, allowed_ips);
-    }
-
-    #[tokio::test]
-    async fn test_increment_active_listeners_invalidate_added_before() {
-        tokio::time::pause();
-        let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
-            size: 2,
-            max_roles: 2,
-            ttl: Duration::from_secs(1),
-            gc_interval: Duration::from_secs(600),
-        }));
-
-        let project_id: ProjectId = "project".into();
-        let endpoint_id: EndpointId = "endpoint".into();
-        let user1: RoleName = "user1".into();
-        let user2: RoleName = "user2".into();
-        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
-        let secret2 = Some(AuthSecret::Scram(ServerSecret::mock([2; 32])));
-        let allowed_ips = Arc::new(vec![
-            "127.0.0.1".parse().unwrap(),
-            "127.0.0.2".parse().unwrap(),
-        ]);
-        cache.insert_role_secret(
-            (&project_id).into(),
-            (&endpoint_id).into(),
-            (&user1).into(),
-            secret1.clone(),
-        );
-        cache.clone().increment_active_listeners().await;
-        tokio::time::advance(Duration::from_millis(100)).await;
-        cache.insert_role_secret(
-            (&project_id).into(),
+        // storing an error does not overwrite successful access control response
+        cache.insert_endpoint_access_err(
             (&endpoint_id).into(),
             (&user2).into(),
-            secret2.clone(),
+            generic_msg.clone(),
         );
-
-        // Added before ttl was disabled + ttl should be still cached.
-        let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
-        assert!(cached.cached());
-        let cached = cache.get_role_secret(&endpoint_id, &user2).unwrap();
-        assert!(cached.cached());
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        // Added before ttl was disabled + ttl should expire.
-        assert!(cache.get_role_secret(&endpoint_id, &user1).is_none());
-        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
-
-        // Added after ttl was disabled + ttl should not be cached.
-        cache.insert_allowed_ips(
-            (&project_id).into(),
-            (&endpoint_id).into(),
-            allowed_ips.clone(),
-        );
-        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
-        assert!(!cached.cached());
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        // Added before ttl was disabled + ttl still should expire.
-        assert!(cache.get_role_secret(&endpoint_id, &user1).is_none());
-        assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
-        // Shouldn't be invalidated.
-
-        let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
-        assert!(!cached.cached());
-        assert_eq!(cached.value, allowed_ips);
+        assert!(get_role_secret(&endpoint_id, &user2).is_err());
+        assert!(get_endpoint_access(&endpoint_id).is_ok());
     }
 }

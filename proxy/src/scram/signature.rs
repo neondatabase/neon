@@ -1,6 +1,10 @@
 //! Tools for client/server signature management.
 
+use hmac::Mac as _;
+
 use super::key::{SCRAM_KEY_LEN, ScramKey};
+use crate::metrics::Metrics;
+use crate::scram::pbkdf2::Prf;
 
 /// A collection of message parts needed to derive the client's signature.
 #[derive(Debug)]
@@ -12,15 +16,18 @@ pub(crate) struct SignatureBuilder<'a> {
 
 impl SignatureBuilder<'_> {
     pub(crate) fn build(&self, key: &ScramKey) -> Signature {
-        let parts = [
-            self.client_first_message_bare.as_bytes(),
-            b",",
-            self.server_first_message.as_bytes(),
-            b",",
-            self.client_final_message_without_proof.as_bytes(),
-        ];
+        // don't know exactly. this is a rough approx
+        Metrics::get().proxy.sha_rounds.inc_by(8);
 
-        super::hmac_sha256(key.as_ref(), parts).into()
+        let mut mac = Prf::new_from_slice(key.as_ref()).expect("HMAC accepts all key sizes");
+        mac.update(self.client_first_message_bare.as_bytes());
+        mac.update(b",");
+        mac.update(self.server_first_message.as_bytes());
+        mac.update(b",");
+        mac.update(self.client_final_message_without_proof.as_bytes());
+        Signature {
+            bytes: mac.finalize().into_bytes().into(),
+        }
     }
 }
 

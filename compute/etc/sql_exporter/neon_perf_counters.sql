@@ -9,6 +9,8 @@ SELECT d.* FROM pg_catalog.jsonb_to_record((SELECT jb FROM c)) AS d(
   getpage_wait_seconds_sum numeric,
   getpage_prefetch_requests_total numeric,
   getpage_sync_requests_total numeric,
+  compute_getpage_stuck_requests_total numeric,
+  compute_getpage_max_inflight_stuck_time_ms numeric,
   getpage_prefetch_misses_total numeric,
   getpage_prefetch_discards_total numeric,
   getpage_prefetches_buffered numeric,

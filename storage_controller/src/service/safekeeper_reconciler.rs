@@ -1,4 +1,9 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use clashmap::{ClashMap, Entry};
 use safekeeper_api::models::PullTimelineRequest;
@@ -15,7 +20,9 @@ use utils::{
 };
 
 use crate::{
-    persistence::SafekeeperTimelineOpKind, safekeeper::Safekeeper,
+    metrics::{METRICS_REGISTRY, SafekeeperReconcilerLabelGroup},
+    persistence::SafekeeperTimelineOpKind,
+    safekeeper::Safekeeper,
     safekeeper_client::SafekeeperClient,
 };
 
@@ -138,7 +145,7 @@ pub(crate) async fn load_schedule_requests(
                         }
                         let Some(sk) = safekeepers.get(&other_node_id) else {
                             tracing::warn!(
-                                "couldnt find safekeeper with pending op id {other_node_id}, not pulling from it"
+                                "couldn't find safekeeper with pending op id {other_node_id}, not pulling from it"
                             );
                             return None;
                         };
@@ -169,10 +176,17 @@ pub(crate) struct ScheduleRequest {
     pub(crate) kind: SafekeeperTimelineOpKind,
 }
 
+/// A way to keep ongoing/queued reconcile requests apart
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct TokenId(u64);
+
+type OngoingTokens = ClashMap<(TenantId, Option<TimelineId>), (CancellationToken, TokenId)>;
+
 /// Handle to per safekeeper reconciler.
 struct ReconcilerHandle {
-    tx: UnboundedSender<(ScheduleRequest, CancellationToken)>,
-    ongoing_tokens: Arc<ClashMap<(TenantId, Option<TimelineId>), CancellationToken>>,
+    tx: UnboundedSender<(ScheduleRequest, CancellationToken, TokenId)>,
+    ongoing_tokens: Arc<OngoingTokens>,
+    token_id_counter: AtomicU64,
     cancel: CancellationToken,
 }
 
@@ -185,24 +199,47 @@ impl ReconcilerHandle {
         &self,
         tenant_id: TenantId,
         timeline_id: Option<TimelineId>,
-    ) -> CancellationToken {
+    ) -> (CancellationToken, TokenId) {
+        let token_id = self
+            .token_id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let token_id = TokenId(token_id);
         let entry = self.ongoing_tokens.entry((tenant_id, timeline_id));
         if let Entry::Occupied(entry) = &entry {
-            let cancel: &CancellationToken = entry.get();
+            let (cancel, _) = entry.get();
             cancel.cancel();
         }
-        entry.insert(self.cancel.child_token()).clone()
+        entry.insert((self.cancel.child_token(), token_id)).clone()
     }
     /// Cancel an ongoing reconciliation
     fn cancel_reconciliation(&self, tenant_id: TenantId, timeline_id: Option<TimelineId>) {
-        if let Some((_, cancel)) = self.ongoing_tokens.remove(&(tenant_id, timeline_id)) {
+        if let Some((_, (cancel, _id))) = self.ongoing_tokens.remove(&(tenant_id, timeline_id)) {
             cancel.cancel();
         }
     }
     fn schedule_reconcile(&self, req: ScheduleRequest) {
-        let cancel = self.new_token_slot(req.tenant_id, req.timeline_id);
+        let (cancel, token_id) = self.new_token_slot(req.tenant_id, req.timeline_id);
         let hostname = req.safekeeper.skp.host.clone();
-        if let Err(err) = self.tx.send((req, cancel)) {
+        let sk_az = req.safekeeper.skp.availability_zone_id.clone();
+        let sk_node_id = req.safekeeper.get_id().to_string();
+
+        // We don't have direct access to the queue depth here, so increase it blindly by 1.
+        // We know that putting into the queue increases the queue depth. The receiver will
+        // update with the correct value once it processes the next item. To avoid races where we
+        // reduce before we increase, leaving the gauge with a 1 value for a long time, we
+        // increase it before putting into the queue.
+        let queued_gauge = &METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_safekeeper_reconciles_queued;
+        let label_group = SafekeeperReconcilerLabelGroup {
+            sk_az: &sk_az,
+            sk_node_id: &sk_node_id,
+            sk_hostname: &hostname,
+        };
+        queued_gauge.inc(label_group.clone());
+
+        if let Err(err) = self.tx.send((req, cancel, token_id)) {
+            queued_gauge.set(label_group, 0);
             tracing::info!("scheduling request onto {hostname} returned error: {err}");
         }
     }
@@ -211,13 +248,14 @@ impl ReconcilerHandle {
 pub(crate) struct SafekeeperReconciler {
     inner: SafekeeperReconcilerInner,
     concurrency_limiter: Arc<Semaphore>,
-    rx: UnboundedReceiver<(ScheduleRequest, CancellationToken)>,
+    rx: UnboundedReceiver<(ScheduleRequest, CancellationToken, TokenId)>,
     cancel: CancellationToken,
 }
 
 /// Thin wrapper over `Service` to not clutter its inherent functions
 #[derive(Clone)]
 struct SafekeeperReconcilerInner {
+    ongoing_tokens: Arc<OngoingTokens>,
     service: Arc<Service>,
 }
 
@@ -226,15 +264,20 @@ impl SafekeeperReconciler {
         // We hold the ServiceInner lock so we don't want to make sending to the reconciler channel to be blocking.
         let (tx, rx) = mpsc::unbounded_channel();
         let concurrency = service.config.safekeeper_reconciler_concurrency;
+        let ongoing_tokens = Arc::new(ClashMap::new());
         let mut reconciler = SafekeeperReconciler {
-            inner: SafekeeperReconcilerInner { service },
+            inner: SafekeeperReconcilerInner {
+                service,
+                ongoing_tokens: ongoing_tokens.clone(),
+            },
             rx,
             concurrency_limiter: Arc::new(Semaphore::new(concurrency)),
             cancel: cancel.clone(),
         };
         let handle = ReconcilerHandle {
             tx,
-            ongoing_tokens: Arc::new(ClashMap::new()),
+            ongoing_tokens,
+            token_id_counter: AtomicU64::new(0),
             cancel,
         };
         tokio::spawn(async move { reconciler.run().await });
@@ -246,7 +289,9 @@ impl SafekeeperReconciler {
                 req = self.rx.recv() => req,
                 _ = self.cancel.cancelled() => break,
             };
-            let Some((req, req_cancel)) = req else { break };
+            let Some((req, req_cancel, req_token_id)) = req else {
+                break;
+            };
 
             let permit_res = tokio::select! {
                 req = self.concurrency_limiter.clone().acquire_owned() => req,
@@ -259,13 +304,25 @@ impl SafekeeperReconciler {
                 continue;
             }
 
+            let queued_gauge = &METRICS_REGISTRY
+                .metrics_group
+                .storage_controller_safekeeper_reconciles_queued;
+            queued_gauge.set(
+                SafekeeperReconcilerLabelGroup {
+                    sk_az: &req.safekeeper.skp.availability_zone_id,
+                    sk_node_id: &req.safekeeper.get_id().to_string(),
+                    sk_hostname: &req.safekeeper.skp.host,
+                },
+                self.rx.len() as i64,
+            );
+
             tokio::task::spawn(async move {
                 let kind = req.kind;
                 let tenant_id = req.tenant_id;
                 let timeline_id = req.timeline_id;
                 let node_id = req.safekeeper.skp.id;
                 inner
-                    .reconcile_one(req, req_cancel)
+                    .reconcile_one(req, req_cancel, req_token_id)
                     .instrument(tracing::info_span!(
                         "reconcile_one",
                         ?kind,
@@ -280,8 +337,14 @@ impl SafekeeperReconciler {
 }
 
 impl SafekeeperReconcilerInner {
-    async fn reconcile_one(&self, req: ScheduleRequest, req_cancel: CancellationToken) {
+    async fn reconcile_one(
+        &self,
+        req: ScheduleRequest,
+        req_cancel: CancellationToken,
+        req_token_id: TokenId,
+    ) {
         let req_host = req.safekeeper.skp.host.clone();
+        let success;
         match req.kind {
             SafekeeperTimelineOpKind::Pull => {
                 let Some(timeline_id) = req.timeline_id else {
@@ -301,19 +364,29 @@ impl SafekeeperReconcilerInner {
                     http_hosts,
                     tenant_id: req.tenant_id,
                     timeline_id,
+                    // TODO(diko): get mconf from "timelines" table and pass it here.
+                    // Now we use pull_timeline reconciliation only for the timeline creation,
+                    // so it's not critical right now.
+                    // It could be fixed together with other reconciliation issues:
+                    // https://github.com/neondatabase/neon/issues/12189
+                    mconf: None,
                 };
-                self.reconcile_inner(
-                    req,
-                    async |client| client.pull_timeline(&pull_req).await,
-                    |resp| {
-                        tracing::info!(
-                            "pulled timeline from {} onto {req_host}",
-                            resp.safekeeper_host,
-                        );
-                    },
-                    req_cancel,
-                )
-                .await;
+                success = self
+                    .reconcile_inner(
+                        &req,
+                        async |client| client.pull_timeline(&pull_req).await,
+                        |resp| {
+                            if let Some(host) = resp.safekeeper_host {
+                                tracing::info!("pulled timeline from {host} onto {req_host}");
+                            } else {
+                                tracing::info!(
+                                    "timeline already present on safekeeper on {req_host}"
+                                );
+                            }
+                        },
+                        req_cancel,
+                    )
+                    .await;
             }
             SafekeeperTimelineOpKind::Exclude => {
                 // TODO actually exclude instead of delete here
@@ -324,22 +397,23 @@ impl SafekeeperReconcilerInner {
                     );
                     return;
                 };
-                self.reconcile_inner(
-                    req,
-                    async |client| client.delete_timeline(tenant_id, timeline_id).await,
-                    |_resp| {
-                        tracing::info!("deleted timeline from {req_host}");
-                    },
-                    req_cancel,
-                )
-                .await;
+                success = self
+                    .reconcile_inner(
+                        &req,
+                        async |client| client.delete_timeline(tenant_id, timeline_id).await,
+                        |_resp| {
+                            tracing::info!("deleted timeline from {req_host}");
+                        },
+                        req_cancel,
+                    )
+                    .await;
             }
             SafekeeperTimelineOpKind::Delete => {
                 let tenant_id = req.tenant_id;
                 if let Some(timeline_id) = req.timeline_id {
-                    let deleted = self
+                    success = self
                         .reconcile_inner(
-                            req,
+                            &req,
                             async |client| client.delete_timeline(tenant_id, timeline_id).await,
                             |_resp| {
                                 tracing::info!("deleted timeline from {req_host}");
@@ -347,13 +421,13 @@ impl SafekeeperReconcilerInner {
                             req_cancel,
                         )
                         .await;
-                    if deleted {
+                    if success {
                         self.delete_timeline_from_db(tenant_id, timeline_id).await;
                     }
                 } else {
-                    let deleted = self
+                    success = self
                         .reconcile_inner(
-                            req,
+                            &req,
                             async |client| client.delete_tenant(tenant_id).await,
                             |_resp| {
                                 tracing::info!(%tenant_id, "deleted tenant from {req_host}");
@@ -361,11 +435,20 @@ impl SafekeeperReconcilerInner {
                             req_cancel,
                         )
                         .await;
-                    if deleted {
+                    if success {
                         self.delete_tenant_timelines_from_db(tenant_id).await;
                     }
                 }
             }
+        }
+        if success {
+            self.ongoing_tokens.remove_if(
+                &(req.tenant_id, req.timeline_id),
+                |_ttid, (_cancel, token_id)| {
+                    // Ensure that this request is indeed the request we just finished and not a new one
+                    req_token_id == *token_id
+                },
+            );
         }
     }
     async fn delete_timeline_from_db(&self, tenant_id: TenantId, timeline_id: TimelineId) {
@@ -420,10 +503,10 @@ impl SafekeeperReconcilerInner {
             self.delete_timeline_from_db(tenant_id, timeline_id).await;
         }
     }
-    /// Returns whether the reconciliation happened successfully
+    /// Returns whether the reconciliation happened successfully (or we got cancelled)
     async fn reconcile_inner<T, F, U>(
         &self,
-        req: ScheduleRequest,
+        req: &ScheduleRequest,
         closure: impl Fn(SafekeeperClient) -> F,
         log_success: impl FnOnce(T) -> U,
         req_cancel: CancellationToken,
@@ -466,6 +549,16 @@ impl SafekeeperReconcilerInner {
                             req.generation,
                         )
                         .await;
+
+                    let complete_counter = &METRICS_REGISTRY
+                        .metrics_group
+                        .storage_controller_safekeeper_reconciles_complete;
+                    complete_counter.inc(SafekeeperReconcilerLabelGroup {
+                        sk_az: &req.safekeeper.skp.availability_zone_id,
+                        sk_node_id: &req.safekeeper.get_id().to_string(),
+                        sk_hostname: &req.safekeeper.skp.host,
+                    });
+
                     if let Err(err) = res {
                         tracing::info!(
                             "couldn't remove reconciliation request onto {} from persistence: {err:?}",

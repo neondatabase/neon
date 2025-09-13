@@ -1,6 +1,9 @@
 //! Tools for SCRAM server secret management.
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
 use subtle::{Choice, ConstantTimeEq};
+use tokio::time::Instant;
 
 use super::base64_decode_array;
 use super::key::ScramKey;
@@ -9,10 +12,13 @@ use super::key::ScramKey;
 /// and is used throughout the authentication process.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) struct ServerSecret {
+    /// When this secret was cached.
+    pub(crate) cached_at: Instant,
+
     /// Number of iterations for `PBKDF2` function.
     pub(crate) iterations: u32,
     /// Salt used to hash user's password.
-    pub(crate) salt_base64: String,
+    pub(crate) salt_base64: Box<str>,
     /// Hashed `ClientKey`.
     pub(crate) stored_key: ScramKey,
     /// Used by client to verify server's signature.
@@ -32,8 +38,9 @@ impl ServerSecret {
             params.split_once(':').zip(keys.split_once(':'))?;
 
         let secret = ServerSecret {
+            cached_at: Instant::now(),
             iterations: iterations.parse().ok()?,
-            salt_base64: salt.to_owned(),
+            salt_base64: salt.into(),
             stored_key: base64_decode_array(stored_key)?.into(),
             server_key: base64_decode_array(server_key)?.into(),
             doomed: false,
@@ -52,11 +59,12 @@ impl ServerSecret {
     /// See `auth-scram.c : mock_scram_secret` for details.
     pub(crate) fn mock(nonce: [u8; 32]) -> Self {
         Self {
+            cached_at: Instant::now(),
             // this doesn't reveal much information as we're going to use
             // iteration count 1 for our generated passwords going forward.
             // PG16 users can set iteration count=1 already today.
             iterations: 1,
-            salt_base64: base64::encode(nonce),
+            salt_base64: BASE64_STANDARD.encode(nonce).into_boxed_str(),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),
             doomed: true,
@@ -86,9 +94,9 @@ mod tests {
 
         let parsed = ServerSecret::parse(&secret).unwrap();
         assert_eq!(parsed.iterations, iterations);
-        assert_eq!(parsed.salt_base64, salt);
+        assert_eq!(&*parsed.salt_base64, salt);
 
-        assert_eq!(base64::encode(parsed.stored_key), stored_key);
-        assert_eq!(base64::encode(parsed.server_key), server_key);
+        assert_eq!(BASE64_STANDARD.encode(parsed.stored_key), stored_key);
+        assert_eq!(BASE64_STANDARD.encode(parsed.server_key), server_key);
     }
 }

@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::TryFutureExt;
+use postgres_client::config::SslMode;
 use thiserror::Error;
 use tokio_postgres::Client;
 use tracing::{Instrument, error, info, info_span, warn};
@@ -14,19 +15,20 @@ use crate::auth::IpPattern;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::backend::jwt::AuthRule;
 use crate::cache::Cached;
+use crate::cache::node_info::CachedNodeInfo;
+use crate::compute::ConnectInfo;
 use crate::context::RequestContext;
-use crate::control_plane::client::{
-    CachedAllowedIps, CachedAllowedVpcEndpointIds, CachedRoleSecret,
-};
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
 };
-use crate::control_plane::messages::MetricsAuxInfo;
-use crate::control_plane::{AccessBlockerFlags, AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
+use crate::control_plane::messages::{EndpointRateLimitConfig, MetricsAuxInfo};
+use crate::control_plane::{
+    AccessBlockerFlags, AuthInfo, AuthSecret, EndpointAccessControl, NodeInfo, RoleAccessControl,
+};
 use crate::intern::RoleNameInt;
+use crate::scram;
 use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 use crate::url::ApiUrl;
-use crate::{compute, scram};
 
 #[derive(Debug, Error)]
 enum MockApiError {
@@ -66,7 +68,8 @@ impl MockControlPlane {
 
     async fn do_get_auth_info(
         &self,
-        user_info: &ComputeUserInfo,
+        endpoint: &EndpointId,
+        role: &RoleName,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         let (secret, allowed_ips) = async {
             // Perhaps we could persist this connection, but then we'd have to
@@ -80,16 +83,15 @@ impl MockControlPlane {
             let secret = if let Some(entry) = get_execute_postgres_query(
                 &client,
                 "select rolpassword from pg_catalog.pg_authid where rolname = $1",
-                &[&&*user_info.user],
+                &[&role.as_str()],
                 "rolpassword",
             )
             .await?
             {
                 info!("got a secret: {entry}"); // safe since it's not a prod scenario
-                let secret = scram::ServerSecret::parse(&entry).map(AuthSecret::Scram);
-                secret.or_else(|| parse_md5(&entry).map(AuthSecret::Md5))
+                scram::ServerSecret::parse(&entry).map(AuthSecret::Scram)
             } else {
-                warn!("user '{}' does not exist", user_info.user);
+                warn!("user '{role}' does not exist");
                 None
             };
 
@@ -97,7 +99,7 @@ impl MockControlPlane {
                 match get_execute_postgres_query(
                     &client,
                     "select allowed_ips from neon_control_plane.endpoints where endpoint_id = $1",
-                    &[&user_info.endpoint.as_str()],
+                    &[&endpoint.as_str()],
                     "allowed_ips",
                 )
                 .await?
@@ -128,12 +130,13 @@ impl MockControlPlane {
             project_id: None,
             account_id: None,
             access_blocker_flags: AccessBlockerFlags::default(),
+            rate_limits: EndpointRateLimitConfig::default(),
         })
     }
 
     async fn do_get_endpoint_jwks(
         &self,
-        endpoint: EndpointId,
+        endpoint: &EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         let (client, connection) =
             tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
@@ -169,25 +172,23 @@ impl MockControlPlane {
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let port = self.endpoint.port().unwrap_or(5432);
-        let mut config = match self.endpoint.host_str() {
-            None => {
-                let mut config = compute::ConnCfg::new("localhost".to_string(), port);
-                config.set_host_addr(IpAddr::V4(Ipv4Addr::LOCALHOST));
-                config
-            }
-            Some(host) => {
-                let mut config = compute::ConnCfg::new(host.to_string(), port);
-                if let Ok(addr) = IpAddr::from_str(host) {
-                    config.set_host_addr(addr);
-                }
-                config
-            }
+        let conn_info = match self.endpoint.host_str() {
+            None => ConnectInfo {
+                host_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                host: "localhost".into(),
+                port,
+                ssl_mode: SslMode::Disable,
+            },
+            Some(host) => ConnectInfo {
+                host_addr: IpAddr::from_str(host).ok(),
+                host: host.into(),
+                port,
+                ssl_mode: SslMode::Disable,
+            },
         };
 
-        config.ssl_mode(postgres_client::config::SslMode::Disable);
-
         let node = NodeInfo {
-            config,
+            conn_info,
             aux: MetricsAuxInfo {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
@@ -222,53 +223,37 @@ async fn get_execute_postgres_query(
 }
 
 impl super::ControlPlaneApi for MockControlPlane {
-    #[tracing::instrument(skip_all)]
-    async fn get_role_secret(
+    async fn get_endpoint_access_control(
         &self,
         _ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        Ok(CachedRoleSecret::new_uncached(
-            self.do_get_auth_info(user_info).await?.secret,
-        ))
+        endpoint: &EndpointId,
+        role: &RoleName,
+    ) -> Result<EndpointAccessControl, GetAuthInfoError> {
+        let info = self.do_get_auth_info(endpoint, role).await?;
+        Ok(EndpointAccessControl {
+            allowed_ips: Arc::new(info.allowed_ips),
+            allowed_vpce: Arc::new(info.allowed_vpc_endpoint_ids),
+            flags: info.access_blocker_flags,
+            rate_limits: info.rate_limits,
+        })
     }
 
-    async fn get_allowed_ips(
+    async fn get_role_access_control(
         &self,
         _ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
-        Ok(Cached::new_uncached(Arc::new(
-            self.do_get_auth_info(user_info).await?.allowed_ips,
-        )))
-    }
-
-    async fn get_allowed_vpc_endpoint_ids(
-        &self,
-        _ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedVpcEndpointIds, super::errors::GetAuthInfoError> {
-        Ok(Cached::new_uncached(Arc::new(
-            self.do_get_auth_info(user_info)
-                .await?
-                .allowed_vpc_endpoint_ids,
-        )))
-    }
-
-    async fn get_block_public_or_vpc_access(
-        &self,
-        _ctx: &RequestContext,
-        user_info: &ComputeUserInfo,
-    ) -> Result<super::CachedAccessBlockerFlags, super::errors::GetAuthInfoError> {
-        Ok(Cached::new_uncached(
-            self.do_get_auth_info(user_info).await?.access_blocker_flags,
-        ))
+        endpoint: &EndpointId,
+        role: &RoleName,
+    ) -> Result<RoleAccessControl, GetAuthInfoError> {
+        let info = self.do_get_auth_info(endpoint, role).await?;
+        Ok(RoleAccessControl {
+            secret: info.secret,
+        })
     }
 
     async fn get_endpoint_jwks(
         &self,
         _ctx: &RequestContext,
-        endpoint: EndpointId,
+        endpoint: &EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(endpoint).await
     }
@@ -281,13 +266,4 @@ impl super::ControlPlaneApi for MockControlPlane {
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute().map_ok(Cached::new_uncached).await
     }
-}
-
-fn parse_md5(input: &str) -> Option<[u8; 16]> {
-    let text = input.strip_prefix("md5")?;
-
-    let mut bytes = [0u8; 16];
-    hex::decode_to_slice(text, &mut bytes).ok()?;
-
-    Some(bytes)
 }

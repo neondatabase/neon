@@ -35,8 +35,9 @@ use std::hash::{Hash, Hasher};
 
 #[doc(inline)]
 pub use ::utils::shard::*;
-use postgres_ffi::relfile_utils::INIT_FORKNUM;
+use postgres_ffi_types::forknum::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
+use utils::critical;
 
 use crate::key::Key;
 use crate::models::ShardParameters;
@@ -65,22 +66,6 @@ impl Hash for ShardIdentity {
 
         number.0.hash(state);
         count.0.hash(state);
-    }
-}
-
-/// Stripe size in number of pages
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
-pub struct ShardStripeSize(pub u32);
-
-impl Default for ShardStripeSize {
-    fn default() -> Self {
-        DEFAULT_STRIPE_SIZE
-    }
-}
-
-impl std::fmt::Display for ShardStripeSize {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
     }
 }
 
@@ -179,12 +164,23 @@ impl ShardIdentity {
 
     /// For use when creating ShardIdentity instances for new shards, where a creation request
     /// specifies the ShardParameters that apply to all shards.
-    pub fn from_params(number: ShardNumber, params: &ShardParameters) -> Self {
+    pub fn from_params(number: ShardNumber, params: ShardParameters) -> Self {
         Self {
             number,
             count: params.count,
             layout: LAYOUT_V1,
             stripe_size: params.stripe_size,
+        }
+    }
+
+    /// Asserts that the given shard identities are equal. Changes to shard parameters will likely
+    /// result in data corruption.
+    pub fn assert_equal(&self, other: ShardIdentity) {
+        if self != &other {
+            // TODO: for now, we're conservative and just log errors in production. Turn this into a
+            // real assertion when we're confident it doesn't misfire, and also reject requests that
+            // attempt to change it with an error response.
+            critical!("shard identity mismatch: {self:?} != {other:?}");
         }
     }
 
@@ -320,7 +316,11 @@ fn hash_combine(mut a: u32, mut b: u32) -> u32 {
 ///
 /// The mapping of key to shard is not stable across changes to ShardCount: this is intentional
 /// and will be handled at higher levels when shards are split.
-fn key_to_shard_number(count: ShardCount, stripe_size: ShardStripeSize, key: &Key) -> ShardNumber {
+pub fn key_to_shard_number(
+    count: ShardCount,
+    stripe_size: ShardStripeSize,
+    key: &Key,
+) -> ShardNumber {
     // Fast path for un-sharded tenants or broadcast keys
     if count < ShardCount(2) || key_is_shard0(key) {
         return ShardNumber(0);

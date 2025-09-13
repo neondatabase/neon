@@ -1,15 +1,15 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::send_wal::EndWatch;
+use crate::timeline::WalResidentTimeline;
+use crate::wal_storage::WalReader;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use safekeeper_api::Term;
+use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
-
-use crate::send_wal::EndWatch;
-use crate::timeline::WalResidentTimeline;
-use crate::wal_storage::WalReader;
 
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) struct WalBytes {
@@ -37,6 +37,8 @@ struct PositionedWalReader {
 pub(crate) struct StreamingWalReader {
     stream: BoxStream<'static, WalOrReset>,
     start_changed_tx: tokio::sync::watch::Sender<Lsn>,
+    // HADRON: Added TenantTimelineId for instrumentation purposes.
+    pub(crate) ttid: TenantTimelineId,
 }
 
 pub(crate) enum WalOrReset {
@@ -63,6 +65,7 @@ impl StreamingWalReader {
         buffer_size: usize,
     ) -> Self {
         let (start_changed_tx, start_changed_rx) = tokio::sync::watch::channel(start);
+        let ttid = tli.ttid;
 
         let state = WalReaderStreamState {
             tli,
@@ -107,6 +110,7 @@ impl StreamingWalReader {
         Self {
             stream,
             start_changed_tx,
+            ttid,
         }
     }
 

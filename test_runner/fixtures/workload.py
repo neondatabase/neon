@@ -78,6 +78,9 @@ class Workload:
         """
         if self._endpoint is not None:
             with ENDPOINT_LOCK:
+                # It's important that we update config.json before issuing the reconfigure request to make sure
+                # that PG-initiated spec refresh doesn't mess things up by reverting to the old spec.
+                self._endpoint.update_pageservers_in_config()
                 self._endpoint.reconfigure()
 
     def endpoint(self, pageserver_id: int | None = None) -> Endpoint:
@@ -97,10 +100,10 @@ class Workload:
                 self._endpoint.start(pageserver_id=pageserver_id)
                 self._configured_pageserver = pageserver_id
             else:
-                if self._configured_pageserver != pageserver_id:
-                    self._configured_pageserver = pageserver_id
-                    self._endpoint.reconfigure(pageserver_id=pageserver_id)
-                    self._endpoint_config = pageserver_id
+                # It's important that we update config.json before issuing the reconfigure request to make sure
+                # that PG-initiated spec refresh doesn't mess things up by reverting to the old spec.
+                self._endpoint.update_pageservers_in_config(pageserver_id=pageserver_id)
+                self._endpoint.reconfigure(pageserver_id=pageserver_id)
 
         connstring = self._endpoint.safe_psql(
             "SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'"

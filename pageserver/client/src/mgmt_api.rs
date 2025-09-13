@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error as _;
+use std::time::Duration;
 
 use bytes::Bytes;
 use detach_ancestor::AncestorDetached;
 use http_utils::error::HttpErrorBody;
 use pageserver_api::models::*;
 use pageserver_api::shard::TenantShardId;
+use postgres_versioninfo::PgMajorVersion;
 pub use reqwest::Body as ReqwestBody;
 use reqwest::{IntoUrl, Method, StatusCode, Url};
 use utils::id::{TenantId, TimelineId};
@@ -248,6 +250,70 @@ impl Client {
         self.request(Method::PUT, &uri, ()).await?;
         Ok(())
     }
+
+    pub async fn tenant_timeline_compact(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        force_image_layer_creation: bool,
+        must_force_image_layer_creation: bool,
+        scheduled: bool,
+        wait_until_done: bool,
+    ) -> Result<()> {
+        let mut path = reqwest::Url::parse(&format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/compact",
+            self.mgmt_api_endpoint
+        ))
+        .expect("Cannot build URL");
+
+        if force_image_layer_creation {
+            path.query_pairs_mut()
+                .append_pair("force_image_layer_creation", "true");
+        }
+
+        if must_force_image_layer_creation {
+            path.query_pairs_mut()
+                .append_pair("must_force_image_layer_creation", "true");
+        }
+
+        if scheduled {
+            path.query_pairs_mut().append_pair("scheduled", "true");
+        }
+        if wait_until_done {
+            path.query_pairs_mut()
+                .append_pair("wait_until_scheduled_compaction_done", "true");
+            path.query_pairs_mut()
+                .append_pair("wait_until_uploaded", "true");
+        }
+        self.request(Method::PUT, path, ()).await?;
+        Ok(())
+    }
+
+    /* BEGIN_HADRON */
+    pub async fn tenant_timeline_describe(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+    ) -> Result<TimelineInfo> {
+        let mut path = reqwest::Url::parse(&format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}",
+            self.mgmt_api_endpoint
+        ))
+        .expect("Cannot build URL");
+        path.query_pairs_mut()
+            .append_pair("include-image-consistent-lsn", "true");
+
+        let response: reqwest::Response = self.request(Method::GET, path, ()).await?;
+        let body = response.json().await.map_err(Error::ReceiveBody)?;
+        Ok(body)
+    }
+
+    pub async fn list_tenant_visible_size(&self) -> Result<BTreeMap<TenantShardId, u64>> {
+        let uri = format!("{}/v1/list_tenant_visible_size", self.mgmt_api_endpoint);
+        let resp = self.get(&uri).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+    /* END_HADRON */
 
     pub async fn tenant_scan_remote_storage(
         &self,
@@ -507,11 +573,11 @@ impl Client {
         .expect("Cannot build URL");
 
         path.query_pairs_mut()
-            .append_pair("recurse", &format!("{}", recurse));
+            .append_pair("recurse", &format!("{recurse}"));
 
         if let Some(concurrency) = concurrency {
             path.query_pairs_mut()
-                .append_pair("concurrency", &format!("{}", concurrency));
+                .append_pair("concurrency", &format!("{concurrency}"));
         }
 
         self.request(Method::POST, path, ()).await.map(|_| ())
@@ -744,9 +810,11 @@ impl Client {
         timeline_id: TimelineId,
         base_lsn: Lsn,
         end_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
         basebackup_tarball: ReqwestBody,
     ) -> Result<()> {
+        let pg_version = pg_version.major_version_num();
+
         let uri = format!(
             "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_basebackup?base_lsn={base_lsn}&end_lsn={end_lsn}&pg_version={pg_version}",
             self.mgmt_api_endpoint,
@@ -805,6 +873,22 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    pub async fn reset_alert_gauges(&self) -> Result<()> {
+        let uri = format!(
+            "{}/hadron-internal/reset_alert_gauges",
+            self.mgmt_api_endpoint
+        );
+        self.start_request(Method::POST, uri)
+            .send()
+            .await
+            .map_err(Error::SendRequest)?
+            .error_from_body()
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn wait_lsn(
         &self,
         tenant_shard_id: TenantShardId,
@@ -818,5 +902,35 @@ impl Client {
         self.request_noerror(Method::POST, uri, request)
             .await
             .map(|resp| resp.status())
+    }
+
+    pub async fn activate_post_import(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        activate_timeline_timeout: Duration,
+    ) -> Result<TimelineInfo> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/activate_post_import?timeline_activate_timeout_ms={}",
+            self.mgmt_api_endpoint,
+            tenant_shard_id,
+            timeline_id,
+            activate_timeline_timeout.as_millis()
+        );
+
+        self.request(Method::PUT, uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn update_feature_flag_spec(&self, spec: String) -> Result<()> {
+        let uri = format!("{}/v1/feature_flag_spec", self.mgmt_api_endpoint);
+        self.request(Method::POST, uri, spec)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
     }
 }

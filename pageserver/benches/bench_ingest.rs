@@ -1,22 +1,30 @@
 use std::env;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use criterion::{Criterion, criterion_group, criterion_main};
+use futures::stream::FuturesUnordered;
 use pageserver::config::PageServerConf;
 use pageserver::context::{DownloadBehavior, RequestContext};
+use pageserver::keyspace::KeySpace;
 use pageserver::l0_flush::{L0FlushConfig, L0FlushGlobalState};
 use pageserver::task_mgr::TaskKind;
-use pageserver::tenant::storage_layer::InMemoryLayer;
+use pageserver::tenant::storage_layer::IoConcurrency;
+use pageserver::tenant::storage_layer::{InMemoryLayer, ValuesReconstructState};
 use pageserver::{page_cache, virtual_file};
+use pageserver_api::config::GetVectoredConcurrentIo;
 use pageserver_api::key::Key;
 use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::shard::TenantShardId;
-use pageserver_api::value::Value;
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
+use utils::lsn::Lsn;
+use utils::sync::gate::Gate;
+use wal_decoder::models::value::Value;
 use wal_decoder::serialized_batch::SerializedValueBatch;
 
 // A very cheap hash for generating non-sequential keys.
@@ -29,7 +37,7 @@ fn murmurhash32(mut h: u32) -> u32 {
     h
 }
 
-#[derive(serde::Serialize, Clone, Copy, Debug)]
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq)]
 enum KeyLayout {
     /// Sequential unique keys
     Sequential,
@@ -39,8 +47,14 @@ enum KeyLayout {
     RandomReuse(u32),
 }
 
-#[derive(serde::Serialize, Clone, Copy, Debug)]
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq)]
 enum WriteDelta {
+    Yes,
+    No,
+}
+
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq)]
+enum ConcurrentReads {
     Yes,
     No,
 }
@@ -51,7 +65,12 @@ async fn ingest(
     put_count: usize,
     key_layout: KeyLayout,
     write_delta: WriteDelta,
+    concurrent_reads: ConcurrentReads,
 ) -> anyhow::Result<()> {
+    if concurrent_reads == ConcurrentReads::Yes {
+        assert_eq!(key_layout, KeyLayout::Sequential);
+    }
+
     let mut lsn = utils::lsn::Lsn(1000);
     let mut key = Key::from_i128(0x0);
 
@@ -67,16 +86,18 @@ async fn ingest(
     let gate = utils::sync::gate::Gate::default();
     let cancel = CancellationToken::new();
 
-    let layer = InMemoryLayer::create(
-        conf,
-        timeline_id,
-        tenant_shard_id,
-        lsn,
-        &gate,
-        &cancel,
-        &ctx,
-    )
-    .await?;
+    let layer = Arc::new(
+        InMemoryLayer::create(
+            conf,
+            timeline_id,
+            tenant_shard_id,
+            lsn,
+            &gate,
+            &cancel,
+            &ctx,
+        )
+        .await?,
+    );
 
     let data = Value::Image(Bytes::from(vec![0u8; put_size]));
     let data_ser_size = data.serialized_size().unwrap() as usize;
@@ -84,6 +105,61 @@ async fn ingest(
         pageserver::task_mgr::TaskKind::WalReceiverConnectionHandler,
         pageserver::context::DownloadBehavior::Download,
     );
+
+    const READ_BATCH_SIZE: u32 = 32;
+    let (tx, mut rx) = tokio::sync::watch::channel::<Option<Key>>(None);
+    let reader_cancel = CancellationToken::new();
+    let reader_handle = if concurrent_reads == ConcurrentReads::Yes {
+        Some(tokio::task::spawn({
+            let cancel = reader_cancel.clone();
+            let layer = layer.clone();
+            let ctx = ctx.attached_child();
+            async move {
+                let gate = Gate::default();
+                let gate_guard = gate.enter().unwrap();
+                let io_concurrency = IoConcurrency::spawn_from_conf(
+                    GetVectoredConcurrentIo::SidecarTask,
+                    gate_guard,
+                );
+
+                rx.wait_for(|key| key.is_some()).await.unwrap();
+
+                while !cancel.is_cancelled() {
+                    let key = match *rx.borrow() {
+                        Some(some) => some,
+                        None => unreachable!(),
+                    };
+
+                    let mut start_key = key;
+                    start_key.field6 = key.field6.saturating_sub(READ_BATCH_SIZE);
+                    let key_range = start_key..key.next();
+
+                    let mut reconstruct_state = ValuesReconstructState::new(io_concurrency.clone());
+
+                    layer
+                        .get_values_reconstruct_data(
+                            KeySpace::single(key_range),
+                            Lsn(1)..Lsn(u64::MAX),
+                            &mut reconstruct_state,
+                            &ctx,
+                        )
+                        .await
+                        .unwrap();
+
+                    let mut collect_futs = std::mem::take(&mut reconstruct_state.keys)
+                        .into_values()
+                        .map(|state| state.sink_pending_ios())
+                        .collect::<FuturesUnordered<_>>();
+                    while collect_futs.next().await.is_some() {}
+                }
+
+                drop(io_concurrency);
+                gate.close().await;
+            }
+        }))
+    } else {
+        None
+    };
 
     const BATCH_SIZE: usize = 16;
     let mut batch = Vec::new();
@@ -112,19 +188,27 @@ async fn ingest(
 
         batch.push((key.to_compact(), lsn, data_ser_size, data.clone()));
         if batch.len() >= BATCH_SIZE {
+            let last_key = Key::from_compact(batch.last().unwrap().0);
+
             let this_batch = std::mem::take(&mut batch);
             let serialized = SerializedValueBatch::from_values(this_batch);
             layer.put_batch(serialized, &ctx).await?;
+
+            tx.send(Some(last_key)).unwrap();
         }
     }
     if !batch.is_empty() {
+        let last_key = Key::from_compact(batch.last().unwrap().0);
+
         let this_batch = std::mem::take(&mut batch);
         let serialized = SerializedValueBatch::from_values(this_batch);
         layer.put_batch(serialized, &ctx).await?;
+
+        tx.send(Some(last_key)).unwrap();
     }
     layer.freeze(lsn + 1).await;
 
-    if matches!(write_delta, WriteDelta::Yes) {
+    if write_delta == WriteDelta::Yes {
         let l0_flush_state = L0FlushGlobalState::new(L0FlushConfig::Direct {
             max_concurrency: NonZeroUsize::new(1).unwrap(),
         });
@@ -133,6 +217,11 @@ async fn ingest(
             .await?
             .unwrap();
         tokio::fs::remove_file(path).await?;
+    }
+
+    reader_cancel.cancel();
+    if let Some(handle) = reader_handle {
+        handle.await.unwrap();
     }
 
     Ok(())
@@ -146,6 +235,7 @@ fn ingest_main(
     put_count: usize,
     key_layout: KeyLayout,
     write_delta: WriteDelta,
+    concurrent_reads: ConcurrentReads,
 ) {
     pageserver::virtual_file::set_io_mode(io_mode);
 
@@ -155,7 +245,15 @@ fn ingest_main(
         .unwrap();
 
     runtime.block_on(async move {
-        let r = ingest(conf, put_size, put_count, key_layout, write_delta).await;
+        let r = ingest(
+            conf,
+            put_size,
+            put_count,
+            key_layout,
+            write_delta,
+            concurrent_reads,
+        )
+        .await;
         if let Err(e) = r {
             panic!("{e:?}");
         }
@@ -194,6 +292,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         key_size: usize,
         key_layout: KeyLayout,
         write_delta: WriteDelta,
+        concurrent_reads: ConcurrentReads,
     }
     #[derive(Clone)]
     struct HandPickedParameters {
@@ -244,13 +343,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     ];
     let exploded_parameters = {
         let mut out = Vec::new();
-        for io_mode in [
-            IoMode::Buffered,
-            #[cfg(target_os = "linux")]
-            IoMode::Direct,
-            #[cfg(target_os = "linux")]
-            IoMode::DirectRw,
-        ] {
+        for concurrent_reads in [ConcurrentReads::Yes, ConcurrentReads::No] {
             for param in expect.clone() {
                 let HandPickedParameters {
                     volume_mib,
@@ -258,12 +351,18 @@ fn criterion_benchmark(c: &mut Criterion) {
                     key_layout,
                     write_delta,
                 } = param;
+
+                if key_layout != KeyLayout::Sequential && concurrent_reads == ConcurrentReads::Yes {
+                    continue;
+                }
+
                 out.push(ExplodedParameters {
-                    io_mode,
+                    io_mode: IoMode::DirectRw,
                     volume_mib,
                     key_size,
                     key_layout,
                     write_delta,
+                    concurrent_reads,
                 });
             }
         }
@@ -277,9 +376,10 @@ fn criterion_benchmark(c: &mut Criterion) {
                 key_size,
                 key_layout,
                 write_delta,
+                concurrent_reads,
             } = self;
             format!(
-                "io_mode={io_mode:?} volume_mib={volume_mib:?} key_size_bytes={key_size:?} key_layout={key_layout:?} write_delta={write_delta:?}"
+                "io_mode={io_mode:?} volume_mib={volume_mib:?} key_size_bytes={key_size:?} key_layout={key_layout:?} write_delta={write_delta:?} concurrent_reads={concurrent_reads:?}"
             )
         }
     }
@@ -292,12 +392,23 @@ fn criterion_benchmark(c: &mut Criterion) {
             key_size,
             key_layout,
             write_delta,
+            concurrent_reads,
         } = params;
         let put_count = volume_mib * 1024 * 1024 / key_size;
         group.throughput(criterion::Throughput::Bytes((key_size * put_count) as u64));
         group.sample_size(10);
         group.bench_function(id, |b| {
-            b.iter(|| ingest_main(conf, io_mode, key_size, put_count, key_layout, write_delta))
+            b.iter(|| {
+                ingest_main(
+                    conf,
+                    io_mode,
+                    key_size,
+                    put_count,
+                    key_layout,
+                    write_delta,
+                    concurrent_reads,
+                )
+            })
         });
     }
 }

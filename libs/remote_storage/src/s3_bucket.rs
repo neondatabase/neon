@@ -657,7 +657,14 @@ impl RemoteStorage for S3Bucket {
                     res = request => Ok(res),
                     _ = tokio::time::sleep(self.timeout) => Err(DownloadError::Timeout),
                     _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-                }?;
+                };
+
+                if let Err(DownloadError::Timeout) = &response {
+                    yield Err(DownloadError::Timeout);
+                    continue 'outer;
+                }
+
+                let response = response?; // always yield cancellation errors and stop the stream
 
                 let response = response
                     .context("Failed to list S3 prefixes")
@@ -974,22 +981,16 @@ impl RemoteStorage for S3Bucket {
         timestamp: SystemTime,
         done_if_after: SystemTime,
         cancel: &CancellationToken,
+        complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError> {
         let kind = RequestKind::TimeTravel;
         let permit = self.permit(kind, cancel).await?;
 
         tracing::trace!("Target time: {timestamp:?}, done_if_after {done_if_after:?}");
 
-        // Limit the number of versions deletions, mostly so that we don't
-        // keep requesting forever if the list is too long, as we'd put the
-        // list in RAM.
-        // Building a list of 100k entries that reaches the limit roughly takes
-        // 40 seconds, and roughly corresponds to tenants of 2 TiB physical size.
-        const COMPLEXITY_LIMIT: Option<NonZeroU32> = NonZeroU32::new(100_000);
-
         let mode = ListingMode::NoDelimiter;
         let version_listing = self
-            .list_versions_with_permit(&permit, prefix, mode, COMPLEXITY_LIMIT, cancel)
+            .list_versions_with_permit(&permit, prefix, mode, complexity_limit, cancel)
             .await
             .map_err(|err| match err {
                 DownloadError::Other(e) => TimeTravelError::Other(e),
@@ -1015,6 +1016,7 @@ impl RemoteStorage for S3Bucket {
             let Version { key, .. } = &vd;
             let version_id = vd.version_id().map(|v| v.0.as_str());
             if version_id == Some("null") {
+                // TODO: check the behavior of using the SDK on a non-versioned container
                 return Err(TimeTravelError::Other(anyhow!(
                     "Received ListVersions response for key={key} with version_id='null', \
                     indicating either disabled versioning, or legacy objects with null version id values"

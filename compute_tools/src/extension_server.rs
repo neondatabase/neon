@@ -74,18 +74,19 @@ More specifically, here is an example ext_index.json
 use std::path::Path;
 use std::str;
 
+use crate::metrics::{REMOTE_EXT_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use compute_api::spec::RemoteExtSpec;
+use postgres_versioninfo::PgMajorVersion;
 use regex::Regex;
 use remote_storage::*;
 use reqwest::StatusCode;
 use tar::Archive;
 use tracing::info;
 use tracing::log::warn;
+use url::Url;
 use zstd::stream::read::Decoder;
-
-use crate::metrics::{REMOTE_EXT_REQUESTS_TOTAL, UNKNOWN_HTTP_STATUS};
 
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
     // gives the result of `pg_config [argument]`
@@ -105,7 +106,7 @@ fn get_pg_config(argument: &str, pgbin: &str) -> String {
         .to_string()
 }
 
-pub fn get_pg_version(pgbin: &str) -> PostgresMajorVersion {
+pub fn get_pg_version(pgbin: &str) -> PgMajorVersion {
     // pg_config --version returns a (platform specific) human readable string
     // such as "PostgreSQL 15.4". We parse this to v14/v15/v16 etc.
     let human_version = get_pg_config("--version", pgbin);
@@ -113,25 +114,11 @@ pub fn get_pg_version(pgbin: &str) -> PostgresMajorVersion {
 }
 
 pub fn get_pg_version_string(pgbin: &str) -> String {
-    match get_pg_version(pgbin) {
-        PostgresMajorVersion::V14 => "v14",
-        PostgresMajorVersion::V15 => "v15",
-        PostgresMajorVersion::V16 => "v16",
-        PostgresMajorVersion::V17 => "v17",
-    }
-    .to_owned()
+    get_pg_version(pgbin).v_str()
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum PostgresMajorVersion {
-    V14,
-    V15,
-    V16,
-    V17,
-}
-
-fn parse_pg_version(human_version: &str) -> PostgresMajorVersion {
-    use PostgresMajorVersion::*;
+fn parse_pg_version(human_version: &str) -> PgMajorVersion {
+    use PgMajorVersion::*;
     // Normal releases have version strings like "PostgreSQL 15.4". But there
     // are also pre-release versions like "PostgreSQL 17devel" or "PostgreSQL
     // 16beta2" or "PostgreSQL 17rc1". And with the --with-extra-version
@@ -142,10 +129,10 @@ fn parse_pg_version(human_version: &str) -> PostgresMajorVersion {
         .captures(human_version)
     {
         Some(captures) if captures.len() == 2 => match &captures["major"] {
-            "14" => return V14,
-            "15" => return V15,
-            "16" => return V16,
-            "17" => return V17,
+            "14" => return PG14,
+            "15" => return PG15,
+            "16" => return PG16,
+            "17" => return PG17,
             _ => {}
         },
         _ => {}
@@ -158,14 +145,14 @@ fn parse_pg_version(human_version: &str) -> PostgresMajorVersion {
 pub async fn download_extension(
     ext_name: &str,
     ext_path: &RemotePath,
-    ext_remote_storage: &str,
+    remote_ext_base_url: &Url,
     pgbin: &str,
 ) -> Result<u64> {
     info!("Download extension {:?} from {:?}", ext_name, ext_path);
 
     // TODO add retry logic
     let download_buffer =
-        match download_extension_tar(ext_remote_storage, &ext_path.to_string()).await {
+        match download_extension_tar(remote_ext_base_url, &ext_path.to_string()).await {
             Ok(buffer) => buffer,
             Err(error_message) => {
                 return Err(anyhow::anyhow!(
@@ -270,10 +257,14 @@ pub fn create_control_files(remote_extensions: &RemoteExtSpec, pgbin: &str) {
 }
 
 // Do request to extension storage proxy, e.g.,
-// curl http://pg-ext-s3-gateway/latest/v15/extensions/anon.tar.zst
+// curl http://pg-ext-s3-gateway.pg-ext-s3-gateway.svc.cluster.local/latest/v15/extensions/anon.tar.zst
 // using HTTP GET and return the response body as bytes.
-async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Result<Bytes> {
-    let uri = format!("{}/{}", ext_remote_storage, ext_path);
+async fn download_extension_tar(remote_ext_base_url: &Url, ext_path: &str) -> Result<Bytes> {
+    let uri = remote_ext_base_url.join(ext_path).with_context(|| {
+        format!(
+            "failed to create the remote extension URI for {ext_path} using {remote_ext_base_url}"
+        )
+    })?;
     let filename = Path::new(ext_path)
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
@@ -283,7 +274,7 @@ async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Res
 
     info!("Downloading extension file '{}' from uri {}", filename, uri);
 
-    match do_extension_server_request(&uri).await {
+    match do_extension_server_request(uri).await {
         Ok(resp) => {
             info!("Successfully downloaded remote extension data {}", ext_path);
             REMOTE_EXT_REQUESTS_TOTAL
@@ -302,13 +293,10 @@ async fn download_extension_tar(ext_remote_storage: &str, ext_path: &str) -> Res
 
 // Do a single remote extensions server request.
 // Return result or (error message + stringified status code) in case of any failures.
-async fn do_extension_server_request(uri: &str) -> Result<Bytes, (String, String)> {
+async fn do_extension_server_request(uri: Url) -> Result<Bytes, (String, String)> {
     let resp = reqwest::get(uri).await.map_err(|e| {
         (
-            format!(
-                "could not perform remote extensions server request: {:?}",
-                e
-            ),
+            format!("could not perform remote extensions server request: {e:?}"),
             UNKNOWN_HTTP_STATUS.to_string(),
         )
     })?;
@@ -318,7 +306,7 @@ async fn do_extension_server_request(uri: &str) -> Result<Bytes, (String, String
         StatusCode::OK => match resp.bytes().await {
             Ok(resp) => Ok(resp),
             Err(e) => Err((
-                format!("could not read remote extensions server response: {:?}", e),
+                format!("could not read remote extensions server response: {e:?}"),
                 // It's fine to return and report error with status as 200 OK,
                 // because we still failed to read the response.
                 status.to_string(),
@@ -329,10 +317,7 @@ async fn do_extension_server_request(uri: &str) -> Result<Bytes, (String, String
             status.to_string(),
         )),
         _ => Err((
-            format!(
-                "unexpected remote extensions server response status code: {}",
-                status
-            ),
+            format!("unexpected remote extensions server response status code: {status}"),
             status.to_string(),
         )),
     }
@@ -344,25 +329,25 @@ mod tests {
 
     #[test]
     fn test_parse_pg_version() {
-        use super::PostgresMajorVersion::*;
-        assert_eq!(parse_pg_version("PostgreSQL 15.4"), V15);
-        assert_eq!(parse_pg_version("PostgreSQL 15.14"), V15);
+        use postgres_versioninfo::PgMajorVersion::*;
+        assert_eq!(parse_pg_version("PostgreSQL 15.4"), PG15);
+        assert_eq!(parse_pg_version("PostgreSQL 15.14"), PG15);
         assert_eq!(
             parse_pg_version("PostgreSQL 15.4 (Ubuntu 15.4-0ubuntu0.23.04.1)"),
-            V15
+            PG15
         );
 
-        assert_eq!(parse_pg_version("PostgreSQL 14.15"), V14);
-        assert_eq!(parse_pg_version("PostgreSQL 14.0"), V14);
+        assert_eq!(parse_pg_version("PostgreSQL 14.15"), PG14);
+        assert_eq!(parse_pg_version("PostgreSQL 14.0"), PG14);
         assert_eq!(
             parse_pg_version("PostgreSQL 14.9 (Debian 14.9-1.pgdg120+1"),
-            V14
+            PG14
         );
 
-        assert_eq!(parse_pg_version("PostgreSQL 16devel"), V16);
-        assert_eq!(parse_pg_version("PostgreSQL 16beta1"), V16);
-        assert_eq!(parse_pg_version("PostgreSQL 16rc2"), V16);
-        assert_eq!(parse_pg_version("PostgreSQL 16extra"), V16);
+        assert_eq!(parse_pg_version("PostgreSQL 16devel"), PG16);
+        assert_eq!(parse_pg_version("PostgreSQL 16beta1"), PG16);
+        assert_eq!(parse_pg_version("PostgreSQL 16rc2"), PG16);
+        assert_eq!(parse_pg_version("PostgreSQL 16extra"), PG16);
     }
 
     #[test]

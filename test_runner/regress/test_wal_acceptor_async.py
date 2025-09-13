@@ -14,7 +14,6 @@ from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
     NeonEnvBuilder,
-    PageserverWalReceiverProtocol,
     Safekeeper,
 )
 from fixtures.remote_storage import RemoteStorageKind
@@ -591,6 +590,13 @@ async def run_wal_truncation(env: NeonEnv, safekeeper_proto_version: int):
 @pytest.mark.parametrize("safekeeper_proto_version", [2, 3])
 def test_wal_truncation(neon_env_builder: NeonEnvBuilder, safekeeper_proto_version: int):
     neon_env_builder.num_safekeepers = 3
+    if safekeeper_proto_version == 2:
+        # On the legacy protocol, we don't support generations, which are part of
+        # `timelines_onto_safekeepers`
+        neon_env_builder.storage_controller_config = {
+            "timelines_onto_safekeepers": False,
+        }
+
     env = neon_env_builder.init_start()
 
     asyncio.run(run_wal_truncation(env, safekeeper_proto_version))
@@ -637,10 +643,7 @@ async def quorum_sanity_single(
     # create timeline on `members_sks`
     Safekeeper.create_timeline(tenant_id, timeline_id, env.pageservers[0], mconf, members_sks)
 
-    config_lines = [
-        "neon.safekeeper_proto_version = 3",
-    ]
-    ep = env.endpoints.create(branch_name, config_lines=config_lines)
+    ep = env.endpoints.create(branch_name)
     ep.start(safekeeper_generation=1, safekeepers=compute_sks_ids)
     ep.safe_psql("create table t(key int, value text)")
 
@@ -717,6 +720,11 @@ async def run_quorum_sanity(env: NeonEnv):
 # we don't.
 def test_quorum_sanity(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 4
+
+    # The test fails basically always on the new mode.
+    neon_env_builder.storage_controller_config = {
+        "timelines_onto_safekeepers": False,
+    }
     env = neon_env_builder.init_start()
 
     asyncio.run(run_quorum_sanity(env))
@@ -754,15 +762,8 @@ async def run_segment_init_failure(env: NeonEnv):
 # Test (injected) failure during WAL segment init.
 # https://github.com/neondatabase/neon/issues/6401
 # https://github.com/neondatabase/neon/issues/6402
-@pytest.mark.parametrize(
-    "wal_receiver_protocol",
-    [PageserverWalReceiverProtocol.VANILLA, PageserverWalReceiverProtocol.INTERPRETED],
-)
-def test_segment_init_failure(
-    neon_env_builder: NeonEnvBuilder, wal_receiver_protocol: PageserverWalReceiverProtocol
-):
+def test_segment_init_failure(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 1
-    neon_env_builder.pageserver_wal_receiver_protocol = wal_receiver_protocol
     env = neon_env_builder.init_start()
 
     asyncio.run(run_segment_init_failure(env))

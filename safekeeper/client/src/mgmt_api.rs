@@ -6,10 +6,10 @@
 use std::error::Error as _;
 
 use http_utils::error::HttpErrorBody;
-use reqwest::{IntoUrl, Method, StatusCode};
+use reqwest::{IntoUrl, Method, Response, StatusCode};
 use safekeeper_api::models::{
-    self, PullTimelineRequest, PullTimelineResponse, SafekeeperUtilization, TimelineCreateRequest,
-    TimelineStatus,
+    self, PullTimelineRequest, PullTimelineResponse, SafekeeperStatus, SafekeeperUtilization,
+    TimelineCreateRequest,
 };
 use utils::id::{NodeId, TenantId, TimelineId};
 use utils::logging::SecretString;
@@ -52,7 +52,7 @@ pub trait ResponseErrorMessageExt: Sized {
 impl ResponseErrorMessageExt for reqwest::Response {
     async fn error_from_body(self) -> Result<Self> {
         let status = self.status();
-        if !(status.is_client_error() || status.is_server_error()) {
+        if status.is_success() {
             return Ok(self);
         }
 
@@ -121,6 +121,20 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
+    pub async fn switch_timeline_membership(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: &models::TimelineMembershipSwitchRequest,
+    ) -> Result<models::TimelineMembershipSwitchResponse> {
+        let uri = format!(
+            "{}/v1/tenant/{}/timeline/{}/membership",
+            self.mgmt_api_endpoint, tenant_id, timeline_id
+        );
+        let resp = self.put(&uri, req).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
+    }
+
     pub async fn delete_tenant(&self, tenant_id: TenantId) -> Result<models::TenantDeleteResult> {
         let uri = format!("{}/v1/tenant/{}", self.mgmt_api_endpoint, tenant_id);
         let resp = self
@@ -147,13 +161,12 @@ impl Client {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> Result<TimelineStatus> {
+    ) -> Result<Response> {
         let uri = format!(
             "{}/v1/tenant/{}/timeline/{}",
             self.mgmt_api_endpoint, tenant_id, timeline_id
         );
-        let resp = self.get(&uri).await?;
-        resp.json().await.map_err(Error::ReceiveBody)
+        self.get(&uri).await
     }
 
     pub async fn snapshot(
@@ -167,6 +180,12 @@ impl Client {
             self.mgmt_api_endpoint, tenant_id, timeline_id, stream_to.0
         );
         self.get(&uri).await
+    }
+
+    pub async fn status(&self) -> Result<SafekeeperStatus> {
+        let uri = format!("{}/v1/status", self.mgmt_api_endpoint);
+        let resp = self.get(&uri).await?;
+        resp.json().await.map_err(Error::ReceiveBody)
     }
 
     pub async fn utilization(&self) -> Result<SafekeeperUtilization> {

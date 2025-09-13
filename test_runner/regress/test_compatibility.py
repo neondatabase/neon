@@ -18,6 +18,8 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
+    Safekeeper,
+    StorageControllerApiException,
     flush_ep_to_pageserver,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -26,6 +28,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
+from fixtures.safekeeper.http import MembershipConfiguration
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
@@ -73,6 +76,7 @@ if TYPE_CHECKING:
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
+#    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
 #
 #    # Build previous version of binaries and store them somewhere:
 #    rm -rf pg_install target
@@ -99,6 +103,7 @@ if TYPE_CHECKING:
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
+#    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
 #    export NEON_BIN=target/${BUILD_TYPE}
 #    export POSTGRES_DISTRIB_DIR=pg_install
 #
@@ -123,6 +128,12 @@ if TYPE_CHECKING:
 check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
     os.environ.get("CHECK_ONDISK_DATA_COMPATIBILITY") is None,
     reason="CHECK_ONDISK_DATA_COMPATIBILITY env is not set",
+)
+
+skip_old_debug_versions = pytest.mark.skipif(
+    os.getenv("BUILD_TYPE", "debug") == "debug"
+    and os.getenv("DEFAULT_PG_VERSION") in [PgVersion.V14, PgVersion.V15, PgVersion.V16],
+    reason="compatibility snaphots not available for old versions of debug builds",
 )
 
 
@@ -176,18 +187,20 @@ def test_create_snapshot(
     env.pageserver.stop()
     env.storage_controller.stop()
 
-    # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
-    compatibility_snapshot_dir = (
+    # Directory `new_compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
+    new_compatibility_snapshot_dir = (
         top_output_dir / f"compatibility_snapshot_pg{pg_version.v_prefixed}"
     )
-    if compatibility_snapshot_dir.exists():
-        shutil.rmtree(compatibility_snapshot_dir)
+    if new_compatibility_snapshot_dir.exists():
+        shutil.rmtree(new_compatibility_snapshot_dir)
 
     shutil.copytree(
         test_output_dir,
-        compatibility_snapshot_dir,
-        ignore=shutil.ignore_patterns("pg_dynshmem"),
+        new_compatibility_snapshot_dir,
+        ignore=shutil.ignore_patterns("pg_dynshmem", "neon-communicator.socket"),
     )
+
+    log.info(f"Copied new compatibility snapshot dir to: {new_compatibility_snapshot_dir}")
 
 
 # check_neon_works does recovery from WAL => the compatibility snapshot's WAL is old => will log this warning
@@ -195,6 +208,7 @@ ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_backward_compatibility(
@@ -206,6 +220,7 @@ def test_backward_compatibility(
     """
     Test that the new binaries can read old data
     """
+    log.info(f"Using snapshot dir at {compatibility_snapshot_dir}")
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
     env.pageserver.allowed_errors.append(ingest_lag_log_line)
@@ -222,6 +237,7 @@ def test_backward_compatibility(
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_forward_compatibility(
@@ -229,7 +245,6 @@ def test_forward_compatibility(
     test_output_dir: Path,
     top_output_dir: Path,
     pg_version: PgVersion,
-    compatibility_snapshot_dir: Path,
     compute_reconfigure_listener: ComputeReconfigure,
 ):
     """
@@ -253,8 +268,14 @@ def test_forward_compatibility(
     neon_env_builder.neon_binpath = neon_env_builder.compatibility_neon_binpath
     neon_env_builder.pg_distrib_dir = neon_env_builder.compatibility_pg_distrib_dir
 
+    # Note that we are testing with new data, so we should use `new_compatibility_snapshot_dir`, which is created by test_create_snapshot.
+    new_compatibility_snapshot_dir = (
+        top_output_dir / f"compatibility_snapshot_pg{pg_version.v_prefixed}"
+    )
+
+    log.info(f"Using snapshot dir at {new_compatibility_snapshot_dir}")
     env = neon_env_builder.from_repo_dir(
-        compatibility_snapshot_dir / "repo",
+        new_compatibility_snapshot_dir / "repo",
     )
     # there may be an arbitrary number of unrelated tests run between create_snapshot and here
     env.pageserver.allowed_errors.append(ingest_lag_log_line)
@@ -283,7 +304,7 @@ def test_forward_compatibility(
     check_neon_works(
         env,
         test_output_dir=test_output_dir,
-        sql_dump_path=compatibility_snapshot_dir / "dump.sql",
+        sql_dump_path=new_compatibility_snapshot_dir / "dump.sql",
         repo_dir=env.repo_dir,
     )
 
@@ -291,7 +312,20 @@ def test_forward_compatibility(
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
     ep = env.endpoints.create("main")
     ep_env = {"LD_LIBRARY_PATH": str(env.pg_distrib_dir / f"v{env.pg_version}/lib")}
-    ep.start(env=ep_env)
+
+    # If the compatibility snapshot was created with --timelines-onto-safekeepers=false,
+    # we should not pass safekeeper_generation to the endpoint because the compute
+    # will not be able to start.
+    # Zero generation is INVALID_GENERATION.
+    generation = 0
+    try:
+        res = env.storage_controller.timeline_locate(env.initial_tenant, env.initial_timeline)
+        generation = res["generation"]
+    except StorageControllerApiException as e:
+        if e.status_code != 404 or not re.search(r"Timeline .* not found", str(e)):
+            raise e
+
+    ep.start(env=ep_env, safekeeper_generation=generation)
 
     connstr = ep.connstr()
 
@@ -341,7 +375,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     )
 
     # Timeline exists again: restart the endpoint
-    ep.start(env=ep_env)
+    ep.start(env=ep_env, safekeeper_generation=generation)
 
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
@@ -504,6 +538,7 @@ def test_historic_storage_formats(
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.pg_version = dataset.pg_version
     env = neon_env_builder.init_configs()
+
     env.start()
     assert isinstance(env.pageserver_remote_storage, S3Storage)
 
@@ -542,6 +577,35 @@ def test_historic_storage_formats(
     # All our artifacts should contain at least one timeline
     assert len(timelines) > 0
 
+    if dataset.name == "2025-04-08-tenant-manifest-v1":
+        # This dataset was created at a time where we decided to migrate to v2 reldir by simply disabling writes to v1
+        # and starting writing to v2. This was too risky and we have reworked the migration plan. Therefore, we should
+        # opt in full relv2 mode for this dataset.
+        for timeline in timelines:
+            env.pageserver.http_client().timeline_patch_index_part(
+                dataset.tenant_id,
+                timeline["timeline_id"],
+                {"force_index_update": True, "rel_size_migration": "migrated"},
+            )
+
+    # Import tenant does not create the timeline on safekeepers,
+    # because it is a debug handler and the timeline may have already been
+    # created on some set of safekeepers.
+    # Create the timeline on safekeepers manually.
+    # TODO(diko): when we have the script/storcon handler to migrate
+    # the timeline to storcon, we can replace this code with it.
+    mconf = MembershipConfiguration(
+        generation=1,
+        members=Safekeeper.sks_to_safekeeper_ids([env.safekeepers[0]]),
+        new_members=None,
+    )
+    members_sks = Safekeeper.mconf_sks(env, mconf)
+
+    for timeline in timelines:
+        Safekeeper.create_timeline(
+            dataset.tenant_id, timeline["timeline_id"], env.pageserver, mconf, members_sks
+        )
+
     # TODO: ensure that the snapshots we're importing contain a sensible variety of content, at the very
     # least they should include a mixture of deltas and image layers.  Preferably they should also
     # contain some "exotic" stuff like aux files from logical replication.
@@ -573,6 +637,7 @@ def test_historic_storage_formats(
 
 
 @check_ondisk_data_compatibility_if_enabled
+@skip_old_debug_versions
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.parametrize(
     **fixtures.utils.allpairs_versions(),

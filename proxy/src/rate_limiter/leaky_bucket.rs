@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ahash::RandomState;
 use clashmap::ClashMap;
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use tokio::time::Instant;
 use tracing::info;
 use utils::leaky_bucket::LeakyBucketState;
@@ -15,7 +15,7 @@ pub type EndpointRateLimiter = LeakyBucketRateLimiter<EndpointIdInt>;
 
 pub struct LeakyBucketRateLimiter<Key> {
     map: ClashMap<Key, LeakyBucketState, RandomState>,
-    config: utils::leaky_bucket::LeakyBucketConfig,
+    default_config: utils::leaky_bucket::LeakyBucketConfig,
     access_count: AtomicUsize,
 }
 
@@ -28,16 +28,22 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
     pub fn new_with_shards(config: LeakyBucketConfig, shards: usize) -> Self {
         Self {
             map: ClashMap::with_hasher_and_shard_amount(RandomState::new(), shards),
-            config: config.into(),
+            default_config: config.into(),
             access_count: AtomicUsize::new(0),
         }
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
-    pub(crate) fn check(&self, key: K, n: u32) -> bool {
+    pub(crate) fn check(&self, key: K, config: Option<LeakyBucketConfig>, n: u32) -> bool {
         let now = Instant::now();
 
-        if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
+        let config = config.map_or(self.default_config, Into::into);
+
+        if self
+            .access_count
+            .fetch_add(1, Ordering::AcqRel)
+            .is_multiple_of(2048)
+        {
             self.do_gc(now);
         }
 
@@ -46,7 +52,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
             .entry(key)
             .or_insert_with(|| LeakyBucketState { empty_at: now });
 
-        entry.add_tokens(&self.config, now, n as f64).is_ok()
+        entry.add_tokens(&config, now, n as f64).is_ok()
     }
 
     fn do_gc(&self, now: Instant) {
@@ -55,7 +61,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
             self.map.len()
         );
         let n = self.map.shards().len();
-        let shard = thread_rng().gen_range(0..n);
+        let shard = rand::rng().random_range(0..n);
         self.map.shards()[shard]
             .write()
             .retain(|(_, value)| !value.bucket_is_empty(now));
@@ -67,9 +73,8 @@ pub struct LeakyBucketConfig {
     pub max: f64,
 }
 
-#[cfg(test)]
 impl LeakyBucketConfig {
-    pub(crate) fn new(rps: f64, max: f64) -> Self {
+    pub fn new(rps: f64, max: f64) -> Self {
         assert!(rps > 0.0, "rps must be positive");
         assert!(max > 0.0, "max must be positive");
         Self { rps, max }

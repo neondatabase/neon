@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS perf_test_results (
     metric_unit VARCHAR(10),
     metric_report_type TEXT,
     recorded_at_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    labels JSONB with default '{}'
+    labels JSONB DEFAULT '{}'::jsonb
 )
 """
 

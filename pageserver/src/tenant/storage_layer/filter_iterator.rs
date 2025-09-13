@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::bail;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, SparseKeySpace};
-use pageserver_api::value::Value;
 use utils::lsn::Lsn;
+use wal_decoder::models::value::Value;
 
 use super::PersistentLayerKey;
 use super::merge_iterator::{MergeIterator, MergeIteratorItem};
@@ -126,7 +126,6 @@ mod tests {
     #[tokio::test]
     async fn filter_keyspace_iterator() {
         use bytes::Bytes;
-        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("filter_iterator_filter_keyspace_iterator")
             .await
@@ -157,7 +156,7 @@ mod tests {
             .await
             .unwrap();
 
-        let merge_iter = MergeIterator::create(
+        let merge_iter = MergeIterator::create_for_testing(
             &[resident_layer_1.get_as_delta(&ctx).await.unwrap()],
             &[],
             &ctx,
@@ -182,7 +181,7 @@ mod tests {
         result.extend(test_deltas1[90..100].iter().cloned());
         assert_filter_iter_equal(&mut filter_iter, &result).await;
 
-        let merge_iter = MergeIterator::create(
+        let merge_iter = MergeIterator::create_for_testing(
             &[resident_layer_1.get_as_delta(&ctx).await.unwrap()],
             &[],
             &ctx,

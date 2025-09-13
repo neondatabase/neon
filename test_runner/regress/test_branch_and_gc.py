@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import wait_for_last_flush_lsn
 from fixtures.pageserver.http import TimelineCreate406
 from fixtures.utils import query_scalar, skip_in_debug_build
 
@@ -161,6 +162,9 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
         ]
     )
     lsn = Lsn(res[2][0][0])
+
+    # Wait for all WAL to reach the pageserver, so GC cutoff LSN is greater than `lsn`.
+    wait_for_last_flush_lsn(env, endpoint0, tenant, b0)
 
     # Use `failpoint=sleep` and `threading` to make the GC iteration triggers *before* the
     # branch creation task but the individual timeline GC iteration happens *after*

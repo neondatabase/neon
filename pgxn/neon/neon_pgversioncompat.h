@@ -9,6 +9,10 @@
 #include "fmgr.h"
 #include "storage/buf_internals.h"
 
+#if PG_MAJORVERSION_NUM < 16
+typedef PGAlignedBlock PGIOAlignedBlock;
+#endif
+
 #if PG_MAJORVERSION_NUM < 17
 #define NRelFileInfoBackendIsTemp(rinfo) (rinfo.backend != InvalidBackendId)
 #else
@@ -72,22 +76,21 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 		(tag).rnode = (rinfo); \
 	} while (false)
 
-#define BufTagGetNRelFileInfo(tag) tag.rnode
+#define BufTagGetNRelFileInfo(tag) (tag).rnode
 
 #define BufTagGetRelNumber(tagp) ((tagp)->rnode.relNode)
 
-#define BufTagInit(tag, relNumber, forknum, blkno, spcOid, dbOid) \
+#define BufTagInit(tag, rel_number, fork_number, block_number, spc_oid, db_oid) \
 	do { \
-		RelFileNode rnode = { .spcNode = spcOid, .dbNode = dbOid, .relNode = relNumber}; \
-		(tag).forkNum = forknum; \
-		(tag).blockNum = blkno; \
-		(tag).rnode = rnode; \
+		RelFileNode rnode = { .spcNode = (spc_oid), .dbNode = (db_oid), .relNode = (rel_number)}; \
+		(tag).forkNum = (fork_number);								\
+		(tag).blockNum = (block_number);							\
+		(tag).rnode = rnode;										\
 	} while (false)
 
 #define InvalidRelFileNumber InvalidOid
 
-#define SMgrRelGetRelInfo(reln) \
-	(reln->smgr_rnode.node)
+#define SMgrRelGetRelInfo(reln)	   	((reln)->smgr_rnode.node)
 
 #define DropRelationAllLocalBuffers DropRelFileNodeAllLocalBuffers
 
@@ -133,20 +136,25 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 		.relNumber = (tag).relNumber, \
 	})
 
-#define BufTagInit(tag, relNumber, forknum, blkno, spcOid, dbOid) \
+#define BufTagInit(tag, rel_number, fork_number, block_number, spc_oid, db_oid) \
 	do { \
-		(tag).forkNum = forknum; \
-		(tag).blockNum = blkno; \
-		(tag).spcOid = spcOid; \
-		(tag).dbOid = dbOid; \
-		(tag).relNumber = relNumber; \
+		(tag).forkNum = (fork_number);					\
+		(tag).blockNum = (block_number);				\
+		(tag).spcOid = (spc_oid);						\
+		(tag).dbOid = (db_oid);							\
+		(tag).relNumber = (rel_number);					\
 	} while (false)
 
-#define SMgrRelGetRelInfo(reln) \
-	((reln)->smgr_rlocator)
+#define SMgrRelGetRelInfo(reln)	   	((reln)->smgr_rlocator)
 
 #define DropRelationAllLocalBuffers DropRelationAllLocalBuffers
 #endif
+
+#define NRelFileInfoInvalidate(rinfo) do { \
+		NInfoGetSpcOid(rinfo) = InvalidOid; \
+		NInfoGetDbOid(rinfo) = InvalidOid; \
+		NInfoGetRelNumber(rinfo) = InvalidRelFileNumber; \
+	} while (0)
 
 #if PG_MAJORVERSION_NUM < 17
 #define ProcNumber BackendId
@@ -154,8 +162,17 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 #define AmAutoVacuumWorkerProcess() (IsAutoVacuumWorkerProcess())
 #endif
 
+#if PG_MAJORVERSION_NUM < 17
+#define	MyProcNumber (MyProc - &ProcGlobal->allProcs[0])
+#endif
+
 #if PG_MAJORVERSION_NUM < 15
 extern void InitMaterializedSRF(FunctionCallInfo fcinfo, bits32 flags);
+extern TimeLineID GetWALInsertionTimeLine(void);
 #endif
+
+/* format codes not present in PG17-; but available in PG18+ */
+#define INT64_HEX_FORMAT "%" INT64_MODIFIER "x"
+#define UINT64_HEX_FORMAT "%" INT64_MODIFIER "x"
 
 #endif							/* NEON_PGVERSIONCOMPAT_H */

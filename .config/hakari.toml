@@ -21,18 +21,20 @@ platforms = [
     # "x86_64-apple-darwin",
     # "x86_64-pc-windows-msvc",
 ]
-
 [final-excludes]
 workspace-members = [
     # vm_monitor benefits from the same Cargo.lock as the rest of our artifacts, but
     # it is built primarly in separate repo neondatabase/autoscaling and thus is excluded
     # from depending on workspace-hack because most of the dependencies are not used.
     "vm_monitor",
+    # subzero-core is a stub crate that should be excluded from workspace-hack
+    "subzero-core",
     # All of these exist in libs and are not usually built independently.
     # Putting workspace hack there adds a bottleneck for cargo builds.
     "compute_api",
     "consumption_metrics",
     "desim",
+    "json",
     "metrics",
     "pageserver_api",
     "postgres_backend",

@@ -6,11 +6,14 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::background_process;
+use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper0::Uri;
 use nix::unistd::Pid;
 use pageserver_api::controller_api::{
-    NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
+    NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest,
+    SafekeeperSchedulingPolicyRequest, SkSchedulingPolicy, TenantCreateRequest,
     TenantCreateResponse, TenantLocateResponse,
 };
 use pageserver_api::models::{
@@ -20,7 +23,8 @@ use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api::ResponseErrorMessageExt;
 use pem::Pem;
 use postgres_backend::AuthType;
-use reqwest::Method;
+use reqwest::{Method, Response};
+use safekeeper_api::PgMajorVersion;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -29,9 +33,6 @@ use url::Url;
 use utils::auth::{Claims, Scope, encode_from_key_file};
 use utils::id::{NodeId, TenantId};
 use whoami::username;
-
-use crate::background_process;
-use crate::local_env::{LocalEnv, NeonStorageControllerConf};
 
 pub struct StorageController {
     env: LocalEnv,
@@ -47,7 +48,7 @@ pub struct StorageController {
 
 const COMMAND: &str = "storage_controller";
 
-const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
+const STORAGE_CONTROLLER_POSTGRES_VERSION: PgMajorVersion = PgMajorVersion::PG16;
 
 const DB_NAME: &str = "storage_controller";
 
@@ -55,6 +56,7 @@ pub struct NeonStorageControllerStartArgs {
     pub instance_id: u8,
     pub base_port: Option<u16>,
     pub start_timeout: humantime::Duration,
+    pub handle_ps_local_disk_loss: Option<bool>,
 }
 
 impl NeonStorageControllerStartArgs {
@@ -63,6 +65,7 @@ impl NeonStorageControllerStartArgs {
             instance_id: 1,
             base_port: None,
             start_timeout,
+            handle_ps_local_disk_loss: None,
         }
     }
 }
@@ -166,7 +169,7 @@ impl StorageController {
     fn storage_controller_instance_dir(&self, instance_id: u8) -> PathBuf {
         self.env
             .base_data_dir
-            .join(format!("storage_controller_{}", instance_id))
+            .join(format!("storage_controller_{instance_id}"))
     }
 
     fn pid_file(&self, instance_id: u8) -> Utf8PathBuf {
@@ -183,9 +186,15 @@ impl StorageController {
     /// to other versions if that one isn't found.  Some automated tests create circumstances
     /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
     async fn get_pg_dir(&self, dir_name: &str) -> anyhow::Result<Utf8PathBuf> {
-        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 16, 15, 14];
+        const PREFER_VERSIONS: [PgMajorVersion; 5] = [
+            STORAGE_CONTROLLER_POSTGRES_VERSION,
+            PgMajorVersion::PG16,
+            PgMajorVersion::PG15,
+            PgMajorVersion::PG14,
+            PgMajorVersion::PG17,
+        ];
 
-        for v in prefer_versions {
+        for v in PREFER_VERSIONS {
             let path = Utf8PathBuf::from_path_buf(self.env.pg_dir(v, dir_name)?).unwrap();
             if tokio::fs::try_exists(&path).await? {
                 return Ok(path);
@@ -219,7 +228,7 @@ impl StorageController {
             "-d",
             DB_NAME,
             "-p",
-            &format!("{}", postgres_port),
+            &format!("{postgres_port}"),
         ];
         let pg_lib_dir = self.get_pg_lib_dir().await.unwrap();
         let envs = [
@@ -262,7 +271,7 @@ impl StorageController {
                 "-h",
                 "localhost",
                 "-p",
-                &format!("{}", postgres_port),
+                &format!("{postgres_port}"),
                 "-U",
                 &username(),
                 "-O",
@@ -424,7 +433,7 @@ impl StorageController {
             // from `LocalEnv`'s config file (`.neon/config`).
             tokio::fs::write(
                 &pg_data_path.join("postgresql.conf"),
-                format!("port = {}\nfsync=off\n", postgres_port),
+                format!("port = {postgres_port}\nfsync=off\n"),
             )
             .await?;
 
@@ -476,7 +485,7 @@ impl StorageController {
             self.setup_database(postgres_port).await?;
         }
 
-        let database_url = format!("postgresql://localhost:{}/{DB_NAME}", postgres_port);
+        let database_url = format!("postgresql://localhost:{postgres_port}/{DB_NAME}");
 
         // We support running a startup SQL script to fiddle with the database before we launch storcon.
         // This is used by the test suite.
@@ -507,7 +516,7 @@ impl StorageController {
         drop(client);
         conn.await??;
 
-        let addr = format!("{}:{}", host, listen_port);
+        let addr = format!("{host}:{listen_port}");
         let address_for_peers = Uri::builder()
             .scheme(scheme)
             .authority(addr.clone())
@@ -556,6 +565,10 @@ impl StorageController {
             args.push("--use-local-compute-notifications".to_string());
         }
 
+        if let Some(value) = self.config.kick_secondary_downloads {
+            args.push(format!("--kick-secondary-downloads={value}"));
+        }
+
         if let Some(ssl_ca_file) = self.env.ssl_ca_cert_path() {
             args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
         }
@@ -570,6 +583,11 @@ impl StorageController {
             let peer_jwt_token = encode_from_key_file(&peer_claims, private_key)
                 .expect("failed to generate jwt token");
             args.push(format!("--peer-jwt-token={peer_jwt_token}"));
+
+            let claims = Claims::new(None, Scope::SafekeeperData);
+            let jwt_token =
+                encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
+            args.push(format!("--safekeeper-jwt-token={jwt_token}"));
         }
 
         if let Some(public_key) = &self.public_key {
@@ -614,21 +632,55 @@ impl StorageController {
             self.env.base_data_dir.display()
         ));
 
+        if self.env.safekeepers.iter().any(|sk| sk.auth_enabled) && self.private_key.is_none() {
+            anyhow::bail!("Safekeeper set up for auth but no private key specified");
+        }
+
         if self.config.timelines_onto_safekeepers {
             args.push("--timelines-onto-safekeepers".to_string());
         }
 
-        println!("Starting storage controller");
+        // neon_local is used in test environments where we often have less than 3 safekeepers.
+        if self.config.timeline_safekeeper_count.is_some() || self.env.safekeepers.len() < 3 {
+            let sk_cnt = self
+                .config
+                .timeline_safekeeper_count
+                .unwrap_or(self.env.safekeepers.len());
+
+            args.push(format!("--timeline-safekeeper-count={sk_cnt}"));
+        }
+
+        if let Some(duration) = self.config.shard_split_request_timeout {
+            args.push(format!(
+                "--shard-split-request-timeout={}",
+                humantime::Duration::from(duration)
+            ));
+        }
+
+        let mut envs = vec![
+            ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+            ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+        ];
+
+        if let Some(posthog_config) = &self.config.posthog_config {
+            envs.push((
+                "POSTHOG_CONFIG".to_string(),
+                serde_json::to_string(posthog_config)?,
+            ));
+        }
+
+        println!("Starting storage controller at {scheme}://{host}:{listen_port}");
+
+        if start_args.handle_ps_local_disk_loss.unwrap_or_default() {
+            args.push("--handle-ps-local-disk-loss".to_string());
+        }
 
         background_process::start_process(
             COMMAND,
             &instance_dir,
             &self.env.storage_controller_bin(),
             args,
-            vec![
-                ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-            ],
+            envs,
             background_process::InitialPidFile::Create(self.pid_file(start_args.instance_id)),
             &start_args.start_timeout,
             || async {
@@ -639,6 +691,10 @@ impl StorageController {
             },
         )
         .await?;
+
+        if self.config.timelines_onto_safekeepers {
+            self.register_safekeepers().await?;
+        }
 
         Ok(())
     }
@@ -744,6 +800,23 @@ impl StorageController {
         RQ: Serialize + Sized,
         RS: DeserializeOwned + Sized,
     {
+        let response = self.dispatch_inner(method, path, body).await?;
+        Ok(response
+            .json()
+            .await
+            .map_err(pageserver_client::mgmt_api::Error::ReceiveBody)?)
+    }
+
+    /// Simple HTTP request wrapper for calling into storage controller
+    async fn dispatch_inner<RQ>(
+        &self,
+        method: reqwest::Method,
+        path: String,
+        body: Option<RQ>,
+    ) -> anyhow::Result<Response>
+    where
+        RQ: Serialize + Sized,
+    {
         // In the special case of the `storage_controller start` subcommand, we wish
         // to use the API endpoint of the newly started storage controller in order
         // to pass the readiness check. In this scenario [`Self::listen_port`] will
@@ -771,9 +844,9 @@ impl StorageController {
             builder = builder.json(&body)
         }
         if let Some(private_key) = &self.private_key {
-            println!("Getting claims for path {}", path);
+            println!("Getting claims for path {path}");
             if let Some(required_claims) = Self::get_claims_for_path(&path)? {
-                println!("Got claims {:?} for path {}", required_claims, path);
+                println!("Got claims {required_claims:?} for path {path}");
                 let jwt_token = encode_from_key_file(&required_claims, private_key)?;
                 builder = builder.header(
                     reqwest::header::AUTHORIZATION,
@@ -785,10 +858,31 @@ impl StorageController {
         let response = builder.send().await?;
         let response = response.error_from_body().await?;
 
-        Ok(response
-            .json()
-            .await
-            .map_err(pageserver_client::mgmt_api::Error::ReceiveBody)?)
+        Ok(response)
+    }
+
+    /// Register the safekeepers in the storage controller
+    #[instrument(skip(self))]
+    async fn register_safekeepers(&self) -> anyhow::Result<()> {
+        for sk in self.env.safekeepers.iter() {
+            let sk_id = sk.id;
+            let body = serde_json::json!({
+                "id": sk_id,
+                "created_at": "2023-10-25T09:11:25Z",
+                "updated_at": "2024-08-28T11:32:43Z",
+                "region_id": "aws-us-east-2",
+                "host": "127.0.0.1",
+                "port": sk.pg_port,
+                "http_port": sk.http_port,
+                "https_port": sk.https_port,
+                "version": 5957,
+                "availability_zone_id": format!("us-east-2b-{sk_id}"),
+            });
+            self.upsert_safekeeper(sk_id, body).await?;
+            self.safekeeper_scheduling_policy(sk_id, SkSchedulingPolicy::Active)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Call into the attach_hook API, for use before handing out attachments to pageservers
@@ -814,6 +908,42 @@ impl StorageController {
             .await?;
 
         Ok(response.generation)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn upsert_safekeeper(
+        &self,
+        node_id: NodeId,
+        request: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let resp = self
+            .dispatch_inner::<serde_json::Value>(
+                Method::POST,
+                format!("control/v1/safekeeper/{node_id}"),
+                Some(request),
+            )
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "setting scheduling policy unsuccessful for safekeeper {node_id}: {}",
+                resp.status()
+            );
+        }
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    pub async fn safekeeper_scheduling_policy(
+        &self,
+        node_id: NodeId,
+        scheduling_policy: SkSchedulingPolicy,
+    ) -> anyhow::Result<()> {
+        self.dispatch::<SafekeeperSchedulingPolicyRequest, ()>(
+            Method::POST,
+            format!("control/v1/safekeeper/{node_id}/scheduling_policy"),
+            Some(SafekeeperSchedulingPolicyRequest { scheduling_policy }),
+        )
+        .await
     }
 
     #[instrument(skip(self))]

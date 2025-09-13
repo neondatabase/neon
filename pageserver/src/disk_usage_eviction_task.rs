@@ -171,7 +171,8 @@ pub fn launch_disk_usage_global_eviction_task(
     tenant_manager: Arc<TenantManager>,
     background_jobs_barrier: completion::Barrier,
 ) -> Option<DiskUsageEvictionTask> {
-    let Some(task_config) = &conf.disk_usage_based_eviction else {
+    let task_config = &conf.disk_usage_based_eviction;
+    if !task_config.enabled {
         info!("disk usage based eviction task not configured");
         return None;
     };
@@ -458,6 +459,9 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 match next {
                     Ok(Ok(file_size)) => {
                         METRICS.layers_evicted.inc();
+                        /*BEGIN_HADRON */
+                        METRICS.bytes_evicted.inc_by(file_size);
+                        /*END_HADRON */
                         usage_assumed.add_available_bytes(file_size);
                     }
                     Ok(Err((
@@ -837,7 +841,30 @@ async fn collect_eviction_candidates(
                 continue;
             }
             let info = tl.get_local_layers_for_disk_usage_eviction().await;
-            debug!(tenant_id=%tl.tenant_shard_id.tenant_id, shard_id=%tl.tenant_shard_id.shard_slug(), timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
+            debug!(
+                tenant_id=%tl.tenant_shard_id.tenant_id,
+                shard_id=%tl.tenant_shard_id.shard_slug(),
+                timeline_id=%tl.timeline_id,
+                "timeline resident layers count: {}", info.resident_layers.len()
+            );
+
+            tenant_candidates.extend(info.resident_layers.into_iter());
+            max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
+
+            if cancel.is_cancelled() {
+                return Ok(EvictionCandidates::Cancelled);
+            }
+        }
+
+        // Also consider layers of timelines being imported for eviction
+        for tl in tenant.list_importing_timelines() {
+            let info = tl.timeline.get_local_layers_for_disk_usage_eviction().await;
+            debug!(
+                tenant_id=%tl.timeline.tenant_shard_id.tenant_id,
+                shard_id=%tl.timeline.tenant_shard_id.shard_slug(),
+                timeline_id=%tl.timeline.timeline_id,
+                "timeline resident layers count: {}", info.resident_layers.len()
+            );
 
             tenant_candidates.extend(info.resident_layers.into_iter());
             max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
@@ -1242,6 +1269,7 @@ mod filesystem_level_usage {
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
                 eviction_order: pageserver_api::config::EvictionOrder::default(),
+                enabled: true,
             },
             total_bytes: 100_000,
             avail_bytes: 0,

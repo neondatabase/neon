@@ -2,22 +2,23 @@ use std::cmp::min;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
-use futures::stream::FuturesOrdered;
+use futures::stream::{self, FuturesOrdered};
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::{PG_TLI, XLogFileName, XLogSegNo};
 use remote_storage::{
-    DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata,
+    DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata,
 };
 use safekeeper_api::models::PeerInfo;
 use tokio::fs::File;
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{OnceCell, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -25,7 +26,9 @@ use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
 use utils::{backoff, pausable_failpoint};
 
-use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
+use crate::metrics::{
+    BACKED_UP_SEGMENTS, BACKUP_ERRORS, BACKUP_REELECT_LEADER_COUNT, WAL_BACKUP_TASKS,
+};
 use crate::timeline::WalResidentTimeline;
 use crate::timeline_manager::{Manager, StateSnapshot};
 use crate::{SafeKeeperConf, WAL_BACKUP_RUNTIME};
@@ -63,9 +66,15 @@ pub(crate) fn is_wal_backup_required(
 /// Based on peer information determine which safekeeper should offload; if it
 /// is me, run (per timeline) task, if not yet. OTOH, if it is not me and task
 /// is running, kill it.
-pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &StateSnapshot) {
-    let (offloader, election_dbg_str) =
-        determine_offloader(&state.peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
+pub(crate) async fn update_task(
+    mgr: &mut Manager,
+    storage: Arc<GenericRemoteStorage>,
+    need_backup: bool,
+    state: &StateSnapshot,
+) {
+    /* BEGIN_HADRON */
+    let (offloader, election_dbg_str) = hadron_determine_offloader(mgr, state);
+    /* END_HADRON */
     let elected_me = Some(mgr.conf.my_id) == offloader;
 
     let should_task_run = need_backup && elected_me;
@@ -82,7 +91,12 @@ pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &St
                 return;
             };
 
-            let async_task = backup_task_main(resident, mgr.conf.backup_parallel_jobs, shutdown_rx);
+            let async_task = backup_task_main(
+                resident,
+                storage,
+                mgr.conf.backup_parallel_jobs,
+                shutdown_rx,
+            );
 
             let handle = if mgr.conf.current_thread_runtime {
                 tokio::spawn(async_task)
@@ -116,6 +130,70 @@ async fn shut_down_task(entry: &mut Option<WalBackupTaskHandle>) {
     }
 }
 
+/* BEGIN_HADRON */
+// On top of the neon determine_offloader, we also check if the current offloader is lagging behind too much.
+// If it is, we re-elect a new offloader. This mitigates the below issue. It also helps distribute the load across SKs.
+//
+// We observe that the offloader fails to upload a segment due to race conditions on XLOG SWITCH and PG start streaming WALs.
+// wal_backup task continously failing to upload a full segment while the segment remains partial on the disk.
+// The consequence is that commit_lsn for all SKs move forward but backup_lsn stays the same. Then, all SKs run out of disk space.
+// See go/sk-ood-xlog-switch for more details.
+//
+// To mitigate this issue, we will re-elect a new offloader if the current offloader is lagging behind too much.
+// Each SK makes the decision locally but they are aware of each other's commit and backup lsns.
+//
+// determine_offloader will pick a SK. say SK-1.
+// Each SK checks
+// -- if commit_lsn - back_lsn > threshold,
+// -- -- remove SK-1 from the candidate and call determine_offloader again.
+// SK-1 will step down and all SKs will elect the same leader again.
+// After the backup is caught up, the leader will become SK-1 again.
+fn hadron_determine_offloader(mgr: &Manager, state: &StateSnapshot) -> (Option<NodeId>, String) {
+    let mut offloader: Option<NodeId>;
+    let mut election_dbg_str: String;
+    let caughtup_peers_count: usize;
+    (offloader, election_dbg_str, caughtup_peers_count) =
+        determine_offloader(&state.peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
+
+    if offloader.is_none()
+        || caughtup_peers_count <= 1
+        || mgr.conf.max_reelect_offloader_lag_bytes == 0
+    {
+        return (offloader, election_dbg_str);
+    }
+
+    let offloader_sk_id = offloader.unwrap();
+
+    let backup_lag = state.commit_lsn.checked_sub(state.backup_lsn);
+    if backup_lag.is_none() {
+        debug!("Backup lag is None. Skipping re-election.");
+        return (offloader, election_dbg_str);
+    }
+
+    let backup_lag = backup_lag.unwrap().0;
+
+    if backup_lag < mgr.conf.max_reelect_offloader_lag_bytes {
+        return (offloader, election_dbg_str);
+    }
+
+    info!(
+        "Electing a new leader: Backup lag is too high backup lsn lag {} threshold {}: {}",
+        backup_lag, mgr.conf.max_reelect_offloader_lag_bytes, election_dbg_str
+    );
+    BACKUP_REELECT_LEADER_COUNT.inc();
+    // Remove the current offloader if lag is too high.
+    let new_peers: Vec<_> = state
+        .peers
+        .iter()
+        .filter(|p| p.sk_id != offloader_sk_id)
+        .cloned()
+        .collect();
+    (offloader, election_dbg_str, _) =
+        determine_offloader(&new_peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
+    (offloader, election_dbg_str)
+}
+/* END_HADRON */
+
 /// The goal is to ensure that normally only one safekeepers offloads. However,
 /// it is fine (and inevitable, as s3 doesn't provide CAS) that for some short
 /// time we have several ones as they PUT the same files. Also,
@@ -130,13 +208,13 @@ fn determine_offloader(
     wal_backup_lsn: Lsn,
     ttid: TenantTimelineId,
     conf: &SafeKeeperConf,
-) -> (Option<NodeId>, String) {
+) -> (Option<NodeId>, String, usize) {
     // TODO: remove this once we fill newly joined safekeepers since backup_lsn.
     let capable_peers = alive_peers
         .iter()
         .filter(|p| p.local_start_lsn <= wal_backup_lsn);
     match capable_peers.clone().map(|p| p.commit_lsn).max() {
-        None => (None, "no connected peers to elect from".to_string()),
+        None => (None, "no connected peers to elect from".to_string(), 0),
         Some(max_commit_lsn) => {
             let threshold = max_commit_lsn
                 .checked_sub(conf.max_offloader_lag_bytes)
@@ -164,38 +242,37 @@ fn determine_offloader(
                     capable_peers_dbg,
                     caughtup_peers.len()
                 ),
+                caughtup_peers.len(),
             )
         }
     }
 }
 
-static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::const_new();
-
-// Storage must be configured and initialized when this is called.
-fn get_configured_remote_storage() -> &'static GenericRemoteStorage {
-    REMOTE_STORAGE
-        .get()
-        .expect("failed to get remote storage")
-        .as_ref()
-        .unwrap()
+pub struct WalBackup {
+    storage: Option<Arc<GenericRemoteStorage>>,
 }
 
-pub async fn init_remote_storage(conf: &SafeKeeperConf) {
-    // TODO: refactor REMOTE_STORAGE to avoid using global variables, and provide
-    // dependencies to all tasks instead.
-    REMOTE_STORAGE
-        .get_or_init(|| async {
-            if let Some(conf) = conf.remote_storage.as_ref() {
-                Some(
-                    GenericRemoteStorage::from_config(conf)
-                        .await
-                        .expect("failed to create remote storage"),
-                )
-            } else {
-                None
+impl WalBackup {
+    /// Create a new WalBackup instance.
+    pub async fn new(conf: &SafeKeeperConf) -> Result<Self> {
+        if !conf.wal_backup_enabled {
+            return Ok(Self { storage: None });
+        }
+
+        match conf.remote_storage.as_ref() {
+            Some(config) => {
+                let storage = GenericRemoteStorage::from_config(config).await?;
+                Ok(Self {
+                    storage: Some(Arc::new(storage)),
+                })
             }
-        })
-        .await;
+            None => Ok(Self { storage: None }),
+        }
+    }
+
+    pub fn get_storage(&self) -> Option<Arc<GenericRemoteStorage>> {
+        self.storage.clone()
+    }
 }
 
 struct WalBackupTask {
@@ -204,12 +281,14 @@ struct WalBackupTask {
     wal_seg_size: usize,
     parallel_jobs: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
+    storage: Arc<GenericRemoteStorage>,
 }
 
 /// Offload single timeline.
 #[instrument(name = "wal_backup", skip_all, fields(ttid = %tli.ttid))]
 async fn backup_task_main(
     tli: WalResidentTimeline,
+    storage: Arc<GenericRemoteStorage>,
     parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
@@ -223,6 +302,7 @@ async fn backup_task_main(
         timeline_dir: tli.get_timeline_dir(),
         timeline: tli,
         parallel_jobs,
+        storage,
     };
 
     // task is spinned up only when wal_seg_size already initialized
@@ -293,6 +373,7 @@ impl WalBackupTask {
 
             match backup_lsn_range(
                 &self.timeline,
+                self.storage.clone(),
                 &mut backup_lsn,
                 commit_lsn,
                 self.wal_seg_size,
@@ -322,6 +403,7 @@ impl WalBackupTask {
 
 async fn backup_lsn_range(
     timeline: &WalResidentTimeline,
+    storage: Arc<GenericRemoteStorage>,
     backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
@@ -331,6 +413,8 @@ async fn backup_lsn_range(
     if parallel_jobs < 1 {
         anyhow::bail!("parallel_jobs must be >= 1");
     }
+
+    pausable_failpoint!("backup-lsn-range-pausable");
 
     let remote_timeline_path = &timeline.remote_path;
     let start_lsn = *backup_lsn;
@@ -352,7 +436,12 @@ async fn backup_lsn_range(
     loop {
         let added_task = match iter.next() {
             Some(s) => {
-                uploads.push_back(backup_single_segment(s, timeline_dir, remote_timeline_path));
+                uploads.push_back(backup_single_segment(
+                    &storage,
+                    s,
+                    timeline_dir,
+                    remote_timeline_path,
+                ));
                 true
             }
             None => false,
@@ -388,6 +477,7 @@ async fn backup_lsn_range(
 }
 
 async fn backup_single_segment(
+    storage: &GenericRemoteStorage,
     seg: &Segment,
     timeline_dir: &Utf8Path,
     remote_timeline_path: &RemotePath,
@@ -395,7 +485,13 @@ async fn backup_single_segment(
     let segment_file_path = seg.file_path(timeline_dir)?;
     let remote_segment_path = seg.remote_path(remote_timeline_path);
 
-    let res = backup_object(&segment_file_path, &remote_segment_path, seg.size()).await;
+    let res = backup_object(
+        storage,
+        &segment_file_path,
+        &remote_segment_path,
+        seg.size(),
+    )
+    .await;
     if res.is_ok() {
         BACKED_UP_SEGMENTS.inc();
     } else {
@@ -455,12 +551,11 @@ fn get_segments(start: Lsn, end: Lsn, seg_size: usize) -> Vec<Segment> {
 }
 
 async fn backup_object(
+    storage: &GenericRemoteStorage,
     source_file: &Utf8Path,
     target_file: &RemotePath,
     size: usize,
 ) -> Result<()> {
-    let storage = get_configured_remote_storage();
-
     let file = File::open(&source_file)
         .await
         .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
@@ -475,12 +570,11 @@ async fn backup_object(
 }
 
 pub(crate) async fn backup_partial_segment(
+    storage: &GenericRemoteStorage,
     source_file: &Utf8Path,
     target_file: &RemotePath,
     size: usize,
 ) -> Result<()> {
-    let storage = get_configured_remote_storage();
-
     let file = File::open(&source_file)
         .await
         .with_context(|| format!("Failed to open file {source_file:?} for wal backup"))?;
@@ -504,25 +598,23 @@ pub(crate) async fn backup_partial_segment(
 }
 
 pub(crate) async fn copy_partial_segment(
+    storage: &GenericRemoteStorage,
     source: &RemotePath,
     destination: &RemotePath,
 ) -> Result<()> {
-    let storage = get_configured_remote_storage();
     let cancel = CancellationToken::new();
 
     storage.copy_object(source, destination, &cancel).await
 }
 
+const WAL_READ_WARN_THRESHOLD: u32 = 2;
+const WAL_READ_MAX_RETRIES: u32 = 3;
+
 pub async fn read_object(
+    storage: &GenericRemoteStorage,
     file_path: &RemotePath,
     offset: u64,
 ) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>> {
-    let storage = REMOTE_STORAGE
-        .get()
-        .context("Failed to get remote storage")?
-        .as_ref()
-        .context("No remote storage configured")?;
-
     info!("segment download about to start from remote path {file_path:?} at offset {offset}");
 
     let cancel = CancellationToken::new();
@@ -531,12 +623,23 @@ pub async fn read_object(
         byte_start: std::ops::Bound::Included(offset),
         ..Default::default()
     };
-    let download = storage
-        .download(file_path, &opts, &cancel)
-        .await
-        .with_context(|| {
-            format!("Failed to open WAL segment download stream for remote path {file_path:?}")
-        })?;
+
+    // This retry only solves the connect errors: subsequent reads can still fail as this function returns
+    // a stream.
+    let download = backoff::retry(
+        || async { storage.download(file_path, &opts, &cancel).await },
+        DownloadError::is_permanent,
+        WAL_READ_WARN_THRESHOLD,
+        WAL_READ_MAX_RETRIES,
+        "download WAL segment",
+        &cancel,
+    )
+    .await
+    .ok_or_else(|| DownloadError::Cancelled)
+    .and_then(|x| x)
+    .with_context(|| {
+        format!("Failed to open WAL segment download stream for remote path {file_path:?}")
+    })?;
 
     let reader = tokio_util::io::StreamReader::new(download.download_stream);
 
@@ -547,8 +650,10 @@ pub async fn read_object(
 
 /// Delete WAL files for the given timeline. Remote storage must be configured
 /// when called.
-pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
-    let storage = get_configured_remote_storage();
+pub async fn delete_timeline(
+    storage: &GenericRemoteStorage,
+    ttid: &TenantTimelineId,
+) -> Result<()> {
     let remote_path = remote_timeline_path(ttid)?;
 
     // see DEFAULT_MAX_KEYS_PER_LIST_RESPONSE
@@ -618,28 +723,20 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
 }
 
 /// Used by wal_backup_partial.
-pub async fn delete_objects(paths: &[RemotePath]) -> Result<()> {
+pub async fn delete_objects(storage: &GenericRemoteStorage, paths: &[RemotePath]) -> Result<()> {
     let cancel = CancellationToken::new(); // not really used
-    let storage = get_configured_remote_storage();
     storage.delete_objects(paths, &cancel).await
 }
 
 /// Copy segments from one timeline to another. Used in copy_timeline.
 pub async fn copy_s3_segments(
+    storage: &GenericRemoteStorage,
     wal_seg_size: usize,
     src_ttid: &TenantTimelineId,
     dst_ttid: &TenantTimelineId,
     from_segment: XLogSegNo,
     to_segment: XLogSegNo,
 ) -> Result<()> {
-    const SEGMENTS_PROGRESS_REPORT_INTERVAL: u64 = 1024;
-
-    let storage = REMOTE_STORAGE
-        .get()
-        .expect("failed to get remote storage")
-        .as_ref()
-        .unwrap();
-
     let remote_dst_path = remote_timeline_path(dst_ttid)?;
 
     let cancel = CancellationToken::new();
@@ -659,27 +756,69 @@ pub async fn copy_s3_segments(
         .filter_map(|o| o.key.object_name().map(ToOwned::to_owned))
         .collect::<HashSet<_>>();
 
-    debug!(
+    info!(
         "these segments have already been uploaded: {:?}",
         uploaded_segments
     );
 
-    for segno in from_segment..to_segment {
-        if segno % SEGMENTS_PROGRESS_REPORT_INTERVAL == 0 {
-            info!("copied all segments from {} until {}", from_segment, segno);
-        }
+    /* BEGIN_HADRON */
+    // Copying multiple segments async.
+    let mut copy_stream = stream::iter(from_segment..to_segment)
+        .map(|segno| {
+            let segment_name = XLogFileName(PG_TLI, segno, wal_seg_size);
+            let remote_dst_path = remote_dst_path.clone();
+            let cancel = cancel.clone();
 
-        let segment_name = XLogFileName(PG_TLI, segno, wal_seg_size);
-        if uploaded_segments.contains(&segment_name) {
-            continue;
-        }
-        debug!("copying segment {}", segment_name);
+            async move {
+                if uploaded_segments.contains(&segment_name) {
+                    return Ok(());
+                }
 
-        let from = remote_timeline_path(src_ttid)?.join(&segment_name);
-        let to = remote_dst_path.join(&segment_name);
+                if segno % 1000 == 0 {
+                    info!("copying segment {} {}", segno, segment_name);
+                }
 
-        storage.copy_object(&from, &to, &cancel).await?;
+                let from = remote_timeline_path(src_ttid)?.join(&segment_name);
+                let to = remote_dst_path.join(&segment_name);
+
+                // Retry logic: retry up to 10 times with 1 second delay
+                let mut retry_count = 0;
+                const MAX_RETRIES: u32 = 10;
+
+                loop {
+                    match storage.copy_object(&from, &to, &cancel).await {
+                        Ok(()) => return Ok(()),
+                        Err(e) => {
+                            if cancel.is_cancelled() {
+                                // Don't retry if cancellation was requested
+                                return Err(e);
+                            }
+
+                            retry_count += 1;
+                            if retry_count >= MAX_RETRIES {
+                                error!(
+                                    "Failed to copy segment {} after {} retries: {}",
+                                    segment_name, MAX_RETRIES, e
+                                );
+                                return Err(e);
+                            }
+                            warn!(
+                                "Failed to copy segment {} (attempt {}/{}): {}, retrying...",
+                                segment_name, retry_count, MAX_RETRIES, e
+                            );
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            }
+        })
+        .buffer_unordered(32); // Limit to 32 concurrent uploads
+
+    // Process results, stopping on first error
+    while let Some(result) = copy_stream.next().await {
+        result?;
     }
+    /* END_HADRON */
 
     info!(
         "finished copying segments from {} until {}",

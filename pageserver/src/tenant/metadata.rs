@@ -18,6 +18,7 @@
 //! [`IndexPart`]: super::remote_timeline_client::index::IndexPart
 
 use anyhow::ensure;
+use postgres_ffi::PgMajorVersion;
 use serde::{Deserialize, Serialize};
 use utils::bin_ser::{BeSer, SerializeError};
 use utils::id::TimelineId;
@@ -136,7 +137,7 @@ struct TimelineMetadataBodyV2 {
     latest_gc_cutoff_lsn: Lsn,
 
     initdb_lsn: Lsn,
-    pg_version: u32,
+    pg_version: PgMajorVersion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,7 +168,7 @@ impl TimelineMetadata {
         ancestor_lsn: Lsn,
         latest_gc_cutoff_lsn: Lsn,
         initdb_lsn: Lsn,
-        pg_version: u32,
+        pg_version: PgMajorVersion,
     ) -> Self {
         Self {
             hdr: TimelineMetadataHeader {
@@ -215,7 +216,7 @@ impl TimelineMetadata {
             ancestor_lsn: body.ancestor_lsn,
             latest_gc_cutoff_lsn: body.latest_gc_cutoff_lsn,
             initdb_lsn: body.initdb_lsn,
-            pg_version: 14, // All timelines created before this version had pg_version 14
+            pg_version: PgMajorVersion::PG14, // All timelines created before this version had pg_version 14
         };
 
         hdr.format_version = METADATA_FORMAT_VERSION;
@@ -317,7 +318,7 @@ impl TimelineMetadata {
         self.body.initdb_lsn
     }
 
-    pub fn pg_version(&self) -> u32 {
+    pub fn pg_version(&self) -> PgMajorVersion {
         self.body.pg_version
     }
 
@@ -331,7 +332,7 @@ impl TimelineMetadata {
             Lsn::from_hex("00000000").unwrap(),
             Lsn::from_hex("00000000").unwrap(),
             Lsn::from_hex("00000000").unwrap(),
-            0,
+            PgMajorVersion::PG14,
         );
         let bytes = instance.to_bytes().unwrap();
         Self::from_bytes(&bytes).unwrap()
@@ -545,13 +546,12 @@ mod tests {
             Lsn(0),
             Lsn(0),
             Lsn(0),
-            14, // All timelines created before this version had pg_version 14
+            PgMajorVersion::PG14, // All timelines created before this version had pg_version 14
         );
 
         assert_eq!(
             deserialized_metadata.body, expected_metadata.body,
-            "Metadata of the old version {} should be upgraded to the latest version {}",
-            METADATA_OLD_FORMAT_VERSION, METADATA_FORMAT_VERSION
+            "Metadata of the old version {METADATA_OLD_FORMAT_VERSION} should be upgraded to the latest version {METADATA_FORMAT_VERSION}"
         );
     }
 
@@ -566,7 +566,7 @@ mod tests {
             Lsn(0),
             // Updating this version to 17 will cause the test to fail at the
             // next assert_eq!().
-            16,
+            PgMajorVersion::PG16,
         );
         let expected_bytes = vec![
             /* TimelineMetadataHeader */

@@ -32,7 +32,7 @@ use crate::metrics::{
     WAL_RECEIVERS,
 };
 use crate::safekeeper::{AcceptorProposerMessage, ProposerAcceptorMessage};
-use crate::timeline::WalResidentTimeline;
+use crate::timeline::{TimelineError, WalResidentTimeline};
 
 const DEFAULT_FEEDBACK_CAPACITY: usize = 8;
 
@@ -357,9 +357,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'_, IO> {
                         .await
                         .context("create timeline")?
                 } else {
-                    self.global_timelines
-                        .get(self.ttid)
-                        .context("get timeline")?
+                    let timeline_res = self.global_timelines.get(self.ttid);
+                    match timeline_res {
+                        Ok(tl) => tl,
+                        Err(TimelineError::NotFound(_)) => {
+                            return Err(CopyStreamHandlerEnd::TimelineNoCreate);
+                        }
+                        other => other.context("get_timeline")?,
+                    }
                 };
                 tli.wal_residence_guard().await?
             }

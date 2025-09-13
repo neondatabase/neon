@@ -64,4 +64,12 @@ impl Root {
             },
         }
     }
+    pub fn started_at(&self) -> &chrono::NaiveDateTime {
+        match self {
+            Root::V1(v1) => match v1 {
+                V1::InProgress(in_progress) => &in_progress.started_at,
+                V1::Done(done) => &done.started_at,
+            },
+        }
+    }
 }

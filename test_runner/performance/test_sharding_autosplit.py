@@ -62,7 +62,8 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         ps.allowed_errors.extend(
             [
                 # We shut down pageservers while they might have some compaction work going on
-                ".*Compaction failed.*shutting down.*"
+                ".*Compaction failed.*shutting down.*",
+                ".*flush task cancelled.*",
             ]
         )
 
@@ -72,6 +73,11 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             ".*Local notification hook failed.*",
             ".*Marking shard.*for notification retry.*",
             ".*Failed to notify compute.*",
+            # As an optimization, the storage controller kicks the downloads on the secondary
+            # after the shard split. However, secondaries are created async, so it's possible
+            # that the intent state was modified, but the actual secondary hasn't been created,
+            # which results in an error.
+            ".*Error calling secondary download after shard split.*",
         ]
     )
 

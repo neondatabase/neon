@@ -1,0 +1,52 @@
+use crate::http::JsonResponse;
+use axum::response::{IntoResponse, Response};
+use axum::{Json, http::StatusCode};
+use axum_extra::extract::OptionalQuery;
+use compute_api::responses::{LfcOffloadState, LfcPrewarmState};
+type Compute = axum::extract::State<std::sync::Arc<crate::compute::ComputeNode>>;
+
+pub(in crate::http) async fn prewarm_state(compute: Compute) -> Json<LfcPrewarmState> {
+    Json(compute.lfc_prewarm_state().await)
+}
+
+// Following functions are marked async for axum, as it's more convenient than wrapping these
+// in async lambdas at call site
+
+pub(in crate::http) async fn offload_state(compute: Compute) -> Json<LfcOffloadState> {
+    Json(compute.lfc_offload_state())
+}
+
+#[derive(serde::Deserialize)]
+pub struct PrewarmQuery {
+    pub from_endpoint: String,
+}
+
+pub(in crate::http) async fn prewarm(
+    compute: Compute,
+    OptionalQuery(query): OptionalQuery<PrewarmQuery>,
+) -> Response {
+    if compute.prewarm_lfc(query.map(|q| q.from_endpoint)) {
+        StatusCode::ACCEPTED.into_response()
+    } else {
+        JsonResponse::error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Multiple requests for prewarm are not allowed",
+        )
+    }
+}
+
+pub(in crate::http) async fn offload(compute: Compute) -> Response {
+    if compute.offload_lfc() {
+        StatusCode::ACCEPTED.into_response()
+    } else {
+        JsonResponse::error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Multiple requests for prewarm offload are not allowed",
+        )
+    }
+}
+
+pub(in crate::http) async fn cancel_prewarm(compute: Compute) -> StatusCode {
+    compute.cancel_prewarm();
+    StatusCode::ACCEPTED
+}

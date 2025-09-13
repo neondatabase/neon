@@ -1,46 +1,28 @@
-use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use futures_util::{Sink, Stream, ready};
-use postgres_protocol2::message::backend::Message;
+use futures_util::{Sink, StreamExt, ready};
+use postgres_protocol2::message::backend::{Message, NoticeResponseBody};
 use postgres_protocol2::message::frontend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use tokio_util::sync::PollSender;
-use tracing::{info, trace};
+use tracing::trace;
 
-use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
-use crate::error::DbError;
+use crate::Error;
+use crate::codec::{
+    BackendMessage, BackendMessages, FrontendMessage, PostgresCodec, RecordNotices,
+};
 use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::{AsyncMessage, Error, Notification};
-
-pub enum RequestMessages {
-    Single(FrontendMessage),
-}
-
-pub struct Request {
-    pub messages: RequestMessages,
-    pub sender: mpsc::Sender<BackendMessages>,
-}
-
-pub struct Response {
-    sender: PollSender<BackendMessages>,
-}
 
 #[derive(PartialEq, Debug)]
 enum State {
     Active,
     Closing,
-}
-
-enum WriteReady {
-    Terminating,
-    WaitingOnRead,
 }
 
 /// A connection to a PostgreSQL database.
@@ -52,15 +34,38 @@ enum WriteReady {
 /// occurred, or because its associated `Client` has dropped and all outstanding work has completed.
 #[must_use = "futures do nothing unless polled"]
 pub struct Connection<S, T> {
-    /// HACK: we need this in the Neon Proxy.
-    pub stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-    /// HACK: we need this in the Neon Proxy to forward params.
-    pub parameters: HashMap<String, String>,
-    receiver: mpsc::UnboundedReceiver<Request>,
-    pending_responses: VecDeque<BackendMessage>,
-    responses: VecDeque<Response>,
+    stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
+
+    sender: PollSender<BackendMessages>,
+    receiver: mpsc::UnboundedReceiver<FrontendMessage>,
+    notices: Option<RecordNotices>,
+
+    pending_response: Option<BackendMessages>,
     state: State,
 }
+
+pub const INITIAL_CAPACITY: usize = 2 * 1024;
+pub const GC_THRESHOLD: usize = 16 * 1024;
+
+/// Gargabe collect the [`BytesMut`] if it has too much spare capacity.
+pub fn gc_bytesmut(buf: &mut BytesMut) {
+    // We use a different mode to shrink the buf when above the threshold.
+    // When above the threshold, we only re-allocate when the buf has 2x spare capacity.
+    let reclaim = GC_THRESHOLD.checked_sub(buf.len()).unwrap_or(buf.len());
+
+    // `try_reclaim` tries to get the capacity from any shared `BytesMut`s,
+    // before then comparing the length against the capacity.
+    if buf.try_reclaim(reclaim) {
+        let capacity = usize::max(buf.len(), INITIAL_CAPACITY);
+
+        // Allocate a new `BytesMut` so that we deallocate the old version.
+        let mut new = BytesMut::with_capacity(capacity);
+        new.extend_from_slice(buf);
+        *buf = new;
+    }
+}
+
+pub enum Never {}
 
 impl<S, T> Connection<S, T>
 where
@@ -69,103 +74,60 @@ where
 {
     pub(crate) fn new(
         stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-        pending_responses: VecDeque<BackendMessage>,
-        parameters: HashMap<String, String>,
-        receiver: mpsc::UnboundedReceiver<Request>,
+        sender: mpsc::Sender<BackendMessages>,
+        receiver: mpsc::UnboundedReceiver<FrontendMessage>,
     ) -> Connection<S, T> {
         Connection {
             stream,
-            parameters,
+            sender: PollSender::new(sender),
             receiver,
-            pending_responses,
-            responses: VecDeque::new(),
+            notices: None,
+            pending_response: None,
             state: State::Active,
         }
     }
 
-    fn poll_response(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<BackendMessage, Error>>> {
-        if let Some(message) = self.pending_responses.pop_front() {
-            trace!("retrying pending response");
-            return Poll::Ready(Some(Ok(message)));
-        }
-
-        Pin::new(&mut self.stream)
-            .poll_next(cx)
-            .map(|o| o.map(|r| r.map_err(Error::io)))
-    }
-
     /// Read and process messages from the connection to postgres.
     /// client <- postgres
-    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<AsyncMessage, Error>> {
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Result<Never, Error>> {
         loop {
-            let message = match self.poll_response(cx)? {
-                Poll::Ready(Some(message)) => message,
-                Poll::Ready(None) => return Poll::Ready(Err(Error::closed())),
-                Poll::Pending => {
-                    trace!("poll_read: waiting on response");
-                    return Poll::Pending;
-                }
-            };
-
-            let (mut messages, request_complete) = match message {
-                BackendMessage::Async(Message::NoticeResponse(body)) => {
-                    let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
-                    return Poll::Ready(Ok(AsyncMessage::Notice(error)));
-                }
-                BackendMessage::Async(Message::NotificationResponse(body)) => {
-                    let notification = Notification {
-                        process_id: body.process_id(),
-                        channel: body.channel().map_err(Error::parse)?.to_string(),
-                        payload: body.message().map_err(Error::parse)?.to_string(),
+            let messages = match self.pending_response.take() {
+                Some(messages) => messages,
+                None => {
+                    let message = match self.stream.poll_next_unpin(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(None) => return Poll::Ready(Err(Error::closed())),
+                        Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(Error::io(e))),
+                        Poll::Ready(Some(Ok(message))) => message,
                     };
-                    return Poll::Ready(Ok(AsyncMessage::Notification(notification)));
-                }
-                BackendMessage::Async(Message::ParameterStatus(body)) => {
-                    self.parameters.insert(
-                        body.name().map_err(Error::parse)?.to_string(),
-                        body.value().map_err(Error::parse)?.to_string(),
-                    );
-                    continue;
-                }
-                BackendMessage::Async(_) => unreachable!(),
-                BackendMessage::Normal {
-                    messages,
-                    request_complete,
-                } => (messages, request_complete),
-            };
 
-            let mut response = match self.responses.pop_front() {
-                Some(response) => response,
-                None => match messages.next().map_err(Error::parse)? {
-                    Some(Message::ErrorResponse(error)) => {
-                        return Poll::Ready(Err(Error::db(error)));
+                    match message {
+                        BackendMessage::Async(Message::NoticeResponse(body)) => {
+                            self.handle_notice(body)?;
+                            continue;
+                        }
+                        BackendMessage::Async(_) => continue,
+                        BackendMessage::Normal { messages, ready } => {
+                            // if we read a ReadyForQuery from postgres, let's try GC the read buffer.
+                            if ready {
+                                gc_bytesmut(self.stream.read_buffer_mut());
+                            }
+
+                            messages
+                        }
                     }
-                    _ => return Poll::Ready(Err(Error::unexpected_message())),
-                },
+                }
             };
 
-            match response.sender.poll_reserve(cx) {
+            match self.sender.poll_reserve(cx) {
                 Poll::Ready(Ok(())) => {
-                    let _ = response.sender.send_item(messages);
-                    if !request_complete {
-                        self.responses.push_front(response);
-                    }
+                    let _ = self.sender.send_item(messages);
                 }
                 Poll::Ready(Err(_)) => {
-                    // we need to keep paging through the rest of the messages even if the receiver's hung up
-                    if !request_complete {
-                        self.responses.push_front(response);
-                    }
+                    return Poll::Ready(Err(Error::closed()));
                 }
                 Poll::Pending => {
-                    self.responses.push_front(response);
-                    self.pending_responses.push_back(BackendMessage::Normal {
-                        messages,
-                        request_complete,
-                    });
+                    self.pending_response = Some(messages);
                     trace!("poll_read: waiting on sender");
                     return Poll::Pending;
                 }
@@ -173,8 +135,33 @@ where
         }
     }
 
+    fn handle_notice(&mut self, body: NoticeResponseBody) -> Result<(), Error> {
+        let Some(notices) = &mut self.notices else {
+            return Ok(());
+        };
+
+        let mut fields = body.fields();
+        while let Some(field) = fields.next().map_err(Error::parse)? {
+            // loop until we find the message field
+            if field.type_() == b'M' {
+                // if the message field is within the limit, send it.
+                if let Some(new_limit) = notices.limit.checked_sub(field.value().len()) {
+                    match notices.sender.send(field.value().into()) {
+                        // set the new limit.
+                        Ok(()) => notices.limit = new_limit,
+                        // closed.
+                        Err(_) => self.notices = None,
+                    }
+                }
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Fetch the next client request and enqueue the response sender.
-    fn poll_request(&mut self, cx: &mut Context<'_>) -> Poll<Option<RequestMessages>> {
+    fn poll_request(&mut self, cx: &mut Context<'_>) -> Poll<Option<FrontendMessage>> {
         if self.receiver.is_closed() {
             return Poll::Ready(None);
         }
@@ -182,10 +169,7 @@ where
         match self.receiver.poll_recv(cx) {
             Poll::Ready(Some(request)) => {
                 trace!("polled new request");
-                self.responses.push_back(Response {
-                    sender: PollSender::new(request.sender),
-                });
-                Poll::Ready(Some(request.messages))
+                Poll::Ready(Some(request))
             }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -194,7 +178,7 @@ where
 
     /// Process client requests and write them to the postgres connection, flushing if necessary.
     /// client -> postgres
-    fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<WriteReady, Error>> {
+    fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         loop {
             if Pin::new(&mut self.stream)
                 .poll_ready(cx)
@@ -209,35 +193,23 @@ where
 
             match self.poll_request(cx) {
                 // send the message to postgres
-                Poll::Ready(Some(RequestMessages::Single(request))) => {
+                Poll::Ready(Some(FrontendMessage::Raw(request))) => {
                     Pin::new(&mut self.stream)
                         .start_send(request)
                         .map_err(Error::io)?;
+                }
+                Poll::Ready(Some(FrontendMessage::RecordNotices(notices))) => {
+                    self.notices = Some(notices)
                 }
                 // No more messages from the client, and no more responses to wait for.
                 // Send a terminate message to postgres
-                Poll::Ready(None) if self.responses.is_empty() => {
+                Poll::Ready(None) => {
                     trace!("poll_write: at eof, terminating");
-                    let mut request = BytesMut::new();
-                    frontend::terminate(&mut request);
-                    let request = FrontendMessage::Raw(request.freeze());
-
-                    Pin::new(&mut self.stream)
-                        .start_send(request)
-                        .map_err(Error::io)?;
+                    frontend::terminate(self.stream.write_buffer_mut());
 
                     trace!("poll_write: sent eof, closing");
                     trace!("poll_write: done");
-                    return Poll::Ready(Ok(WriteReady::Terminating));
-                }
-                // No more messages from the client, but there are still some responses to wait for.
-                Poll::Ready(None) => {
-                    trace!(
-                        "poll_write: at eof, pending responses {}",
-                        self.responses.len()
-                    );
-                    ready!(self.poll_flush(cx))?;
-                    return Poll::Ready(Ok(WriteReady::WaitingOnRead));
+                    return Poll::Ready(Ok(()));
                 }
                 // Still waiting for a message from the client.
                 Poll::Pending => {
@@ -256,6 +228,13 @@ where
         {
             Poll::Ready(()) => {
                 trace!("poll_flush: flushed");
+
+                // Since our codec prefers to share the buffer with the `Client`,
+                // if we don't release our share, then the `Client` would have to re-alloc
+                // the buffer when they next use it.
+                debug_assert!(self.stream.write_buffer().is_empty());
+                *self.stream.write_buffer_mut() = BytesMut::new();
+
                 Poll::Ready(Ok(()))
             }
             Poll::Pending => {
@@ -281,34 +260,17 @@ where
         }
     }
 
-    /// Returns the value of a runtime parameter for this connection.
-    pub fn parameter(&self, name: &str) -> Option<&str> {
-        self.parameters.get(name).map(|s| &**s)
-    }
-
-    /// Polls for asynchronous messages from the server.
-    ///
-    /// The server can send notices as well as notifications asynchronously to the client. Applications that wish to
-    /// examine those messages should use this method to drive the connection rather than its `Future` implementation.
-    pub fn poll_message(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<AsyncMessage, Error>>> {
+    fn poll_message(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Never, Error>>> {
         if self.state != State::Closing {
             // if the state is still active, try read from and write to postgres.
-            let message = self.poll_read(cx)?;
-            let closing = self.poll_write(cx)?;
-            if let Poll::Ready(WriteReady::Terminating) = closing {
+            let Poll::Pending = self.poll_read(cx)?;
+            if self.poll_write(cx)?.is_ready() {
                 self.state = State::Closing;
             }
 
-            if let Poll::Ready(message) = message {
-                return Poll::Ready(Some(Ok(message)));
-            }
-
             // poll_read returned Pending.
-            // poll_write returned Pending or Ready(WriteReady::WaitingOnRead).
-            // if poll_write returned Ready(WriteReady::WaitingOnRead), then we are waiting to read more data from postgres.
+            // poll_write returned Pending or Ready(()).
+            // if poll_write returned Ready(()), then we are waiting to read more data from postgres.
             if self.state != State::Closing {
                 return Poll::Pending;
             }
@@ -330,11 +292,9 @@ where
     type Output = Result<(), Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        while let Some(message) = ready!(self.poll_message(cx)?) {
-            if let AsyncMessage::Notice(notice) = message {
-                info!("{}: {}", notice.severity(), notice.message());
-            }
+        match self.poll_message(cx)? {
+            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
         }
-        Poll::Ready(Ok(()))
     }
 }

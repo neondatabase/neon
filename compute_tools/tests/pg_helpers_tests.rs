@@ -30,6 +30,8 @@ mod pg_helpers_tests {
             r#"fsync = off
 wal_level = logical
 hot_standby = on
+autoprewarm = off
+offload_lfc_interval_seconds = 20
 neon.safekeepers = '127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501'
 wal_log_hints = on
 log_connections = on
@@ -70,6 +72,14 @@ test.escaping = 'here''s a backslash \\ and a quote '' and a double-quote " hoor
             ("name$$$", ("$x$name$$$$x$", "xx")),
             ("name$$$$", ("$x$name$$$$$x$", "xx")),
             ("name$x$", ("$xx$name$x$$xx$", "xxx")),
+            ("x", ("$xx$x$xx$", "xxx")),
+            ("xx", ("$xxx$xx$xxx$", "xxxx")),
+            ("$x", ("$xx$$x$xx$", "xxx")),
+            ("x$", ("$xx$x$$xx$", "xxx")),
+            ("$x$", ("$xx$$x$$xx$", "xxx")),
+            ("xx$", ("$xxx$xx$$xxx$", "xxxx")),
+            ("$xx", ("$xxx$$xx$xxx$", "xxxx")),
+            ("$xx$", ("$xxx$$xx$$xxx$", "xxxx")),
         ];
 
         for (input, expected) in test_cases {

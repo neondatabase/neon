@@ -20,6 +20,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
 use tracing::{Instrument, debug, info, info_span, warn};
 use utils::auth::{AuthError, Claims, SwappableJwtAuth};
+use utils::metrics_collector::{METRICS_COLLECTOR, METRICS_STALE_MILLIS};
 
 use crate::error::{ApiError, api_error_handler, route_error_handler};
 use crate::request::{get_query_param, parse_query_param};
@@ -250,8 +251,27 @@ impl std::io::Write for ChannelWriter {
     }
 }
 
-pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+pub async fn prometheus_metrics_handler(
+    req: Request<Body>,
+    force_metric_collection_on_scrape: bool,
+) -> Result<Response<Body>, ApiError> {
     SERVE_METRICS_COUNT.inc();
+
+    // HADRON
+    let requested_use_latest = parse_query_param(&req, "use_latest")?;
+
+    let use_latest = match requested_use_latest {
+        None => force_metric_collection_on_scrape,
+        Some(true) => true,
+        Some(false) => {
+            if force_metric_collection_on_scrape {
+                // We don't cache in this case
+                true
+            } else {
+                false
+            }
+        }
+    };
 
     let started_at = std::time::Instant::now();
 
@@ -277,12 +297,18 @@ pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<
 
         let _span = span.entered();
 
-        let metrics = metrics::gather();
+        // HADRON
+        let collected = if use_latest {
+            // Skip caching the results if we always force metric collection on scrape.
+            METRICS_COLLECTOR.run_once(!force_metric_collection_on_scrape)
+        } else {
+            METRICS_COLLECTOR.last_collected()
+        };
 
         let gathered_at = std::time::Instant::now();
 
         let res = encoder
-            .encode(&metrics, &mut writer)
+            .encode(&collected.metrics, &mut writer)
             .and_then(|_| writer.flush().map_err(|e| e.into()));
 
         // this instant is not when we finally got the full response sent, sending is done by hyper
@@ -295,6 +321,10 @@ pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<
         let encoded_in = encoded_at - gathered_at - writer.wait_time();
         let total = encoded_at - started_at;
 
+        // HADRON
+        let staleness_ms = (encoded_at - collected.collected_at).as_millis();
+        METRICS_STALE_MILLIS.set(staleness_ms as i64);
+
         match res {
             Ok(()) => {
                 tracing::info!(
@@ -303,6 +333,7 @@ pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<
                     spawning_ms = spawned_in.as_millis(),
                     collection_ms = collected_in.as_millis(),
                     encoding_ms = encoded_in.as_millis(),
+                    stalenss_ms = staleness_ms,
                     "responded /metrics"
                 );
             }
@@ -527,11 +558,11 @@ async fn add_request_id_header_to_response(
     mut res: Response<Body>,
     req_info: RequestInfo,
 ) -> Result<Response<Body>, ApiError> {
-    if let Some(request_id) = req_info.context::<RequestId>() {
-        if let Ok(request_header_value) = HeaderValue::from_str(&request_id.0) {
-            res.headers_mut()
-                .insert(&X_REQUEST_ID_HEADER, request_header_value);
-        };
+    if let Some(request_id) = req_info.context::<RequestId>()
+        && let Ok(request_header_value) = HeaderValue::from_str(&request_id.0)
+    {
+        res.headers_mut()
+            .insert(&X_REQUEST_ID_HEADER, request_header_value);
     };
 
     Ok(res)
@@ -582,14 +613,14 @@ pub fn attach_openapi_ui(
                             deepLinking: true,
                             showExtensions: true,
                             showCommonExtensions: true,
-                            url: "{}",
+                            url: "{spec_mount_path}",
                         }})
                         window.ui = ui;
                     }};
                 </script>
                 </body>
                 </html>
-            "#, spec_mount_path))).unwrap())
+            "#))).unwrap())
              })
         )
 }
@@ -696,7 +727,7 @@ mod tests {
         let remote_addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 80);
         let mut service = builder.build(remote_addr);
         if let Err(e) = poll_fn(|ctx| service.poll_ready(ctx)).await {
-            panic!("request service is not ready: {:?}", e);
+            panic!("request service is not ready: {e:?}");
         }
 
         let mut req: Request<Body> = Request::default();
@@ -716,7 +747,7 @@ mod tests {
         let remote_addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 80);
         let mut service = builder.build(remote_addr);
         if let Err(e) = poll_fn(|ctx| service.poll_ready(ctx)).await {
-            panic!("request service is not ready: {:?}", e);
+            panic!("request service is not ready: {e:?}");
         }
 
         let req: Request<Body> = Request::default();

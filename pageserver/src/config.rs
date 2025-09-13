@@ -11,20 +11,23 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
-use pageserver_api::config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes};
+use pageserver_api::config::{
+    DiskUsageEvictionTaskConfig, MaxGetVectoredKeys, MaxVectoredReadBytes,
+    PageServicePipeliningConfig, PageServicePipeliningConfigPipelined, PostHogConfig,
+};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use pem::Pem;
 use postgres_backend::AuthType;
+use postgres_ffi::PgMajorVersion;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use reqwest::Url;
 use storage_broker::Uri;
 use utils::id::{NodeId, TimelineId};
 use utils::logging::{LogFormat, SecretString};
-use utils::postgres_client::PostgresClientProtocol;
 
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -58,11 +61,16 @@ pub struct PageServerConf {
     pub listen_http_addr: String,
     /// Example: 127.0.0.1:9899
     pub listen_https_addr: Option<String>,
+    /// If set, expose a gRPC API on this address.
+    /// Example: 127.0.0.1:51051
+    ///
+    /// EXPERIMENTAL: this protocol is unstable and under active development.
+    pub listen_grpc_addr: Option<String>,
 
-    /// Path to a file with certificate's private key for https API.
+    /// Path to a file with certificate's private key for https and gRPC API.
     /// Default: server.key
     pub ssl_key_file: Utf8PathBuf,
-    /// Path to a file with a X509 certificate for https API.
+    /// Path to a file with a X509 certificate for https and gRPC API.
     /// Default: server.crt
     pub ssl_cert_file: Utf8PathBuf,
     /// Period to reload certificate and private key from files.
@@ -100,6 +108,8 @@ pub struct PageServerConf {
     pub http_auth_type: AuthType,
     /// authentication method for libpq connections from compute
     pub pg_auth_type: AuthType,
+    /// authentication method for gRPC connections from compute
+    pub grpc_auth_type: AuthType,
     /// Path to a file or directory containing public key(s) for verifying JWT tokens.
     /// Used for both mgmt and compute auth, if enabled.
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
@@ -135,9 +145,13 @@ pub struct PageServerConf {
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
 
-    pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
+    pub disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
 
+    // The number of allowed failures in remote storage operations.
     pub test_remote_failures: u64,
+    // The probability of failure in remote storage operations. Only works when test_remote_failures > 1.
+    // Use 100 for 100% failure, 0 for no failure.
+    pub test_remote_failures_probability: u64,
 
     pub ondemand_download_behavior_treat_error_as_warn: bool,
 
@@ -178,6 +192,9 @@ pub struct PageServerConf {
 
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
+    /// Maximum number of keys to be read in a single get_vectored call.
+    pub max_get_vectored_keys: MaxGetVectoredKeys,
+
     pub image_compression: ImageCompressionAlgorithm,
 
     /// Whether to offload archived timelines automatically
@@ -197,8 +214,6 @@ pub struct PageServerConf {
 
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
-
-    pub wal_receiver_protocol: PostgresClientProtocol,
 
     pub page_service_pipelining: pageserver_api::config::PageServicePipeliningConfig,
 
@@ -230,6 +245,21 @@ pub struct PageServerConf {
     /// such as authentication requirements for HTTP and PostgreSQL APIs.
     /// This is insecure and should only be used in development environments.
     pub dev_mode: bool,
+
+    /// PostHog integration config.
+    pub posthog_config: Option<PostHogConfig>,
+
+    pub timeline_import_config: pageserver_api::config::TimelineImportConfig,
+
+    pub basebackup_cache_config: Option<pageserver_api::config::BasebackupCacheConfig>,
+
+    /// Defines what is a big tenant for the purpose of image layer generation.
+    /// See Timeline::should_check_if_image_layers_required
+    pub image_layer_generation_large_timeline_threshold: Option<u64>,
+
+    /// Controls whether to collect all metrics on each scrape or to return potentially stale
+    /// results.
+    pub force_metric_collection_on_scrape: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -257,6 +287,10 @@ impl PageServerConf {
 
     pub fn metadata_path(&self) -> Utf8PathBuf {
         self.workdir.join("metadata.json")
+    }
+
+    pub fn basebackup_cache_dir(&self) -> Utf8PathBuf {
+        self.workdir.join("basebackup_cache")
     }
 
     pub fn deletion_list_path(&self, sequence: u64) -> Utf8PathBuf {
@@ -317,20 +351,16 @@ impl PageServerConf {
     //
     // Postgres distribution paths
     //
-    pub fn pg_distrib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+    pub fn pg_distrib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<Utf8PathBuf> {
         let path = self.pg_distrib_dir.clone();
 
-        #[allow(clippy::manual_range_patterns)]
-        match pg_version {
-            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
-            _ => bail!("Unsupported postgres version: {}", pg_version),
-        }
+        Ok(path.join(pg_version.v_str()))
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+    pub fn pg_bin_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<Utf8PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
     }
-    pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<Utf8PathBuf> {
+    pub fn pg_lib_dir(&self, pg_version: PgMajorVersion) -> anyhow::Result<Utf8PathBuf> {
         Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
     }
 
@@ -347,6 +377,7 @@ impl PageServerConf {
             listen_pg_addr,
             listen_http_addr,
             listen_https_addr,
+            listen_grpc_addr,
             ssl_key_file,
             ssl_cert_file,
             ssl_cert_reload_period,
@@ -361,6 +392,7 @@ impl PageServerConf {
             pg_distrib_dir,
             http_auth_type,
             pg_auth_type,
+            grpc_auth_type,
             auth_validation_public_key_path,
             remote_storage,
             broker_endpoint,
@@ -372,6 +404,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval,
             disk_usage_based_eviction,
             test_remote_failures,
+            test_remote_failures_probability,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
             control_plane_api,
@@ -384,6 +417,7 @@ impl PageServerConf {
             secondary_download_concurrency,
             ingest_batch_size,
             max_vectored_read_bytes,
+            max_get_vectored_keys,
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
@@ -394,7 +428,6 @@ impl PageServerConf {
             virtual_file_io_engine,
             tenant_config,
             no_sync,
-            wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
             enable_read_path_debugging,
@@ -404,6 +437,11 @@ impl PageServerConf {
             tracing,
             enable_tls_page_service_api,
             dev_mode,
+            posthog_config,
+            timeline_import_config,
+            basebackup_cache_config,
+            image_layer_generation_large_timeline_threshold,
+            force_metric_collection_on_scrape,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -413,6 +451,7 @@ impl PageServerConf {
             listen_pg_addr,
             listen_http_addr,
             listen_https_addr,
+            listen_grpc_addr,
             ssl_key_file,
             ssl_cert_file,
             ssl_cert_reload_period,
@@ -425,6 +464,7 @@ impl PageServerConf {
             max_file_descriptors,
             http_auth_type,
             pg_auth_type,
+            grpc_auth_type,
             auth_validation_public_key_path,
             remote_storage_config: remote_storage,
             broker_endpoint,
@@ -436,6 +476,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval,
             disk_usage_based_eviction,
             test_remote_failures,
+            test_remote_failures_probability,
             ondemand_download_behavior_treat_error_as_warn,
             background_task_maximum_delay,
             control_plane_api: control_plane_api
@@ -445,18 +486,22 @@ impl PageServerConf {
             secondary_download_concurrency,
             ingest_batch_size,
             max_vectored_read_bytes,
+            max_get_vectored_keys,
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
             import_pgdata_upcall_api,
             import_pgdata_upcall_api_token: import_pgdata_upcall_api_token.map(SecretString::from),
             import_pgdata_aws_endpoint_url,
-            wal_receiver_protocol,
             page_service_pipelining,
             get_vectored_concurrent_io,
             tracing,
             enable_tls_page_service_api,
             dev_mode,
+            timeline_import_config,
+            basebackup_cache_config,
+            image_layer_generation_large_timeline_threshold,
+            force_metric_collection_on_scrape,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -513,13 +558,16 @@ impl PageServerConf {
                 }
                 None => Vec::new(),
             },
+            posthog_config,
         };
 
         // ------------------------------------------------------------
         // custom validation code that covers more than one field in isolation
         // ------------------------------------------------------------
 
-        if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
+        if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type]
+            .contains(&AuthType::NeonJWT)
+        {
             let auth_validation_public_key_path = conf
                 .auth_validation_public_key_path
                 .get_or_insert_with(|| workdir.join("auth_public_key.pem"));
@@ -540,6 +588,23 @@ impl PageServerConf {
                     ratio.numerator, ratio.denominator
                 )
             );
+
+            let url = Url::parse(&tracing_config.export_config.endpoint)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| {
+                    format!(
+                        "tracing endpoint URL is invalid : {}",
+                        tracing_config.export_config.endpoint
+                    )
+                })?;
+
+            ensure!(
+                url.scheme() == "http" || url.scheme() == "https",
+                format!(
+                    "tracing endpoint URL must start with http:// or https://: {}",
+                    tracing_config.export_config.endpoint
+                )
+            );
         }
 
         IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
@@ -550,6 +615,19 @@ impl PageServerConf {
                     conf.default_tenant_conf.checkpoint_distance
                 )
             })?;
+
+        if let PageServicePipeliningConfig::Pipelined(PageServicePipeliningConfigPipelined {
+            max_batch_size,
+            ..
+        }) = conf.page_service_pipelining
+        {
+            if max_batch_size.get() > conf.max_get_vectored_keys.get() {
+                return Err(anyhow::anyhow!(
+                    "`max_batch_size` ({max_batch_size}) must be less than or equal to `max_get_vectored_keys` ({})",
+                    conf.max_get_vectored_keys.get()
+                ));
+            }
+        };
 
         Ok(conf)
     }
@@ -565,7 +643,7 @@ impl PageServerConf {
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
         let pg_distrib_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
-        let config_toml = pageserver_api::config::ConfigToml {
+        let mut config_toml = pageserver_api::config::ConfigToml {
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             pg_distrib_dir: Some(pg_distrib_dir),
@@ -577,6 +655,15 @@ impl PageServerConf {
             control_plane_api: Some(Url::parse("http://localhost:6666").unwrap()),
             ..Default::default()
         };
+
+        // Test authors tend to forget about the default 10min initial lease deadline
+        // when writing tests, which turns their immediate gc requests via mgmt API
+        // into no-ops. Override the binary default here, such that there is no initial
+        // lease deadline by default in tests. Tests that care can always override it
+        // themselves.
+        // Cf https://databricks.atlassian.net/browse/LKB-92?focusedCommentId=6722329
+        config_toml.tenant_config.lsn_lease_length = Duration::from_secs(0);
+
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
     }
 }
@@ -637,8 +724,12 @@ impl ConfigurableSemaphore {
 #[cfg(test)]
 mod tests {
 
+    use std::time::Duration;
+
     use camino::Utf8PathBuf;
-    use utils::id::NodeId;
+    use pageserver_api::config::{DiskUsageEvictionTaskConfig, EvictionOrder};
+    use rstest::rstest;
+    use utils::{id::NodeId, serde_percent::Percent};
 
     use super::PageServerConf;
 
@@ -655,5 +746,152 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_config_tracing_endpoint_is_invalid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [tracing]
+
+            sampling_ratio = { numerator = 1, denominator = 0 }
+
+            [tracing.export_config]
+            endpoint = "localhost:4317"
+            protocol = "http-binary"
+            timeout = "1ms"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("config has valid fields");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect_err("parse_and_validate should fail for endpoint without scheme");
+    }
+
+    #[rstest]
+    #[case(32, 32, true)]
+    #[case(64, 32, false)]
+    #[case(64, 64, true)]
+    #[case(128, 128, true)]
+    fn test_config_max_batch_size_is_valid(
+        #[case] max_batch_size: usize,
+        #[case] max_get_vectored_keys: usize,
+        #[case] is_valid: bool,
+    ) {
+        let input = format!(
+            r#"
+            control_plane_api = "http://localhost:6666"
+            max_get_vectored_keys = {max_get_vectored_keys}
+            page_service_pipelining = {{ mode="pipelined", execution="concurrent-futures", max_batch_size={max_batch_size}, batching="uniform-lsn" }}
+        "#,
+        );
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+            .expect("config has valid fields");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        let result = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir);
+        assert_eq!(result.is_ok(), is_valid);
+    }
+
+    #[test]
+    fn test_config_posthog_config_is_valid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [posthog_config]
+            server_api_key = "phs_AAA"
+            client_api_key = "phc_BBB"
+            project_id = "000"
+            private_api_url = "https://us.posthog.com"
+            public_api_url = "https://us.i.posthog.com"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("posthogconfig is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_config_posthog_incomplete_config_is_valid() {
+        let input = r#"
+            control_plane_api = "http://localhost:6666"
+
+            [posthog_config]
+            server_api_key = "phs_AAA"
+            private_api_url = "https://us.posthog.com"
+            public_api_url = "https://us.i.posthog.com"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("posthogconfig is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect("parse_and_validate");
+    }
+
+    #[rstest]
+    #[
+        case::omit_the_whole_config(
+            DiskUsageEvictionTaskConfig {
+                max_usage_pct: Percent::new(80).unwrap(),
+                min_avail_bytes: 2_000_000_000,
+                period: Duration::from_secs(60),
+                eviction_order: Default::default(),
+                #[cfg(feature = "testing")]
+                mock_statvfs: None,
+                enabled: true,
+            },
+        r#"
+            control_plane_api = "http://localhost:6666"
+        "#,
+    )]
+    #[
+        case::omit_enabled_field(
+            DiskUsageEvictionTaskConfig {
+                max_usage_pct: Percent::new(80).unwrap(),
+                min_avail_bytes: 1_000_000_000,
+                period: Duration::from_secs(60),
+                eviction_order: EvictionOrder::RelativeAccessed {
+                    highest_layer_count_loses_first: true,
+                },
+                #[cfg(feature = "testing")]
+                mock_statvfs: None,
+                enabled: true,
+            },
+        r#"
+            control_plane_api = "http://localhost:6666"
+            disk_usage_based_eviction = { max_usage_pct = 80, min_avail_bytes = 1000000000, period = "60s" }
+        "#,
+    )]
+    #[case::disabled(
+        DiskUsageEvictionTaskConfig {
+            max_usage_pct: Percent::new(80).unwrap(),
+            min_avail_bytes: 2_000_000_000,
+            period: Duration::from_secs(60),
+            eviction_order: EvictionOrder::RelativeAccessed {
+                highest_layer_count_loses_first: true,
+            },
+            #[cfg(feature = "testing")]
+            mock_statvfs: None,
+            enabled: false,
+        },
+        r#"
+            control_plane_api = "http://localhost:6666"
+            disk_usage_based_eviction = { enabled = false }
+        "#
+    )]
+    fn test_config_disk_usage_based_eviction_is_valid(
+        #[case] expected_disk_usage_based_eviction: DiskUsageEvictionTaskConfig,
+        #[case] input: &str,
+    ) {
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("disk_usage_based_eviction is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        let config = PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir).unwrap();
+        let disk_usage_based_eviction = config.disk_usage_based_eviction;
+        assert_eq!(
+            expected_disk_usage_based_eviction,
+            disk_usage_based_eviction
+        );
     }
 }

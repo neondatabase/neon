@@ -10,7 +10,8 @@ from typing import Any
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin
+from fixtures.pageserver.makelayers import l0stack
 from fixtures.utils import humantime_to_ms
 
 TARGET_RUNTIME = 30
@@ -34,28 +35,18 @@ class PageServicePipeliningConfigPipelined(PageServicePipeliningConfig):
     mode: str = "pipelined"
 
 
-EXECUTION = ["concurrent-futures"]
-BATCHING = ["uniform-lsn", "scattered-lsn"]
-
-NON_BATCHABLE: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
-for max_batch_size in [1, 32]:
-    for execution in EXECUTION:
-        for batching in BATCHING:
-            NON_BATCHABLE.append(
-                PageServicePipeliningConfigPipelined(max_batch_size, execution, batching)
-            )
-
-BATCHABLE: list[PageServicePipeliningConfig] = []
+PS_IO_CONCURRENCY = ["sidecar-task"]
+PIPELINING_CONFIGS: list[PageServicePipeliningConfig] = []
 for max_batch_size in [32]:
-    for execution in EXECUTION:
-        for batching in BATCHING:
-            BATCHABLE.append(
+    for execution in ["concurrent-futures"]:
+        for batching in ["scattered-lsn"]:
+            PIPELINING_CONFIGS.append(
                 PageServicePipeliningConfigPipelined(max_batch_size, execution, batching)
             )
 
 
 @pytest.mark.parametrize(
-    "tablesize_mib, pipelining_config, target_runtime, effective_io_concurrency, readhead_buffer_size, name",
+    "tablesize_mib, pipelining_config, target_runtime, ps_io_concurrency, effective_io_concurrency, readhead_buffer_size, name",
     [
         # batchable workloads should show throughput and CPU efficiency improvements
         *[
@@ -63,20 +54,23 @@ for max_batch_size in [32]:
                 50,
                 config,
                 TARGET_RUNTIME,
+                ps_io_concurrency,
                 100,
                 128,
                 f"batchable {dataclasses.asdict(config)}",
             )
-            for config in BATCHABLE
+            for config in PIPELINING_CONFIGS
+            for ps_io_concurrency in PS_IO_CONCURRENCY
         ],
     ],
 )
-def test_throughput(
+def test_postgres_seqscan(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     tablesize_mib: int,
     pipelining_config: PageServicePipeliningConfig,
     target_runtime: int,
+    ps_io_concurrency: str,
     effective_io_concurrency: int,
     readhead_buffer_size: int,
     name: str,
@@ -97,6 +91,10 @@ def test_throughput(
     If the compute provides pipeline depth (effective_io_concurrency=100), then
     pipelining configs, especially with max_batch_size>1 should yield dramatic improvements
     in all performance metrics.
+
+    We advance the LSN from a disruptor thread to simulate the effect of a workload with concurrent writes
+    in another table. The `scattered-lsn` batching mode handles this well whereas the
+    initial implementatin (`uniform-lsn`) would break the batch.
     """
 
     #
@@ -114,7 +112,19 @@ def test_throughput(
         }
     )
     # For storing configuration as a metric, insert a fake 0 with labels with actual data
-    params.update({"pipelining_config": (0, {"labels": dataclasses.asdict(pipelining_config)})})
+    params.update(
+        {
+            "config": (
+                0,
+                {
+                    "labels": {
+                        "pipelining_config": dataclasses.asdict(pipelining_config),
+                        "ps_io_concurrency": ps_io_concurrency,
+                    }
+                },
+            )
+        }
+    )
 
     log.info("params: %s", params)
 
@@ -266,7 +276,10 @@ def test_throughput(
         return iters
 
     env.pageserver.patch_config_toml_nonrecursive(
-        {"page_service_pipelining": dataclasses.asdict(pipelining_config)}
+        {
+            "page_service_pipelining": dataclasses.asdict(pipelining_config),
+            "get_vectored_concurrent_io": {"mode": ps_io_concurrency},
+        }
     )
 
     # set trace for log analysis below
@@ -318,76 +331,62 @@ def test_throughput(
     )
 
 
-PRECISION_CONFIGS: list[PageServicePipeliningConfig] = [PageServicePipeliningConfigSerial()]
-for max_batch_size in [1, 32]:
-    for execution in EXECUTION:
-        for batching in BATCHING:
-            PRECISION_CONFIGS.append(
-                PageServicePipeliningConfigPipelined(max_batch_size, execution, batching)
-            )
-
-
 @pytest.mark.parametrize(
-    "pipelining_config,name",
-    [(config, f"{dataclasses.asdict(config)}") for config in PRECISION_CONFIGS],
+    "pipelining_config,ps_io_concurrency,l0_stack_height,queue_depth,name",
+    [
+        (config, ps_io_concurrency, l0_stack_height, queue_depth, f"{dataclasses.asdict(config)}")
+        for config in PIPELINING_CONFIGS
+        for ps_io_concurrency in PS_IO_CONCURRENCY
+        for queue_depth in [1, 2, 32]
+        for l0_stack_height in [0, 20]
+    ],
 )
-def test_latency(
+def test_random_reads(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
     pipelining_config: PageServicePipeliningConfig,
+    ps_io_concurrency: str,
+    l0_stack_height: int,
+    queue_depth: int,
     name: str,
 ):
     """
-    Measure the latency impact of pipelining in an un-batchable workloads.
-
-    An ideal implementation should not increase average or tail latencies for such workloads.
-
-    We don't have support in pagebench to create queue depth yet.
-    => https://github.com/neondatabase/neon/issues/9837
+    Throw pagebench random getpage at latest lsn workload from a single client against pageserver.
     """
 
     #
     # Setup
     #
 
+    def build_snapshot_cb(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
+        env = neon_env_builder.init_start()
+        endpoint = env.endpoints.create_start("main")
+        l0stack.make_l0_stack(
+            endpoint,
+            l0stack.L0StackShape(logical_table_size_mib=50, delta_stack_height=l0_stack_height),
+        )
+        return env
+
+    env = neon_env_builder.build_and_use_snapshot(
+        f"test_page_service_batching--test_pagebench-{l0_stack_height}", build_snapshot_cb
+    )
+
     def patch_ps_config(ps_config):
-        if pipelining_config is not None:
-            ps_config["page_service_pipelining"] = dataclasses.asdict(pipelining_config)
+        ps_config["page_service_pipelining"] = dataclasses.asdict(pipelining_config)
+        ps_config["get_vectored_concurrent_io"] = {"mode": ps_io_concurrency}
 
-    neon_env_builder.pageserver_config_override = patch_ps_config
+    env.pageserver.edit_config_toml(patch_ps_config)
 
-    env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start("main")
-    conn = endpoint.connect()
-    cur = conn.cursor()
+    env.start()
 
-    cur.execute("SET max_parallel_workers_per_gather=0")  # disable parallel backends
-    cur.execute("SET effective_io_concurrency=1")
-
-    cur.execute("CREATE EXTENSION IF NOT EXISTS neon;")
-    cur.execute("CREATE EXTENSION IF NOT EXISTS neon_test_utils;")
-
-    log.info("Filling the table")
-    cur.execute("CREATE TABLE t (data char(1000)) with (fillfactor=10)")
-    tablesize = 50 * 1024 * 1024
-    npages = tablesize // (8 * 1024)
-    cur.execute("INSERT INTO t SELECT generate_series(1, %s)", (npages,))
-    # TODO: can we force postgres to do sequential scans?
-
-    cur.close()
-    conn.close()
-
-    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
-
-    endpoint.stop()
+    lsn = env.safekeepers[0].get_commit_lsn(env.initial_tenant, env.initial_timeline)
+    ep = env.endpoints.create_start("main", lsn=lsn)
+    data_table_relnode_oid = ep.safe_psql_scalar("SELECT 'data'::regclass::oid")
+    ep.stop_and_destroy()
 
     for sk in env.safekeepers:
         sk.stop()
-
-    #
-    # Run single-threaded pagebench (TODO: dedup with other benchmark code)
-    #
 
     env.pageserver.allowed_errors.append(
         # https://github.com/neondatabase/neon/issues/6925
@@ -395,6 +394,8 @@ def test_latency(
     )
 
     ps_http = env.pageserver.http_client()
+
+    metrics_before = ps_http.get_metrics()
 
     cmd = [
         str(env.neon_binpath / "pagebench"),
@@ -405,6 +406,10 @@ def test_latency(
         env.pageserver.connstr(password=None),
         "--num-clients",
         "1",
+        "--queue-depth",
+        str(queue_depth),
+        "--only-relnode",
+        str(data_table_relnode_oid),
         "--runtime",
         "10s",
     ]
@@ -413,11 +418,21 @@ def test_latency(
     results_path = Path(basepath + ".stdout")
     log.info(f"Benchmark results at: {results_path}")
 
+    metrics_after = ps_http.get_metrics()
+
     with open(results_path) as f:
         results = json.load(f)
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 
     total = results["total"]
+
+    metric = "request_count"
+    zenbenchmark.record(
+        metric,
+        metric_value=total[metric],
+        unit="",
+        report=MetricReport.HIGHER_IS_BETTER,
+    )
 
     metric = "latency_mean"
     zenbenchmark.record(
@@ -435,3 +450,17 @@ def test_latency(
             unit="ms",
             report=MetricReport.LOWER_IS_BETTER,
         )
+
+    reads_before = metrics_before.query_one(
+        "pageserver_io_operations_seconds_count", filter={"operation": "read"}
+    )
+    reads_after = metrics_after.query_one(
+        "pageserver_io_operations_seconds_count", filter={"operation": "read"}
+    )
+
+    zenbenchmark.record(
+        "virtual_file_reads",
+        metric_value=reads_after.value - reads_before.value,
+        unit="",
+        report=MetricReport.LOWER_IS_BETTER,
+    )

@@ -1,16 +1,59 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 use crate::privilege::Privilege;
 use crate::responses::ComputeCtlConfig;
 use crate::spec::{ComputeSpec, ExtVersion, PgIdent};
 
+/// The value to place in the [`ComputeClaims::audience`] claim.
+pub static COMPUTE_AUDIENCE: &str = "compute";
+
+/// Available scopes for a compute's JWT.
+#[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeClaimsScope {
+    /// An admin-scoped token allows access to all of `compute_ctl`'s authorized
+    /// facilities.
+    #[serde(rename = "compute_ctl:admin")]
+    Admin,
+}
+
+impl FromStr for ComputeClaimsScope {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "compute_ctl:admin" => Ok(ComputeClaimsScope::Admin),
+            _ => Err(anyhow::anyhow!("invalid compute claims scope \"{s}\"")),
+        }
+    }
+}
+
 /// When making requests to the `compute_ctl` external HTTP server, the client
 /// must specify a set of claims in `Authorization` header JWTs such that
 /// `compute_ctl` can authorize the request.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename = "snake_case")]
 pub struct ComputeClaims {
-    pub compute_id: String,
+    /// The compute ID that will validate the token. The only case in which this
+    /// can be [`None`] is if [`Self::scope`] is
+    /// [`ComputeClaimsScope::Admin`].
+    pub compute_id: Option<String>,
+
+    /// The scope of what the token authorizes.
+    pub scope: Option<ComputeClaimsScope>,
+
+    /// The recipient the token is intended for.
+    ///
+    /// See [RFC 7519](https://www.rfc-editor.org/rfc/rfc7519#section-4.1.3) for
+    /// more information.
+    ///
+    /// TODO: Remove the [`Option`] wrapper when control plane learns to send
+    /// the claim.
+    #[serde(rename = "aud")]
+    pub audience: Option<Vec<String>>,
 }
 
 /// Request of the /configure API
@@ -37,4 +80,24 @@ pub struct SetRoleGrantsRequest {
     pub schema: PgIdent,
     pub privileges: Vec<Privilege>,
     pub role: PgIdent,
+}
+
+#[cfg(test)]
+mod test {
+    use std::str::FromStr;
+
+    use crate::requests::ComputeClaimsScope;
+
+    /// Confirm that whether we parse the scope by string or through serde, the
+    /// same values parse to the same enum variant.
+    #[test]
+    fn compute_request_scopes() {
+        const ADMIN_SCOPE: &str = "compute_ctl:admin";
+
+        let from_serde: ComputeClaimsScope =
+            serde_json::from_str(&format!("\"{ADMIN_SCOPE}\"")).unwrap();
+        let from_str = ComputeClaimsScope::from_str(ADMIN_SCOPE).unwrap();
+
+        assert_eq!(from_serde, from_str);
+    }
 }

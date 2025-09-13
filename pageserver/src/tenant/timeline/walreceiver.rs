@@ -79,7 +79,7 @@ impl WalReceiver {
         let loop_status = Arc::new(std::sync::RwLock::new(None));
         let manager_status = Arc::clone(&loop_status);
         let cancel = timeline.cancel.child_token();
-        WALRECEIVER_RUNTIME.spawn({
+        let _task = WALRECEIVER_RUNTIME.spawn({
             let cancel = cancel.clone();
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
@@ -112,7 +112,7 @@ impl WalReceiver {
                 }
                 connection_manager_state.shutdown().await;
                 *loop_status.write().unwrap() = None;
-                debug!("task exits");
+                info!("task exits");
             }
             .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), timeline_id = %timeline_id))
         });
@@ -124,7 +124,7 @@ impl WalReceiver {
     }
 
     #[instrument(skip_all, level = tracing::Level::DEBUG)]
-    pub fn cancel(&self) {
+    pub async fn cancel(self) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         debug!("cancelling walreceiver tasks");
         self.cancel.cancel();

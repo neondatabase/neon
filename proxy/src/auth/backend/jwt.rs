@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwapOption;
+use base64::Engine as _;
+use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use clashmap::ClashMap;
 use jose_jwk::crypto::KeyInfo;
 use reqwest::{Client, redirect};
@@ -347,17 +349,17 @@ impl JwkCacheEntryLock {
             .split_once('.')
             .ok_or(JwtEncodingError::InvalidCompactForm)?;
 
-        let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)?;
+        let header = BASE64_URL_SAFE_NO_PAD.decode(header)?;
         let header = serde_json::from_slice::<JwtHeader<'_>>(&header)?;
 
-        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)?;
+        let payloadb = BASE64_URL_SAFE_NO_PAD.decode(payload)?;
         let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)?;
 
         if let Some(iss) = &payload.issuer {
             ctx.set_jwt_issuer(iss.as_ref().to_owned());
         }
 
-        let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)?;
+        let sig = BASE64_URL_SAFE_NO_PAD.decode(signature)?;
 
         let kid = header.key_id.ok_or(JwtError::MissingKeyId)?;
 
@@ -397,28 +399,36 @@ impl JwkCacheEntryLock {
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 
-        if let Some(aud) = expected_audience {
-            if payload.audience.0.iter().all(|s| s != aud) {
-                return Err(JwtError::InvalidClaims(
-                    JwtClaimsError::InvalidJwtTokenAudience,
-                ));
-            }
+        if let Some(aud) = expected_audience
+            && payload.audience.0.iter().all(|s| s != aud)
+        {
+            return Err(JwtError::InvalidClaims(
+                JwtClaimsError::InvalidJwtTokenAudience,
+            ));
         }
 
         let now = SystemTime::now();
 
-        if let Some(exp) = payload.expiration {
-            if now >= exp + CLOCK_SKEW_LEEWAY {
-                return Err(JwtError::InvalidClaims(JwtClaimsError::JwtTokenHasExpired));
-            }
+        if let Some(exp) = payload.expiration
+            && now >= exp + CLOCK_SKEW_LEEWAY
+        {
+            return Err(JwtError::InvalidClaims(JwtClaimsError::JwtTokenHasExpired(
+                exp.duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            )));
         }
 
-        if let Some(nbf) = payload.not_before {
-            if nbf >= now + CLOCK_SKEW_LEEWAY {
-                return Err(JwtError::InvalidClaims(
-                    JwtClaimsError::JwtTokenNotYetReadyToUse,
-                ));
-            }
+        if let Some(nbf) = payload.not_before
+            && nbf >= now + CLOCK_SKEW_LEEWAY
+        {
+            return Err(JwtError::InvalidClaims(
+                JwtClaimsError::JwtTokenNotYetReadyToUse(
+                    nbf.duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                ),
+            ));
         }
 
         Ok(ComputeCredentialKeys::JwtPayload(payloadb))
@@ -534,10 +544,10 @@ struct JwtPayload<'a> {
     #[serde(rename = "aud", default)]
     audience: OneOrMany,
     /// Expiration - Time after which the JWT expires
-    #[serde(deserialize_with = "numeric_date_opt", rename = "exp", default)]
+    #[serde(rename = "exp", deserialize_with = "numeric_date_opt", default)]
     expiration: Option<SystemTime>,
-    /// Not before - Time after which the JWT expires
-    #[serde(deserialize_with = "numeric_date_opt", rename = "nbf", default)]
+    /// Not before - Time before which the JWT is not valid
+    #[serde(rename = "nbf", deserialize_with = "numeric_date_opt", default)]
     not_before: Option<SystemTime>,
 
     // the following entries are only extracted for the sake of debug logging.
@@ -609,8 +619,15 @@ impl<'de> Deserialize<'de> for OneOrMany {
 }
 
 fn numeric_date_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
-    let d = <Option<u64>>::deserialize(d)?;
-    Ok(d.map(|n| SystemTime::UNIX_EPOCH + Duration::from_secs(n)))
+    <Option<u64>>::deserialize(d)?
+        .map(|t| {
+            SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_secs(t))
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format_args!("timestamp out of bounds: {t}"))
+                })
+        })
+        .transpose()
 }
 
 struct JwkRenewalPermit<'a> {
@@ -746,11 +763,11 @@ pub enum JwtClaimsError {
     #[error("invalid JWT token audience")]
     InvalidJwtTokenAudience,
 
-    #[error("JWT token has expired")]
-    JwtTokenHasExpired,
+    #[error("JWT token has expired (exp={0})")]
+    JwtTokenHasExpired(u64),
 
-    #[error("JWT token is not yet ready to use")]
-    JwtTokenNotYetReadyToUse,
+    #[error("JWT token is not yet ready to use (nbf={0})")]
+    JwtTokenNotYetReadyToUse(u64),
 }
 
 #[allow(dead_code, reason = "Debug use only")]
@@ -781,13 +798,12 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::SystemTime;
 
-    use base64::URL_SAFE_NO_PAD;
     use bytes::Bytes;
     use http::Response;
     use http_body_util::Full;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
-    use rand::rngs::OsRng;
+    use rand_core::OsRng;
     use rsa::pkcs8::DecodePrivateKey;
     use serde::Serialize;
     use serde_json::json;
@@ -856,9 +872,8 @@ mod tests {
             key_id: Some(Cow::Owned(kid)),
         };
 
-        let header =
-            base64::encode_config(serde_json::to_string(&header).unwrap(), URL_SAFE_NO_PAD);
-        let body = base64::encode_config(serde_json::to_string(&body).unwrap(), URL_SAFE_NO_PAD);
+        let header = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_string(&header).unwrap());
+        let body = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_string(&body).unwrap());
 
         format!("{header}.{body}")
     }
@@ -868,7 +883,7 @@ mod tests {
 
         let payload = build_jwt_payload(kid, jose_jwa::Signing::Es256);
         let sig: Signature = SigningKey::from(key).sign(payload.as_bytes());
-        let sig = base64::encode_config(sig.to_bytes(), URL_SAFE_NO_PAD);
+        let sig = BASE64_URL_SAFE_NO_PAD.encode(sig.to_bytes());
 
         format!("{payload}.{sig}")
     }
@@ -878,7 +893,7 @@ mod tests {
 
         let payload = build_custom_jwt_payload(kid, body, jose_jwa::Signing::Es256);
         let sig: Signature = SigningKey::from(key).sign(payload.as_bytes());
-        let sig = base64::encode_config(sig.to_bytes(), URL_SAFE_NO_PAD);
+        let sig = BASE64_URL_SAFE_NO_PAD.encode(sig.to_bytes());
 
         format!("{payload}.{sig}")
     }
@@ -889,7 +904,7 @@ mod tests {
 
         let payload = build_jwt_payload(kid, jose_jwa::Signing::Rs256);
         let sig = SigningKey::<sha2::Sha256>::new(key).sign(payload.as_bytes());
-        let sig = base64::encode_config(sig.to_bytes(), URL_SAFE_NO_PAD);
+        let sig = BASE64_URL_SAFE_NO_PAD.encode(sig.to_bytes());
 
         format!("{payload}.{sig}")
     }
@@ -1233,14 +1248,14 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                     "nbf": now + 60,
                     "aud": "neon",
                 }},
-                error: JwtClaimsError::JwtTokenNotYetReadyToUse,
+                error: JwtClaimsError::JwtTokenNotYetReadyToUse(now + 60),
             },
             Test {
                 body: json! {{
                     "exp": now - 60,
                     "aud": ["neon"],
                 }},
-                error: JwtClaimsError::JwtTokenHasExpired,
+                error: JwtClaimsError::JwtTokenHasExpired(now - 60),
             },
             Test {
                 body: json! {{

@@ -14,7 +14,6 @@ use super::xlog_utils::*;
 use crate::WAL_SEGMENT_SIZE;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::*;
-use log::*;
 use std::cmp::min;
 use std::num::NonZeroU32;
 use utils::lsn::Lsn;
@@ -114,7 +113,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
 
                         let hdr = XLogLongPageHeaderData::from_bytes(&mut self.inputbuf).map_err(
                             |e| WalDecodeError {
-                                msg: format!("long header deserialization failed {}", e),
+                                msg: format!("long header deserialization failed {e}"),
                                 lsn: self.lsn,
                             },
                         )?;
@@ -130,7 +129,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
                         let hdr =
                             XLogPageHeaderData::from_bytes(&mut self.inputbuf).map_err(|e| {
                                 WalDecodeError {
-                                    msg: format!("header deserialization failed {}", e),
+                                    msg: format!("header deserialization failed {e}"),
                                     lsn: self.lsn,
                                 }
                             })?;
@@ -155,7 +154,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
                     let xl_tot_len = (&self.inputbuf[0..4]).get_u32_le();
                     if (xl_tot_len as usize) < XLOG_SIZE_OF_XLOG_RECORD {
                         return Err(WalDecodeError {
-                            msg: format!("invalid xl_tot_len {}", xl_tot_len),
+                            msg: format!("invalid xl_tot_len {xl_tot_len}"),
                             lsn: self.lsn,
                         });
                     }
@@ -218,7 +217,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
         let xlogrec =
             XLogRecord::from_slice(&recordbuf[0..XLOG_SIZE_OF_XLOG_RECORD]).map_err(|e| {
                 WalDecodeError {
-                    msg: format!("xlog record deserialization failed {}", e),
+                    msg: format!("xlog record deserialization failed {e}"),
                     lsn: self.lsn,
                 }
             })?;
@@ -236,7 +235,7 @@ impl WalStreamDecoderHandler for WalStreamDecoder {
         // XLOG_SWITCH records are special. If we see one, we need to skip
         // to the next WAL segment.
         let next_lsn = if xlogrec.is_xlog_switch_record() {
-            trace!("saw xlog switch record at {}", self.lsn);
+            tracing::trace!("saw xlog switch record at {}", self.lsn);
             self.lsn + self.lsn.calc_padding(WAL_SEGMENT_SIZE as u64)
         } else {
             // Pad to an 8-byte boundary

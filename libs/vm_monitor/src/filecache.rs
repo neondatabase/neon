@@ -285,7 +285,7 @@ impl FileCacheState {
         // why we're constructing the query here.
         self.client
             .query(
-                &format!("ALTER SYSTEM SET neon.file_cache_size_limit = {};", num_mb),
+                &format!("ALTER SYSTEM SET neon.file_cache_size_limit = {num_mb};"),
                 &[],
             )
             .await

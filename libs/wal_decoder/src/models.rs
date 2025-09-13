@@ -25,6 +25,9 @@
 //!                     |
 //!                     |--> write to KV store within the pageserver
 
+pub mod record;
+pub mod value;
+
 use bytes::Bytes;
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::walrecord::{

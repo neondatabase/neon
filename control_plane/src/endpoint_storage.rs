@@ -3,17 +3,19 @@ use crate::local_env::LocalEnv;
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 /// Directory within .neon which will be used by default for LocalFs remote storage.
 pub const ENDPOINT_STORAGE_REMOTE_STORAGE_DIR: &str = "local_fs_remote_storage/endpoint_storage";
-pub const ENDPOINT_STORAGE_DEFAULT_PORT: u16 = 9993;
+pub const ENDPOINT_STORAGE_DEFAULT_ADDR: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9993);
 
 pub struct EndpointStorage {
     pub bin: Utf8PathBuf,
     pub data_dir: Utf8PathBuf,
     pub pemfile: Utf8PathBuf,
-    pub port: u16,
+    pub addr: SocketAddr,
 }
 
 impl EndpointStorage {
@@ -22,7 +24,7 @@ impl EndpointStorage {
             bin: Utf8PathBuf::from_path_buf(env.endpoint_storage_bin()).unwrap(),
             data_dir: Utf8PathBuf::from_path_buf(env.endpoint_storage_data_dir()).unwrap(),
             pemfile: Utf8PathBuf::from_path_buf(env.public_key_path.clone()).unwrap(),
-            port: env.endpoint_storage.port,
+            addr: env.endpoint_storage.listen_addr,
         }
     }
 
@@ -31,7 +33,7 @@ impl EndpointStorage {
     }
 
     fn listen_addr(&self) -> Utf8PathBuf {
-        format!("127.0.0.1:{}", self.port).into()
+        format!("{}:{}", self.addr.ip(), self.addr.port()).into()
     }
 
     pub fn init(&self) -> Result<()> {

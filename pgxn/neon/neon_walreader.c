@@ -69,6 +69,7 @@ struct NeonWALReader
 	WALSegmentContext segcxt;
 	WALOpenSegment seg;
 	int			wre_errno;
+	TimeLineID	local_active_tlid;
 	/* Explains failure to read, static for simplicity. */
 	char		err_msg[NEON_WALREADER_ERR_MSG_LEN];
 
@@ -106,7 +107,7 @@ struct NeonWALReader
 
 /* palloc and initialize NeonWALReader */
 NeonWALReader *
-NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, char *log_prefix)
+NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, char *log_prefix, TimeLineID tlid)
 {
 	NeonWALReader *reader;
 
@@ -118,6 +119,7 @@ NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, char *log_
 		MemoryContextAllocZero(TopMemoryContext, sizeof(NeonWALReader));
 
 	reader->available_lsn = available_lsn;
+	reader->local_active_tlid = tlid;
 	reader->seg.ws_file = -1;
 	reader->seg.ws_segno = 0;
 	reader->seg.ws_tli = 0;
@@ -150,7 +152,7 @@ NeonWALReaderFree(NeonWALReader *state)
  * fetched from timeline 'tli'.
  *
  * Returns NEON_WALREAD_SUCCESS if succeeded, NEON_WALREAD_ERROR if an error
- * occurs, in which case 'err' has the desciption. Error always closes remote
+ * occurs, in which case 'err' has the description. Error always closes remote
  * connection, if there was any, so socket subscription should be removed.
  *
  * NEON_WALREAD_WOULDBLOCK means caller should obtain socket to wait for with
@@ -575,6 +577,17 @@ bool
 NeonWALReaderIsRemConnEstablished(NeonWALReader *state)
 {
 	return state->rem_state == RS_ESTABLISHED;
+}
+
+/*
+ * Whether remote connection is established. Once this is done, until successful
+ * local read or error socket is stable and user can update socket events
+ * instead of readding it each time.
+ */
+TimeLineID
+NeonWALReaderLocalActiveTimeLineID(NeonWALReader *state)
+{
+	return state->local_active_tlid;
 }
 
 /*

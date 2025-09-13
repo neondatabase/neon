@@ -20,7 +20,7 @@ In our case consensus leader is compute (walproposer), and we don't want to wake
 up all computes for the change. Neither we want to fully reimplement the leader
 logic second time outside compute. Because of that the proposed algorithm relies
 for issuing configurations on the external fault tolerant (distributed) strongly
-consisent storage with simple API: CAS (compare-and-swap) on the single key.
+consistent storage with simple API: CAS (compare-and-swap) on the single key.
 Properly configured postgres suits this.
 
 In the system consensus is implemented at the timeline level, so algorithm below
@@ -34,7 +34,7 @@ A configuration is
 
 ```
 struct Configuration {
-    generation: Generation, // a number uniquely identifying configuration
+    generation: SafekeeperGeneration, // a number uniquely identifying configuration
     sk_set: Vec<NodeId>, // current safekeeper set
     new_sk_set: Optional<Vec<NodeId>>,
 }
@@ -81,11 +81,11 @@ configuration generation in them is less than its current one. Namely, it
 refuses to vote, to truncate WAL in `handle_elected` and to accept WAL. In
 response it sends its current configuration generation to let walproposer know.
 
-Safekeeper gets `PUT /v1/tenants/{tenant_id}/timelines/{timeline_id}/configuration`
-accepting `Configuration`. Safekeeper switches to the given conf it is higher than its
+Safekeeper gets `PUT /v1/tenants/{tenant_id}/timelines/{timeline_id}/membership`
+accepting `Configuration`. Safekeeper switches to the given conf if it is higher than its
 current one and ignores it otherwise. In any case it replies with
 ```
-struct ConfigurationSwitchResponse {
+struct TimelineMembershipSwitchResponse {
     conf: Configuration,
     term: Term,
     last_log_term: Term,
@@ -108,7 +108,7 @@ establishes this configuration as its own and moves to voting.
 It should stop talking to safekeepers not listed in the configuration at this
 point, though it is not unsafe to continue doing so.
 
-To be elected it must receive votes from both majorites if `new_sk_set` is present.
+To be elected it must receive votes from both majorities if `new_sk_set` is present.
 Similarly, to commit WAL it must receive flush acknowledge from both majorities.
 
 If walproposer hears from safekeeper configuration higher than his own (i.e.
@@ -130,7 +130,7 @@ storage are reachable.
 1) Fetch current timeline configuration from the configuration storage.
 2) If it is already joint one and `new_set` is different from `desired_set`
    refuse to change. However, assign join conf to (in memory) var
-   `join_conf` and proceed to step 4 to finish the ongoing change.
+   `joint_conf` and proceed to step 4 to finish the ongoing change.
 3) Else, create joint `joint_conf: Configuration`: increment current conf number
    `n` and put `desired_set` to `new_sk_set`. Persist it in the configuration
    storage by doing CAS on the current generation: change happens only if
@@ -161,11 +161,11 @@ storage are reachable.
    because `pull_timeline` already includes it and plus additionally would be
    broadcast by compute. More importantly, we may proceed to the next step
    only when `<last_log_term, flush_lsn>` on the majority of the new set reached
-   `sync_position`. Similarly, on the happy path no waiting is not needed because
+   `sync_position`. Similarly, on the happy path no waiting is needed because
    `pull_timeline` already includes it. However, we should double
     check to be safe. For example, timeline could have been created earlier e.g.
     manually or after try-to-migrate, abort, try-to-migrate-again sequence.
-7) Create `new_conf: Configuration` incrementing `join_conf` generation and having new
+7) Create `new_conf: Configuration` incrementing `joint_conf` generation and having new
    safekeeper set as `sk_set` and None `new_sk_set`. Write it to configuration
    storage under one more CAS.
 8) Call `PUT` `configuration` on safekeepers from the new set,
@@ -178,12 +178,12 @@ spec of it.
 
 Description above focuses on safety. To make the flow practical and live, here a few more
 considerations.
-1) It makes sense to ping new set to ensure it we are migrating to live node(s) before
+1) It makes sense to ping new set to ensure we are migrating to live node(s) before
   step 3.
 2) If e.g. accidentally wrong new sk set has been specified, before CAS in step `6` is completed
    it is safe to rollback to the old conf with one more CAS.
 3) On step 4 timeline might be already created on members of the new set for various reasons;
-   the simplest is the procedure restart. There are more complicated scenarious like mentioned
+   the simplest is the procedure restart. There are more complicated scenarios like mentioned
    in step 5. Deleting and re-doing `pull_timeline` is generally unsafe without involving
    generations, so seems simpler to treat existing timeline as success. However, this also
    has a disadvantage: you might imagine an surpassingly unlikely schedule where condition in
@@ -192,7 +192,7 @@ considerations.
 4) In the end timeline should be locally deleted on the safekeeper(s) which are
    in the old set but not in the new one, unless they are unreachable. To be
    safe this also should be done under generation number (deletion proceeds only if
-   current configuration is <= than one in request and safekeeper is not memeber of it).
+   current configuration is <= than one in request and safekeeper is not member of it).
 5) If current conf fetched on step 1 is already not joint and members equal to `desired_set`,
    jump to step 7, using it as `new_conf`.
 
@@ -261,14 +261,14 @@ Timeline (branch) creation in cplane should call storage_controller POST
 Response should be augmented with `safekeepers_generation` and `safekeepers`
 fields like described in `/notify-safekeepers` above. Initially (currently)
 these fields may be absent; in this case cplane chooses safekeepers on its own
-like it currently does. The call should be retried until succeeds.
+like it currently does. The call should be retried until it succeeds.
 
 Timeline deletion and tenant deletion in cplane should call appropriate
 storage_controller endpoints like it currently does for sharded tenants. The
 calls should be retried until they succeed.
 
-When compute receives safekeepers list from control plane it needs to know the
-generation to checked whether it should be updated (note that compute may get
+When compute receives safekeeper list from control plane it needs to know the
+generation to check whether it should be updated (note that compute may get
 safekeeper list from either cplane or safekeepers). Currently `neon.safekeepers`
 GUC is just a comma separates list of `host:port`. Let's prefix it with
 `g#<generation>:` to this end, so it will look like
@@ -305,8 +305,8 @@ enum MigrationRequest {
 ```
 
 `FinishPending` requests to run the procedure to ensure state is clean: current
-configuration is not joint and majority of safekeepers are aware of it, but do
-not attempt to migrate anywhere. If current configuration fetched on step 1 is
+configuration is not joint and the majority of safekeepers are aware of it, but do
+not attempt to migrate anywhere. If the current configuration fetched on step 1 is
 not joint it jumps to step 7. It should be run at startup for all timelines (but
 similarly, in the first version it is ok to trigger it manually).
 
@@ -315,7 +315,7 @@ similarly, in the first version it is ok to trigger it manually).
 `safekeepers` table mirroring current `nodes` should be added, except that for
 `scheduling_policy`: it is enough to have at least in the beginning only 3
 fields: 1) `active` 2) `paused` (initially means only not assign new tlis there
-3) `decomissioned` (node is removed).
+3) `decommissioned` (node is removed).
 
 `timelines` table:
 ```
@@ -326,9 +326,10 @@ table! {
         tenant_id -> Varchar,
         start_lsn -> pg_lsn,
         generation -> Int4,
-        sk_set -> Array<Int4>, // list of safekeeper ids
+        sk_set -> Array<Int8>, // list of safekeeper ids
         new_sk_set -> Nullable<Array<Int8>>, // list of safekeeper ids, null if not joint conf
         cplane_notified_generation -> Int4,
+        sk_set_notified_generation -> Int4, // the generation a quorum of sk_set knows about
         deleted_at -> Nullable<Timestamptz>,
     }
 }
@@ -338,13 +339,23 @@ table! {
 might also want to add ancestor_timeline_id to preserve the hierarchy, but for
 this RFC it is not needed.
 
+`cplane_notified_generation` and `sk_set_notified_generation` fields are used to
+track the last stage of the algorithm, when we need to notify safekeeper set and cplane
+with the final configuration after it's already committed to DB.
+
+The timeline is up-to-date (no migration in progress) if `new_sk_set` is null and
+`*_notified_generation` fields are up to date with `generation`. 
+
+It's possible to replace `*_notified_generation` with one boolean field `migration_completed`,
+but for better observability it's nice to have them separately.
+
 #### API
 
 Node management is similar to pageserver:
-1) POST `/control/v1/safekeepers` inserts safekeeper.
-2) GET `/control/v1/safekeepers` lists safekeepers.
-3) GET `/control/v1/safekeepers/:node_id` gets safekeeper.
-4) PUT `/control/v1/safekepers/:node_id/status` changes status to e.g.
+1) POST `/control/v1/safekeeper` inserts safekeeper.
+2) GET `/control/v1/safekeeper` lists safekeepers.
+3) GET `/control/v1/safekeeper/:node_id` gets safekeeper.
+4) PUT `/control/v1/safekeper/:node_id/scheduling_policy` changes status to e.g.
    `offline` or `decomissioned`. Initially it is simpler not to schedule any
     migrations here.
 
@@ -368,8 +379,8 @@ Migration API: the first version is the simplest and the most imperative:
 all timelines from one safekeeper to another. It accepts json
 ```
 {
-    "src_sk": u32,
-    "dst_sk": u32,
+    "src_sk": NodeId,
+    "dst_sk": NodeId,
     "limit": Optional<u32>,
 }
 ```
@@ -379,12 +390,15 @@ Returns list of scheduled requests.
 2) PUT `/control/v1/tenant/:tenant_id/timeline/:timeline_id/safekeeper_migrate` schedules `MigrationRequest`
    to move single timeline to given set of safekeepers:
 ```
-{
-    "desired_set": Vec<u32>,
+struct TimelineSafekeeperMigrateRequest {
+    "new_sk_set": Vec<NodeId>,
 }
 ```
 
-Returns scheduled request.
+In the first version the handler migrates the timeline to `new_sk_set` synchronously.
+Should be retried until success.
+
+In the future we might change it to asynchronous API and return scheduled request.
 
 Similar call should be added for the tenant.
 
@@ -434,6 +448,9 @@ table! {
 }
 ```
 
+We load all pending ops from the table on startup into the memory.
+The table is needed only to preserve the state between restarts.
+
 `op_type` can be `include` (seed from peers and ensure generation is up to
 date), `exclude` (remove locally) and `delete`. Field is actually not strictly
 needed as it can be computed from current configuration, but gives more explicit
@@ -474,7 +491,7 @@ actions must be idempotent. Now, a tricky point here is timeline start LSN. For
 the initial (tenant creation) call cplane doesn't know it. However, setting
 start_lsn on safekeepers during creation is a good thing -- it provides a
 guarantee that walproposer can always find a common point in WAL histories of
-safekeeper and its own, and so absense of it would be a clear sign of
+safekeeper and its own, and so absence of it would be a clear sign of
 corruption. The following sequence works:
 1) Create timeline (or observe that it exists) on pageserver,
    figuring out last_record_lsn in response.
@@ -497,11 +514,9 @@ corruption. The following sequence works:
    retries the call until 200 response.
 
    There is a small question how request handler (timeline creation in this
-   case) would interact with per sk reconciler. As always I prefer to do the
-   simplest possible thing and here it seems to be just waking it up so it
-   re-reads the db for work to do. Passing work in memory is faster, but
-   that shouldn't matter, and path to scan db for work will exist anyway, 
-   simpler to reuse it.
+   case) would interact with per sk reconciler. In the current implementation
+   we first persist the request in the DB, and then send an in-memory request
+   to each safekeeper reconciler to process it.
 
 For pg version / wal segment size: while we may persist them in `timelines`
 table, it is not necessary as initial creation at step 3 can take them from
@@ -509,29 +524,39 @@ pageserver or cplane creation call and later pull_timeline will carry them
 around.
 
 Timeline migration.
-1) CAS to the db to create joint conf, and in the same transaction create
-   `safekeeper_timeline_pending_ops` `include` entries to initialize new members
-   as well as deliver this conf to current ones; poke per sk reconcilers to work
-   on it. Also any conf change should also poke cplane notifier task(s).
-2) Once it becomes possible per alg description above, get out of joint conf
-   with another CAS. Task should get wakeups from per sk reconcilers because 
-   conf switch is required for advancement; however retries should be sleep
-   based as well as LSN advancement might be needed, though in happy path 
-   it isn't. To see whether further transition is possible on wakup migration
-   executor polls safekeepers per the algorithm. CAS creating new conf with only
-   new members should again insert entries to `safekeeper_timeline_pending_ops`
-   to switch them there, as well as `exclude` rows to remove timeline from 
-   old members.
+1) CAS to the db to create joint conf. Since this moment the migration is considered to be 
+   "in progress". We can detect all "in-progress" migrations looking into the database.
+2) Do steps 4-6 from the algorithm, including `pull_timeline` onto `new_sk_set`, update membership
+   configuration on all safekeepers, notify cplane, etc. All operations are idempotent,
+   so we don't need to persist anything in the database at this stage. If any errors occur,
+   it's safe to retry or abort the migration.
+3) Once it becomes possible per alg description above, get out of joint conf
+   with another CAS. Also should insert `exclude` entries into `safekeeper_timeline_pending_ops`
+   in the same DB transaction. Adding `exclude` entries atomically is nesessary because after
+   CAS we don't have the list of excluded safekeepers in the `timelines` table anymore, but we
+   need to have them persisted somewhere in case the migration is interrupted right after the CAS.
+4) Finish the migration. The final membership configuration is committed to the DB at this stage.
+   So, the migration can not be aborted anymore. But it can still be retried if the migration fails
+   past stage 3. To finish the migration we need to send the new membership configuration to
+   a new quorum of safekeepers, notify cplane with the new safekeeper list and schedule the `exclude`
+   requests to in-memory queue for safekeeper reconciler. If the algrorithm is retried, it's
+   possible that we have already committed `exclude` requests to DB, but didn't send them to
+   the in-memory queue. In this case we need to read them from `safekeeper_timeline_pending_ops`
+   because it's the only place where they are persistent. The fields `sk_set_notified_generation`
+   and `cplane_notified_generation` are updated after each step. The migration is considered
+   fully completed when they match the `generation` field.
+
+In practice, we can report "success" after stage 3 and do the "finish" step in per-timeline
+reconciler (if we implement it). But it's wise to at least try to finish them synchronously,
+so the timeline is always in a "good state" and doesn't require an old quorum to commit
+WAL after the migration reported "success".
 
 Timeline deletion: just set `deleted_at` on the timeline row and insert
 `safekeeper_timeline_pending_ops` entries in the same xact, the rest is done by
 per sk reconcilers.
 
-When node is removed (set to `decomissioned`), `safekeeper_timeline_pending_ops`
+When node is removed (set to `decommissioned`), `safekeeper_timeline_pending_ops`
 for it must be cleared in the same transaction.
-
-One more task pool should infinitely retry notifying control plane about changed
-safekeeper sets (trying making `cplane_notified_generation` equal `generation`).
 
 #### Dealing with multiple instances of storage_controller
 
@@ -541,7 +566,7 @@ of storage_controller it is fine to have it temporarily, e.g. during redeploy.
 
 To harden against some controller instance creating some work in
 `safekeeper_timeline_pending_ops` and then disappearing without anyone pickup up
-the job per sk reconcilers apart from explicit wakups should scan for work
+the job per sk reconcilers apart from explicit wakeups should scan for work
 periodically. It is possible to remove that though if all db updates are
 protected with leadership token/term -- then such scans are needed only after
 leadership is acquired.
@@ -563,7 +588,7 @@ There should be following layers of tests:
    safekeeper communication and pull_timeline need to be mocked and main switch
    procedure wrapped to as a node (thread) in simulation tests, using these
    mocks. Test would inject migrations like it currently injects
-   safekeeper/walproposer restars. Main assert is the same -- committed WAL must
+   safekeeper/walproposer restarts. Main assert is the same -- committed WAL must
    not be lost.
 
 3) Since simulation testing injects at relatively high level points (not
@@ -613,7 +638,7 @@ Let's have the following implementation bits for gradual rollout:
   `notify-safekeepers`.
 
 Then the rollout for a region would be:
-- Current situation: safekeepers are choosen by control_plane.
+- Current situation: safekeepers are chosen by control_plane.
 - We manually migrate some timelines, test moving them around.
 - Then we enable `--set-safekeepers` so that all new timelines
   are on storage controller.

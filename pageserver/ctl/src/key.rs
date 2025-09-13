@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use pageserver_api::key::Key;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
-use pageserver_api::shard::{ShardCount, ShardStripeSize};
+use pageserver_api::shard::{DEFAULT_STRIPE_SIZE, ShardCount, ShardStripeSize};
 
 #[derive(Parser)]
 pub(super) struct DescribeKeyCommand {
@@ -128,7 +128,9 @@ impl DescribeKeyCommand {
             // seeing the sharding placement might be confusing, so leave it out unless shard
             // count was given.
 
-            let stripe_size = stripe_size.map(ShardStripeSize).unwrap_or_default();
+            let stripe_size = stripe_size
+                .map(ShardStripeSize)
+                .unwrap_or(DEFAULT_STRIPE_SIZE);
             println!(
                 "# placement with shard_count: {} and stripe_size: {}:",
                 shard_count.0, stripe_size.0
@@ -372,7 +374,7 @@ impl<const N: usize> std::fmt::Debug for RelTagish<N> {
                 f.write_char('/')?;
             }
             first = false;
-            write!(f, "{}", x)
+            write!(f, "{x}")
         })
     }
 }

@@ -1,7 +1,7 @@
 use metrics::core::{AtomicF64, AtomicU64, Collector, GenericCounter, GenericGauge};
 use metrics::proto::MetricFamily;
 use metrics::{
-    IntCounterVec, IntGaugeVec, UIntGaugeVec, register_gauge, register_int_counter,
+    IntCounter, IntCounterVec, IntGaugeVec, UIntGaugeVec, register_gauge, register_int_counter,
     register_int_counter_vec, register_int_gauge_vec, register_uint_gauge_vec,
 };
 use once_cell::sync::Lazy;
@@ -97,6 +97,38 @@ pub(crate) static PG_TOTAL_DOWNTIME_MS: Lazy<GenericCounter<AtomicU64>> = Lazy::
     .expect("failed to define a metric")
 });
 
+pub(crate) static LFC_PREWARMS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "compute_ctl_lfc_prewarms_total",
+        "Total number of LFC prewarms requested by compute_ctl or autoprewarm option",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LFC_PREWARM_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "compute_ctl_lfc_prewarm_errors_total",
+        "Total number of LFC prewarm errors",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LFC_OFFLOADS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "compute_ctl_lfc_offloads_total",
+        "Total number of LFC offloads requested by compute_ctl or lfc_offload_period_seconds option",
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static LFC_OFFLOAD_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "compute_ctl_lfc_offload_errors_total",
+        "Total number of LFC offload errors",
+    )
+    .expect("failed to define a metric")
+});
+
 pub fn collect() -> Vec<MetricFamily> {
     let mut metrics = COMPUTE_CTL_UP.collect();
     metrics.extend(INSTALLED_EXTENSIONS.collect());
@@ -106,5 +138,9 @@ pub fn collect() -> Vec<MetricFamily> {
     metrics.extend(AUDIT_LOG_DIR_SIZE.collect());
     metrics.extend(PG_CURR_DOWNTIME_MS.collect());
     metrics.extend(PG_TOTAL_DOWNTIME_MS.collect());
+    metrics.extend(LFC_PREWARMS.collect());
+    metrics.extend(LFC_PREWARM_ERRORS.collect());
+    metrics.extend(LFC_OFFLOADS.collect());
+    metrics.extend(LFC_OFFLOAD_ERRORS.collect());
     metrics
 }

@@ -14,7 +14,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     wait_for_last_flush_lsn,
 )
-from fixtures.utils import get_scale_for_db, humantime_to_ms, skip_on_ci
+from fixtures.utils import get_scale_for_db, humantime_to_ms
 
 from performance.pageserver.util import setup_pageserver_with_tenants
 
@@ -36,9 +36,6 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
 @pytest.mark.parametrize("n_tenants", [500])
 @pytest.mark.timeout(10000)
-@skip_on_ci(
-    "This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI"
-)
 def test_pageserver_characterize_throughput_with_n_tenants(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
@@ -58,14 +55,12 @@ def test_pageserver_characterize_throughput_with_n_tenants(
 @pytest.mark.parametrize("duration", [20 * 60])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(2048)])
 # we use 1 client to characterize latencies, and 64 clients to characterize throughput/scalability
-# we use 64 clients because typically for a high number of connections we recommend the connection pooler
-# which by default uses 64 connections
-@pytest.mark.parametrize("n_clients", [1, 64])
+# we use 8 clients because we see a latency knee around 6-8 clients on im4gn.2xlarge instance type,
+# which we use for this periodic test - at a cpu utilization of around 70 % - which is considered
+# a good utilization for pageserver.
+@pytest.mark.parametrize("n_clients", [1, 8])
 @pytest.mark.parametrize("n_tenants", [1])
 @pytest.mark.timeout(2400)
-@skip_on_ci(
-    "This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI"
-)
 def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_many_clients_one_tenant(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
@@ -76,7 +71,13 @@ def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_man
     n_clients: int,
 ):
     setup_and_run_pagebench_benchmark(
-        neon_env_builder, zenbenchmark, pg_bin, n_tenants, pgbench_scale, duration, n_clients
+        neon_env_builder,
+        zenbenchmark,
+        pg_bin,
+        n_tenants,
+        pgbench_scale,
+        duration,
+        n_clients,
     )
 
 
@@ -91,7 +92,8 @@ def setup_and_run_pagebench_benchmark(
 ):
     def record(metric, **kwargs):
         zenbenchmark.record(
-            metric_name=f"pageserver_max_throughput_getpage_at_latest_lsn.{metric}", **kwargs
+            metric_name=f"pageserver_max_throughput_getpage_at_latest_lsn.{metric}",
+            **kwargs,
         )
 
     params: dict[str, tuple[Any, dict[str, Any]]] = {}
@@ -109,9 +111,7 @@ def setup_and_run_pagebench_benchmark(
     # configure cache sizes like in prod
     page_cache_size = 16384
     max_file_descriptors = 500000
-    neon_env_builder.pageserver_config_override = (
-        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
-    )
+    neon_env_builder.pageserver_config_override = f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}; disk_usage_based_eviction={{enabled = false}}"
 
     tracing_config = PageserverTracingConfig(
         sampling_ratio=(0, 1000),
@@ -127,7 +127,10 @@ def setup_and_run_pagebench_benchmark(
                 page_cache_size * 8192,
                 {"unit": "byte"},
             ),
-            "pageserver_config_override.max_file_descriptors": (max_file_descriptors, {"unit": ""}),
+            "pageserver_config_override.max_file_descriptors": (
+                max_file_descriptors,
+                {"unit": ""},
+            ),
             "pageserver_config_override.sampling_ratio": (ratio, {"unit": ""}),
         }
     )

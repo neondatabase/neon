@@ -3,6 +3,8 @@
 use std::fmt::Write;
 use std::{io, iter, mem, str};
 
+use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
 use hmac::{Hmac, Mac};
 use rand::{self, Rng};
 use sha2::digest::FixedOutput;
@@ -50,7 +52,7 @@ pub(crate) async fn hi(str: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
         }
         // yield every ~250us
         // hopefully reduces tail latencies
-        if i % 1024 == 0 {
+        if i.is_multiple_of(1024) {
             yield_now().await
         }
     }
@@ -153,10 +155,10 @@ pub struct ScramSha256 {
 
 fn nonce() -> String {
     // rand 0.5's ThreadRng is cryptographically secure
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..NONCE_LENGTH)
         .map(|_| {
-            let mut v = rng.gen_range(0x21u8..0x7e);
+            let mut v = rng.random_range(0x21u8..0x7e);
             if v == 0x2c {
                 v = 0x7e
             }
@@ -226,7 +228,7 @@ impl ScramSha256 {
 
         let (client_key, server_key) = match password {
             Credentials::Password(password) => {
-                let salt = match base64::decode(parsed.salt) {
+                let salt = match BASE64_STANDARD.decode(parsed.salt) {
                     Ok(salt) => salt,
                     Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidInput, e)),
                 };
@@ -255,7 +257,7 @@ impl ScramSha256 {
         let mut cbind_input = vec![];
         cbind_input.extend(channel_binding.gs2_header().as_bytes());
         cbind_input.extend(channel_binding.cbind_data());
-        let cbind_input = base64::encode(&cbind_input);
+        let cbind_input = BASE64_STANDARD.encode(&cbind_input);
 
         self.message.clear();
         write!(&mut self.message, "c={},r={}", cbind_input, parsed.nonce).unwrap();
@@ -272,7 +274,12 @@ impl ScramSha256 {
             *proof ^= signature;
         }
 
-        write!(&mut self.message, ",p={}", base64::encode(client_proof)).unwrap();
+        write!(
+            &mut self.message,
+            ",p={}",
+            BASE64_STANDARD.encode(client_proof)
+        )
+        .unwrap();
 
         self.state = State::Finish {
             server_key,
@@ -301,12 +308,12 @@ impl ScramSha256 {
 
         let verifier = match parsed {
             ServerFinalMessage::Error(e) => {
-                return Err(io::Error::other(format!("SCRAM error: {}", e)));
+                return Err(io::Error::other(format!("SCRAM error: {e}")));
             }
             ServerFinalMessage::Verifier(verifier) => verifier,
         };
 
-        let verifier = match base64::decode(verifier) {
+        let verifier = match BASE64_STANDARD.decode(verifier) {
             Ok(verifier) => verifier,
             Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidInput, e)),
         };
@@ -336,10 +343,8 @@ impl<'a> Parser<'a> {
         match self.it.next() {
             Some((_, c)) if c == target => Ok(()),
             Some((i, c)) => {
-                let m = format!(
-                    "unexpected character at byte {}: expected `{}` but got `{}",
-                    i, target, c
-                );
+                let m =
+                    format!("unexpected character at byte {i}: expected `{target}` but got `{c}");
                 Err(io::Error::new(io::ErrorKind::InvalidInput, m))
             }
             None => Err(io::Error::new(
@@ -405,7 +410,7 @@ impl<'a> Parser<'a> {
         match self.it.peek() {
             Some(&(i, _)) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unexpected trailing data at byte {}", i),
+                format!("unexpected trailing data at byte {i}"),
             )),
             None => Ok(()),
         }

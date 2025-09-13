@@ -4,6 +4,7 @@
 //!
 //! Separate, `metadata` subcommand allows to print and update pageserver's metadata file.
 
+mod download_remote_object;
 mod draw_timeline_dir;
 mod index_part;
 mod key;
@@ -16,6 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
+use download_remote_object::DownloadRemoteObjectCmd;
 use index_part::IndexPartCmd;
 use layers::LayerCmd;
 use page_trace::PageTraceCmd;
@@ -63,6 +65,7 @@ enum Commands {
     /// Debug print a hex key found from logs
     Key(key::DescribeKeyCommand),
     PageTrace(PageTraceCmd),
+    DownloadRemoteObject(DownloadRemoteObjectCmd),
 }
 
 /// Read and update pageserver metadata file
@@ -176,13 +179,18 @@ async fn main() -> anyhow::Result<()> {
             let config = RemoteStorageConfig::from_toml_str(&cmd.config_toml_str)?;
             let storage = remote_storage::GenericRemoteStorage::from_config(&config).await;
             let cancel = CancellationToken::new();
+            // Complexity limit: as we are running this command locally, we should have a lot of memory available, and we do not
+            // need to limit the number of versions we are going to delete.
             storage
                 .unwrap()
-                .time_travel_recover(Some(&prefix), timestamp, done_if_after, &cancel)
+                .time_travel_recover(Some(&prefix), timestamp, done_if_after, &cancel, None)
                 .await?;
         }
         Commands::Key(dkc) => dkc.execute(),
         Commands::PageTrace(cmd) => page_trace::main(&cmd)?,
+        Commands::DownloadRemoteObject(cmd) => {
+            download_remote_object::main(&cmd).await?;
+        }
     };
     Ok(())
 }

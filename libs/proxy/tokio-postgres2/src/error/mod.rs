@@ -9,7 +9,7 @@ use postgres_protocol2::message::backend::{ErrorFields, ErrorResponseBody};
 pub use self::sqlstate::*;
 
 #[allow(clippy::unreadable_literal)]
-mod sqlstate;
+pub mod sqlstate;
 
 /// The severity of a Postgres error or notice.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -86,6 +86,27 @@ pub struct DbError {
 }
 
 impl DbError {
+    pub fn new_test_error(code: SqlState, message: String) -> Self {
+        DbError {
+            severity: "ERROR".to_string(),
+            parsed_severity: Some(Severity::Error),
+            code,
+            message,
+            detail: None,
+            hint: None,
+            position: None,
+            where_: None,
+            schema: None,
+            table: None,
+            column: None,
+            datatype: None,
+            constraint: None,
+            file: None,
+            line: None,
+            routine: None,
+        }
+    }
+
     pub(crate) fn parse(fields: &mut ErrorFields<'_>) -> io::Result<DbError> {
         let mut severity = None;
         let mut parsed_severity = None;
@@ -311,10 +332,10 @@ impl fmt::Display for DbError {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(fmt, "{}: {}", self.severity, self.message)?;
         if let Some(detail) = &self.detail {
-            write!(fmt, "\nDETAIL: {}", detail)?;
+            write!(fmt, "\nDETAIL: {detail}")?;
         }
         if let Some(hint) = &self.hint {
-            write!(fmt, "\nHINT: {}", hint)?;
+            write!(fmt, "\nHINT: {hint}")?;
         }
         Ok(())
     }
@@ -377,9 +398,9 @@ impl fmt::Display for Error {
             Kind::Io => fmt.write_str("error communicating with the server")?,
             Kind::UnexpectedMessage => fmt.write_str("unexpected message from server")?,
             Kind::Tls => fmt.write_str("error performing TLS handshake")?,
-            Kind::ToSql(idx) => write!(fmt, "error serializing parameter {}", idx)?,
-            Kind::FromSql(idx) => write!(fmt, "error deserializing column {}", idx)?,
-            Kind::Column(column) => write!(fmt, "invalid column `{}`", column)?,
+            Kind::ToSql(idx) => write!(fmt, "error serializing parameter {idx}")?,
+            Kind::FromSql(idx) => write!(fmt, "error deserializing column {idx}")?,
+            Kind::Column(column) => write!(fmt, "invalid column `{column}`")?,
             Kind::Closed => fmt.write_str("connection closed")?,
             Kind::Db => fmt.write_str("db error")?,
             Kind::Parse => fmt.write_str("error parsing response from server")?,
@@ -390,7 +411,7 @@ impl fmt::Display for Error {
             Kind::Timeout => fmt.write_str("timeout waiting for server")?,
         };
         if let Some(ref cause) = self.0.cause {
-            write!(fmt, ": {}", cause)?;
+            write!(fmt, ": {cause}")?;
         }
         Ok(())
     }
@@ -431,16 +452,16 @@ impl Error {
         Error(Box::new(ErrorInner { kind, cause }))
     }
 
-    pub(crate) fn closed() -> Error {
+    pub fn closed() -> Error {
         Error::new(Kind::Closed, None)
     }
 
-    pub(crate) fn unexpected_message() -> Error {
+    pub fn unexpected_message() -> Error {
         Error::new(Kind::UnexpectedMessage, None)
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn db(error: ErrorResponseBody) -> Error {
+    pub fn db(error: ErrorResponseBody) -> Error {
         match DbError::parse(&mut error.fields()) {
             Ok(e) => Error::new(Kind::Db, Some(Box::new(e))),
             Err(e) => Error::new(Kind::Parse, Some(Box::new(e))),
@@ -472,7 +493,7 @@ impl Error {
         Error::new(Kind::Tls, Some(e))
     }
 
-    pub(crate) fn io(e: io::Error) -> Error {
+    pub fn io(e: io::Error) -> Error {
         Error::new(Kind::Io, Some(Box::new(e)))
     }
 

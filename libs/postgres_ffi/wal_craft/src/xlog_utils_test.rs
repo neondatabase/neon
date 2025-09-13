@@ -24,7 +24,7 @@ fn init_logging() {
 fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
     use crate::*;
 
-    let pg_version = PG_MAJORVERSION[1..3].parse::<u32>().unwrap();
+    let pg_version = MY_PGVERSION;
 
     // Craft some WAL
     let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -34,7 +34,7 @@ fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
     let cfg = Conf {
         pg_version,
         pg_distrib_dir: top_path.join("pg_install"),
-        datadir: top_path.join(format!("test_output/{}-{PG_MAJORVERSION}", test_name)),
+        datadir: top_path.join(format!("test_output/{test_name}-{PG_MAJORVERSION}")),
     };
     if cfg.datadir.exists() {
         fs::remove_dir_all(&cfg.datadir).unwrap();
