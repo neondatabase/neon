@@ -248,29 +248,8 @@ async fn gcs_test_suite(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
     assert_eq!(t0_files, t0_files_recovered);
 
     // cleanup
-
     let paths = &[path1, path2, path3];
     retry(|| ctx.client.delete_objects(paths, &cancel)).await?;
-
-    //// ------------------------------------------------
-    //// --- Missing Delete Key Doesn't Error
-    //// ------------------------------------------------
-    //let key = "neon/safekeeper/99336152a31c64b41034e4e904629ce9/814ce0bd2ae452e11575402e8296b64d/000000010000000000000001_0_00000000014EEC40_00000000014EEC40_sk1.partial";
-    //let remote_path = RemotePath::from_string(key)?;
-    //let cancel = CancellationToken::new();
-
-    //let paths = [remote_path.clone()];
-    //ctx.client
-    //    .delete_objects(&paths, &cancel).await?;
-    //// Do it again just in case it was there.
-    //ctx.client
-    //    .delete_objects(&paths, &cancel).await?;
-
-    // ------------------------------------------------
-    // --- Missing Delete Key Doesn't Error
-    // ------------------------------------------------
-    //let header = ctx.client.head_object(&remote_path, &cancel).await?;
-    //println!("header: {:?}", header);
 
     Ok(())
 }

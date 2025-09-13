@@ -699,7 +699,6 @@ impl GCSBucket {
         /// 1. Serialize the metadata of the first request to get Etag, last modified, etc
         /// 2. We do not .await the second request pass on the pinned stream to the 'get_object'
         ///    caller
-        // 1. Serialize Metadata in initial request
         let metadata_uri_mod = "alt=json";
         let download_uri = format!(
             "https://storage.googleapis.com/storage/v1/b/{}/o/{}?{}",
@@ -925,7 +924,6 @@ impl RemoteStorage for GCSBucket {
             .chain(max_keys.into_iter())
             .min()
             // https://cloud.google.com/storage/docs/json_api/v1/objects/list?hl=en#parameters
-            // TODO set this to default
             .unwrap_or(1000);
 
         // We pass URI in to `list_objects_v2` as we'll modify it with `NextPageToken`, hence
