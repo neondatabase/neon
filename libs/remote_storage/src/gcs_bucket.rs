@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused)]
-
 use crate::config::GCSConfig;
 use crate::error::Cancelled;
 pub(super) use crate::metrics::RequestKind;
