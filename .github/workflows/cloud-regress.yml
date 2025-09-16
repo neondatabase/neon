@@ -14,11 +14,6 @@ defaults:
   run:
     shell: bash -euxo pipefail {0}
 
-concurrency:
-  # Allow only one workflow
-  group: ${{ github.workflow }}
-  cancel-in-progress: true
-
 permissions:
   id-token: write # aws-actions/configure-aws-credentials
   statuses: write
@@ -33,9 +28,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg-version: [16, 17]
+        pg-version: [17]
 
-    runs-on: us-east-2
+    #runs-on: us-east-2
+    runs-on: small
     container:
       image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
@@ -59,6 +55,7 @@ jobs:
         run: |
           cd "vendor/postgres-v${PG_VERSION}"
           patch -p1 < "../../compute/patches/cloud_regress_pg${PG_VERSION}.patch"
+          patch -p1 < "../../compute/patches/cloud_regress_pg17_495.patch"
 
       - name: Generate a random password
         id: pwgen
