@@ -123,9 +123,15 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
 def patch_tenant_conf(tenant_conf: dict[str, Any], reldir_type: str) -> dict[str, Any]:
     tenant_conf = tenant_conf.copy()
     if reldir_type == "v2":
-        tenant_conf["rel_size_v2_enabled"] = "true"
+        tenant_conf["rel_size_v2_enabled"] = True
+        tenant_conf["rel_size_v1_access_disabled"] = True
+    elif reldir_type == "v1v2":
+        tenant_conf["rel_size_v2_enabled"] = True
+        tenant_conf["rel_size_v1_access_disabled"] = False
+    elif reldir_type == "v1":
+        tenant_conf["rel_size_v2_enabled"] = False
     else:
-        tenant_conf["rel_size_v2_enabled"] = "false"
+        raise ValueError(f"Invalid reldir_type: {reldir_type}")
     return tenant_conf
 
 
@@ -133,7 +139,7 @@ def patch_tenant_conf(tenant_conf: dict[str, Any], reldir_type: str) -> dict[str
 #
 @pytest.mark.timeout(3000)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
-@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
+@pytest.mark.parametrize("reldir_type", ["v1", "v1v2", "v2"])
 def test_pg_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -213,7 +219,7 @@ def test_pg_regress(
 #
 @pytest.mark.timeout(1500)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
-@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
+@pytest.mark.parametrize("reldir_type", ["v1", "v1v2", "v2"])
 def test_isolation(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -293,7 +299,7 @@ def test_isolation(
 # Run extra Neon-specific pg_regress-based tests. The tests and their
 # schedule file are in the sql_regress/ directory.
 @pytest.mark.parametrize("shard_count", [None, 4])
-@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
+@pytest.mark.parametrize("reldir_type", ["v1", "v1v2", "v2"])
 def test_sql_regress(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -416,7 +422,7 @@ def test_max_wal_rate(neon_simple_env: NeonEnv):
 
 
 @skip_in_debug_build("only run with release build")
-@pytest.mark.parametrize("reldir_type", ["v1", "v2"])
+@pytest.mark.parametrize("reldir_type", ["v1", "v1v2", "v2"])
 def test_tx_abort_with_many_relations(
     neon_env_builder: NeonEnvBuilder,
     reldir_type: str,
