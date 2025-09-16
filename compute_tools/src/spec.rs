@@ -92,7 +92,7 @@ pub fn get_config_from_control_plane(base_uri: &str, compute_id: &str) -> Result
         current_interval: Duration::from_millis(65),
         max_interval: Duration::from_millis(500),
         max_elapsed_time: Some(Duration::from_secs(1)),
-        multiplier: 2.0,
+        multiplier: 1.5,
         randomization_factor: 0.3,
         ..Default::default()
     };
