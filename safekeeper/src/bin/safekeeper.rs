@@ -15,6 +15,7 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use http_utils::tls_certs::ReloadingCertificateResolver;
 use metrics::set_build_info_metric;
+use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use safekeeper::defaults::{
     DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT,
@@ -109,10 +110,15 @@ struct Args {
     /// Listen https endpoint for management and metrics in the form host:port.
     #[arg(long, default_value = None)]
     listen_https: Option<String>,
-    /// Advertised endpoint for receiving/sending WAL in the form host:port. If not
+    /// Advertised endpoint to PS for receiving/sending WAL in the form host:port. If not
     /// specified, listen_pg is used to advertise instead.
     #[arg(long, default_value = None)]
     advertise_pg: Option<String>,
+    /// Advertised endpoint to compute for receiving/sending WAL in the form host:port.
+    /// Required if --hcc-base-url is specified.
+    // TODO(vlad): pull in hcc-base-url too
+    #[arg(long, default_value = None)]
+    advertise_pg_tenant_only: Option<String>,
     /// Availability zone of the safekeeper.
     #[arg(long)]
     availability_zone: Option<String>,
@@ -164,6 +170,12 @@ struct Args {
     /// WAL backup horizon.
     #[arg(long)]
     disable_wal_backup: bool,
+    /// Token authentication type. Allowed values are "NeonJWT" and "HadronJWT". Any specified value only takes effect if
+    /// --pg-auth-public-key-path, --pg-tenant-only-auth-public-key-path, or --http-auth-public-key-path is specified.
+    /// NeonJWT: Decoding keys are loaded from plain public key files in the specified key path.
+    /// HadronJWT: Decoding keys are loaded from X509 certificates in the specified key path.
+    #[arg(long, verbatim_doc_comment, default_value = "NeonJWT")]
+    token_auth_type: AuthType,
     /// If given, enables auth on incoming connections to WAL service endpoint
     /// (--listen-pg). Value specifies path to a .pem public key used for
     /// validations of JWT tokens. Empty string is allowed and means disabling
@@ -361,9 +373,19 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(path) => {
             info!("loading pg auth JWT key from {path}");
-            Some(Arc::new(
-                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
-            ))
+            match args.token_auth_type {
+                AuthType::NeonJWT => Some(Arc::new(
+                    JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+                )),
+                AuthType::HadronJWT => Some(Arc::new(
+                    JwtAuth::from_cert_path(path)
+                        .context("failed to load auth keys from certificates")?,
+                )),
+                _ => panic!(
+                    "AuthType {auth_type} is not allowed when --pg-auth-public-key-path is specified",
+                    auth_type = args.token_auth_type
+                ),
+            }
         }
     };
     let pg_tenant_only_auth = match args.pg_tenant_only_auth_public_key_path.as_ref() {
@@ -373,9 +395,19 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(path) => {
             info!("loading pg tenant only auth JWT key from {path}");
-            Some(Arc::new(
-                JwtAuth::from_key_path(path).context("failed to load the auth key")?,
-            ))
+            match args.token_auth_type {
+                AuthType::NeonJWT => Some(Arc::new(
+                    JwtAuth::from_key_path(path).context("failed to load the auth key")?,
+                )),
+                AuthType::HadronJWT => Some(Arc::new(
+                    JwtAuth::from_cert_path(path)
+                        .context("failed to load auth keys from certificates")?,
+                )),
+                _ => panic!(
+                    "AuthType {auth_type} is not allowed when --pg-tenant-only-auth-public-key-path is specified",
+                    auth_type = args.token_auth_type
+                ),
+            }
         }
     };
     let http_auth = match args.http_auth_public_key_path.as_ref() {
@@ -385,7 +417,17 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(path) => {
             info!("loading http auth JWT key(s) from {path}");
-            let jwt_auth = JwtAuth::from_key_path(path).context("failed to load the auth key")?;
+            let jwt_auth = match args.token_auth_type {
+                AuthType::NeonJWT => {
+                    JwtAuth::from_key_path(path).context("failed to load the auth key")?
+                }
+                AuthType::HadronJWT => JwtAuth::from_cert_path(path)
+                    .context("failed to load auth keys from certificates")?,
+                _ => panic!(
+                    "AuthType {auth_type} is not allowed when --http-auth-public-key-path is specified",
+                    auth_type = args.token_auth_type
+                ),
+            };
             Some(Arc::new(SwappableJwtAuth::new(jwt_auth)))
         }
     };
@@ -434,6 +476,7 @@ async fn main() -> anyhow::Result<()> {
         /* END_HADRON */
         wal_backup_enabled: !args.disable_wal_backup,
         backup_parallel_jobs: args.wal_backup_parallel_jobs,
+        auth_type: args.token_auth_type,
         pg_auth,
         pg_tenant_only_auth,
         http_auth,
@@ -457,7 +500,7 @@ async fn main() -> anyhow::Result<()> {
         enable_tls_wal_service_api: args.enable_tls_wal_service_api,
         force_metric_collection_on_scrape: args.force_metric_collection_on_scrape,
         /* BEGIN_HADRON */
-        advertise_pg_addr_tenant_only: None,
+        advertise_pg_addr_tenant_only: args.advertise_pg_tenant_only,
         enable_pull_timeline_on_startup: args.enable_pull_timeline_on_startup,
         hcc_base_url: None,
         global_disk_check_interval: args.global_disk_check_interval,
