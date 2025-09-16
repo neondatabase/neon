@@ -2,8 +2,10 @@ use std::fs::File;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
+use backoff::{ExponentialBackoff, backoff::Backoff};
 use compute_api::responses::{
     ComputeConfig, ControlPlaneComputeStatus, ControlPlaneConfigResponse,
 };
@@ -82,10 +84,18 @@ pub fn get_config_from_control_plane(base_uri: &str, compute_id: &str) -> Result
     info!("getting config from control plane: {}", cp_uri);
 
     // Do 3 attempts to get spec from the control plane using the following logic:
-    // - network error -> then retry
+    // - network error -> then retry with exponential backoff
     // - compute id is unknown or any other error -> bail out
     // - no spec for compute yet (Empty state) -> return Ok(None)
     // - got config -> return Ok(Some(config))
+    let mut backoff_strategy = ExponentialBackoff {
+        current_interval: Duration::from_millis(65),
+        max_interval: Duration::from_millis(500),
+        max_elapsed_time: Some(Duration::from_secs(1)),
+        multiplier: 2.0,
+        randomization_factor: 0.3,
+        ..Default::default()
+    };
     while attempt < 4 {
         let result = match do_control_plane_request(&cp_uri, &jwt) {
             Ok(config_resp) => {
@@ -125,7 +135,12 @@ pub fn get_config_from_control_plane(base_uri: &str, compute_id: &str) -> Result
         }
 
         attempt += 1;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Some(duration) = backoff_strategy.next_backoff() {
+            std::thread::sleep(duration);
+        } else {
+            // Maximum retry time elapsed, stop retrying.
+            break;
+        }
     }
 
     // All attempts failed, return error.
