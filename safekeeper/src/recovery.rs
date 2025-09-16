@@ -354,9 +354,7 @@ async fn recovery_stream(
     let connection_conf_args = ConnectionConfigArgs {
         protocol: PostgresClientProtocol::Vanilla,
         ttid: tli.ttid,
-        shard_number: None,
-        shard_count: None,
-        shard_stripe_size: None,
+        shard: None,
         listen_pg_addr_str: &donor.pg_connstr,
         auth_token: None,
         availability_zone: None,

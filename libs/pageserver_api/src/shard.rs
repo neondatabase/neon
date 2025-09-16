@@ -31,136 +31,16 @@
 //! - In a tenant with 4 shards, each shard has ShardCount(N), ShardNumber(i) where i in 0..N-1 (inclusive),
 //!   and their slugs are 0004, 0104, 0204, and 0304.
 
-use std::hash::{Hash, Hasher};
-
 #[doc(inline)]
 pub use ::utils::shard::*;
 use postgres_ffi_types::forknum::INIT_FORKNUM;
-use serde::{Deserialize, Serialize};
 use utils::critical;
 
 use crate::key::Key;
 use crate::models::ShardParameters;
 
-/// The ShardIdentity contains enough information to map a [`Key`] to a [`ShardNumber`],
-/// and to check whether that [`ShardNumber`] is the same as the current shard.
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Debug)]
-pub struct ShardIdentity {
-    pub number: ShardNumber,
-    pub count: ShardCount,
-    pub stripe_size: ShardStripeSize,
-    layout: ShardLayout,
-}
-
-/// Hash implementation
-///
-/// The stripe size cannot change dynamically, so it can be ignored for efficiency reasons.
-impl Hash for ShardIdentity {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let ShardIdentity {
-            number,
-            count,
-            stripe_size: _,
-            layout: _,
-        } = self;
-
-        number.0.hash(state);
-        count.0.hash(state);
-    }
-}
-
-/// Layout version: for future upgrades where we might change how the key->shard mapping works
-#[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash, Debug)]
-pub struct ShardLayout(u8);
-
-const LAYOUT_V1: ShardLayout = ShardLayout(1);
-/// ShardIdentity uses a magic layout value to indicate if it is unusable
-const LAYOUT_BROKEN: ShardLayout = ShardLayout(255);
-
-/// The default stripe size in pages. 16 MiB divided by 8 kiB page size.
-///
-/// A lower stripe size distributes ingest load better across shards, but reduces IO amortization.
-/// 16 MiB appears to be a reasonable balance: <https://github.com/neondatabase/neon/pull/10510>.
-pub const DEFAULT_STRIPE_SIZE: ShardStripeSize = ShardStripeSize(16 * 1024 / 8);
-
-#[derive(thiserror::Error, Debug, PartialEq, Eq)]
-pub enum ShardConfigError {
-    #[error("Invalid shard count")]
-    InvalidCount,
-    #[error("Invalid shard number")]
-    InvalidNumber,
-    #[error("Invalid stripe size")]
-    InvalidStripeSize,
-}
-
+// Extension methods for ShardIdentity that depend on pageserver-specific types
 impl ShardIdentity {
-    /// An identity with number=0 count=0 is a "none" identity, which represents legacy
-    /// tenants.  Modern single-shard tenants should not use this: they should
-    /// have number=0 count=1.
-    pub const fn unsharded() -> Self {
-        Self {
-            number: ShardNumber(0),
-            count: ShardCount(0),
-            layout: LAYOUT_V1,
-            stripe_size: DEFAULT_STRIPE_SIZE,
-        }
-    }
-
-    /// An unsharded identity with the given stripe size (if non-zero). This is typically used to
-    /// carry over a stripe size for an unsharded tenant from persistent storage.
-    pub fn unsharded_with_stripe_size(stripe_size: ShardStripeSize) -> Self {
-        let mut shard_identity = Self::unsharded();
-        if stripe_size.0 > 0 {
-            shard_identity.stripe_size = stripe_size;
-        }
-        shard_identity
-    }
-
-    /// A broken instance of this type is only used for `TenantState::Broken` tenants,
-    /// which are constructed in code paths that don't have access to proper configuration.
-    ///
-    /// A ShardIdentity in this state may not be used for anything, and should not be persisted.
-    /// Enforcement is via assertions, to avoid making our interface fallible for this
-    /// edge case: it is the Tenant's responsibility to avoid trying to do any I/O when in a broken
-    /// state, and by extension to avoid trying to do any page->shard resolution.
-    pub fn broken(number: ShardNumber, count: ShardCount) -> Self {
-        Self {
-            number,
-            count,
-            layout: LAYOUT_BROKEN,
-            stripe_size: DEFAULT_STRIPE_SIZE,
-        }
-    }
-
-    /// The "unsharded" value is distinct from simply having a single shard: it represents
-    /// a tenant which is not shard-aware at all, and whose storage paths will not include
-    /// a shard suffix.
-    pub fn is_unsharded(&self) -> bool {
-        self.number == ShardNumber(0) && self.count == ShardCount(0)
-    }
-
-    /// Count must be nonzero, and number must be < count. To construct
-    /// the legacy case (count==0), use Self::unsharded instead.
-    pub fn new(
-        number: ShardNumber,
-        count: ShardCount,
-        stripe_size: ShardStripeSize,
-    ) -> Result<Self, ShardConfigError> {
-        if count.0 == 0 {
-            Err(ShardConfigError::InvalidCount)
-        } else if number.0 > count.0 - 1 {
-            Err(ShardConfigError::InvalidNumber)
-        } else if stripe_size.0 == 0 {
-            Err(ShardConfigError::InvalidStripeSize)
-        } else {
-            Ok(Self {
-                number,
-                count,
-                layout: LAYOUT_V1,
-                stripe_size,
-            })
-        }
-    }
 
     /// For use when creating ShardIdentity instances for new shards, where a creation request
     /// specifies the ShardParameters that apply to all shards.
@@ -182,10 +62,6 @@ impl ShardIdentity {
             // attempt to change it with an error response.
             critical!("shard identity mismatch: {self:?} != {other:?}");
         }
-    }
-
-    fn is_broken(&self) -> bool {
-        self.layout == LAYOUT_BROKEN
     }
 
     pub fn get_shard_number(&self, key: &Key) -> ShardNumber {
@@ -247,21 +123,6 @@ impl ShardIdentity {
         }
     }
 
-    /// Obtains the shard number and count combined into a `ShardIndex`.
-    pub fn shard_index(&self) -> ShardIndex {
-        ShardIndex {
-            shard_count: self.count,
-            shard_number: self.number,
-        }
-    }
-
-    pub fn shard_slug(&self) -> String {
-        if self.count > ShardCount(0) {
-            format!("-{:02x}{:02x}", self.number.0, self.count.0)
-        } else {
-            String::new()
-        }
-    }
 
     /// Convenience for checking if this identity is the 0th shard in a tenant,
     /// for special cases on shard 0 such as ingesting relation sizes.
