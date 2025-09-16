@@ -6,6 +6,9 @@ extern crate hyper0 as hyper;
 mod auth;
 mod background_node_operations;
 mod compute_hook;
+pub mod hadron_dns;
+mod hadron_queries;
+pub mod hadron_requests;
 pub mod hadron_utils;
 mod heartbeater;
 pub mod http;
@@ -23,6 +26,7 @@ mod safekeeper_client;
 mod scheduler;
 mod schema;
 pub mod service;
+mod sk_node;
 mod tenant_shard;
 mod timeline_import;
 
