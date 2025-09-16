@@ -18,13 +18,13 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     "rows,iters,workers",
     [
-        # The test table is large enough (3-4 MB) that it doesn't fit in the compute node
+        # The test table is large enough (30-40 MB) that it doesn't fit in the compute node
         # cache, so the seqscans go to the page server. But small enough that it fits
         # into memory in the page server.
-        pytest.param(100000, 100, 0),
+        pytest.param(1000000, 100, 0),  # 10x increase from 100000
         # Also test with a larger table, with and without parallelism
-        pytest.param(10000000, 1, 0),
-        pytest.param(10000000, 1, 4),
+        pytest.param(100000000, 1, 0),  # 10x increase from 10000000
+        pytest.param(100000000, 1, 4),  # 10x increase from 10000000
     ],
 )
 @pytest.mark.parametrize(

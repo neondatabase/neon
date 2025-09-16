@@ -17,13 +17,13 @@ async def repeat_bytes(buf, repetitions: int):
 
 async def copy_test_data_to_table(endpoint: Endpoint, worker_id: int, table_name: str):
     buf = BytesIO()
-    for i in range(1000):
+    for i in range(10000):  # 10x increase from 1000
         buf.write(
             f"{i}\tLoaded by worker {worker_id}. Long string to consume some space.\n".encode()
         )
     buf.seek(0)
 
-    copy_input = repeat_bytes(buf.read(), 5000)
+    copy_input = repeat_bytes(buf.read(), 50000)  # 10x increase from 5000
 
     pg_conn = await endpoint.connect_async()
 
