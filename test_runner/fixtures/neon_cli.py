@@ -530,7 +530,10 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--external-http-port", str(external_http_port)])
         if internal_http_port is not None:
             args.extend(["--internal-http-port", str(internal_http_port)])
-        if grpc:
+
+        # XXX: By checking for None, we enable the new communicator for all tests
+        # by default
+        if grpc or grpc is None:
             args.append("--grpc")
         if endpoint_id is not None:
             args.append(endpoint_id)

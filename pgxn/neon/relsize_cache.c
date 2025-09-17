@@ -87,6 +87,8 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 {
 	bool		found = false;
 
+	Assert(!neon_use_communicator_worker);
+
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
@@ -118,6 +120,8 @@ get_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber *size)
 void
 set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
+	Assert(!neon_use_communicator_worker);
+
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
@@ -166,6 +170,8 @@ set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 void
 update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 {
+	Assert(!neon_use_communicator_worker);
+
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
@@ -200,6 +206,8 @@ update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size)
 void
 forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum)
 {
+	Assert(!neon_use_communicator_worker);
+
 	if (relsize_hash_size > 0)
 	{
 		RelTag		tag;
