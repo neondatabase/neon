@@ -57,6 +57,9 @@ stateDiagram-v2
   RefreshConfigurationPending --> RefreshConfiguration: Received compute spec and started configuration
   RefreshConfiguration --> Running : Compute has been re-configured
   RefreshConfiguration --> RefreshConfigurationPending : Configuration failed and to be retried
+  Running --> Reloading : Local changes (TLS certificate renewal) were detected and postgres is being reloaded
+  Reloading --> Running : Postgres was reloaded
+  Reloading --> Failed : Failed to reload postgres
   TerminationPendingFast --> Terminated compute with 30s delay for cplane to inspect status
   TerminationPendingImmediate --> Terminated : Terminated compute immediately
   Failed --> RefreshConfigurationPending : Received a /refresh_configuration request
