@@ -13,6 +13,12 @@ on:
     #        │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
     # - cron: '0 5 * * *' # Runs at 5 UTC once a day
   workflow_dispatch: # adds an ability to run this manually
+    inputs:
+      commit_hash:
+        type: string
+        description: 'The long neon repo commit hash for the system under test (proxy) to be tested.'
+        required: false
+        default: ''
 
 defaults:
   run:
@@ -33,20 +39,14 @@ jobs:
       contents: write
       pull-requests: write
     runs-on: [ self-hosted, unit-perf-aws-arm ]
-    timeout-minutes: 60  # 1h timeout
     container:
       image: ghcr.io/neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       options: --init
+    timeout-minutes: 60  # 1h timeout
     steps:
-    - name: Checkout proxy-bench Repo
-      uses: actions/checkout@v4
-      with:
-        repository: neondatabase/proxy-bench
-        path: proxy-bench
-
     - name: Set up the environment which depends on $RUNNER_TEMP on nvme drive
       id: set-env
       shell: bash -euxo pipefail {0}
@@ -54,11 +54,49 @@ jobs:
         PROXY_BENCH_PATH=$(realpath ./proxy-bench)
         {
           echo "PROXY_BENCH_PATH=$PROXY_BENCH_PATH"
-          echo "NEON_DIR=${RUNNER_TEMP}/neon"
-          echo "NEON_PROXY_PATH=${RUNNER_TEMP}/neon/bin/proxy"
+          echo "NEON_DIR=${GITHUB_WORKSPACE}/"
+          echo "NEON_PROXY_PATH=${GITHUB_WORKSPACE}/bin/proxy"
           echo "TEST_OUTPUT=${PROXY_BENCH_PATH}/test_output"
+          echo "DOCKER_COMPOSE_FILE=${PROXY_BENCH_PATH}/docker-compose.yml"
           echo ""
         } >> "$GITHUB_ENV"
+
+    - name: Determine commit hash
+      id: commit_hash
+      shell: bash -euxo pipefail {0}
+      env:
+        INPUT_COMMIT_HASH: ${{ github.event.inputs.commit_hash }}
+      run: |
+        if [[ -z "${INPUT_COMMIT_HASH}" ]]; then
+          COMMIT_HASH=$(curl -s https://api.github.com/repos/neondatabase/neon/commits/main | jq -r '.sha')
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+          echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
+          echo "COMMIT_HASH_TYPE=latest" >> $GITHUB_ENV
+        else
+          COMMIT_HASH="${INPUT_COMMIT_HASH}"
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+          echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
+          echo "COMMIT_HASH_TYPE=manual" >> $GITHUB_ENV
+        fi
+    - name: Checkout the neon repository at given commit hash
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        ref: ${{ steps.commit_hash.outputs.commit_hash }}
+
+    - name: Print GITHUB_WORKSPACE
+      run: echo "$GITHUB_WORKSPACE"
+
+    - name: List parent dir of workspace
+      run: ls -la /__w/neon
+
+    - name: List all env vars
+      run: env
+
+    - name: Checkout proxy-bench Repo
+      uses: actions/checkout@v4
+      with:
+        repository: neondatabase/proxy-bench
+        path: proxy-bench
 
     - name: Cache poetry deps
       uses: actions/cache@v4
@@ -66,7 +104,14 @@ jobs:
         path: ~/.cache/pypoetry/virtualenvs
         key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
 
+    - name: DEBUG List files for debugging
+      working-directory: ${{ env.NEON_DIR }}
+      run: |
+        pwd
+        ls -la
+
     - name: Install Python deps
+      working-directory: ${{ env.NEON_DIR }}
       shell: bash -euxo pipefail {0}
       run: ./scripts/pysync
 
@@ -77,14 +122,14 @@ jobs:
 
     - name: Run proxy-bench
       working-directory: ${{ env.PROXY_BENCH_PATH }}
-      run: ./run.sh --with-grafana --bare-metal
+      run: ./run.sh --bare-metal
 
     - name: Ingest Bench Results
       if: always()
       working-directory: ${{ env.NEON_DIR }}
       run: |
         mkdir -p $TEST_OUTPUT
-        python $NEON_DIR/scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
+        python3 ./scripts/proxy_bench_results_ingest.py --out $TEST_OUTPUT
 
     - name: Push Metrics to Proxy perf database
       shell: bash -euxo pipefail {0}
