@@ -856,7 +856,7 @@ async fn query_batch_to_json(
     headers: HttpHeaders,
 ) -> Result<String, SqlOverHttpError> {
     let json_output = json::value_to_string!(|obj| json::value_as_object!(|obj| {
-        let results = obj.key("results");
+        let results = obj.key(json::esc!("results"));
         json::value_as_list!(|results| {
             query_batch(config, cancel, tx, queries, headers, results).await?;
         });
@@ -881,17 +881,17 @@ async fn query_to_json<T: GenericClient>(
         .map_err(SqlOverHttpError::Postgres)?;
     let query_acknowledged = Instant::now();
 
-    let mut json_fields = output.key("fields").list();
+    let mut json_fields = output.key(json::esc!("fields")).list();
     for c in row_stream.statement.columns() {
         let json_field = json_fields.entry();
         json::value_as_object!(|json_field| {
-            json_field.entry("name", c.name());
-            json_field.entry("dataTypeID", c.type_().oid());
-            json_field.entry("tableID", c.table_oid());
-            json_field.entry("columnID", c.column_id());
-            json_field.entry("dataTypeSize", c.type_size());
-            json_field.entry("dataTypeModifier", c.type_modifier());
-            json_field.entry("format", "text");
+            json_field.entry(json::esc!("name"), c.name());
+            json_field.entry(json::esc!("dataTypeID"), c.type_().oid());
+            json_field.entry(json::esc!("tableID"), c.table_oid());
+            json_field.entry(json::esc!("columnID"), c.column_id());
+            json_field.entry(json::esc!("dataTypeSize"), c.type_size());
+            json_field.entry(json::esc!("dataTypeModifier"), c.type_modifier());
+            json_field.entry(json::esc!("format"), "text");
         });
     }
     json_fields.finish();
@@ -903,7 +903,7 @@ async fn query_to_json<T: GenericClient>(
     // around to get a command tag. Also check that the response is not too
     // big.
     let mut rows = 0;
-    let mut json_rows = output.key("rows").list();
+    let mut json_rows = output.key(json::esc!("rows")).list();
     while let Some(row) = row_stream.next().await {
         let row = row.map_err(SqlOverHttpError::Postgres)?;
 
@@ -952,9 +952,9 @@ async fn query_to_json<T: GenericClient>(
         "finished executing query"
     );
 
-    output.entry("command", command_tag_name);
-    output.entry("rowCount", command_tag_count);
-    output.entry("rowAsArray", array_mode);
+    output.entry(json::esc!("command"), command_tag_name);
+    output.entry(json::esc!("rowCount"), command_tag_count);
+    output.entry(json::esc!("rowAsArray"), array_mode);
 
     output.finish();
     Ok(ready)

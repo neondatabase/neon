@@ -554,21 +554,23 @@ impl EventFormatter {
         let serializer = json::ValueSer::new(&mut self.logline_buffer);
         json::value_as_object!(|serializer| {
             // Timestamp comes first, so raw lines can be sorted by timestamp.
-            serializer.entry("timestamp", &*timestamp);
+            serializer.entry(json::esc!("timestamp"), &*timestamp);
 
             // Level next.
-            serializer.entry("level", meta.level().as_str());
+            serializer.entry(json::esc!("level"), meta.level().as_str());
 
             // Message next.
-            let mut message_extractor =
-                MessageFieldExtractor::new(serializer.key("message"), skipped_field_indices);
+            let mut message_extractor = MessageFieldExtractor::new(
+                serializer.key(json::esc!("message")),
+                skipped_field_indices,
+            );
             event.record(&mut message_extractor);
             message_extractor.finish();
 
             // Direct message fields.
             {
                 let mut message_skipper = MessageFieldSkipper::new(
-                    serializer.key("fields").object(),
+                    serializer.key(json::esc!("fields")).object(),
                     skipped_field_indices,
                 );
                 event.record(&mut message_skipper);
@@ -581,7 +583,7 @@ impl EventFormatter {
 
             let mut extracted = ExtractedSpanFields::new(extract_fields);
 
-            let spans = serializer.key("spans");
+            let spans = serializer.key(json::esc!("spans"));
             json::value_as_object!(|spans| {
                 let parent_spans = ctx
                     .event_span(event)
@@ -601,6 +603,8 @@ impl EventFormatter {
                     json::value_as_object!(|span_fields| {
                         for (field, value) in std::iter::zip(span.metadata().fields(), values) {
                             if let Some(value) = value {
+                                // we don't use entry syntax here, as that's intended for literal keys only.
+                                // the field name might need escaping, and entry would panic in that case.
                                 span_fields.entry(field.name(), value);
                             }
                         }
@@ -612,37 +616,37 @@ impl EventFormatter {
             let pid = std::process::id();
             // Skip adding pid 1 to reduce noise for services running in containers.
             if pid != 1 {
-                serializer.entry("process_id", pid);
+                serializer.entry(json::esc!("process_id"), pid);
             }
 
-            THREAD_ID.with(|tid| serializer.entry("thread_id", tid));
+            THREAD_ID.with(|tid| serializer.entry(json::esc!("thread_id"), tid));
 
             // TODO: tls cache? name could change
             if let Some(thread_name) = std::thread::current().name()
                 && !thread_name.is_empty()
                 && thread_name != "tokio-runtime-worker"
             {
-                serializer.entry("thread_name", thread_name);
+                serializer.entry(json::esc!("thread_name"), thread_name);
             }
 
             if let Some(task_id) = tokio::task::try_id() {
-                serializer.entry("task_id", format_args!("{task_id}"));
+                serializer.entry(json::esc!("task_id"), format_args!("{task_id}"));
             }
 
-            serializer.entry("target", meta.target());
+            serializer.entry(json::esc!("target"), meta.target());
 
             // Skip adding module if it's the same as target.
             if let Some(module) = meta.module_path()
                 && module != meta.target()
             {
-                serializer.entry("module", module);
+                serializer.entry(json::esc!("module"), module);
             }
 
             if let Some(file) = meta.file() {
                 if let Some(line) = meta.line() {
-                    serializer.entry("src", format_args!("{file}:{line}"));
+                    serializer.entry(json::esc!("src"), format_args!("{file}:{line}"));
                 } else {
-                    serializer.entry("src", file);
+                    serializer.entry(json::esc!("src"), file);
                 }
             }
 
@@ -651,13 +655,16 @@ impl EventFormatter {
                 let otel_spanref = otel_context.span();
                 let span_context = otel_spanref.span_context();
                 if span_context.is_valid() {
-                    serializer.entry("trace_id", format_args!("{}", span_context.trace_id()));
+                    serializer.entry(
+                        json::esc!("trace_id"),
+                        format_args!("{}", span_context.trace_id()),
+                    );
                 }
             }
 
             if extracted.has_values() {
                 // TODO: add fields from event, too?
-                let extract = serializer.key("extract");
+                let extract = serializer.key(json::esc!("extract"));
                 json::value_as_object!(|extract| {
                     for (key, value) in std::iter::zip(extracted.names, extracted.values) {
                         if let Some(value) = value {
