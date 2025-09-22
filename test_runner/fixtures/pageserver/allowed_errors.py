@@ -126,6 +126,8 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
         if sys.platform != "linux"
         else []
     ),
+    # Tests run in dev mode
+    ".*Starting in dev mode.*",
 )
 
 
