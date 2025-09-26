@@ -703,6 +703,11 @@ pub mod defaults {
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
+    #[cfg(feature = "io-align-4k")]
+    pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 4096;
+    #[cfg(all(feature = "io-align-512", not(feature = "io-align-4k")))]
+    pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
+    #[cfg(not(any(feature = "io-align-512", feature = "io-align-4k")))]
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
 
     pub const DEFAULT_SSL_KEY_FILE: &str = "server.key";

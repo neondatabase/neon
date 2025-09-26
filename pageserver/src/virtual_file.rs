@@ -852,7 +852,7 @@ impl VirtualFileInner {
         // Because the alloctor might return _more_ aligned addresses than requested,
         // there is a chance that testing would not catch violations of a runtime requirement stricter than 512.
         {
-            let requirement = 512;
+            let requirement = get_io_buffer_alignment();
             let remainder = addr % requirement;
             assert!(
                 remainder == 0,
@@ -866,7 +866,7 @@ impl VirtualFileInner {
         // So enforce just that and not anything more restrictive.
         // Even the shallowest testing will expose more restrictive requirements if those ever arise.
         {
-            let requirement = 512;
+            let requirement = get_io_buffer_alignment() as u64;
             let remainder = offset % requirement;
             assert!(
                 remainder == 0,
@@ -879,7 +879,7 @@ impl VirtualFileInner {
         // The requirement in Linux 6.1 is bdev_logical_block_size().
         // On our production systems, that is 512.
         {
-            let requirement = 512;
+            let requirement = get_io_buffer_alignment();
             let remainder = size % requirement;
             assert!(
                 remainder == 0,

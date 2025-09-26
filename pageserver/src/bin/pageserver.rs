@@ -353,6 +353,10 @@ fn start_pageserver(
         launch_ts.to_string(),
         BUILD_TAG,
     );
+    info!(
+        "IO buffer alignment: {} bytes",
+        pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT
+    );
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
     set_launch_timestamp_metric(launch_ts);
     #[cfg(target_os = "linux")]

@@ -10,6 +10,10 @@ default = []
 # which adds some runtime cost to run tests on outage conditions
 testing = ["fail/failpoints", "pageserver_api/testing", "wal_decoder/testing", "pageserver_client/testing"]
 
+# Direct IO alignment options (propagated to pageserver_api)
+io-align-512 = ["pageserver_api/io-align-512"]
+io-align-4k = ["pageserver_api/io-align-4k"]
+
 fuzz-read-path = ["testing"]
 
 # Enables benchmarking only APIs

@@ -78,6 +78,7 @@ WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 ARG BUILD_TAG
 ARG ADDITIONAL_RUSTFLAGS=""
+ARG IO_ALIGNMENT=512
 ENV CARGO_FEATURES="default"
 
 # 3. Build cargo dependencies. Note that this step doesn't depend on anything else than
@@ -101,7 +102,12 @@ COPY --chown=nonroot --from=plan     /home/nonroot/Cargo.lock               Carg
 RUN  --mount=type=secret,uid=1000,id=SUBZERO_ACCESS_TOKEN \
     set -e \
     && if [ -s /run/secrets/SUBZERO_ACCESS_TOKEN ]; then \
-        export CARGO_FEATURES="rest_broker"; \
+        export CARGO_FEATURES="${CARGO_FEATURES},rest_broker"; \
+    fi \
+    && if [ "$IO_ALIGNMENT" = "4k" ]; then \
+        export CARGO_FEATURES="${CARGO_FEATURES},io-align-4k"; \
+    elif [ "$IO_ALIGNMENT" = "512" ]; then \
+        export CARGO_FEATURES="${CARGO_FEATURES},io-align-512"; \
     fi \
     && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment -Cforce-frame-pointers=yes ${ADDITIONAL_RUSTFLAGS}" cargo auditable build \
       --features $CARGO_FEATURES \

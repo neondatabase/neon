@@ -73,7 +73,7 @@ pub trait Buffer: std::ops::Deref<Target = [u8]> {
 }
 
 /// The minimum alignment and size requirement for disk offsets and memory buffer size for direct IO.
-const DIO_CHUNK_SIZE: usize = 512;
+const DIO_CHUNK_SIZE: usize = crate::virtual_file::get_io_buffer_alignment();
 
 /// If multiple chunks need to be read, merge adjacent chunk reads into batches of max size `MAX_CHUNK_BATCH_SIZE`.
 /// (The unit is the number of chunks.)
