@@ -76,6 +76,8 @@ pub async fn download_layer_file<'a>(
         layer_metadata.generation,
     );
 
+    let expected = layer_metadata.file_size;
+
     let (bytes_amount, temp_file) = download_retry(
         || async {
             // TempVirtualFile requires us to never reuse a filename while an old
@@ -103,6 +105,16 @@ pub async fn download_layer_file<'a>(
                 .map_err(DownloadError::Other)?,
                 gate.enter().map_err(|_| DownloadError::Cancelled)?,
             );
+            {
+                temp_file.fallocate(
+                    0,
+                    layer_metadata.file_size.next_multiple_of(
+64 * 1024 /* TODO this is the max roundtup size by the buffered writer set_len_then_truncate */
+
+            ),
+                    ctx,
+                ).await.unwrap();
+            };
             download_object(storage, &remote_path, temp_file, gate, cancel, ctx).await
         },
         &format!("download {remote_path:?}"),
@@ -110,7 +122,6 @@ pub async fn download_layer_file<'a>(
     )
     .await?;
 
-    let expected = layer_metadata.file_size;
     if expected != bytes_amount {
         return Err(DownloadError::Other(anyhow!(
             "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file {:?}",
