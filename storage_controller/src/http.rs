@@ -2028,23 +2028,19 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
     };
 
     let cfg = state.service.get_config();
-    if let Some(ref self_addr) = cfg.address_for_peers {
-        let leader_addr = match Uri::from_str(leader.address.as_str()) {
-            Ok(uri) => uri,
-            Err(err) => {
-                return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(
-                    anyhow::anyhow!(
-                        "Failed to parse leader uri for forwarding while in stepped down state: {err}"
-                    ),
-                )));
-            }
-        };
-
-        if *self_addr == leader_addr {
-            return ForwardOutcome::Forwarded(Err(ApiError::ResourceUnavailable(
-                "Leader is stepped down instance".into(),
-            )));
+    let leader_addr = match Uri::from_str(leader.address.as_str()) {
+        Ok(uri) => uri,
+        Err(err) => {
+            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Failed to parse leader uri for forwarding while in stepped down state: {err}"
+            ))));
         }
+    };
+
+    if cfg.address_for_peers == leader_addr {
+        return ForwardOutcome::Forwarded(Err(ApiError::ResourceUnavailable(
+            "Leader is stepped down instance".into(),
+        )));
     }
 
     tracing::info!("Forwarding {} to leader at {}", uri, leader.address);
