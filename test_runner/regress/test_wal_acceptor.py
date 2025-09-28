@@ -489,14 +489,13 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     assert_prefix_empty(neon_env_builder.safekeepers_remote_storage, prefix)
 
 
-# This test is flaky, probably because PUTs of local fs storage are not atomic.
-# Let's keep both remote storage kinds for a while to see if this is the case.
-# https://github.com/neondatabase/neon/issues/10761
-@pytest.mark.parametrize("remote_storage_kind", [s3_storage(), RemoteStorageKind.LOCAL_FS])
-def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
+def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
 
-    neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
+    # Note: local fs implementation is not protected from concurrent uploads of
+    # the same segment by different safekeepers and makes the test flaky.
+    # https://github.com/neondatabase/neon/issues/10761
+    neon_env_builder.enable_safekeeper_remote_storage(s3_storage())
 
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
