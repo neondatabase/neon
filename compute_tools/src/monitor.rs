@@ -407,8 +407,8 @@ fn get_database_stats(cli: &mut Client) -> anyhow::Result<(f64, i64)> {
     // like `postgres_exporter` use it to query Postgres statistics.
     // Use explicit 8 bytes type casts to match Rust types.
     let stats = cli.query_one(
-        "SELECT pg_catalog.coalesce(pg_catalog.sum(active_time), 0.0)::pg_catalog.float8 AS total_active_time,
-            pg_catalog.coalesce(pg_catalog.sum(sessions), 0)::pg_catalog.bigint AS total_sessions
+        "SELECT COALESCE(pg_catalog.sum(active_time), 0.0)::pg_catalog.float8 AS total_active_time,
+            COALESCE(pg_catalog.sum(sessions), 0)::pg_catalog.int8 AS total_sessions
         FROM pg_catalog.pg_stat_database
         WHERE datname NOT IN (
                 'postgres',
