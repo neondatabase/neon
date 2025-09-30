@@ -646,6 +646,8 @@ pub struct TenantConfigPatch {
     pub relsize_snapshot_cache_capacity: FieldPatch<usize>,
     #[serde(skip_serializing_if = "FieldPatch::is_noop")]
     pub basebackup_cache_enabled: FieldPatch<bool>,
+    #[serde(skip_serializing_if = "FieldPatch::is_noop")]
+    pub rel_size_v1_access_disabled: FieldPatch<bool>,
 }
 
 /// Like [`crate::config::TenantConfigToml`], but preserves the information
@@ -783,6 +785,9 @@ pub struct TenantConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub basebackup_cache_enabled: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rel_size_v1_access_disabled: Option<bool>,
 }
 
 impl TenantConfig {
@@ -830,6 +835,7 @@ impl TenantConfig {
             mut sampling_ratio,
             mut relsize_snapshot_cache_capacity,
             mut basebackup_cache_enabled,
+            mut rel_size_v1_access_disabled,
         } = self;
 
         patch.checkpoint_distance.apply(&mut checkpoint_distance);
@@ -939,6 +945,9 @@ impl TenantConfig {
         patch
             .basebackup_cache_enabled
             .apply(&mut basebackup_cache_enabled);
+        patch
+            .rel_size_v1_access_disabled
+            .apply(&mut rel_size_v1_access_disabled);
 
         Ok(Self {
             checkpoint_distance,
@@ -980,6 +989,7 @@ impl TenantConfig {
             sampling_ratio,
             relsize_snapshot_cache_capacity,
             basebackup_cache_enabled,
+            rel_size_v1_access_disabled,
         })
     }
 
@@ -1094,6 +1104,9 @@ impl TenantConfig {
             basebackup_cache_enabled: self
                 .basebackup_cache_enabled
                 .unwrap_or(global_conf.basebackup_cache_enabled),
+            rel_size_v1_access_disabled: self
+                .rel_size_v1_access_disabled
+                .unwrap_or(global_conf.rel_size_v1_access_disabled),
         }
     }
 }
@@ -1526,12 +1539,15 @@ pub struct OffloadedTimelineInfo {
     pub archived_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The state of the rel size migration. This is persisted in the index part.
+/// compatibility.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RelSizeMigration {
     /// The tenant is using the old rel_size format.
     /// Note that this enum is persisted as `Option<RelSizeMigration>` in the index part, so
     /// `None` is the same as `Some(RelSizeMigration::Legacy)`.
+    #[default]
     Legacy,
     /// The tenant is migrating to the new rel_size format. Both old and new rel_size format are
     /// persisted in the storage. The read path will read both formats and validate them.
