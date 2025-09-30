@@ -1145,6 +1145,23 @@ USER root
 
 #########################################################################################
 #
+# Layer "rust extensions pgrx16"
+#
+# Version 16 is now required by a few
+# This layer should be used as a base for new pgrx extensions,
+# and eventually get merged with `rust-extensions-build`
+#
+#########################################################################################
+FROM pg-build-with-cargo AS rust-extensions-build-pgrx16
+ARG PG_VERSION
+
+RUN cargo install --locked --version 0.16.0 cargo-pgrx && \
+    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
+
+USER root
+
+#########################################################################################
+#
 # Layers "pg-onnx-build" and "pgrag-build"
 # Compile "pgrag" extensions
 #
@@ -1491,19 +1508,15 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) && \
 FROM build-deps AS pg_mooncake-src
 ARG PG_VERSION
 WORKDIR /ext-src
-COPY compute/patches/duckdb_v113.patch .
-RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.2/pg_mooncake-0.1.2.tar.gz -O pg_mooncake.tar.gz && \
-    echo "4550473784fcdd2e1e18062bc01eb9c286abd27cdf5e11a4399be6c0a426ba90 pg_mooncake.tar.gz" | sha256sum --check && \
-    mkdir pg_mooncake-src && cd pg_mooncake-src && tar xzf ../pg_mooncake.tar.gz --strip-components=1 -C . && \
-    cd third_party/duckdb && patch -p1 < /ext-src/duckdb_v113.patch && cd ../.. && \
-    echo "make -f pg_mooncake-src/Makefile.build installcheck TEST_DIR=./test SQL_DIR=./sql SRC_DIR=./src" > neon-test.sh && \
-    chmod a+x neon-test.sh
+RUN git clone --depth 1 --branch poc-08.29 https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
+    cd pg_mooncake-src && \
+    git submodule update --init --recursive && \
+    sed -i 's/pgrx = "0.16.0"/pgrx = { version = "0.16.0", features = [ "unsafe-postgres" ] }/g' Cargo.toml
 
-FROM rust-extensions-build AS pg_mooncake-build
+FROM rust-extensions-build-pgrx16 AS pg_mooncake-build
 COPY --from=pg_mooncake-src /ext-src/ /ext-src/
 WORKDIR /ext-src/pg_mooncake-src
-RUN make release -j $(getconf _NPROCESSORS_ONLN) && \
-    make install -j $(getconf _NPROCESSORS_ONLN) && \
+RUN make install PG_VERSION=pg${PG_VERSION#v} && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_mooncake.control
 
 #########################################################################################
@@ -1512,27 +1525,27 @@ RUN make release -j $(getconf _NPROCESSORS_ONLN) && \
 # compile pg_duckdb extension
 #
 #########################################################################################
-FROM build-deps AS pg_duckdb-src
-WORKDIR /ext-src
-COPY compute/patches/pg_duckdb_v031.patch .
-COPY compute/patches/duckdb_v120.patch .
-# pg_duckdb build requires source dir to be a git repo to get submodules
-# allow {privileged_role_name} to execute some functions that in pg_duckdb are available to superuser only:
-# - extension management function duckdb.install_extension()
-# - access to duckdb.extensions table and its sequence
-RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
-    cd pg_duckdb-src && \
-    git submodule update --init --recursive && \
-    patch -p1 < /ext-src/pg_duckdb_v031.patch && \
-    cd third_party/duckdb && \
-    patch -p1 < /ext-src/duckdb_v120.patch
+# FROM build-deps AS pg_duckdb-src
+# WORKDIR /ext-src
+# COPY compute/patches/pg_duckdb_v031.patch .
+# COPY compute/patches/duckdb_v120.patch .
+# # pg_duckdb build requires source dir to be a git repo to get submodules
+# # allow {privileged_role_name} to execute some functions that in pg_duckdb are available to superuser only:
+# # - extension management function duckdb.install_extension()
+# # - access to duckdb.extensions table and its sequence
+# RUN git clone --depth 1 --branch v0.3.1 https://github.com/duckdb/pg_duckdb.git pg_duckdb-src && \
+#     cd pg_duckdb-src && \
+#     git submodule update --init --recursive && \
+#     patch -p1 < /ext-src/pg_duckdb_v031.patch && \
+#     cd third_party/duckdb && \
+#     patch -p1 < /ext-src/duckdb_v120.patch
 
-FROM pg-build AS pg_duckdb-build
-ARG PG_VERSION
-COPY --from=pg_duckdb-src /ext-src/ /ext-src/
-WORKDIR /ext-src/pg_duckdb-src
-RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control
+# FROM pg-build AS pg_duckdb-build
+# ARG PG_VERSION
+# COPY --from=pg_duckdb-src /ext-src/ /ext-src/
+# WORKDIR /ext-src/pg_duckdb-src
+# RUN make install -j $(getconf _NPROCESSORS_ONLN) && \
+#     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_duckdb.control
 
 #########################################################################################
 #
@@ -1708,7 +1721,7 @@ COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgaudit-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgauditlogtofile-build /usr/local/pgsql/ /usr/local/pgsql/
