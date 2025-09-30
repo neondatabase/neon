@@ -44,6 +44,7 @@ use pageserver_api::models::{
     TopTenantShardItem, TopTenantShardsRequest, TopTenantShardsResponse,
 };
 use pageserver_api::shard::{ShardCount, TenantShardId};
+use postgres_backend::AuthType;
 use postgres_ffi::PgMajorVersion;
 use remote_storage::{DownloadError, GenericRemoteStorage, TimeTravelError};
 use scopeguard::defer;
@@ -55,6 +56,7 @@ use tokio::time::Instant;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::auth::JwtAuth;
 use utils::auth::SwappableJwtAuth;
 use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
@@ -560,6 +562,10 @@ async fn reload_auth_validation_keys_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
+    // Note to Bricksters: This API returns 400 if HTTP auth is not enabled. This is because `state.auth` is only
+    // determined by HTTP auth.
+    // TODO(william.huang): In practice both HTTP and PG auth point to the same SwappableJwtAuth object. Refactor
+    // this code so that we can swap out the underlying shared auth object even if HTTP auth is None.
     check_permission(&request, None)?;
     let config = get_config(&request);
     let state = get_state(&request);
@@ -570,7 +576,12 @@ async fn reload_auth_validation_keys_handler(
     let key_path = config.auth_validation_public_key_path.as_ref().unwrap();
     info!("Reloading public key(s) for verifying JWT tokens from {key_path:?}");
 
-    match utils::auth::JwtAuth::from_key_path(key_path) {
+    let new_jwt_auth = if config.http_auth_type == AuthType::HadronJWT {
+        JwtAuth::from_cert_path(key_path)
+    } else {
+        JwtAuth::from_key_path(key_path)
+    };
+    match new_jwt_auth {
         Ok(new_auth) => {
             shared_auth.swap(new_auth);
             json_response(StatusCode::OK, ())

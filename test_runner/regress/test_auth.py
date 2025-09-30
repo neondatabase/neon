@@ -32,8 +32,11 @@ def assert_client_not_authorized(env: NeonEnv, http_client: PageserverHttpClient
         assert_client_authorized(env, http_client)
 
 
-def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
+def test_pageserver_auth(neon_env_builder: NeonEnvBuilder, use_hadron_auth_tokens: bool):
     neon_env_builder.auth_enabled = True
+    neon_env_builder.use_hadron_auth_tokens = use_hadron_auth_tokens
+
     env = neon_env_builder.init_start()
 
     ps = env.pageserver
@@ -72,8 +75,10 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         env.pageserver.tenant_create(TenantId.generate(), auth_token=tenant_token)
 
 
-def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
+def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder, use_hadron_auth_tokens: bool):
     neon_env_builder.auth_enabled = True
+    neon_env_builder.use_hadron_auth_tokens = use_hadron_auth_tokens
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
@@ -91,8 +96,10 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
             assert cur.fetchone() == (5000050000,)
 
 
-def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
+def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder, use_hadron_auth_tokens: bool):
     neon_env_builder.auth_enabled = True
+    neon_env_builder.use_hadron_auth_tokens = use_hadron_auth_tokens
     env = neon_env_builder.init_start()
     env.pageserver.allowed_errors.extend(
         [".*Authentication error: InvalidSignature.*", ".*Unauthorized: malformed jwt token.*"]
@@ -145,8 +152,10 @@ def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
     assert_client_authorized(env, pageserver_http_client_new)
 
 
-def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
+def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder, use_hadron_auth_tokens: bool):
     neon_env_builder.auth_enabled = True
+    neon_env_builder.use_hadron_auth_tokens = use_hadron_auth_tokens
     env = neon_env_builder.init_start()
     env.pageserver.allowed_errors.extend(
         [".*Authentication error: InvalidSignature.*", ".*Unauthorized: malformed jwt token.*"]
@@ -183,7 +192,12 @@ def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
 
 
 @pytest.mark.parametrize("auth_enabled", [False, True])
-def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
+@pytest.mark.parametrize("use_hadron_auth_tokens", [True, False])
+def test_auth_failures(
+    neon_env_builder: NeonEnvBuilder, auth_enabled: bool, use_hadron_auth_tokens: bool
+):
+    neon_env_builder.auth_enabled = auth_enabled
+    neon_env_builder.use_hadron_auth_tokens = use_hadron_auth_tokens
     neon_env_builder.auth_enabled = auth_enabled
     env = neon_env_builder.init_start()
 

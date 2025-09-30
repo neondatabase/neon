@@ -30,14 +30,14 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::instrument;
 use url::Url;
-use utils::auth::{Claims, Scope, encode_from_key_file};
+use utils::auth::{Claims, Scope, encode_from_key_file, encode_hadron_token};
 use utils::id::{NodeId, TenantId};
 use whoami::username;
 
 pub struct StorageController {
     env: LocalEnv,
-    private_key: Option<Pem>,
-    public_key: Option<Pem>,
+    private_key: Option<StorageControllerPrivateKey>,
+    public_key: Option<StorageControllerPublicKey>,
     client: reqwest::Client,
     config: NeonStorageControllerConf,
 
@@ -108,6 +108,25 @@ pub struct InspectResponse {
     pub attachment: Option<(u32, NodeId)>,
 }
 
+enum StorageControllerPublicKey {
+    RawPublicKey(Pem),
+    PublicKeyCertPath(Utf8PathBuf),
+}
+
+enum StorageControllerPrivateKey {
+    EdPrivateKey(Pem),
+    HadronPrivateKey(Utf8PathBuf, Vec<u8>),
+}
+
+impl StorageControllerPrivateKey {
+    pub fn encode_token(&self, claims: &Claims) -> anyhow::Result<String> {
+        match self {
+            Self::EdPrivateKey(key_data) => encode_from_key_file(claims, key_data),
+            Self::HadronPrivateKey(_, key_data) => encode_hadron_token(claims, key_data),
+        }
+    }
+}
+
 impl StorageController {
     pub fn from_env(env: &LocalEnv) -> Self {
         // Assume all pageservers have symmetric auth configuration: this service
@@ -152,7 +171,30 @@ impl StorageController {
                     )
                     .expect("Failed to parse PEM file")
                 };
-                (Some(private_key), Some(public_key))
+                (
+                    Some(StorageControllerPrivateKey::EdPrivateKey(private_key)),
+                    Some(StorageControllerPublicKey::RawPublicKey(public_key)),
+                )
+            }
+            AuthType::HadronJWT => {
+                let private_key_path = env.get_private_key_path();
+                let private_key =
+                    fs::read(private_key_path.clone()).expect("failed to read private key");
+
+                // If pageserver auth is enabled, this implicitly enables auth for this service,
+                // using the same credentials.
+                let public_key_path =
+                    camino::Utf8PathBuf::try_from(env.base_data_dir.join("auth_public_key.pem"))
+                        .unwrap();
+                (
+                    Some(StorageControllerPrivateKey::HadronPrivateKey(
+                        camino::Utf8PathBuf::try_from(private_key_path).unwrap(),
+                        private_key,
+                    )),
+                    Some(StorageControllerPublicKey::PublicKeyCertPath(
+                        public_key_path,
+                    )),
+                )
             }
         };
 
@@ -575,23 +617,38 @@ impl StorageController {
 
         if let Some(private_key) = &self.private_key {
             let claims = Claims::new(None, Scope::PageServerApi);
-            let jwt_token =
-                encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
+            if let StorageControllerPrivateKey::HadronPrivateKey(key_path, _) = private_key {
+                args.push(format!("--private-key-path={key_path}"));
+            }
+            // We are setting all JWT tokens for Hadron as well in this test to avoid bifurcation between Neon and
+            // Hadron test cases. In production we do not need to set this as HTTP auth is not enabled on the
+            // pageserver. We use network segmentation to ensure that only trusted components can talk to
+            // pageserver's http port
+            let jwt_token = private_key.encode_token(&claims)?;
             args.push(format!("--jwt-token={jwt_token}"));
 
             let peer_claims = Claims::new(None, Scope::Admin);
-            let peer_jwt_token = encode_from_key_file(&peer_claims, private_key)
+            let peer_jwt_token = private_key
+                .encode_token(&peer_claims)
                 .expect("failed to generate jwt token");
             args.push(format!("--peer-jwt-token={peer_jwt_token}"));
 
             let claims = Claims::new(None, Scope::SafekeeperData);
-            let jwt_token =
-                encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
+            let jwt_token = private_key
+                .encode_token(&claims)
+                .expect("failed to generate jwt token");
             args.push(format!("--safekeeper-jwt-token={jwt_token}"));
         }
 
         if let Some(public_key) = &self.public_key {
-            args.push(format!("--public-key=\"{public_key}\""));
+            match public_key {
+                StorageControllerPublicKey::RawPublicKey(public_key) => {
+                    args.push(format!("--public-key=\"{public_key}\""));
+                }
+                StorageControllerPublicKey::PublicKeyCertPath(public_key_path) => {
+                    args.push(format!("--public-key-cert-path={public_key_path}"));
+                }
+            }
         }
 
         if let Some(control_plane_hooks_api) = &self.env.control_plane_hooks_api {
@@ -632,7 +689,13 @@ impl StorageController {
             self.env.base_data_dir.display()
         ));
 
-        if self.env.safekeepers.iter().any(|sk| sk.auth_enabled) && self.private_key.is_none() {
+        if self
+            .env
+            .safekeepers
+            .iter()
+            .any(|sk| sk.auth_type != AuthType::Trust)
+            && self.private_key.is_none()
+        {
             anyhow::bail!("Safekeeper set up for auth but no private key specified");
         }
 
@@ -847,7 +910,7 @@ impl StorageController {
             println!("Getting claims for path {path}");
             if let Some(required_claims) = Self::get_claims_for_path(&path)? {
                 println!("Got claims {required_claims:?} for path {path}");
-                let jwt_token = encode_from_key_file(&required_claims, private_key)?;
+                let jwt_token = private_key.encode_token(&required_claims)?;
                 builder = builder.header(
                     reqwest::header::AUTHORIZATION,
                     format!("Bearer {jwt_token}"),

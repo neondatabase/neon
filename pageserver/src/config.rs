@@ -629,6 +629,13 @@ impl PageServerConf {
             }
         };
 
+        let auth_types = [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type];
+        if auth_types.contains(&AuthType::NeonJWT) && auth_types.contains(&AuthType::HadronJWT) {
+            return Err(anyhow::anyhow!(
+                "Mixing neon and hadron style JWT tokens is not supported"
+            ));
+        }
+
         Ok(conf)
     }
 

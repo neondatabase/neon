@@ -969,6 +969,7 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
         // User (likely interactive) did not provide a description of the environment, give them the default
         NeonLocalInitConf {
             control_plane_api: Some(DEFAULT_PAGESERVER_CONTROL_PLANE_API.parse().unwrap()),
+            auth_token_type: AuthType::NeonJWT,
             broker: NeonBroker {
                 listen_addr: Some(DEFAULT_BROKER_ADDR.parse().unwrap()),
                 listen_https_addr: None,
@@ -1504,7 +1505,10 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             pageserver_conninfo.prefer_protocol = prefer_protocol;
 
             let ps_conf = env.get_pageserver_conf(DEFAULT_PAGESERVER_ID)?;
-            let auth_token = if matches!(ps_conf.pg_auth_type, AuthType::NeonJWT) {
+            let auth_token = if matches!(
+                ps_conf.pg_auth_type,
+                AuthType::NeonJWT | AuthType::HadronJWT
+            ) {
                 let claims = Claims::new(Some(endpoint.tenant_id), Scope::Tenant);
 
                 Some(env.generate_auth_token(&claims)?)
