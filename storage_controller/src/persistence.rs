@@ -20,7 +20,8 @@ use futures::future::BoxFuture;
 use itertools::Itertools;
 use pageserver_api::controller_api::{
     AvailabilityZone, MetadataHealthRecord, NodeLifecycle, NodeSchedulingPolicy, PlacementPolicy,
-    SafekeeperDescribeResponse, ShardSchedulingPolicy, SkSchedulingPolicy,
+    SCSafekeeperTimelinesResponse, SafekeeperDescribeResponse, ShardSchedulingPolicy,
+    SkSchedulingPolicy,
 };
 use pageserver_api::models::{ShardImportStatus, TenantConfig};
 use pageserver_api::shard::{
@@ -37,10 +38,19 @@ use utils::id::{NodeId, TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use self::split_state::SplitState;
+use crate::hadron_queries::HadronSafekeeperRow;
+use crate::hadron_queries::PageserverAndSafekeeperConnectionInfo;
+use crate::hadron_queries::delete_timeline_safekeepers;
+use crate::hadron_queries::execute_safekeeper_list_timelines;
+use crate::hadron_queries::execute_sk_upsert;
+use crate::hadron_queries::get_pageserver_and_safekeeper_connection_info;
+use crate::hadron_queries::idempotently_persist_or_get_existing_timeline_safekeepers;
+use crate::hadron_queries::scan_safekeepers_and_scheduled_timelines;
 use crate::metrics::{
     DatabaseQueryErrorLabelGroup, DatabaseQueryLatencyLabelGroup, METRICS_REGISTRY,
 };
 use crate::node::Node;
+use crate::sk_node::SafeKeeperNode;
 use crate::timeline_import::{
     TimelineImport, TimelineImportUpdateError, TimelineImportUpdateFollowUp,
 };
@@ -75,6 +85,38 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 /// we can UPDATE a node's scheduling mode reasonably quickly to mark a bad node offline.
 pub struct Persistence {
     connection_pool: Pool<AsyncPgConnection>,
+}
+
+#[derive(Copy, Clone)]
+pub struct PersistenceConfig {
+    max_connections: u32,
+    idle_connection_timeout: Duration,
+    max_connection_lifetime: Duration,
+}
+
+impl PersistenceConfig {
+    // If unspecified, use neon.com defaults
+    //
+    // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
+    // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
+    pub const MAX_CONNECTIONS_DEFAULT: u32 = 99;
+    // We don't want to keep a lot of connections alive: close them down promptly if they aren't being used.
+    pub const IDLE_CONNECTION_TIMEOUT_DEFAULT: Duration = Duration::from_secs(10);
+    pub const MAX_CONNECTION_LIFETIME_DEFAULT: Duration = Duration::from_secs(60);
+
+    pub fn new(
+        max_connections: Option<u32>,
+        idle_connection_timeout: Option<Duration>,
+        max_connection_lifetime: Option<Duration>,
+    ) -> Self {
+        PersistenceConfig {
+            max_connections: max_connections.unwrap_or(Self::MAX_CONNECTIONS_DEFAULT),
+            idle_connection_timeout: idle_connection_timeout
+                .unwrap_or(Self::IDLE_CONNECTION_TIMEOUT_DEFAULT),
+            max_connection_lifetime: max_connection_lifetime
+                .unwrap_or(Self::MAX_CONNECTION_LIFETIME_DEFAULT),
+        }
+    }
 }
 
 /// Legacy format, for use in JSON compat objects in test environment
@@ -143,6 +185,20 @@ pub(crate) enum DatabaseOperation {
     DeleteTimelineImport,
     ListTimelineImports,
     IsTenantImportingTimeline,
+    // Brickstore Hadron
+    UpsertSafeKeeperNode,
+    LoadSafeKeepersAndEndpoints,
+    EnsureHadronEndpointTransaction,
+    DeleteHadronEndpoint,
+    GetHadronEndpointInfo,
+    FetchComputeSpec,
+    GetTenandIdByEndpointId,
+    GetTenantShardsByEndpointId,
+    GetComputeNamesByTenantId,
+    GetOrCreateHadronTimelineSafekeeper,
+    FetchPageServerAndSafeKeeperConnections,
+    DeleteHadronTimeline,
+    ListSafekeeperTimelines,
 }
 
 #[must_use]
@@ -179,11 +235,7 @@ impl Persistence {
     // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
     pub const MAX_CONNECTIONS: u32 = 99;
 
-    // We don't want to keep a lot of connections alive: close them down promptly if they aren't being used.
-    const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
-    const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
-
-    pub async fn new(database_url: String) -> Self {
+    pub async fn new(database_url: String, config: PersistenceConfig) -> Self {
         let mut mgr_config = ManagerConfig::default();
         mgr_config.custom_setup = Box::new(establish_connection_rustls);
 
@@ -195,9 +247,9 @@ impl Persistence {
         // We will use a connection pool: this is primarily to _limit_ our connection count, rather than to optimize time
         // to execute queries (database queries are not generally on latency-sensitive paths).
         let connection_pool = Pool::builder()
-            .max_size(Self::MAX_CONNECTIONS)
-            .max_lifetime(Some(Self::MAX_CONNECTION_LIFETIME))
-            .idle_timeout(Some(Self::IDLE_CONNECTION_TIMEOUT))
+            .max_size(config.max_connections)
+            .max_lifetime(Some(config.max_connection_lifetime))
+            .idle_timeout(Some(config.idle_connection_timeout))
             // Always keep at least one connection ready to go
             .min_idle(Some(1))
             .test_on_check_out(true)
@@ -2141,6 +2193,134 @@ impl Persistence {
         })
         .await
     }
+
+    ////////////////////////////////////////////////////////////////
+    //////////////////////// Hadron methods ////////////////////////
+    //////////////////////// (Brickstore) //////////////////////////
+    ////////////////////////////////////////////////////////////////
+
+    /// Upsert a SafeKeeper node.
+    #[allow(unused)]
+    pub(crate) async fn upsert_sk_node(&self, sk_node: &SafeKeeperNode) -> DatabaseResult<()> {
+        let sk_row = sk_node.to_database_row();
+        self.with_measured_conn(DatabaseOperation::UpsertSafeKeeperNode, move |conn| {
+            // Incantation to make the borrow checker happy
+            let sk_row_clone = sk_row.clone();
+            Box::pin(async move { execute_sk_upsert(conn, sk_row_clone).await })
+        })
+        .await
+    }
+
+    /// Load all Safe Keeper nodes and their scheduled endpoints from the database. This method is called at startup to
+    /// populate the SafeKeeperScheduler.
+    #[allow(unused)]
+    pub(crate) async fn load_safekeeper_scheduling_data(
+        &self,
+    ) -> DatabaseResult<HashMap<NodeId, SafeKeeperNode>> {
+        let sk_nodes: HashMap<NodeId, SafeKeeperNode> = self
+            .with_measured_conn(
+                DatabaseOperation::LoadSafeKeepersAndEndpoints,
+                move |conn| {
+                    // Retrieve all Safe Keeper nodes from the hadron_safekeepers table, and all timelines (grouped by
+                    // safe keeper IDs) from the hadron_timeline_safekeepers table.
+                    Box::pin(async move { scan_safekeepers_and_scheduled_timelines(conn).await })
+                },
+            )
+            .await?;
+
+        tracing::info!(
+            "load_safekeepers_and_endpoints: loaded {} safekeepers",
+            sk_nodes.len()
+        );
+
+        Ok(sk_nodes)
+    }
+
+    #[allow(unused)]
+    pub(crate) async fn get_or_assign_safekeepers_to_timeline(
+        &self,
+        timeline_id: TimelineId,
+        safekeepers: Vec<NodeId>,
+    ) -> DatabaseResult<Vec<NodeId>> {
+        self.with_measured_conn(
+            DatabaseOperation::GetOrCreateHadronTimelineSafekeeper,
+            move |conn| {
+                let safekeepers_clone = safekeepers.clone();
+                Box::pin(async move {
+                    idempotently_persist_or_get_existing_timeline_safekeepers(
+                        conn,
+                        timeline_id,
+                        &safekeepers_clone,
+                    )
+                    .await
+                })
+            },
+        )
+        .await
+    }
+
+    #[allow(unused)]
+    pub(crate) async fn delete_hadron_timeline_safekeepers(
+        &self,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<()> {
+        self.with_measured_conn(DatabaseOperation::DeleteHadronTimeline, move |conn| {
+            Box::pin(async move {
+                delete_timeline_safekeepers(conn, timeline_id).await?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    #[allow(unused)]
+    pub(crate) async fn get_pageserver_and_safekeepers(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> DatabaseResult<PageserverAndSafekeeperConnectionInfo> {
+        self.with_measured_conn(
+            DatabaseOperation::FetchPageServerAndSafeKeeperConnections,
+            move |conn| {
+                Box::pin(async move {
+                    get_pageserver_and_safekeeper_connection_info(conn, tenant_id, timeline_id)
+                        .await
+                })
+            },
+        )
+        .await
+    }
+
+    #[allow(unused)]
+    pub(crate) async fn list_hadron_safekeepers(&self) -> DatabaseResult<Vec<HadronSafekeeperRow>> {
+        let safekeepers: Vec<HadronSafekeeperRow> = self
+            .with_measured_conn(DatabaseOperation::ListNodes, move |conn| {
+                Box::pin(async move {
+                    Ok(crate::schema::hadron_safekeepers::table
+                        .load::<HadronSafekeeperRow>(conn)
+                        .await?)
+                })
+            })
+            .await?;
+
+        tracing::info!(
+            "list_hadron_safekeepers: loaded {} nodes",
+            safekeepers.len()
+        );
+
+        Ok(safekeepers)
+    }
+
+    #[allow(unused)]
+    pub(crate) async fn safekeeper_list_timelines(
+        &self,
+        id: i64,
+    ) -> DatabaseResult<SCSafekeeperTimelinesResponse> {
+        self.with_measured_conn(DatabaseOperation::ListSafekeeperTimelines, move |conn| {
+            Box::pin(async move { execute_safekeeper_list_timelines(conn, id).await })
+        })
+        .await
+    }
 }
 
 pub(crate) fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
@@ -2229,15 +2409,45 @@ fn client_config_with_root_certs() -> anyhow::Result<rustls::ClientConfig> {
     })
 }
 
+// Hadron's implementation of establish_connection_rustls which avoids hogging the tokio executor thread during
+// CPU-intensive operations in postgres connection and session establishments.
+// Compared to the original implementation this function performs the following tasks using spawn_blocking to avoid
+// hogging the tokio executor thread:
+// 1. Parsing and decoding root certificates during rustls client config setup.
+// 2. The tokio_postgres::connect() call, which performs the TLS handshake and the postgres password authentication.
 fn establish_connection_rustls(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
-    let fut = async {
+    let fut = async move {
         // We first set up the way we want rustls to work.
-        let rustls_config = client_config_with_root_certs()
-            .map_err(|err| ConnectionError::BadConnection(format!("{err:?}")))?;
-        let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
-        let (client, conn) = tokio_postgres::connect(config, tls)
+        let rustls_config = tokio::task::spawn_blocking(client_config_with_root_certs)
             .await
-            .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
+            .map_err(|e| {
+                ConnectionError::BadConnection(format!(
+                    "Error in spawn_blocking client_config_with_root_certs: {e}"
+                ))
+            })
+            .and_then(|r| {
+                r.map_err(|e| {
+                    ConnectionError::BadConnection(format!(
+                        "Error in client_config_with_root_certs: {e}"
+                    ))
+                })
+            })?;
+
+        let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
+
+        // Perform the expensive TLS handshake and SCRAM SHA calculations in a blocking task
+        let task_owned_config = config.to_owned();
+        let (client, conn) = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current()
+                .block_on(async { tokio_postgres::connect(&task_owned_config, tls).await })
+        })
+        .await
+        .map_err(|e| {
+            ConnectionError::BadConnection(format!(
+                "Error in spawn_blocking tokio_postgres::connect: {e}"
+            ))
+        })
+        .and_then(|r| r.map_err(|e| ConnectionError::BadConnection(e.to_string())))?;
 
         AsyncPgConnection::try_from_client_and_connection(client, conn).await
     };

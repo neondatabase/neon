@@ -16,7 +16,7 @@ use pageserver_api::config::PostHogConfig;
 use reqwest::Certificate;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
-use storage_controller::persistence::Persistence;
+use storage_controller::persistence::{Persistence, PersistenceConfig};
 use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::feature_flag::FeatureFlagService;
 use storage_controller::service::{
@@ -229,6 +229,15 @@ struct Cli {
     /// **Feature Flag** Whether the storage controller should act to rectify pageserver-reported local disk loss.
     #[arg(long, default_value = "false")]
     handle_ps_local_disk_loss: bool,
+
+    #[arg(long)]
+    db_max_connections: Option<u32>,
+
+    #[arg(long)]
+    db_idle_connection_timeout: Option<humantime::Duration>,
+
+    #[arg(long)]
+    db_max_connection_lifetime: Option<humantime::Duration>,
 }
 
 enum StrictMode {
@@ -338,7 +347,7 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         // We use spawn_blocking for database operations, so require approximately
         // as many blocking threads as we will open database connections.
-        .max_blocking_threads(Persistence::MAX_CONNECTIONS as usize)
+        .max_blocking_threads(PersistenceConfig::MAX_CONNECTIONS_DEFAULT as usize)
         .enable_all()
         .build()
         .unwrap()
@@ -429,6 +438,19 @@ async fn async_main() -> anyhow::Result<()> {
         None
     };
 
+    let db_idle_connection_timeout: Option<Duration> = args
+        .db_idle_connection_timeout
+        .map(humantime::Duration::into);
+    let db_max_connection_lifetime: Option<Duration> = args
+        .db_max_connection_lifetime
+        .map(humantime::Duration::into);
+
+    let persistence_config = PersistenceConfig::new(
+        args.db_max_connections,
+        db_idle_connection_timeout,
+        db_max_connection_lifetime,
+    );
+
     let config = Config {
         pageserver_jwt_token: secrets.pageserver_jwt_token,
         safekeeper_jwt_token: secrets.safekeeper_jwt_token,
@@ -482,12 +504,13 @@ async fn async_main() -> anyhow::Result<()> {
             .map(humantime::Duration::into)
             .unwrap_or(Duration::MAX),
         handle_ps_local_disk_loss: args.handle_ps_local_disk_loss,
+        persistence_config,
     };
 
     // Validate that we can connect to the database
     Persistence::await_connection(&secrets.database_url, args.db_connect_timeout.into()).await?;
 
-    let persistence = Arc::new(Persistence::new(secrets.database_url).await);
+    let persistence = Arc::new(Persistence::new(secrets.database_url, persistence_config).await);
 
     let service = Service::spawn(config, persistence.clone()).await?;
 
