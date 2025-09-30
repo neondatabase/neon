@@ -3420,6 +3420,25 @@ impl Timeline {
                 );
                 return Ok(CompactionOutcome::Done);
             }
+            if selected_layers.len() == 1 && !cfg!(test) {
+                // In unit tests, we sometimes compact a single layer to test correctness.
+                info!(
+                    "skipping gc-compaction: only one layer within the key range, gc_cutoff={}, key_range={}..{}",
+                    gc_cutoff, compact_key_range.start, compact_key_range.end
+                );
+                return Ok(());
+            }
+            if selected_layers.iter().all(|l| !l.layer_desc().is_delta()) && !cfg!(test) {
+                // In unit tests, we sometimes force compact image layers to test correctness.
+
+                // If the image layers overlaps, we could potentially consolidate them into a single level.
+                // But the benefit of doing so is not worth the overhead.
+                info!(
+                    "skipping gc-compaction: only image layers within the key range, gc_cutoff={}, key_range={}..{}",
+                    gc_cutoff, compact_key_range.start, compact_key_range.end
+                );
+                return Ok(());
+            }
             retain_lsns_below_horizon.sort();
             GcCompactionJobDescription {
                 selected_layers,
