@@ -12,6 +12,9 @@
 #ifndef COMMUNICATOR_PROCESS_H
 #define COMMUNICATOR_PROCESS_H
 
+extern struct CommunicatorInitStruct *cis;
+
+/* initialization early at postmaster startup */
 extern void pg_init_communicator_process(void);
 
 #endif			/* COMMUNICATOR_PROCESS_H */

@@ -15,6 +15,7 @@ neon.iml
 /.neon
 /integration_tests/.neon
 compaction-suite-results.*
+pgxn/neon/communicator/communicator_bindings.h
 docker-compose/docker-compose-parallel.yml
 
 # Coverage

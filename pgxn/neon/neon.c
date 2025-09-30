@@ -21,6 +21,7 @@
 #include "replication/logicallauncher.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
+#include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/ipc.h"
 #include "funcapi.h"
@@ -31,6 +32,7 @@
 #include "utils/guc_tables.h"
 
 #include "communicator.h"
+#include "communicator_new.h"
 #include "communicator_process.h"
 #include "extension_server.h"
 #include "file_cache.h"
@@ -473,6 +475,16 @@ _PG_init(void)
 	load_file("$libdir/neon_rmgr", false);
 #endif
 
+	DefineCustomBoolVariable(
+							"neon.use_communicator_worker",
+							"Uses the communicator worker implementation",
+							NULL,
+							&neon_use_communicator_worker,
+							true,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
+
 	if (lakebase_mode) {
 		prev_emit_log_hook = emit_log_hook;
 		emit_log_hook = DatabricksSqlErrorHookImpl;
@@ -512,12 +524,14 @@ _PG_init(void)
 	pg_init_libpagestore();
 	relsize_hash_init();
 	lfc_init();
+	pg_init_prewarm();
 	pg_init_walproposer();
-	init_lwlsncache();
+	pg_init_lwlsncache();
 
 	pg_init_communicator_process();
 
 	pg_init_communicator();
+
 	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitUnstableExtensionsSupport();
@@ -723,7 +737,10 @@ approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
 
 	duration = PG_ARGISNULL(0) ? (time_t) -1 : PG_GETARG_INT32(0);
 
-	dc = lfc_approximate_working_set_size_seconds(duration, false);
+	if (neon_use_communicator_worker)
+		dc = communicator_new_approximate_working_set_size_seconds(duration, false);
+	else
+		dc = lfc_approximate_working_set_size_seconds(duration, false);
 	if (dc < 0)
 		PG_RETURN_NULL();
 	else
@@ -736,7 +753,10 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 	bool		reset = PG_GETARG_BOOL(0);
 	int32		dc;
 
-	dc = lfc_approximate_working_set_size_seconds(-1, reset);
+	if (neon_use_communicator_worker)
+		dc = communicator_new_approximate_working_set_size_seconds(-1, reset);
+	else
+		dc = lfc_approximate_working_set_size_seconds(-1, reset);
 	if (dc < 0)
 		PG_RETURN_NULL();
 	else
@@ -754,7 +774,10 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 	InitMaterializedSRF(fcinfo, 0);
 
 	/* lfc_get_stats() does all the heavy lifting */
-	entries = lfc_get_stats(&num_entries);
+	if (neon_use_communicator_worker)
+		entries = communicator_new_lfc_get_stats(&num_entries);
+	else
+		entries = lfc_get_stats(&num_entries);
 
 	/* Convert the LfcStatsEntrys to a result set */
 	for (size_t i = 0; i < num_entries; i++)
@@ -828,11 +851,13 @@ neon_shmem_request_hook(void)
 #endif
 
 	LfcShmemRequest();
+	PrewarmShmemRequest();
 	NeonPerfCountersShmemRequest();
 	PagestoreShmemRequest();
 	RelsizeCacheShmemRequest();
 	WalproposerShmemRequest();
 	LwLsnCacheShmemRequest();
+	CommunicatorNewShmemRequest();
 }
 
 
@@ -850,6 +875,7 @@ neon_shmem_startup_hook(void)
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
 	LfcShmemInit();
+	PrewarmShmemInit();
 	NeonPerfCountersShmemInit();
 	if (lakebase_mode) {
 		DatabricksMetricsShmemInit();
@@ -858,6 +884,7 @@ neon_shmem_startup_hook(void)
 	RelsizeCacheShmemInit();
 	WalproposerShmemInit();
 	LwLsnCacheShmemInit();
+	CommunicatorNewShmemInit();
 
 #if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");

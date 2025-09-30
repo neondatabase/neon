@@ -6,15 +6,26 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-nix.workspace=true
+nix.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }
 libc.workspace = true
 lock_api.workspace = true
 rustc-hash.workspace = true
 
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
+rand = "0.9"
+rand_distr = "0.5.1"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+ahash.workspace = true
+twox-hash = { version = "2.1.1" }
+seahash = "4.1.0"
+hashbrown = { git = "https://github.com/quantumish/hashbrown.git", rev = "6610e6d" }
+
+
 [target.'cfg(target_os = "macos")'.dependencies]
 tempfile = "3.14.0"
 
-[dev-dependencies]
-rand.workspace = true
-rand_distr = "0.5.1"
+[[bench]]
+name = "hmap_resize"
+harness = false

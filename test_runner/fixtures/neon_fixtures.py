@@ -4791,7 +4791,7 @@ class Endpoint(PgProtocol, LogUtils):
 
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
-        config_lines = ["max_replication_write_lag=15MB"] + config_lines
+        config_lines += ["max_replication_write_lag=15MB"]
 
         # Delete file cache if it exists (and we're recreating the endpoint)
         if USE_LFC:

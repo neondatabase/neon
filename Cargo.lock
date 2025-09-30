@@ -260,6 +260,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8ab6b55fe97976e46f91ddbed8d147d966475dc29b2032757ba47e02376fbc3"
 
 [[package]]
+name = "atomic_enum"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99e1aca718ea7b89985790c94aad72d77533063fe00bc497bb79a7c2dae6a661"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1296,13 +1307,29 @@ dependencies = [
 name = "communicator"
 version = "0.1.0"
 dependencies = [
+ "atomic_enum",
  "axum",
+ "bytes",
  "cbindgen",
+ "clashmap",
  "http 1.3.1",
+ "libc",
  "measured",
+ "neon-shmem",
+ "nix 0.30.1",
+ "pageserver_api",
+ "pageserver_client_grpc",
+ "pageserver_page_api",
+ "prometheus",
+ "prost 0.13.5",
+ "strum_macros",
+ "thiserror 1.0.69",
  "tokio",
+ "tokio-pipe",
+ "tonic",
  "tracing",
  "tracing-subscriber",
+ "uring-common",
  "utils",
  "workspace_hack",
 ]
@@ -1643,9 +1670,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-utils"
-version = "0.8.19"
+version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "248e3bacc7dc6baa3b21e405ee045c3047101a49145e7e9eca583ab4c2ca5345"
+checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "crossterm"
@@ -2362,6 +2389,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2768,6 +2801,16 @@ name = "hashbrown"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
+
+[[package]]
+name = "hashbrown"
+version = "0.15.4"
+source = "git+https://github.com/quantumish/hashbrown.git?rev=6610e6d#6610e6d2b1f288ef7b0709a3efefbc846395dc5e"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "hashlink"
@@ -3876,7 +3919,7 @@ dependencies = [
  "prometheus",
  "rand 0.9.1",
  "rand_distr",
- "twox-hash",
+ "twox-hash 1.6.3",
 ]
 
 [[package]]
@@ -3992,15 +4035,21 @@ checksum = "e5ce46fe64a9d73be07dcbe690a38ce1b293be448fd8ce1e6c1b8062c9f72c6a"
 name = "neon-shmem"
 version = "0.1.0"
 dependencies = [
+ "ahash",
+ "criterion",
+ "hashbrown 0.15.4",
  "libc",
  "lock_api",
  "nix 0.30.1",
  "rand 0.9.1",
  "rand_distr",
  "rustc-hash 2.1.1",
+ "seahash",
  "tempfile",
  "thiserror 1.0.69",
+ "twox-hash 2.1.1",
  "workspace_hack",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -4455,13 +4504,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "bytes",
  "camino",
  "clap",
  "futures",
  "hdrhistogram",
+ "http 1.3.1",
  "humantime",
  "humantime-serde",
+ "metrics",
  "pageserver_api",
  "pageserver_client",
  "pageserver_client_grpc",
@@ -4551,6 +4603,7 @@ dependencies = [
  "pageserver_client",
  "pageserver_compaction",
  "pageserver_page_api",
+ "peekable",
  "pem",
  "pin-project-lite",
  "postgres-protocol",
@@ -4564,6 +4617,7 @@ dependencies = [
  "pprof",
  "pq_proto",
  "procfs",
+ "prost 0.13.5",
  "rand 0.9.1",
  "range-set-blaze",
  "regex",
@@ -4600,7 +4654,7 @@ dependencies = [
  "tower 0.5.2",
  "tracing",
  "tracing-utils",
- "twox-hash",
+ "twox-hash 1.6.3",
  "url",
  "utils",
  "uuid",
@@ -4812,7 +4866,7 @@ dependencies = [
  "paste",
  "seq-macro",
  "thrift",
- "twox-hash",
+ "twox-hash 1.6.3",
  "zstd",
  "zstd-sys",
 ]
@@ -4856,6 +4910,15 @@ dependencies = [
  "hmac",
  "password-hash",
  "sha2",
+]
+
+[[package]]
+name = "peekable"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "225f9651e475709164f871dc2f5724956be59cb9edb055372ffeeab01ec2d20b"
+dependencies = [
+ "smallvec",
 ]
 
 [[package]]
@@ -6564,6 +6627,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "621e3680f3e07db4c9c2c3fb07c6223ab2fab2e54bd3c04c3ae037990f428c32"
 
 [[package]]
+name = "seahash"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
+
+[[package]]
 name = "sec1"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7717,6 +7786,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-pipe"
+version = "0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f213a84bffbd61b8fa0ba8a044b4bbe35d471d0b518867181e82bd5c15542784"
+dependencies = [
+ "libc",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-postgres"
 version = "0.7.10"
 source = "git+https://github.com/neondatabase/rust-postgres.git?branch=neon#f3cf448febde5fd298071d54d568a9c875a7a62b"
@@ -8261,6 +8340,15 @@ checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
  "static_assertions",
+]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b907da542cbced5261bd3256de1b3a1bf340a3d37f93425a07362a1d687de56"
+dependencies = [
+ "rand 0.9.1",
 ]
 
 [[package]]
@@ -9099,8 +9187,8 @@ dependencies = [
  "clap",
  "clap_builder",
  "const-oid",
+ "criterion",
  "crossbeam-epoch",
- "crossbeam-utils",
  "crypto-bigint 0.5.5",
  "der 0.7.8",
  "deranged",
@@ -9143,7 +9231,6 @@ dependencies = [
  "num-iter",
  "num-rational",
  "num-traits",
- "once_cell",
  "p256 0.13.2",
  "parquet",
  "portable-atomic",
@@ -9251,6 +9338,12 @@ name = "xmlparser"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d25c75bf9ea12c4040a97f829154768bbbce366287e2dc044af160cd79a13fd"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yansi"

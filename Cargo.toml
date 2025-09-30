@@ -93,6 +93,7 @@ clap = { version = "4.0", features = ["derive", "env"] }
 clashmap = { version = "1.0", features = ["raw-api"] }
 comfy-table = "7.1"
 const_format = "0.2"
+crossbeam-utils = "0.8.21"
 crc32c = "0.6"
 diatomic-waker = { version = "0.2.3" }
 either = "1.8"
@@ -152,6 +153,7 @@ parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pem = "3.0.3"
+peekable = "0.3.0"
 pin-project-lite = "0.2"
 pprof = { version = "0.14", features = ["criterion", "flamegraph", "frame-pointer", "prost-codec"] }
 procfs = "0.16"
@@ -190,6 +192,7 @@ smallvec = "1.11"
 smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
 spki = "0.7.3"
+spin = "0.9.8"
 strum = "0.26"
 strum_macros = "0.26"
 "subtle"  = "2.5.0"
@@ -201,7 +204,6 @@ thiserror = "1.0"
 tikv-jemallocator = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 tokio = { version = "1.43.1", features = ["macros"] }
-tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
@@ -241,6 +243,9 @@ zeroize = "1.8"
 ## TODO replace this with tracing
 env_logger = "0.11"
 log = "0.4"
+
+tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
+uring-common = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch = "neon" }

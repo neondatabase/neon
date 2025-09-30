@@ -237,14 +237,26 @@ extern void prefetch_on_ps_disconnect(void);
 extern page_server_api *page_server;
 
 extern char *pageserver_connstring;
+extern char *pageserver_grpc_urls;
 extern int	flush_every_n_requests;
 extern int	readahead_buffer_size;
 extern char *neon_timeline;
 extern char *neon_tenant;
 extern int32 max_cluster_size;
 extern int  neon_protocol_version;
+extern int	neon_stripe_size;
 
+typedef struct
+{
+	char		connstring[MAX_SHARDS][MAX_PAGESERVER_CONNSTRING_SIZE];
+	size_t		num_shards;
+	size_t		stripe_size;
+} ShardMap;
+
+extern bool parse_shard_map(const char *connstr, ShardMap *result);
 extern shardno_t get_shard_number(BufferTag* tag);
+
+extern void AssignNumShards(shardno_t num_shards);
 
 extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
@@ -290,6 +302,7 @@ extern int64 neon_dbsize(Oid dbNode);
 extern void neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
 								  BlockNumber blkno, neon_request_lsns *output,
 								  BlockNumber nblocks);
+extern XLogRecPtr neon_get_write_lsn(void);
 
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);
