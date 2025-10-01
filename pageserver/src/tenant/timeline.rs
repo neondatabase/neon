@@ -248,8 +248,6 @@ pub struct Timeline {
     // Atomic would be more appropriate here.
     last_freeze_ts: RwLock<Instant>,
 
-    pub(crate) standby_horizon: AtomicLsn,
-
     // WAL redo manager. `None` only for broken tenants.
     walredo_mgr: Option<Arc<super::WalRedoManager>>,
 
@@ -3318,8 +3316,6 @@ impl Timeline {
                 corruption_detected: AtomicBool::default(),
                 l0_compaction_trigger: resources.l0_compaction_trigger,
                 gc_lock: tokio::sync::Mutex::default(),
-
-                standby_horizon: AtomicLsn::new(0),
 
                 pagestream_throttle: resources.pagestream_throttle,
 
@@ -6823,32 +6819,7 @@ impl Timeline {
             )
         };
 
-        let mut new_gc_cutoff = space_cutoff.min(time_cutoff.unwrap_or_default());
-        let standby_horizon = self.standby_horizon.load();
-        // Hold GC for the standby, but as a safety guard do it only within some
-        // reasonable lag.
-        if standby_horizon != Lsn::INVALID {
-            if let Some(standby_lag) = new_gc_cutoff.checked_sub(standby_horizon) {
-                const MAX_ALLOWED_STANDBY_LAG: u64 = 10u64 << 30; // 10 GB
-                if standby_lag.0 < MAX_ALLOWED_STANDBY_LAG {
-                    new_gc_cutoff = Lsn::min(standby_horizon, new_gc_cutoff);
-                    trace!("holding off GC for standby apply LSN {}", standby_horizon);
-                } else {
-                    warn!(
-                        "standby is lagging for more than {}MB, not holding gc for it",
-                        MAX_ALLOWED_STANDBY_LAG / 1024 / 1024
-                    )
-                }
-            }
-        }
-
-        // Reset standby horizon to ignore it if it is not updated till next GC.
-        // It is an easy way to unset it when standby disappears without adding
-        // more conf options.
-        self.standby_horizon.store(Lsn::INVALID);
-        self.metrics
-            .standby_horizon_gauge
-            .set(Lsn::INVALID.0 as i64);
+        let new_gc_cutoff = space_cutoff.min(time_cutoff.unwrap_or_default());
 
         let res = self
             .gc_timeline(

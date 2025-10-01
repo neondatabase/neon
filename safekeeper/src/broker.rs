@@ -199,7 +199,6 @@ async fn discover_loop(
                         commit_lsn: sk_info.commit_lsn,
                         safekeeper_connstr: sk_info.safekeeper_connstr,
                         availability_zone: sk_info.availability_zone,
-                        standby_horizon: 0,
                     };
 
                     // note this is a blocking call

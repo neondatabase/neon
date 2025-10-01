@@ -3026,7 +3026,7 @@ impl Timeline {
     }
 
     /// Get a watermark for gc-compaction, that is the lowest LSN that we can use as the `gc_horizon` for
-    /// the compaction algorithm. It is min(space_cutoff, time_cutoff, latest_gc_cutoff, standby_horizon).
+    /// the compaction algorithm. It is min(space_cutoff, time_cutoff, latest_gc_cutoff).
     /// Leases and retain_lsns are considered in the gc-compaction job itself so we don't need to account for them
     /// here.
     pub(crate) fn get_gc_compaction_watermark(self: &Arc<Self>) -> Lsn {
@@ -3034,9 +3034,6 @@ impl Timeline {
             let gc_info = self.gc_info.read().unwrap();
             gc_info.min_cutoff()
         };
-
-        // TODO: standby horizon should use leases so we don't really need to consider it here.
-        // let watermark = watermark.min(self.standby_horizon.load());
 
         // TODO: ensure the child branches will not use anything below the watermark, or consider
         // them when computing the watermark.
