@@ -298,4 +298,50 @@ extern void set_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumb
 extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
+/*
+ * Relation persistence enum.
+ */
+typedef enum
+{
+    /* The persistence is not known */
+	NEON_RELPERSISTENCE_UNKNOWN,
+
+    /* The relation is a permanent relation that is WAL-logged normally */
+	NEON_RELPERSISTENCE_PERMANENT,
+
+    /* The relation is an unlogged table/index, stored only on local disk */
+	NEON_RELPERSISTENCE_UNLOGGED,
+
+    /*
+     * The relation is a permanent (index) relation, but it is being built by an in-progress
+     * transaction. It currently only lives on local disk and hasn't been WAL-logged yet.
+     * It will turn into a permanent relation later when the index build completes.
+     * This is currently used for GiST, SP-GiST and GIN indexes, as well as the pgvector
+     * extension.
+     */
+	NEON_RELPERSISTENCE_UNLOGGED_BUILD
+} NeonRelPersistence;
+
+/*
+ * Entry type stored in relperst_hash. We have just one entry for the whole relation, i.e. we don't have separate entries for the individual forks.
+ * It gets a little complicated with unlogged relations. The main fork of an unlogged relation is considered UNLOGGED, but its init-fork is
+ * treated as PERMANENT. It is specially checked in neon_write.
+ */
+typedef struct
+{
+	NRelFileInfo rel;
+	uint8		relperst;		/* See NeonRelPersistence */
+	uint16		access_count;
+	dlist_node	lru_node;	/* LRU list node */
+} NeonRelPersistenceEntry;
+
+extern LWLockId finish_unlogged_build_lock;
+
+extern void relperst_hash_init(void);
+extern void set_cached_relperst(NRelFileInfo rinfo, NeonRelPersistence relperst);
+extern NeonRelPersistence get_cached_relperst(NRelFileInfo rinfo);
+extern NeonRelPersistenceEntry* pin_cached_relperst(NRelFileInfo rinfo, NeonRelPersistence relperst);
+extern void unpin_cached_relperst(NeonRelPersistenceEntry* entry);
+extern void forget_cached_relperst(NRelFileInfo rinfo);
+
 #endif							/* PAGESTORE_CLIENT_H */
