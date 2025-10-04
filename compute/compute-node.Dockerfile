@@ -1492,9 +1492,9 @@ FROM build-deps AS pg_mooncake-src
 ARG PG_VERSION
 WORKDIR /ext-src
 COPY compute/patches/duckdb_v113.patch .
-RUN wget https://github.com/Mooncake-Labs/pg_mooncake/releases/download/v0.1.2/pg_mooncake-0.1.2.tar.gz -O pg_mooncake.tar.gz && \
-    echo "4550473784fcdd2e1e18062bc01eb9c286abd27cdf5e11a4399be6c0a426ba90 pg_mooncake.tar.gz" | sha256sum --check && \
-    mkdir pg_mooncake-src && cd pg_mooncake-src && tar xzf ../pg_mooncake.tar.gz --strip-components=1 -C . && \
+RUN git clone --depth 1 --branch v0.1 https://github.com/Mooncake-Labs/pg_mooncake pg_mooncake-src && \
+    cd pg_mooncake-src && \
+    git submodule update --init --recursive && \
     cd third_party/duckdb && patch -p1 < /ext-src/duckdb_v113.patch && cd ../.. && \
     echo "make -f pg_mooncake-src/Makefile.build installcheck TEST_DIR=./test SQL_DIR=./sql SRC_DIR=./src" > neon-test.sh && \
     chmod a+x neon-test.sh
