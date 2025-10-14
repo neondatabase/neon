@@ -714,7 +714,7 @@ impl<K: CompactionKey> KeyspaceWindowPos<K> {
                 self.accum_keysize += distance as u64;
             } else {
                 // advance within the range
-                let skip_key = self.end_key.skip_some();
+                let skip_key = self.end_key.add(128);
                 let distance = K::key_range_size(&(self.end_key..skip_key), shard_identity);
                 if (self.accum_keysize + distance as u64) < max_size {
                     self.end_key = skip_key;

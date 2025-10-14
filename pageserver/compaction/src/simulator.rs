@@ -75,9 +75,8 @@ impl interface::CompactionKey for Key {
     fn next(&self) -> Self {
         self + 1
     }
-    fn skip_some(&self) -> Self {
-        // round up to next xx
-        self + 100
+    fn add(&self, offset: u32) -> Self {
+        self + offset as u64
     }
 }
 
