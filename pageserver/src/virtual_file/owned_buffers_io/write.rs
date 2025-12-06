@@ -45,6 +45,9 @@ pub trait OwnedAsyncWriter {
     ) -> impl Future<Output = std::io::Result<()>> + Send;
 }
 
+use arc_swap::ArcSwap;
+use std::sync::Arc;
+
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
 /// small writes into larger writes of size [`Buffer::cap`].
 ///
@@ -84,7 +87,10 @@ pub trait OwnedAsyncWriter {
 pub struct BufferedWriter<B: Buffer, W> {
     /// Clone of the buffer that was last submitted to the flush loop.
     /// `None` if no flush request has been submitted, Some forever after.
-    pub(super) maybe_flushed: Option<FullSlice<B::IoBuf>>,
+    ///
+    /// Wrapped in `ArcSwap` to allow lock-less access by readers.
+    /// The `u64` is the start offset of the buffer in the file.
+    pub(super) maybe_flushed: Arc<ArcSwap<Option<(u64, FullSlice<B::IoBuf>)>>>,
     /// New writes are accumulated here.
     /// `None` only during submission while we wait for flush loop to accept
     /// the full dirty buffer in exchange for a clean buffer.
@@ -137,7 +143,7 @@ where
     ) -> Self {
         Self {
             mutable: Some(buf_new()),
-            maybe_flushed: None,
+            maybe_flushed: Arc::new(ArcSwap::from_pointee(None)),
             flush_handle: FlushHandle::spawn_new(
                 writer,
                 buf_new(),
@@ -162,8 +168,14 @@ where
 
     /// Gets a reference to the maybe flushed read-only buffer.
     /// Returns `None` if the writer has not submitted any flush request.
-    pub fn inspect_maybe_flushed(&self) -> Option<&FullSlice<Buf>> {
-        self.maybe_flushed.as_ref()
+    pub fn inspect_maybe_flushed(&self) -> Option<Arc<Option<(u64, FullSlice<Buf>)>>> {
+        Some(self.maybe_flushed.load_full())
+    }
+
+    /// Returns the ArcSwap holding the maybe_flushed buffer.
+    /// This allows external components to hold a reference to it and read it lock-lessly.
+    pub(crate) fn maybe_flushed_arc(&self) -> Arc<ArcSwap<Option<(u64, FullSlice<Buf>)>>> {
+        self.maybe_flushed.clone()
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -312,9 +324,11 @@ where
         }
         // Prepare the buffer for read while flushing.
         let slice = buf.flush();
-        // NB: this assignment also drops thereference to the old buffer, allowing us to re-own & make it mutable below.
-        self.maybe_flushed = Some(slice.cheap_clone());
+        // ATOMIC SWAP: Publish the buffer to readers immediately.
+        // This allows EphemeralFile to read this data lock-free while we are stuck 
+        // in the slow flush_handle.flush() call below.
         let offset = self.bytes_submitted;
+        self.maybe_flushed.store(Arc::new(Some((offset, slice.cheap_clone()))));
         self.bytes_submitted += u64::try_from(buf_len).unwrap();
 
         // If we return/panic here or later, we'll leave mutable = None, breaking further
@@ -323,7 +337,7 @@ where
 
         // The only other place that could hold a reference to the recycled buffer
         // is in `Self::maybe_flushed`, but we have already replace it with the new buffer.
-        let recycled = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
+        let recycled: B = Buffer::reuse_after_flush(recycled.into_raw_slice().into_inner());
 
         // We got back some recycled buffer, can open up for more writes again.
         self.mutable = Some(recycled);
