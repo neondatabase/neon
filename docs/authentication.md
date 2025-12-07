@@ -191,11 +191,11 @@ the authentication mode:
 No connections are initiated by a Safekeeper.
 
 ### In the source code
-Tests do not use authentication by default.
-If you need it, you can enable it by configuring the test's environment:
+Tests use authentication by default.
+If you require no authentication, you can disable it by configuring the test's environment:
 
 ```python
-neon_env_builder.auth_enabled = True
+neon_env_builder.auth_enabled = False
 ```
 
 You will have to generate tokens if you want to access components inside the test directly,

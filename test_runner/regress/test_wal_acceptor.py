@@ -871,7 +871,6 @@ def test_start_replication_term(neon_env_builder: NeonEnvBuilder):
 
 # Test auth on all ports: WAL service (postgres protocol), WAL service tenant only and http.
 def test_sk_auth(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
@@ -930,9 +929,8 @@ def test_sk_auth(neon_env_builder: NeonEnvBuilder):
     connector.safe_psql("IDENTIFY_SYSTEM", port=sk.port.pg_tenant_only, password=tenant_token)
 
 
-# Try restarting endpoint with enabled auth.
+# Try restarting endpoint with auth (enabled by default)
 def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.auth_enabled = True
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
@@ -1630,8 +1628,6 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
 # safekeepers; otherwise it is live reload.
 @pytest.mark.parametrize("live_sk_change", [False, True])
 def test_pull_timeline(neon_env_builder: NeonEnvBuilder, live_sk_change: bool):
-    neon_env_builder.auth_enabled = True
-
     def execute_payload(endpoint: Endpoint):
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
@@ -1726,7 +1722,6 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder, live_sk_change: bool):
 # Expected to fail while holding off WAL gc plus fetching commit_lsn WAL
 # segment is not implemented.
 def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.auth_enabled = True
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     env = neon_env_builder.init_start()
@@ -1805,7 +1800,6 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
 #
 # Expected to fail while term check is not implemented.
 def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.auth_enabled = True
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     env = neon_env_builder.init_start()
@@ -2620,7 +2614,6 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
     6. Go back to initial compute SK config and validate that
     source SK can unevict the timeline (S3 state is consistent)
     """
-    neon_env_builder.auth_enabled = True
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
 

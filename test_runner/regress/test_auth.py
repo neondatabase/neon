@@ -33,7 +33,6 @@ def assert_client_not_authorized(env: NeonEnv, http_client: PageserverHttpClient
 
 
 def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
 
     ps = env.pageserver
@@ -73,7 +72,6 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
 
 
 def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.auth_enabled = True
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
@@ -92,7 +90,6 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
 
 
 def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
     env.pageserver.allowed_errors.extend(
         [".*Authentication error: InvalidSignature.*", ".*Unauthorized: malformed jwt token.*"]
@@ -146,7 +143,6 @@ def test_pageserver_multiple_keys(neon_env_builder: NeonEnvBuilder):
 
 
 def test_pageserver_key_reload(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
     env.pageserver.allowed_errors.extend(
         [".*Authentication error: InvalidSignature.*", ".*Unauthorized: malformed jwt token.*"]

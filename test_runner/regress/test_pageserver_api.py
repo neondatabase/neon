@@ -129,16 +129,15 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         wait_until(lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, lsn))
 
 
-def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_pageserver_http_api_client_auth_disabled(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
+    env = neon_env_builder.init_start()
     with env.pageserver.http_client() as client:
         check_client(env, client)
 
 
-def test_pageserver_http_api_client_auth_enabled(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.auth_enabled = True
-    env = neon_env_builder.init_start()
-
+def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
+    env = neon_simple_env
     pageserver_token = env.auth_keys.generate_pageserver_token()
 
     with env.pageserver.http_client(auth_token=pageserver_token) as client:

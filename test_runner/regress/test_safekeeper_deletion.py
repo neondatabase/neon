@@ -156,7 +156,6 @@ def test_safekeeper_delete_timeline_under_load(neon_env_builder: NeonEnvBuilder)
     safekeeper that we're migrating a timeline away from, or if the timeline
     is being deleted while such a rogue client is running.
     """
-    neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
 
     # Create two endpoints that will generate load
