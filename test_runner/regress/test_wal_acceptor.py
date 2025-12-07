@@ -86,6 +86,7 @@ class TimelineMetrics:
 # Run page server and multiple acceptors, and multiple compute nodes running
 # against different timelines.
 def test_many_timelines(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
@@ -268,6 +269,7 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
 
 # Test that safekeepers push their info to the broker and learn peer status from it
 def test_broker(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
@@ -494,6 +496,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
 # https://github.com/neondatabase/neon/issues/10761
 @pytest.mark.parametrize("remote_storage_kind", [s3_storage(), RemoteStorageKind.LOCAL_FS])
 def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 3
 
     neon_env_builder.enable_safekeeper_remote_storage(remote_storage_kind)
@@ -835,6 +838,7 @@ def test_start_replication_term(neon_env_builder: NeonEnvBuilder):
     Test START_REPLICATION of uncommitted part specifying leader term. It must
     error if safekeeper switched to different term.
     """
+    neon_env_builder.auth_enabled = False
 
     env = neon_env_builder.init_start()
 
@@ -1291,6 +1295,7 @@ def test_lagging_sk(neon_env_builder: NeonEnvBuilder):
 # Smaller version of test_one_sk_down testing peer recovery in isolation: that
 # it works without compute at all.
 def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 3
 
     # timelines should be created the old way
@@ -1848,6 +1853,7 @@ def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
 
 
 def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     """
     Verify that when pull_timeline is used on an evicted timeline, it does not result in
     promoting any segments to local disk on the source, and the timeline is correctly instantiated
@@ -2033,6 +2039,7 @@ def test_membership_api(neon_env_builder: NeonEnvBuilder):
 
 
 def test_explicit_timeline_creation(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     """
     Test that having neon.safekeepers starting with g#n: with non zero n enables
     generations, which as a side effect disables automatic timeline creation.
@@ -2387,6 +2394,7 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
 def test_s3_eviction(
     neon_env_builder: NeonEnvBuilder, delete_offloaded_wal: bool, restart_chance: float
 ):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
 
@@ -2529,6 +2537,7 @@ def test_s3_eviction(
 
 # Test resetting uploaded partial segment state.
 def test_backup_partial_reset(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 1
     neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
     # We want to upload/evict quickly, but not too quickly to check that s3 is

@@ -438,7 +438,7 @@ class NeonEnvBuilder:
         safekeepers_id_start: int = 0,
         # fsync is disabled by default to make the tests go faster
         safekeepers_enable_fsync: bool = False,
-        auth_enabled: bool = False,
+        auth_enabled: bool = True,
         rust_log_override: str | None = None,
         default_branch_name: str = DEFAULT_BRANCH_NAME,
         preserve_database_files: bool = False,
@@ -1697,7 +1697,7 @@ def neon_simple_env(
     pageserver_get_vectored_concurrent_io: str | None,
 ) -> Iterator[NeonEnv]:
     """
-    Simple Neon environment, with 1 safekeeper and 1 pageserver. No authentication, no fsync.
+    Simple Neon environment, with 1 safekeeper and 1 pageserver. JWT authentication enabled by default, no fsync.
 
     This fixture will use RemoteStorageKind.LOCAL_FS with pageserver.
     """

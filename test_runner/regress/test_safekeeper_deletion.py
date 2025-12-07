@@ -243,6 +243,7 @@ def test_safekeeper_delete_remote_errors(
     """
     Test that errors and delays during remote deletion are handled correctly.
     """
+    neon_env_builder.auth_enabled = False
 
     # Configure safekeepers with ultra-fast eviction policy
     neon_env_builder.safekeeper_extra_opts = [

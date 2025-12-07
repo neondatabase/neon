@@ -226,6 +226,7 @@ async def run_restarts_under_load(
 
 # Restart acceptors one by one, while executing and validating bank transactions
 def test_restarts_under_load(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
@@ -243,6 +244,7 @@ def test_restarts_under_load(neon_env_builder: NeonEnvBuilder):
 # when checkpoins are triggered frequently by max_wal_size=32MB. Because we have
 # wal_keep_size=0, there will be aggressive WAL segments recycling.
 def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
@@ -335,6 +337,7 @@ async def run_compute_restarts(
 
 # Add a test which creates compute for every query, and then destroys it right after.
 def test_compute_restarts(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
@@ -719,6 +722,7 @@ async def run_quorum_sanity(env: NeonEnv):
 # check that endpont can start and write data when we have quorum and can't when
 # we don't.
 def test_quorum_sanity(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.auth_enabled = False
     neon_env_builder.num_safekeepers = 4
 
     # The test fails basically always on the new mode.
