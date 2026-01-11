@@ -3,17 +3,17 @@ use crate::error::Cancelled;
 pub(super) use crate::metrics::RequestKind;
 use crate::metrics::{AttemptOutcome, start_counting_cancelled_wait, start_measuring_requests};
 use crate::{
-    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, GCS_SCOPES, Listing, ListingMode,
-    ListingObject, MAX_KEYS_PER_DELETE_GCS, REMOTE_STORAGE_PREFIX_SEPARATOR, RemotePath,
-    RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel, GCSVersion, VersionId,
-    GCSVersionListing, 
+    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, GCS_SCOPES, GCSVersion,
+    GCSVersionListing, Listing, ListingMode, ListingObject, MAX_KEYS_PER_DELETE_GCS,
+    REMOTE_STORAGE_PREFIX_SEPARATOR, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError,
+    TimeoutOrCancel, VersionId,
 };
 use anyhow::Context;
 use bytes::Bytes;
 use chrono::DateTime;
 use futures::stream::Stream;
 use futures_util::StreamExt;
-use gcp_auth::{TokenProvider};
+use gcp_auth::TokenProvider;
 use http::StatusCode;
 use reqwest::{Client, header};
 use scopeguard::ScopeGuard;
@@ -177,16 +177,15 @@ impl GCSBucket {
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
     ) -> Result<GCSVersionListing, DownloadError> {
-
         let warn_threshold = 3;
         let max_retries = 10;
         let is_permanent = |e: &_| matches!(e, DownloadError::Cancelled);
-        
+
         // GCS only has versions, which may contain 'deleted_at'.
         let mut versions = GCSVersionListing::default();
         let mut continuation_token = None;
         let mut uri: String;
-        
+
         let list_prefix = prefix
             .map(|p| self.relative_path_to_gcs_object(p))
             .or_else(|| {
@@ -196,7 +195,7 @@ impl GCSBucket {
                 })
             })
             .unwrap();
-        
+
         let mut versions_base_uri = format!(
             "https://storage.googleapis.com/storage/v1/b/{}/o?prefix={}&versions=true",
             self.bucket_name.clone(),
@@ -209,23 +208,21 @@ impl GCSBucket {
                 REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()
             ));
         }
-       
+
         loop {
-            
             match &continuation_token {
                 Some(token) => {
                     uri = format!("{}&pageToken={}", &versions_base_uri, token);
-                },
+                }
                 None => {
                     uri = versions_base_uri.clone();
-                },
+                }
             }
-            
+
             let mut _req_uri = versions_base_uri.clone();
 
             let response = backoff::retry(
                 || async {
-                     
                     // fetch an array of results, keep looping to get them
                     let op = Client::new()
                         .get(&uri)
@@ -234,74 +231,76 @@ impl GCSBucket {
                                 .token(GCS_SCOPES)
                                 .await
                                 .map_err(|e: gcp_auth::Error| DownloadError::Other(e.into()))?
-                                .as_str()
+                                .as_str(),
                         )
                         .send();
-                    
-                        tokio::select! {
-                            res = op => res.map_err(|e| DownloadError::Other(e.into())),
-                            _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-                        }
 
-                    },
-                    is_permanent,
-                    warn_threshold,
-                    max_retries,
-                    "listing object versions",
-                    cancel,
-                ) 
-                .await
-                .ok_or_else(|| DownloadError::Cancelled)
-                .and_then(|x| x)?;
-                
-            let res = response.json::<GCSListResponse>()
+                    tokio::select! {
+                        res = op => res.map_err(|e| DownloadError::Other(e.into())),
+                        _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                    }
+                },
+                is_permanent,
+                warn_threshold,
+                max_retries,
+                "listing object versions",
+                cancel,
+            )
+            .await
+            .ok_or_else(|| DownloadError::Cancelled)
+            .and_then(|x| x)?;
+
+            let res = response
+                .json::<GCSListResponse>()
                 .await
                 .map_err(|e| DownloadError::Other(e.into()))?;
-                    
-            // fill up our results vec, 
+
+            // fill up our results vec,
             continuation_token = res.next_page_token;
-            
-            let version_listing = 
-                res.items
-                    .ok_or_else(|| DownloadError::Other(anyhow::anyhow!("no items returned")))?
-                    .into_iter()
-                    .map(| GCSObject { name, updated, time_deleted, generation, .. } | {
+
+            let version_listing = res
+                .items
+                .ok_or_else(|| DownloadError::Other(anyhow::anyhow!("no items returned")))?
+                .into_iter()
+                .map(
+                    |GCSObject {
+                         name,
+                         updated,
+                         time_deleted,
+                         generation,
+                         ..
+                     }| {
                         // don't `filter_map`, a `None` for `last_modified` ('updated') is bad for
                         // time travel, so catch it.
                         if updated.is_none() {
-                           return Err(
-                               DownloadError::Other(
-                                   anyhow::anyhow!("no 'updated' field")
-                               )
-                           )
+                            return Err(DownloadError::Other(anyhow::anyhow!(
+                                "no 'updated' field"
+                            )));
                         }
-                        Ok(
-                            GCSVersion {
-                                key: self.gcs_object_to_relative_path(&name),
-                                last_modified: to_system_time(updated).unwrap(),
-                                id: VersionId(generation.expect("no version id")),
-                                time_deleted: to_system_time(time_deleted),
-                            }
-                        )
-                    }).collect::<Result<Vec<GCSVersion>, _>>();
-                
+                        Ok(GCSVersion {
+                            key: self.gcs_object_to_relative_path(&name),
+                            last_modified: to_system_time(updated).unwrap(),
+                            id: VersionId(generation.expect("no version id")),
+                            time_deleted: to_system_time(time_deleted),
+                        })
+                    },
+                )
+                .collect::<Result<Vec<GCSVersion>, _>>();
+
             versions.versions.extend(version_listing?);
 
             if let Some(max_keys) = max_keys {
                 if versions.versions.len() >= max_keys.get().try_into().unwrap() {
-                    return Err(DownloadError::Other(
-                        anyhow::anyhow!("max keys reached") 
-                    ));
+                    return Err(DownloadError::Other(anyhow::anyhow!("max keys reached")));
                 }
             }
-            
+
             if continuation_token.is_none() {
-                break
+                break;
             }
         }
-        
+
         Ok(versions)
-        
     }
 
     async fn put_object(
@@ -829,53 +828,46 @@ impl GCSBucket {
             metadata,
         })
     }
-    
+
     async fn copy_object(
-        &self, 
+        &self,
         _from: &RemotePath,
         to: &RemotePath,
         _cancel: &CancellationToken,
         generation: Option<&String>,
     ) -> anyhow::Result<reqwest::RequestBuilder> {
+        let copy_from_path: String = url::form_urlencoded::byte_serialize(
+            self.relative_path_to_gcs_object(to)
+                .trim_start_matches("/")
+                .as_bytes(),
+        )
+        .collect();
 
-        let copy_from_path: String =
-            url::form_urlencoded::byte_serialize(
-                self.relative_path_to_gcs_object(to)
-                    .trim_start_matches("/")
-                    .as_bytes()
-            )
-            .collect();
-        
-        let copy_to_path: String =
-            url::form_urlencoded::byte_serialize(
-                self.relative_path_to_gcs_object(to)
-                    .trim_start_matches("/")
-                    .as_bytes()
-            )
-            .collect();
-       
-       let mut copy_uri = format!(
-           "https://storage.googleapis.com/storage/v1/b/{}/o/{}/rewriteTo/b/{}/o/{}",
-           self.bucket_name.clone(),
-           copy_from_path,
-           self.bucket_name.clone(),
-           copy_to_path,
-       );
-      
-       if let Some(gen_id) = generation {
-           copy_uri += gen_id;
-       }        
+        let copy_to_path: String = url::form_urlencoded::byte_serialize(
+            self.relative_path_to_gcs_object(to)
+                .trim_start_matches("/")
+                .as_bytes(),
+        )
+        .collect();
 
-       Ok(
-           Client::new()
-               .post(copy_uri)
-               .bearer_auth(self.token_provider.token(GCS_SCOPES).await?.as_str())
-               .header(header::CONTENT_TYPE, "application/json")
-               .header(header::CONTENT_LENGTH, "0")
-       )
+        let mut copy_uri = format!(
+            "https://storage.googleapis.com/storage/v1/b/{}/o/{}/rewriteTo/b/{}/o/{}",
+            self.bucket_name.clone(),
+            copy_from_path,
+            self.bucket_name.clone(),
+            copy_to_path,
+        );
+
+        if let Some(gen_id) = generation {
+            copy_uri += gen_id;
+        }
+
+        Ok(Client::new()
+            .post(copy_uri)
+            .bearer_auth(self.token_provider.token(GCS_SCOPES).await?.as_str())
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, "0"))
     }
-
-    
 }
 
 impl RemoteStorage for GCSBucket {
@@ -983,7 +975,7 @@ impl RemoteStorage for GCSBucket {
                 let mut result = Listing::default();
 
                 for res in keys.iter() {
-                    
+
                    let last_modified: SystemTime = to_system_time(res.updated.clone()).unwrap_or(SystemTime::now());
 
                    let size = res.size.unwrap_or(0) as u64;
@@ -1030,7 +1022,7 @@ impl RemoteStorage for GCSBucket {
             }
         }
     }
-    
+
     async fn copy(
         &self,
         from: &RemotePath,
@@ -1044,13 +1036,8 @@ impl RemoteStorage for GCSBucket {
         let timeout = tokio::time::sleep(self.timeout);
 
         let started_at = start_measuring_requests(kind);
-        
-        let op = self.copy_object(
-            from,
-            to, 
-            cancel,
-            None
-        ).await?.send();
+
+        let op = self.copy_object(from, to, cancel, None).await?.send();
 
         let res = tokio::select! {
             res = op => res,
@@ -1067,8 +1054,6 @@ impl RemoteStorage for GCSBucket {
 
         Ok(())
     }
-
-
 
     async fn upload(
         &self,
@@ -1102,9 +1087,7 @@ impl RemoteStorage for GCSBucket {
 
         match res {
             Ok(Ok(_put)) => Ok(()),
-            Ok(Err(sdk)) => {
-                Err(sdk.into())
-            }
+            Ok(Err(sdk)) => Err(sdk.into()),
             Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
         }
     }
@@ -1161,118 +1144,110 @@ impl RemoteStorage for GCSBucket {
     }
 
     async fn time_travel_recover(
-           &self,
-           prefix: Option<&RemotePath>,
-           timestamp: SystemTime,
-           done_if_after: SystemTime,
-           cancel: &CancellationToken,
-           complexity_limit: Option<NonZeroU32>,
+        &self,
+        prefix: Option<&RemotePath>,
+        timestamp: SystemTime,
+        done_if_after: SystemTime,
+        cancel: &CancellationToken,
+        complexity_limit: Option<NonZeroU32>,
     ) -> Result<(), TimeTravelError> {
-        
-       let kind = RequestKind::TimeTravel;
-       let permit = self.permit(kind, cancel).await?;
+        let kind = RequestKind::TimeTravel;
+        let permit = self.permit(kind, cancel).await?;
 
-       tracing::trace!("Target time: {timestamp:?}, done_if_after {done_if_after:?}");
+        tracing::trace!("Target time: {timestamp:?}, done_if_after {done_if_after:?}");
 
-       let mode = ListingMode::NoDelimiter;
-       let version_listing = self
-           .list_versions_with_permit(&permit, prefix, mode, complexity_limit, cancel)
-           .await
-           .map_err(|err| match err {
-               DownloadError::Other(e) => TimeTravelError::Other(e),
-               DownloadError::Cancelled => TimeTravelError::Cancelled,
-               other => TimeTravelError::Other(other.into()),
-           })?;
-       let versions_and_deletes = version_listing.versions;
+        let mode = ListingMode::NoDelimiter;
+        let version_listing = self
+            .list_versions_with_permit(&permit, prefix, mode, complexity_limit, cancel)
+            .await
+            .map_err(|err| match err {
+                DownloadError::Other(e) => TimeTravelError::Other(e),
+                DownloadError::Cancelled => TimeTravelError::Cancelled,
+                other => TimeTravelError::Other(other.into()),
+            })?;
+        let versions_and_deletes = version_listing.versions;
 
-       tracing::info!(
-           "Built list for time travel with {} versions and deletions",
-           versions_and_deletes.len()
-       );
+        tracing::info!(
+            "Built list for time travel with {} versions and deletions",
+            versions_and_deletes.len()
+        );
 
-       // Work on the list of references instead of the objects directly,
-       // otherwise we get lifetime errors in the sort_by_key call below.
-       let mut versions_and_deletes = versions_and_deletes.iter().collect::<Vec<_>>();
+        // Work on the list of references instead of the objects directly,
+        // otherwise we get lifetime errors in the sort_by_key call below.
+        let mut versions_and_deletes = versions_and_deletes.iter().collect::<Vec<_>>();
 
-       versions_and_deletes.sort_by_key(|vd| (&vd.key, &vd.last_modified));
+        versions_and_deletes.sort_by_key(|vd| (&vd.key, &vd.last_modified));
 
-       let mut vds_for_key = HashMap::<_, Vec<_>>::new();
+        let mut vds_for_key = HashMap::<_, Vec<_>>::new();
 
-       for vd in &versions_and_deletes {
-           let GCSVersion { key, .. } = &vd;
-           if Some(vd.id.0.as_str()) == Some("null") {
-               // TODO: check the behavior of using the SDK on a non-versioned container
-               return Err(TimeTravelError::Other(anyhow::anyhow!(
-                   "Received ListVersions response for key={key} with version_id='null', \
+        for vd in &versions_and_deletes {
+            let GCSVersion { key, .. } = &vd;
+            if Some(vd.id.0.as_str()) == Some("null") {
+                // TODO: check the behavior of using the SDK on a non-versioned container
+                return Err(TimeTravelError::Other(anyhow::anyhow!(
+                    "Received ListVersions response for key={key} with version_id='null', \
                    indicating either disabled versioning, or legacy objects with null version id values"
-               )));
-           }
-           tracing::trace!("Parsing version key={key} id={:?}", vd.id);
-           vds_for_key.entry(key).or_default().push(vd);
-       }
+                )));
+            }
+            tracing::trace!("Parsing version key={key} id={:?}", vd.id);
+            vds_for_key.entry(key).or_default().push(vd);
+        }
 
-       let warn_threshold = 3;
-       let max_retries = 10;
-       let is_permanent = |e: &_| matches!(e, TimeTravelError::Cancelled);
+        let warn_threshold = 3;
+        let max_retries = 10;
+        let is_permanent = |e: &_| matches!(e, TimeTravelError::Cancelled);
 
-       for (key, versions) in vds_for_key {
-           let last_vd = versions.last().unwrap();
-           let key = self.relative_path_to_gcs_object(key);
-           if last_vd.last_modified > done_if_after {
-               // Case 1: we have a recent object outside of our restore window.
-               tracing::trace!("Key {key} has version later than done_if_after, skipping");
-               continue;
-           }
-           // We get index in the array that we want whether its `v` or `e`
-           let version_to_restore_to =
-               match versions.binary_search_by_key(&timestamp, |tpl| tpl.last_modified) {
-                   Ok(v) => v,
-                   Err(e) => e,
-               };
-           
-           let mut do_delete = false;
-           if version_to_restore_to == 0 {
-               // All versions more recent, so the key didn't exist at the specified time point.
-               tracing::trace!(
-                   "All {} versions more recent for {key}, deleting",
-                   versions.len()
-               );
-               do_delete = true;
-               
-           } else {
+        for (key, versions) in vds_for_key {
+            let last_vd = versions.last().unwrap();
+            let key = self.relative_path_to_gcs_object(key);
+            if last_vd.last_modified > done_if_after {
+                // Case 1: we have a recent object outside of our restore window.
+                tracing::trace!("Key {key} has version later than done_if_after, skipping");
+                continue;
+            }
+            // We get index in the array that we want whether its `v` or `e`
+            let version_to_restore_to =
+                match versions.binary_search_by_key(&timestamp, |tpl| tpl.last_modified) {
+                    Ok(v) => v,
+                    Err(e) => e,
+                };
 
-               let GCSVersion {
-                       id: VersionId(version_id),
-                       time_deleted: deletion_timestamp,
-                       ..
-                   } = &versions[version_to_restore_to - 1];
-               
-               // GCS only has 'timeDeleted', not a version object per delete + version. 
-               // A version is either replaced by an object or removed -- stomped or dropped.
-               // If `timeDeleted` < `time_travel_timestamp`, obj was removed and ought to be deleted.
-               // If its `None`, that means we have the most current object, no-op.
-               // Else, it was the same as the `updated` / `timeCreated` of the subsequent version, and ought to be restored.
-               match &deletion_timestamp {
-                   
-                   Some(time) => {
-                       
-                       if time < &timestamp  {
-                          // Case 2: version was last marked deleted before `timestamp`
-                          do_delete = true;
-                          
-                       } else {
-                
-                          // Case 3:  restore state to this version via `copy_object`
-                          tracing::trace!("Copying old version {version_id} for {key}...");
-                          
-                          let source_id =
-                              format!("?sourceGeneration={version_id}");
+            let mut do_delete = false;
+            if version_to_restore_to == 0 {
+                // All versions more recent, so the key didn't exist at the specified time point.
+                tracing::trace!(
+                    "All {} versions more recent for {key}, deleting",
+                    versions.len()
+                );
+                do_delete = true;
+            } else {
+                let GCSVersion {
+                    id: VersionId(version_id),
+                    time_deleted: deletion_timestamp,
+                    ..
+                } = &versions[version_to_restore_to - 1];
 
-                          backoff::retry(
+                // GCS only has 'timeDeleted', not a version object per delete + version.
+                // A version is either replaced by an object or removed -- stomped or dropped.
+                // If `timeDeleted` < `time_travel_timestamp`, obj was removed and ought to be deleted.
+                // If its `None`, that means we have the most current object, no-op.
+                // Else, it was the same as the `updated` / `timeCreated` of the subsequent version, and ought to be restored.
+                match &deletion_timestamp {
+                    Some(time) => {
+                        if time < &timestamp {
+                            // Case 2: version was last marked deleted before `timestamp`
+                            do_delete = true;
+                        } else {
+                            // Case 3:  restore state to this version via `copy_object`
+                            tracing::trace!("Copying old version {version_id} for {key}...");
+
+                            let source_id = format!("?sourceGeneration={version_id}");
+
+                            backoff::retry(
                               || async {
-                                  
+
                                   let key_path = self.gcs_object_to_relative_path(&key);
-                                  
+
                                   let op = self.copy_object(
                                       &key_path,
                                       &key_path,
@@ -1280,7 +1255,7 @@ impl RemoteStorage for GCSBucket {
                                       Some(&source_id),
                                   ).await.map_err(|e| TimeTravelError::Other(e.into()))?
                                   .send();
-                                  
+
                                   tokio::select! {
                                       res = op => res.map_err(|e| TimeTravelError::Other(e.into())),
                                       _ = cancel.cancelled() => Err(TimeTravelError::Cancelled),
@@ -1295,29 +1270,29 @@ impl RemoteStorage for GCSBucket {
                           .await
                           .ok_or_else(|| TimeTravelError::Cancelled)
                           .and_then(|x| {x})?;
-                          tracing::info!(%version_id, %key, "Copied old version in GCS");            
-                       }
-                   },
-                   _ => {
+                            tracing::info!(%version_id, %key, "Copied old version in GCS");
+                        }
+                    }
+                    _ => {
                         tracing::info!("most current object version, skipping");
-                   }
-               }
-           };
-           if do_delete {
-               tracing::trace!("Deleting {key}...");
-               self.delete_oids(&[key], cancel, &permit)
-                   .await
-                   .map_err(|e| {
-                       // delete_oid0 will use TimeoutOrCancel
-                       if TimeoutOrCancel::caused_by_cancel(&e) {
-                           TimeTravelError::Cancelled
-                       } else {
-                           TimeTravelError::Other(e)
-                       }
-               })?;
-           }
-       }
-       Ok(())
+                    }
+                }
+            };
+            if do_delete {
+                tracing::trace!("Deleting {key}...");
+                self.delete_oids(&[key], cancel, &permit)
+                    .await
+                    .map_err(|e| {
+                        // delete_oid0 will use TimeoutOrCancel
+                        if TimeoutOrCancel::caused_by_cancel(&e) {
+                            TimeTravelError::Cancelled
+                        } else {
+                            TimeTravelError::Other(e)
+                        }
+                    })?;
+            }
+        }
+        Ok(())
     }
     async fn head_object(
         &self,
@@ -1355,10 +1330,10 @@ impl RemoteStorage for GCSBucket {
     ) -> Result<crate::VersionListing, DownloadError> {
         let kind = RequestKind::ListVersions;
         let permit = self.permit(kind, cancel).await?;
-        Ok(
-            self.list_versions_with_permit(&permit, prefix, mode, max_keys, cancel)
-            .await?.into()
-        )
+        Ok(self
+            .list_versions_with_permit(&permit, prefix, mode, max_keys, cancel)
+            .await?
+            .into())
     }
 }
 
