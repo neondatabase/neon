@@ -128,11 +128,6 @@ impl GCSBucket {
         &self.bucket_name
     }
 
-    #[allow(dead_code)]
-    fn max_keys_per_delete(&self) -> usize {
-        MAX_KEYS_PER_DELETE_GCS
-    }
-
     async fn permit(
         &self,
         kind: RequestKind,
@@ -1156,7 +1151,6 @@ impl RemoteStorage for GCSBucket {
         self.delete_oids(&delete_objects, cancel, &permit).await
     }
 
-    #[allow(dead_code)]
     fn max_keys_per_delete(&self) -> usize {
         MAX_KEYS_PER_DELETE_GCS
     }
