@@ -26,7 +26,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
-use tracing;
 use utils::backoff;
 use uuid::Uuid;
 
@@ -203,10 +202,7 @@ impl GCSBucket {
         );
 
         if let ListingMode::WithDelimiter = mode {
-            versions_base_uri.push_str(&format!(
-                "&delimiter={}",
-                REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()
-            ));
+            versions_base_uri.push_str(&format!("&delimiter={REMOTE_STORAGE_PREFIX_SEPARATOR}"));
         }
 
         loop {
@@ -376,9 +372,8 @@ impl GCSBucket {
         match res {
             Ok(Ok(res)) => {
                 if !res.status().is_success() {
-                    match res.status() {
-                        _ => Err(anyhow::anyhow!("GCS PUT error \n\t {:?}", res)),
-                    }
+                    res.status();
+                    Err(anyhow::anyhow!("GCS PUT error \n\t {:?}", res))
                 } else {
                     let body = res
                         .text()
@@ -388,7 +383,7 @@ impl GCSBucket {
                     let resp: GCSObject = serde_json::from_str(&body)
                         .map_err(|e: serde_json::Error| DownloadError::Other(e.into()))?;
 
-                    if !resp.size.is_some_and(|s| s == fs_size as i64) {
+                    if resp.size.is_none_or(|s| s != fs_size as i64) {
                         // very unlikely
                         return Err(anyhow::anyhow!(
                             "Boundary string from 'multipart/related' HTTP upload occurred in payload"
@@ -458,7 +453,7 @@ impl GCSBucket {
                 );
                 let part = reqwest::multipart::Part::text(delete_req).headers(part_headers);
 
-                form = form.part(format!("request-{}", index), part);
+                form = form.part(format!("request-{index}"), part);
             }
 
             let mut headers = header::HeaderMap::new();
@@ -507,13 +502,13 @@ impl GCSBucket {
             let res_body = resp.text().await?;
 
             let parsed: HashMap<String, String> = res_body
-                .split(&format!("--{}", boundary))
+                .split(&format!("--{boundary}"))
                 .filter_map(|c| {
                     let mut lines = c.lines();
 
                     let id = lines.find_map(|line| {
                         line.strip_prefix("Content-ID:")
-                            .and_then(|suf| suf.split('+').last())
+                            .and_then(|suf| suf.split('+').next_back())
                             .and_then(|suf| suf.split('>').next())
                             .map(|x| x.trim().to_string())
                     });
@@ -543,7 +538,7 @@ impl GCSBucket {
                             y
                         );
                         None
-                    } else if y.chars().next() != Some('2') {
+                    } else if !y.starts_with('2') {
                         id.map(|v| (v, y))
                     } else {
                         None
@@ -820,9 +815,11 @@ impl GCSBucket {
 
         // But let data stream pass through
         Ok(Download {
-            download_stream: Box::pin(object_output.bytes_stream().map(|item| {
-                item.map_err(|e: reqwest::Error| std::io::Error::new(std::io::ErrorKind::Other, e))
-            })),
+            download_stream: Box::pin(
+                object_output
+                    .bytes_stream()
+                    .map(|item| item.map_err(|e: reqwest::Error| std::io::Error::other(e))),
+            ),
             etag,
             last_modified,
             metadata,
@@ -899,7 +896,7 @@ impl RemoteStorage for GCSBucket {
         let request_max_keys = self
             .max_keys_per_list_response
             .into_iter()
-            .chain(max_keys.into_iter())
+            .chain(max_keys)
             .min()
             // https://cloud.google.com/storage/docs/json_api/v1/objects/list?hl=en#parameters
             .unwrap_or(1000);
@@ -916,10 +913,7 @@ impl RemoteStorage for GCSBucket {
         // on ListingMode:
         // https://github.com/neondatabase/neon/blob/edc11253b65e12a10843711bd88ad277511396d7/libs/remote_storage/src/lib.rs#L158C1-L164C2
         if let ListingMode::WithDelimiter = mode {
-            list_uri.push_str(&format!(
-                "&delimiter={}",
-                REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()
-            ));
+            list_uri.push_str(&format!("&delimiter={REMOTE_STORAGE_PREFIX_SEPARATOR}"));
         }
 
         async_stream::stream! {
@@ -1002,11 +996,9 @@ impl RemoteStorage for GCSBucket {
                    };
                 }
 
-                result.prefixes.extend(prefixes.iter().filter_map(|p| {
-                    Some(
-                        self.gcs_object_to_relative_path(
-                            p.trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR)
-                        ),
+                result.prefixes.extend(prefixes.iter().map(|p| {
+                    self.gcs_object_to_relative_path(
+                        p.trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR)
                     )
                 }));
 
@@ -1087,7 +1079,7 @@ impl RemoteStorage for GCSBucket {
 
         match res {
             Ok(Ok(_put)) => Ok(()),
-            Ok(Err(sdk)) => Err(sdk.into()),
+            Ok(Err(sdk)) => Err(sdk),
             Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
         }
     }
@@ -1253,7 +1245,7 @@ impl RemoteStorage for GCSBucket {
                                       &key_path,
                                       cancel,
                                       Some(&source_id),
-                                  ).await.map_err(|e| TimeTravelError::Other(e.into()))?
+                                  ).await.map_err(TimeTravelError::Other)?
                                   .send();
 
                                   tokio::select! {
