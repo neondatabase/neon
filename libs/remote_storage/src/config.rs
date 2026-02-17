@@ -339,7 +339,7 @@ timeout = '5s'";
     fn test_gcs_parsing() {
         let toml = "\
     bucket_name = 'foo-bar'
-    prefix_in_bucket = '/pageserver'
+    prefix_in_bucket = 'pageserver/'
     ";
 
         let config = parse(toml).unwrap();

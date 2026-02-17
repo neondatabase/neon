@@ -77,6 +77,28 @@ impl AsyncTestContext for EnabledGCS {
 
 #[test_context(EnabledGCS)]
 #[tokio::test]
+async fn gcs_get_object_bytes_range_header(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
+    let cancel = CancellationToken::new();
+    let path = RemotePath::new(Utf8Path::new(
+        format!("{}/000000010000028000000086", ctx.base_prefix).as_str(),
+    ))
+    .with_context(|| "RemotePath conversion")?;
+
+    let (data, len) = upload_stream("hello, world".as_bytes().into());
+
+    ctx.client.upload(data, len, &path, None, &cancel).await?;
+
+    let opts = DownloadOpts {
+        byte_start: Bound::Included(7),
+        ..Default::default()
+    };
+    let dl_object = download_to_vec(ctx.client.download(&path, &opts, &cancel).await?).await?;
+    let s = String::from_utf8(dl_object).unwrap();
+    assert_eq!(5, s.len());
+    Ok(())
+}
+#[test_context(EnabledGCS)]
+#[tokio::test]
 async fn gcs_test_suite(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
     // ------------------------------------------------
     // --- `time_travel_recover`, showcasing `upload`, `delete_objects`, `copy`

@@ -731,7 +731,7 @@ impl GCSBucket {
                         StatusCode::NOT_FOUND => return Err(DownloadError::NotFound),
                         _ => {
                             return Err(DownloadError::Other(anyhow::anyhow!(
-                                "GCS GET resposne contained no response body"
+                                "GCS GET response contained no response body"
                             )));
                         }
                     }
@@ -754,7 +754,17 @@ impl GCSBucket {
 
         // 2. Byte Stream request
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::RANGE, header::HeaderValue::from_static("bytes=0-"));
+        let bytes_range = match &request.range {
+           Some(s) => header::HeaderValue::from_str(s).unwrap(),
+           None => header::HeaderValue::from_static("bytes=0-"),
+        };
+        
+        tracing::info!(
+            "performing object download with {:?} range header",
+            bytes_range
+        );
+        
+        headers.insert(header::RANGE, bytes_range);
 
         let encoded_path: String =
             url::form_urlencoded::byte_serialize(request.key.as_bytes()).collect();
