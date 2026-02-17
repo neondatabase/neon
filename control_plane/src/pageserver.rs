@@ -233,8 +233,8 @@ impl PageServerNode {
         let mut identity_file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(identity_file_path)
-            .with_context(|| format!("open identity toml for write: {config_file_path:?}"))?;
+            .open(&identity_file_path)
+            .with_context(|| format!("open identity toml for write: {identity_file_path:?}"))?;
         let identity_toml = self.pageserver_make_identity_toml(node_id);
         identity_file
             .write_all(identity_toml.to_string().as_bytes())
@@ -560,12 +560,12 @@ impl PageServerNode {
                 .remove("sampling_ratio")
                 .map(serde_json::from_str)
                 .transpose()
-                .context("Falied to parse 'sampling_ratio'")?,
+                .context("Failed to parse 'sampling_ratio'")?,
             relsize_snapshot_cache_capacity: settings
                 .remove("relsize snapshot cache capacity")
                 .map(|x| x.parse::<usize>())
                 .transpose()
-                .context("Falied to parse 'relsize_snapshot_cache_capacity' as integer")?,
+                .context("Failed to parse 'relsize_snapshot_cache_capacity' as integer")?,
             basebackup_cache_enabled: settings
                 .remove("basebackup_cache_enabled")
                 .map(|x| x.parse::<bool>())

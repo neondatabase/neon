@@ -5,8 +5,12 @@ edition = "2024"
 license.workspace = true
 
 [features]
+default = ["io-align-512"]
 # See pageserver/Cargo.toml
 testing = ["dep:nix"]
+# Direct IO alignment options (mutually exclusive)
+io-align-512 = []
+io-align-4k = []
 
 [dependencies]
 serde.workspace = true

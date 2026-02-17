@@ -1074,7 +1074,7 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
 }
 
 fn generate_ssl_ca_cert(cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
-    // openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=Neon Local CA" -days 36500 \
+    // openssl req -x509 -newkey ed25519 -nodes -subj "/CN=Neon Local CA" -days 36500 \
     // -out rootCA.crt -keyout rootCA.key
     let keygen_output = Command::new("openssl")
         .args([
@@ -1104,7 +1104,7 @@ fn generate_ssl_cert(
     let mut csr_path = cert_path.to_path_buf();
     csr_path.set_extension(".csr");
 
-    // openssl req -new -nodes -newkey rsa:2048 -keyout server.key -out server.csr \
+    // openssl req -new -nodes -newkey ed25519 -keyout server.key -out server.csr \
     // -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
     let keygen_output = Command::new("openssl")
         .args(["req", "-new", "-nodes"])
