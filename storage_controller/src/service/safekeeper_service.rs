@@ -879,7 +879,7 @@ impl Service {
                     .safekeeper_reconcilers
                     .start_reconciler(node_id, self);
             }
-            SkSchedulingPolicy::Decomissioned
+            SkSchedulingPolicy::Decommissioned
             | SkSchedulingPolicy::Pause
             | SkSchedulingPolicy::Activating => {
                 locked.safekeeper_reconcilers.stop_reconciler(node_id);
@@ -1192,13 +1192,13 @@ impl Service {
             .map(|&id| NodeId(id as u64))
             .collect::<Vec<_>>();
 
-        // Validate that we are not migrating to a decomissioned safekeeper.
+        // Validate that we are not migrating to a decommissioned safekeeper.
         for sk in new_safekeepers.iter() {
             if !cur_sk_set.contains(&sk.get_id())
-                && sk.scheduling_policy() == SkSchedulingPolicy::Decomissioned
+                && sk.scheduling_policy() == SkSchedulingPolicy::Decommissioned
             {
                 return Err(ApiError::BadRequest(anyhow::anyhow!(
-                    "safekeeper {} is decomissioned",
+                    "safekeeper {} is decommissioned",
                     sk.get_id()
                 )));
             }

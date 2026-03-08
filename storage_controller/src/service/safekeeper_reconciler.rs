@@ -100,7 +100,7 @@ pub(crate) async fn load_schedule_requests(
     for (op_persist, timeline_persist) in pending_ops_timelines {
         let node_id = NodeId(op_persist.sk_id as u64);
         let Some(sk) = safekeepers.get(&node_id) else {
-            // This shouldn't happen, at least the safekeeper should exist as decomissioned.
+            // This shouldn't happen, at least the safekeeper should exist as decommissioned.
             tracing::warn!(
                 tenant_id = op_persist.tenant_id,
                 timeline_id = op_persist.timeline_id,
