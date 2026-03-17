@@ -79,6 +79,9 @@ struct LocalProxyCliArgs {
     /// Path of the local proxy PID file
     #[clap(long, default_value = "./local_proxy.pid")]
     pid_path: Utf8PathBuf,
+    /// Configure whether all incoming requests have a Proxy Protocol V2 packet.
+    #[clap(value_enum, long, default_value_t = config::ProxyProtocolV2::Rejected)]
+    proxy_protocol_v2: config::ProxyProtocolV2,
     /// Disable pg_session_jwt extension installation
     /// This is useful for testing the local proxy with vanilla postgres.
     #[clap(long, default_value = "false")]
@@ -297,7 +300,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             max_schema_size: 0,
             hostname_prefix: String::new(),
         },
-        proxy_protocol_v2: config::ProxyProtocolV2::Rejected,
+        proxy_protocol_v2: args.proxy_protocol_v2,
         handshake_timeout: Duration::from_secs(10),
         wake_compute_retry_config: RetryConfig::parse(RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)?,
         connect_compute_locks,
