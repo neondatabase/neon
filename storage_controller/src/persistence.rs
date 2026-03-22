@@ -1473,7 +1473,7 @@ impl Persistence {
     }
 
     /// Update an already present timeline.
-    /// VERY UNSAFE FUNCTION: this overrides in-progress migrations. Don't use this unless neccessary.
+    /// VERY UNSAFE FUNCTION: this overrides in-progress migrations. Don't use this unless necessary.
     pub(crate) async fn update_timeline_unsafe(
         &self,
         entry: TimelineUpdate,
