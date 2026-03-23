@@ -562,7 +562,7 @@ impl Service {
             let pending_op = TimelinePendingOpPersistence {
                 tenant_id: tenant_id.to_string(),
                 timeline_id: timeline_id.to_string(),
-                generation: i32::MAX,
+                generation: tl.generation,
                 op_kind: SafekeeperTimelineOpKind::Delete,
                 sk_id: *sk_id,
             };

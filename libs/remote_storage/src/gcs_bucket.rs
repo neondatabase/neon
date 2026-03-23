@@ -323,8 +323,14 @@ impl GCSBucket {
         cancel: &CancellationToken,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
+
+        // we removed the semaphore permit here which was duplicative of the outer upload() trait
+        // impl call. put_object only called by upload(), so safe to do. upload handles permit and
+        // timeout, we were getting deadlock with upload concurrency at 32, and 32 upload permits
+        // then trying to get a permit inside their put_object calls, timing out, retrying,
+        // ad-infinitum.
+        
         let kind = RequestKind::Put;
-        let _permit = self.permit(kind, cancel).await?;
         let started_at = start_measuring_requests(kind);
 
         let multipart_uri = format!(
@@ -372,21 +378,21 @@ impl GCSBucket {
             .headers(headers)
             .send();
 
-        let upload = tokio::time::timeout(self.timeout, upload);
-
         let res = tokio::select! {
             res = upload => res,
             _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
         };
 
-        if let Ok(inner) = &res {
-            let started_at = ScopeGuard::into_inner(started_at);
-            crate::metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, inner, started_at);
-        }
+        // not if let-ing an Ok(inner), since res is not double-Result<>-wrapped with the tokio
+        // timeout, observe_elapsed's AttemptedOutcome trait obj expects
+        // &Result<reqwest::Response> which &res directly is, and it can handle the Err case.
+        let started_at = ScopeGuard::into_inner(started_at);
+        crate::metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, &res, started_at);
+        
         match res {
-            Ok(Ok(res)) => {
+            Ok(res) => {
                 if !res.status().is_success() {
                     match res.status() {
                         _ => Err(anyhow::anyhow!("GCS PUT error \n\t {:?}", res)),
@@ -410,8 +416,7 @@ impl GCSBucket {
                     Ok(())
                 }
             }
-            Ok(Err(reqw)) => Err(reqw.into()),
-            Err(_timeout) => Err(TimeoutOrCancel::Timeout.into()),
+            Err(reqw) => Err(reqw.into()),
         }
     }
 
