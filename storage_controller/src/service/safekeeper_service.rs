@@ -562,7 +562,7 @@ impl Service {
             let pending_op = TimelinePendingOpPersistence {
                 tenant_id: tenant_id.to_string(),
                 timeline_id: timeline_id.to_string(),
-                generation: tl.generation,
+                generation: i32::MAX,
                 op_kind: SafekeeperTimelineOpKind::Delete,
                 sk_id: *sk_id,
             };
@@ -585,7 +585,7 @@ impl Service {
                     host_list: Vec::new(),
                     tenant_id,
                     timeline_id: Some(timeline_id),
-                    generation: tl.generation as u32,
+                    generation: i32::MAX as u32,
                     kind: SafekeeperTimelineOpKind::Delete,
                 };
                 locked.safekeeper_reconcilers.schedule_request(req);
