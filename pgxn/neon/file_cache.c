@@ -1333,15 +1333,20 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			   of pages) into the LFC file */
 			off_t	first_read_offset = (off_t) entry_offset * lfc_blocks_per_chunk;
 			int		nwrite = iov_last_used - first_block_in_chunk_read;
+			instr_time	read_start, read_end;
 			/* offset of first IOV */
 			first_read_offset += chunk_offs + first_block_in_chunk_read;
 
+			INSTR_TIME_SET_CURRENT(read_start);
 			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_READ);
 
 			/* Read only the blocks we're interested in, limiting */
 			rc = preadv(lfc_desc, &iov[first_block_in_chunk_read],
 						nwrite, first_read_offset * BLCKSZ);
 			pgstat_report_wait_end();
+			INSTR_TIME_SET_CURRENT(read_end);
+			INSTR_TIME_SUBTRACT(read_end, read_start);
+			io_time_us = INSTR_TIME_GET_MICROSEC(read_end);
 
 			if (rc != (BLCKSZ * nwrite))
 			{
@@ -1632,8 +1637,8 @@ lfc_prefetch(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
 			CriticalAssert(entry->access_count > 0);
 
 			lfc_ctl->writes += 1;
-			INSTR_TIME_SUBTRACT(io_start, io_end);
-			time_spent_us = INSTR_TIME_GET_MICROSEC(io_start);
+			INSTR_TIME_SUBTRACT(io_end, io_start);
+			time_spent_us = INSTR_TIME_GET_MICROSEC(io_end);
 			lfc_ctl->time_write += time_spent_us;
 			inc_page_cache_write_wait(time_spent_us);
 
@@ -1816,8 +1821,8 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				CriticalAssert(entry->access_count > 0);
 
 				lfc_ctl->writes += blocks_in_chunk;
-				INSTR_TIME_SUBTRACT(io_start, io_end);
-				time_spent_us = INSTR_TIME_GET_MICROSEC(io_start);
+				INSTR_TIME_SUBTRACT(io_end, io_start);
+				time_spent_us = INSTR_TIME_GET_MICROSEC(io_end);
 				lfc_ctl->time_write += time_spent_us;
 				inc_page_cache_write_wait(time_spent_us);
 
