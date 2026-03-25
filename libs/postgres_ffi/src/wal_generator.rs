@@ -76,7 +76,7 @@ impl<I: Iterator<Item = Record>> RecordGenerator for I {}
 /// complete, well-formed WAL, which can be chunked at segment boundaries if desired. Not optimized
 /// for performance.
 ///
-/// The WAL format is version-dependant (see e.g. `XLOG_PAGE_MAGIC`), so make sure to import this
+/// The WAL format is version-dependent (see e.g. `XLOG_PAGE_MAGIC`), so make sure to import this
 /// for the appropriate Postgres version (e.g. `postgres_ffi::v17::wal_generator::WalGenerator`).
 ///
 /// A WAL is split into 16 MB segments. Each segment is split into 8 KB pages, with headers.

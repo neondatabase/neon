@@ -40,7 +40,7 @@ static CONNECTION_STARTED_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
 static CONNECTION_ERROR_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "http_server_connection_errors_total",
-        "Number of occured connection errors by type",
+        "Number of occurred connection errors by type",
         &["type"]
     )
     .expect("failed to define a metric")
