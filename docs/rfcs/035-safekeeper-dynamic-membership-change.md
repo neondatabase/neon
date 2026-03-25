@@ -356,7 +356,7 @@ Node management is similar to pageserver:
 2) GET `/control/v1/safekeeper` lists safekeepers.
 3) GET `/control/v1/safekeeper/:node_id` gets safekeeper.
 4) PUT `/control/v1/safekeper/:node_id/scheduling_policy` changes status to e.g.
-   `offline` or `decomissioned`. Initially it is simpler not to schedule any
+   `offline` or `decommissioned`. Initially it is simpler not to schedule any
     migrations here.
 
 Safekeeper deploy scripts should register safekeeper at storage_contorller as

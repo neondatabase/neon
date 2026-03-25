@@ -118,9 +118,9 @@ def test_new_sk_set_validation(neon_env_builder: NeonEnvBuilder):
     assert len(sk_set) == 2
 
     decom_sk = [sk.id for sk in env.safekeepers if sk.id not in sk_set][0]
-    env.storage_controller.safekeeper_scheduling_policy(decom_sk, "Decomissioned")
+    env.storage_controller.safekeeper_scheduling_policy(decom_sk, "Decommissioned")
 
-    expect_fail([sk_set[0], decom_sk], "decomissioned")
+    expect_fail([sk_set[0], decom_sk], "decommissioned")
 
 
 def test_safekeeper_migration_common_set_failpoints(neon_env_builder: NeonEnvBuilder):

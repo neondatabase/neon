@@ -438,7 +438,8 @@ pub enum SkSchedulingPolicy {
     Active,
     Activating,
     Pause,
-    Decomissioned,
+    #[serde(alias = "Decomissioned")]
+    Decommissioned,
 }
 
 impl FromStr for SkSchedulingPolicy {
@@ -449,10 +450,10 @@ impl FromStr for SkSchedulingPolicy {
             "active" => Self::Active,
             "activating" => Self::Activating,
             "pause" => Self::Pause,
-            "decomissioned" => Self::Decomissioned,
+            "decommissioned" | "decomissioned" => Self::Decommissioned,
             _ => {
                 return Err(anyhow::anyhow!(
-                    "Unknown scheduling policy '{s}', try active,pause,decomissioned"
+                    "Unknown scheduling policy '{s}', try active,pause,decommissioned"
                 ));
             }
         })
@@ -466,7 +467,7 @@ impl From<SkSchedulingPolicy> for String {
             Active => "active",
             Activating => "activating",
             Pause => "pause",
-            Decomissioned => "decomissioned",
+            Decommissioned => "decommissioned",
         }
         .to_string()
     }

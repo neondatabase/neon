@@ -3752,8 +3752,8 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     wait_until(storcon_heartbeat)
 
-    # Now decomission it
-    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+    # Now decommission it
+    target.safekeeper_scheduling_policy(inserted["id"], "Decommissioned")
 
 
 @run_only_on_default_postgres("this is like a 'unit test' against storcon db")
@@ -3803,8 +3803,8 @@ def test_safekeeper_activating_to_active(neon_env_builder: NeonEnvBuilder):
 
     wait_until(safekeeper_is_active)
 
-    # Now decomission it
-    target.safekeeper_scheduling_policy(inserted["id"], "Decomissioned")
+    # Now decommission it
+    target.safekeeper_scheduling_policy(inserted["id"], "Decommissioned")
 
 
 def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
