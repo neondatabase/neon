@@ -39,9 +39,24 @@ extern void communicator_prefetch_register_bufferv(BufferTag tag, neon_request_l
 												   BlockNumber nblocks, const bits8 *mask);
 extern bool communicator_prefetch_receive(BufferTag tag);
 
-extern int communicator_read_slru_segment(SlruKind kind, int64 segno,
-										  neon_request_lsns *request_lsns,
-										  void *buffer);
+/* Return type for communicator_read_slru_segment */
+typedef struct read_slru_segment_result
+{
+	/* the SLRU segment content is returned here */
+	void	   *slru_data;
+
+	/* Size of 'slru_data', in BLCKSZ blocks. 0 if the segment was not found */
+	int			n_blocks;
+
+	/*
+	 * 'slru_data' points to a larger palloc'd structure that's opaque
+	 * to the caller. Once you're done with the result, pfree this.
+	 */
+	void	   *buf;
+} read_slru_segment_result;
+
+extern read_slru_segment_result communicator_read_slru_segment(SlruKind kind, int64 segno,
+															   neon_request_lsns *request_lsns);
 
 extern void communicator_reconfigure_timeout_if_needed(void);
 extern void communicator_prefetch_pump_state(void);
