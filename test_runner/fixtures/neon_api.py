@@ -79,6 +79,7 @@ class NeonAPI:
                 elif resp.status_code == 423 and resp.json()["message"] in {
                     "endpoint is in some transitive state, could not suspend",
                     "project already has running conflicting operations, scheduling of new ones is prohibited",
+                    "snapshot is in transition",
                 }:
                     retry = True
                     self.retries4xx += 1
@@ -355,6 +356,63 @@ class NeonAPI:
 
         return cast("dict[str, Any]", resp.json())
 
+    def create_snapshot(
+        self,
+        project_id: str,
+        branch_id: str,
+        lsn: str | None = None,
+        timestamp: str | None = None,
+        name: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "lsn": lsn,
+            "timestamp": timestamp,
+            "name": name,
+            "expires_at": expires_at,
+        }
+        params = {key: value for key, value in params.items() if value is not None}
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/snapshot",
+            params=params,
+            json={},
+            headers={
+                "Accept": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
+    def delete_snapshot(self, project_id: str, snapshot_id: str) -> dict[str, Any]:
+        resp = self.__request("DELETE", f"/projects/{project_id}/snapshots/{snapshot_id}")
+        return cast("dict[str, Any]", resp.json())
+
+    def restore_snapshot(
+        self,
+        project_id: str,
+        snapshot_id: str,
+        target_branch_id: str,
+        name: str | None = None,
+        finalize_restore: bool = True,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "target_branch_id": target_branch_id,
+            "finalize_restore": finalize_restore,
+        }
+        if name is not None:
+            data["name"] = name
+        log.info("Restore snapshot data: %s", data)
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/snapshots/{snapshot_id}/restore",
+            json=data,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+        )
+        return cast("dict[str, Any]", resp.json())
+
     def delete_endpoint(self, project_id: str, endpoint_id: str) -> dict[str, Any]:
         resp = self.__request("DELETE", f"/projects/{project_id}/endpoints/{endpoint_id}")
         return cast("dict[str,Any]", resp.json())
@@ -394,6 +452,14 @@ class NeonAPI:
             },
         )
 
+        return cast("dict[str, Any]", resp.json())
+
+    def get_branch_endpoints(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/endpoints",
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
         return cast("dict[str, Any]", resp.json())
 
     def get_endpoints(self, project_id: str) -> dict[str, Any]:
