@@ -109,10 +109,8 @@ pub trait CompactionKey: std::cmp::Ord + Clone + Copy + std::fmt::Display {
     // return "self + 1"
     fn next(&self) -> Self;
 
-    // return "self + <some decent amount to skip>". The amount to skip
-    // is left to the implementation.
-    // FIXME: why not just "add(u32)" ?  This is hard to use
-    fn skip_some(&self) -> Self;
+    // return "self + offset"
+    fn add(&self, offset: u32) -> Self;
 }
 
 impl CompactionKey for Key {
@@ -125,8 +123,8 @@ impl CompactionKey for Key {
     fn next(&self) -> Key {
         (self as &Key).next()
     }
-    fn skip_some(&self) -> Key {
-        self.add(128)
+    fn add(&self, offset: u32) -> Key {
+        (self as &Key).add(offset)
     }
 }
 
