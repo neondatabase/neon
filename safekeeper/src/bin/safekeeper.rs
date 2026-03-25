@@ -263,6 +263,8 @@ struct Args {
     /* BEGIN_HADRON */
     #[arg(long)]
     enable_pull_timeline_on_startup: bool,
+    #[arg(long)]
+    hcc_base_url: Option<url::Url>,
     /// How often to scan entire data-dir for total disk usage
     #[arg(long, value_parser=humantime::parse_duration, default_value = DEFAULT_GLOBAL_DISK_CHECK_INTERVAL)]
     global_disk_check_interval: Duration,
@@ -459,7 +461,7 @@ async fn main() -> anyhow::Result<()> {
         /* BEGIN_HADRON */
         advertise_pg_addr_tenant_only: None,
         enable_pull_timeline_on_startup: args.enable_pull_timeline_on_startup,
-        hcc_base_url: None,
+        hcc_base_url: args.hcc_base_url,
         global_disk_check_interval: args.global_disk_check_interval,
         max_global_disk_usage_ratio: args.max_global_disk_usage_ratio,
         /* END_HADRON */
