@@ -585,7 +585,7 @@ impl Service {
                     host_list: Vec::new(),
                     tenant_id,
                     timeline_id: Some(timeline_id),
-                    generation: tl.generation as u32,
+                    generation: i32::MAX as u32,
                     kind: SafekeeperTimelineOpKind::Delete,
                 };
                 locked.safekeeper_reconcilers.schedule_request(req);
