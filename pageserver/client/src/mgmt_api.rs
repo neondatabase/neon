@@ -88,6 +88,15 @@ impl Client {
         resp.json().await.map_err(Error::ReceiveBody)
     }
 
+    pub async fn tenant_create(&self, req: &TenantCreateRequest) -> Result<TenantShardId> {
+        let uri = format!("{}/v1/tenant", self.mgmt_api_endpoint);
+        self.request(Method::POST, &uri, req)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     /// Send an HTTP request to an arbitrary path with a desired HTTP method and returning a streaming
     /// Response.  This function is suitable for pass-through/proxy use cases where we don't care
     /// what the response content looks like.

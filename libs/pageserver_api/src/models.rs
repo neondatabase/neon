@@ -1430,6 +1430,17 @@ impl TenantConfigRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
+pub struct TenantCreateRequest {
+    pub new_tenant_id: TenantShardId,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+    #[serde(flatten)]
+    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct TenantConfigPatchRequest {
     pub tenant_id: TenantId,
     #[serde(flatten)]
