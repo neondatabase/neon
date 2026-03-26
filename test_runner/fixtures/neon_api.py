@@ -429,6 +429,859 @@ class NeonAPI:
                     has_running = True
             time.sleep(0.5)
 
+    def get_operation(self, project_id: str, operation_id: str) -> dict[str, Any]:
+        """
+        Retrieves a specific operation.
+
+        Args:
+            project_id: The Neon project ID
+            operation_id: The operation ID
+
+        Returns:
+            The API response containing the operation details
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/operations/{operation_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def list_projects(self) -> dict[str, Any]:
+        """
+        Lists all projects.
+
+        Returns:
+            The API response containing the list of projects
+        """
+        resp = self.__request(
+            "GET",
+            "/projects",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def update_project(
+        self,
+        project_id: str,
+        name: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Updates a project.
+
+        Args:
+            project_id: The Neon project ID
+            name: New name for the project (optional)
+            settings: Project settings to update (optional)
+
+        Returns:
+            The API response containing the updated project details
+        """
+        data: dict[str, Any] = {
+            "project": {},
+        }
+
+        if name is not None:
+            data["project"]["name"] = name
+
+        if settings is not None:
+            data["project"]["settings"] = settings
+
+        resp = self.__request(
+            "PATCH",
+            f"/projects/{project_id}",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_project_consumption(
+        self,
+        project_id: str,
+        from_time: str | None = None,
+        to_time: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Retrieves project consumption data.
+
+        Args:
+            project_id: The Neon project ID
+            from_time: Start time for consumption data (optional)
+            to_time: End time for consumption data (optional)
+
+        Returns:
+            The API response containing the project consumption data
+        """
+        params = {}
+        if from_time is not None:
+            params["from"] = from_time
+        if to_time is not None:
+            params["to"] = to_time
+
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/consumption",
+            headers={
+                "Accept": "application/json",
+            },
+            params=params,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_project_vpc_endpoints(self, project_id: str) -> dict[str, Any]:
+        """
+        Retrieves project VPC endpoints.
+
+        Args:
+            project_id: The Neon project ID
+
+        Returns:
+            The API response containing the project VPC endpoints
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/vpc_endpoints",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def create_branch(
+        self,
+        project_id: str,
+        parent_id: str | None = None,
+        name: str | None = None,
+        endpoints: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Creates a new branch.
+
+        Args:
+            project_id: The Neon project ID
+            parent_id: The parent branch ID (optional)
+            name: Name for the branch (optional)
+            endpoints: List of endpoints to create with the branch (optional)
+
+        Returns:
+            The API response containing the created branch details and operations
+        """
+        data: dict[str, Any] = {
+            "branch": {},
+        }
+
+        if parent_id is not None:
+            data["branch"]["parent_id"] = parent_id
+
+        if name is not None:
+            data["branch"]["name"] = name
+
+        if endpoints is not None:
+            data["endpoints"] = endpoints
+
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_branch_details(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        """
+        Retrieves details of a specific branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+
+        Returns:
+            The API response containing the branch details
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def update_branch(
+        self,
+        project_id: str,
+        branch_id: str,
+        name: str | None = None,
+        default: bool | None = None,
+    ) -> dict[str, Any]:
+        """
+        Updates the specified branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            name: New name for the branch (optional)
+            default: Whether to set this branch as the default branch (optional)
+
+        Returns:
+            The API response containing the updated branch details and operations
+        """
+        data: dict[str, Any] = {
+            "branch": {},
+        }
+
+        if name is not None:
+            data["branch"]["name"] = name
+
+        if default is not None:
+            data["branch"]["default"] = default
+
+        resp = self.__request(
+            "PATCH",
+            f"/projects/{project_id}/branches/{branch_id}",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def delete_branch(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        """
+        Deletes a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+
+        Returns:
+            The API response containing the operation details
+        """
+        resp = self.__request(
+            "DELETE",
+            f"/projects/{project_id}/branches/{branch_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def reset_branch(
+        self,
+        project_id: str,
+        branch_id: str,
+        lsn: str | None = None,
+        timestamp: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Resets a branch to a specified LSN or timestamp.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            lsn: The Log Sequence Number (LSN) to reset to (optional)
+            timestamp: The timestamp to reset to (optional)
+
+        Returns:
+            The API response containing the operation details
+        """
+        params = {}
+        if lsn is not None:
+            params["lsn"] = lsn
+        if timestamp is not None:
+            params["timestamp"] = timestamp
+
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/reset",
+            headers={
+                "Accept": "application/json",
+            },
+            params=params,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def reset_branch_to_parent(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        """
+        Resets a branch to the current state of the parent branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+
+        Returns:
+            The API response containing the operation details
+        """
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/reset_to_parent",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def restore_branch(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        """
+        Restores a branch that was previously deleted.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+
+        Returns:
+            The API response containing the operation details
+        """
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/restore",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_branch_schema(
+        self,
+        project_id: str,
+        branch_id: str,
+        db_name: str,
+        lsn: str | None = None,
+        timestamp: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Retrieves the schema from the specified database.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            db_name: Name of the database for which the schema is retrieved
+            lsn: The Log Sequence Number (LSN) for which the schema is retrieved (optional)
+            timestamp: The point in time for which the schema is retrieved (optional)
+
+        Returns:
+            The API response containing the database schema
+        """
+        params = {
+            "db_name": db_name,
+        }
+
+        if lsn is not None:
+            params["lsn"] = lsn
+
+        if timestamp is not None:
+            params["timestamp"] = timestamp
+
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/schema",
+            headers={
+                "Accept": "application/json",
+            },
+            params=params,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def compare_branch_schema(
+        self,
+        project_id: str,
+        branch_id: str,
+        target_branch_id: str,
+        db_name: str,
+        target_db_name: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Compares schemas between two branches.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The source branch ID
+            target_branch_id: The target branch ID to compare with
+            db_name: Name of the database in the source branch
+            target_db_name: Name of the database in the target branch (optional)
+
+        Returns:
+            The API response containing the schema comparison
+        """
+        params = {
+            "target_branch_id": target_branch_id,
+            "db_name": db_name,
+        }
+
+        if target_db_name is not None:
+            params["target_db_name"] = target_db_name
+
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/compare_schema",
+            headers={
+                "Accept": "application/json",
+            },
+            params=params,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def set_branch_as_default(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        """
+        Sets a branch as the default branch for the project.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+
+        Returns:
+            The API response containing the operation details
+        """
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/set_as_default",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_branch_endpoints(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        """
+        Retrieves endpoints associated with a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+
+        Returns:
+            The API response containing the branch endpoints
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/endpoints",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_branch_databases(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        """
+        Retrieves databases associated with a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+
+        Returns:
+            The API response containing the branch databases
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/databases",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def create_branch_database(
+        self, project_id: str, branch_id: str, database_name: str, owner_name: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Creates a new database in a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            database_name: Name of the database to create
+            owner_name: Name of the role that will own the database (optional)
+
+        Returns:
+            The API response containing the created database details
+        """
+        data: dict[str, Any] = {
+            "database": {
+                "name": database_name,
+            },
+        }
+
+        if owner_name is not None:
+            data["database"]["owner_name"] = owner_name
+
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/databases",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_branch_database(
+        self, project_id: str, branch_id: str, database_name: str
+    ) -> dict[str, Any]:
+        """
+        Retrieves details of a specific database in a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            database_name: Name of the database to retrieve
+
+        Returns:
+            The API response containing the database details
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/databases/{database_name}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def delete_branch_database(
+        self, project_id: str, branch_id: str, database_name: str
+    ) -> dict[str, Any]:
+        """
+        Deletes a database from a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            database_name: Name of the database to delete
+
+        Returns:
+            The API response containing the operation details
+        """
+        resp = self.__request(
+            "DELETE",
+            f"/projects/{project_id}/branches/{branch_id}/databases/{database_name}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_branch_roles(self, project_id: str, branch_id: str) -> dict[str, Any]:
+        """
+        Retrieves roles associated with a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+
+        Returns:
+            The API response containing the branch roles
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/roles",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def create_branch_role(self, project_id: str, branch_id: str, role_name: str) -> dict[str, Any]:
+        """
+        Creates a new role in a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            role_name: Name of the role to create
+
+        Returns:
+            The API response containing the created role details
+        """
+        data: dict[str, Any] = {
+            "role": {
+                "name": role_name,
+            },
+        }
+
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/roles",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_branch_role(self, project_id: str, branch_id: str, role_name: str) -> dict[str, Any]:
+        """
+        Retrieves details of a specific role in a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            role_name: Name of the role to retrieve
+
+        Returns:
+            The API response containing the role details
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/roles/{role_name}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def delete_branch_role(self, project_id: str, branch_id: str, role_name: str) -> dict[str, Any]:
+        """
+        Deletes a role from a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            role_name: Name of the role to delete
+
+        Returns:
+            The API response containing the operation details
+        """
+        resp = self.__request(
+            "DELETE",
+            f"/projects/{project_id}/branches/{branch_id}/roles/{role_name}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_branch_role_password(
+        self, project_id: str, branch_id: str, role_name: str
+    ) -> dict[str, Any]:
+        """
+        Retrieves the password for a specific role in a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            role_name: Name of the role
+
+        Returns:
+            The API response containing the role password
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/branches/{branch_id}/roles/{role_name}/reveal_password",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def reset_branch_role_password(
+        self, project_id: str, branch_id: str, role_name: str
+    ) -> dict[str, Any]:
+        """
+        Resets the password for a specific role in a branch.
+
+        Args:
+            project_id: The Neon project ID
+            branch_id: The branch ID
+            role_name: Name of the role
+
+        Returns:
+            The API response containing the new role password
+        """
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/roles/{role_name}/reset_password",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_endpoint(self, project_id: str, endpoint_id: str) -> dict[str, Any]:
+        """
+        Retrieves details of a specific endpoint.
+
+        Args:
+            project_id: The Neon project ID
+            endpoint_id: The endpoint ID
+
+        Returns:
+            The API response containing the endpoint details
+        """
+        resp = self.__request(
+            "GET",
+            f"/projects/{project_id}/endpoints/{endpoint_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def update_endpoint(
+        self,
+        project_id: str,
+        endpoint_id: str,
+        branch_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Updates an endpoint.
+
+        Args:
+            project_id: The Neon project ID
+            endpoint_id: The endpoint ID
+            branch_id: The branch ID to connect the endpoint to (optional)
+            settings: Endpoint settings to update (optional)
+
+        Returns:
+            The API response containing the updated endpoint details
+        """
+        data: dict[str, Any] = {
+            "endpoint": {},
+        }
+
+        if branch_id is not None:
+            data["endpoint"]["branch_id"] = branch_id
+
+        if settings is not None:
+            data["endpoint"]["settings"] = settings
+
+        resp = self.__request(
+            "PATCH",
+            f"/projects/{project_id}/endpoints/{endpoint_id}",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def delete_endpoint(self, project_id: str, endpoint_id: str) -> dict[str, Any]:
+        """
+        Deletes an endpoint.
+
+        Args:
+            project_id: The Neon project ID
+            endpoint_id: The endpoint ID
+
+        Returns:
+            The API response containing the operation details
+        """
+        resp = self.__request(
+            "DELETE",
+            f"/projects/{project_id}/endpoints/{endpoint_id}",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def get_endpoint_stats(
+        self,
+        project_id: str,
+        endpoint_id: str,
+        from_time: str | None = None,
+        to_time: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Retrieves statistics for a specific endpoint.
+
+        Args:
+            project_id: The Neon project ID
+            endpoint_id: The endpoint ID
+            from_time: Start time for statistics data (optional)
+            to_time: End time for statistics data (optional)
+
+        Returns:
+            The API response containing the endpoint statistics
+        """
+        data: dict[str, Any] = {}
+
+        if from_time is not None:
+            data["from"] = from_time
+
+        if to_time is not None:
+            data["to"] = to_time
+
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/endpoints/{endpoint_id}/stats",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=data,
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
+    def authenticate_passwordless_session(
+        self, project_id: str, endpoint_id: str
+    ) -> dict[str, Any]:
+        """
+        Authenticates a passwordless session for an endpoint.
+
+        Args:
+            project_id: The Neon project ID
+            endpoint_id: The endpoint ID
+
+        Returns:
+            The API response containing the authentication details
+        """
+        resp = self.__request(
+            "POST",
+            f"/projects/{project_id}/endpoints/{endpoint_id}/passwordless_auth",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        return cast("dict[str, Any]", resp.json())
+
 
 @final
 class NeonApiEndpoint:
