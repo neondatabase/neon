@@ -26,7 +26,6 @@ pub struct ComputeConfig {
     pub spec: Option<ComputeSpec>,
 
     /// The compute_ctl configuration
-    #[allow(dead_code)]
     pub compute_ctl_config: ComputeCtlConfig,
 }
 
@@ -177,6 +176,8 @@ pub enum ComputeStatus {
     Empty,
     // Compute configuration was requested.
     ConfigurationPending,
+    // Postgres, pgbouncer, and local_proxy is currently being reloaded.
+    Reloading,
     // Compute node has spec and initial startup and
     // configuration is in progress.
     Init,
@@ -211,6 +212,7 @@ impl Display for ComputeStatus {
         match self {
             ComputeStatus::Empty => f.write_str("empty"),
             ComputeStatus::ConfigurationPending => f.write_str("configuration-pending"),
+            ComputeStatus::Reloading => f.write_str("reloading"),
             ComputeStatus::RefreshConfiguration => f.write_str("refresh-configuration"),
             ComputeStatus::RefreshConfigurationPending => {
                 f.write_str("refresh-configuration-pending")
