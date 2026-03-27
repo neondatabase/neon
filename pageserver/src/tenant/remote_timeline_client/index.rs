@@ -115,8 +115,6 @@ pub struct IndexPart {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) marked_invisible_at: Option<NaiveDateTime>,
 
-    /// The LSN at which we started the rel size migration. Accesses below this LSN should be
-    /// processed with the v1 read path. Usually this LSN should be set together with `rel_size_migration`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) rel_size_migrated_at: Option<Lsn>,
 }
