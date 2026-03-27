@@ -13,10 +13,11 @@ if TYPE_CHECKING:
 @dataclass
 class AuthKeys:
     priv: str
+    algorithm: str
 
     def generate_token(self, *, scope: TokenScope, **token_data: Any) -> str:
         token_data = {key: str(val) for key, val in token_data.items()}
-        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="EdDSA")
+        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm=self.algorithm)
         # cast(Any, self.priv)
 
         # jwt.encode can return 'bytes' or 'str', depending on Python version or type
@@ -46,3 +47,4 @@ class TokenScope(StrEnum):
     TENANT = "tenant"
     SCRUBBER = "scrubber"
     INFRA = "infra"
+    TENANT_ENDPOINT = "tenantendpoint"

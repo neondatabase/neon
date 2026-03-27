@@ -31,6 +31,7 @@ humantime.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true
 json-structural-diff.workspace = true
+jsonwebtoken.workspace = true
 lasso.workspace = true
 once_cell.workspace = true
 pageserver_api.workspace = true

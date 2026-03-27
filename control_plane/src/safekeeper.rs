@@ -13,6 +13,7 @@ use std::{io, result};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use postgres_backend::AuthType;
 use postgres_connection::PgConnectionConfig;
 use safekeeper_api::models::TimelineCreateRequest;
 use safekeeper_client::mgmt_api;
@@ -110,7 +111,7 @@ impl SafekeeperNode {
         }
 
         // Generate a token file for authentication with other safekeepers
-        if self.conf.auth_enabled {
+        if self.conf.auth_type != AuthType::Trust {
             let token = self
                 .env
                 .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
@@ -156,7 +157,7 @@ impl SafekeeperNode {
             "--id".to_owned(),
             id_string,
             "--listen-pg".to_owned(),
-            listen_pg,
+            listen_pg.clone(),
             "--listen-http".to_owned(),
             listen_http,
             "--availability-zone".to_owned(),
@@ -186,7 +187,11 @@ impl SafekeeperNode {
         }
 
         let key_path = self.env.base_data_dir.join("auth_public_key.pem");
-        if self.conf.auth_enabled {
+        if self.conf.auth_type != AuthType::Trust {
+            args.extend([
+                "--token-auth-type".to_owned(),
+                self.conf.auth_type.to_string(),
+            ]);
             let key_path_string = key_path
                 .to_str()
                 .with_context(|| {
@@ -205,6 +210,15 @@ impl SafekeeperNode {
                 "--http-auth-public-key-path".to_owned(),
                 key_path_string.clone(),
             ]);
+
+            let token_path = self.datadir_path().join("peer_jwt_token");
+            let token_path_str = token_path
+                .to_str()
+                .with_context(|| {
+                    format!("Token path {token_path:?} cannot be represented as a unicode string")
+                })?
+                .to_owned();
+            args.extend(["--auth-token-path".to_owned(), token_path_str]);
         }
 
         if let Some(https_port) = self.conf.https_port {
@@ -217,26 +231,14 @@ impl SafekeeperNode {
             args.push(format!("--ssl-ca-file={}", ssl_ca_file.to_str().unwrap()));
         }
 
-        if self.conf.auth_enabled {
-            let token_path = self.datadir_path().join("peer_jwt_token");
-            let token_path_str = token_path
-                .to_str()
-                .with_context(|| {
-                    format!("Token path {token_path:?} cannot be represented as a unicode string")
-                })?
-                .to_owned();
-            args.extend(["--auth-token-path".to_owned(), token_path_str]);
-        }
-
         args.extend_from_slice(extra_opts);
 
-        let env_variables = Vec::new();
         background_process::start_process(
             &format!("safekeeper-{id}"),
             &datadir,
             &self.env.safekeeper_bin(),
             &args,
-            env_variables,
+            self.safekeeper_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
             retry_timeout,
             || async {
@@ -248,6 +250,11 @@ impl SafekeeperNode {
             },
         )
         .await
+    }
+
+    fn safekeeper_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
+        // TODO: remove me
+        Ok(vec![])
     }
 
     ///
