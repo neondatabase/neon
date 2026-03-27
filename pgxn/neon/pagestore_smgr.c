@@ -1609,19 +1609,23 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			if (mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum))
 			{
 				/* It exists locally. Guess it's unlogged then. */
+				if (mdnblocks(reln, forknum) >= blocknum)
+				{
+					/* prevent race condition with unlogged build end which unlinks local files */
 #if PG_MAJORVERSION_NUM >= 17
-				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
+					mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
 #else
-				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
+					mdwrite(reln, forknum, blocknum, buffer, skipFsync);
 #endif
-				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
-				 */
-				return;
+					/*
+					 * We could set relpersistence now that we have determined
+					 * that it's local. But we don't dare to do it, because that
+					 * would immediately allow reads as well, which shouldn't
+					 * happen. We could cache it with a different 'relpersistence'
+					 * value, but this isn't performance critical.
+					 */
+					return;
+				}
 			}
 			break;
 
@@ -1688,17 +1692,30 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			/* This is a bit tricky. Check if the relation exists locally */
 			if (mdexists(reln, debug_compare_local ? INIT_FORKNUM : forknum))
 			{
-				/* It exists locally. Guess it's unlogged then. */
-				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
-
 				/*
-				 * We could set relpersistence now that we have determined
-				 * that it's local. But we don't dare to do it, because that
-				 * would immediately allow reads as well, which shouldn't
-				 * happen. We could cache it with a different 'relpersistence'
-				 * value, but this isn't performance critical.
+				 * There can be race condition between backend A performing unlogged index build and some other backend B evicting page of this index.
+				 * After `mdexists` check in backend B is completed and returns true, backend A can complete unlogged build and unlink local files
+				 * of this relation before backend B performs `mdwrite`. It is not a problem if unlogged relation has just one segment:
+				 * it is opened and file descriptor is cached by smgr, preventing removing file on the disk. So subsequent `mdwrite` will succeed.
+				 * But if unlogged relation is large enough and consists of multiple segments, then first segment will be truncated and all other - removed.
+				 * So attempt to write to some segment cause error because file doesn't exists any more and previous segment is empty or not exists as well.
+				 * Calling `mdnblocks` cause SMGR to open and cache descriptors of all relation segments and so prevent there removal which guarantees that
+				 * subsequent `mdwrite` will succeed.
 				 */
-				return;
+				if (mdnblocks(reln, forknum) >= blkno)
+				{
+					/* prevent race condition with unlogged build end which unlinks local files */
+					mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+
+					/*
+					 * We could set relpersistence now that we have determined
+					 * that it's local. But we don't dare to do it, because that
+					 * would immediately allow reads as well, which shouldn't
+					 * happen. We could cache it with a different 'relpersistence'
+					 * value, but this isn't performance critical.
+					 */
+					return;
+				}
 			}
 			break;
 
