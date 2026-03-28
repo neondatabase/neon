@@ -510,6 +510,7 @@ impl ApiMethod for ComputeHookTenant {
                 tracing::info!("Reconfiguring pageservers for endpoint {endpoint_name}");
 
                 let shard_count = match shards.len() {
+                    0 => panic!("no shards"),
                     1 => ShardCount::unsharded(),
                     n => ShardCount(n.try_into().expect("too many shards")),
                 };

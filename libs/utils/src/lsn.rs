@@ -310,6 +310,11 @@ impl AtomicLsn {
         }
     }
 
+    /// Consumes the atomic and returns the contained value.
+    pub const fn into_inner(self) -> Lsn {
+        Lsn(self.inner.into_inner())
+    }
+
     /// Atomically retrieve the `Lsn` value from memory.
     pub fn load(&self) -> Lsn {
         Lsn(self.inner.load(Ordering::Acquire))
