@@ -50,20 +50,26 @@ impl From<tokio_postgres::Error> for ControlPlaneError {
 
 #[derive(Clone)]
 pub struct MockControlPlane {
-    endpoint: ApiUrl,
+    auth_endpoint: ApiUrl,
+    compute_endpoint: Option<ApiUrl>,
     ip_allowlist_check_enabled: bool,
 }
 
 impl MockControlPlane {
-    pub fn new(endpoint: ApiUrl, ip_allowlist_check_enabled: bool) -> Self {
+    pub fn new(
+        auth_endpoint: ApiUrl,
+        compute_endpoint: Option<ApiUrl>,
+        ip_allowlist_check_enabled: bool,
+    ) -> Self {
         Self {
-            endpoint,
+            auth_endpoint,
+            compute_endpoint,
             ip_allowlist_check_enabled,
         }
     }
 
     pub(crate) fn url(&self) -> &str {
-        self.endpoint.as_str()
+        self.auth_endpoint.as_str()
     }
 
     async fn do_get_auth_info(
@@ -76,7 +82,8 @@ impl MockControlPlane {
             // write more code for reopening it if it got closed, which doesn't
             // seem worth it.
             let (client, connection) =
-                tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
+                tokio_postgres::connect(self.auth_endpoint.as_str(), tokio_postgres::NoTls)
+                    .await?;
 
             tokio::spawn(connection);
 
@@ -121,7 +128,7 @@ impl MockControlPlane {
             Ok((secret, allowed_ips))
         }
         .inspect_err(|e: &GetAuthInfoError| tracing::error!("{e}"))
-        .instrument(info_span!("postgres", url = self.endpoint.as_str()))
+        .instrument(info_span!("postgres", url = self.auth_endpoint.as_str()))
         .await?;
         Ok(AuthInfo {
             secret,
@@ -139,7 +146,7 @@ impl MockControlPlane {
         endpoint: &EndpointId,
     ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         let (client, connection) =
-            tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
+            tokio_postgres::connect(self.auth_endpoint.as_str(), tokio_postgres::NoTls).await?;
 
         let connection = tokio::spawn(connection);
 
@@ -171,19 +178,21 @@ impl MockControlPlane {
     }
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
-        let port = self.endpoint.port().unwrap_or(5432);
-        let conn_info = match self.endpoint.host_str() {
+        let target = self.compute_endpoint.as_ref().unwrap_or(&self.auth_endpoint);
+        let port = target.port().unwrap_or(5432);
+        let ssl_mode = parse_ssl_mode(target)?;
+        let conn_info = match target.host_str() {
             None => ConnectInfo {
                 host_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
                 host: "localhost".into(),
                 port,
-                ssl_mode: SslMode::Disable,
+                ssl_mode,
             },
             Some(host) => ConnectInfo {
                 host_addr: IpAddr::from_str(host).ok(),
                 host: host.into(),
                 port,
-                ssl_mode: SslMode::Disable,
+                ssl_mode,
             },
         };
 
@@ -199,6 +208,20 @@ impl MockControlPlane {
         };
 
         Ok(node)
+    }
+}
+
+fn parse_ssl_mode(url: &ApiUrl) -> Result<SslMode, WakeComputeError> {
+    let Some((_, sslmode)) = url.query_pairs().find(|(k, _)| k == "sslmode") else {
+        return Ok(SslMode::Disable);
+    };
+
+    match sslmode.as_ref() {
+        "disable" => Ok(SslMode::Disable),
+        "require" => Ok(SslMode::Require),
+        other => Err(WakeComputeError::BadComputeAddress(
+            format!("unsupported sslmode: {other}").into(),
+        )),
     }
 }
 

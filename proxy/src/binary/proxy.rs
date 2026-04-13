@@ -111,6 +111,11 @@ struct ProxyCliArgs {
         default_value = "http://localhost:3000/authenticate_proxy_request/"
     )]
     auth_endpoint: String,
+    /// Upstream compute endpoint for `--auth-backend=postgres`.
+    /// Example: `postgresql://host:5432/db?sslmode=require`
+    #[cfg(any(test, feature = "testing"))]
+    #[clap(long)]
+    compute_endpoint: Option<String>,
     /// JWT used to connect to control plane.
     #[clap(
         long,
@@ -845,8 +850,14 @@ fn build_auth_backend(
                 url.set_password(Some(&password))
                     .expect("Failed to set password");
             }
+            let compute_endpoint = args
+                .compute_endpoint
+                .as_deref()
+                .map(parse_compute_endpoint)
+                .transpose()?;
             let api = control_plane::client::mock::MockControlPlane::new(
                 url,
+                compute_endpoint,
                 !args.is_private_access_proxy,
             );
             let api = control_plane::client::ControlPlaneClient::PostgresMock(api);
@@ -929,6 +940,28 @@ fn build_auth_backend(
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+fn parse_compute_endpoint(endpoint: &str) -> anyhow::Result<ApiUrl> {
+    let url: ApiUrl = endpoint.parse()?;
+    ensure!(
+        url.host_str().is_some(),
+        "compute-endpoint must include a hostname"
+    );
+
+    if let Some((_, sslmode)) = url.query_pairs().find(|(k, _)| k == "sslmode") {
+        match sslmode.as_ref() {
+            "disable" | "require" => {}
+            other => {
+                bail!(
+                    "unsupported sslmode in compute-endpoint: {other}. supported values: disable,require"
+                );
+            }
+        }
+    }
+
+    Ok(url)
+}
+
 async fn configure_redis(
     args: &ProxyCliArgs,
 ) -> anyhow::Result<Option<ConnectionWithCredentialsProvider>> {
@@ -999,5 +1032,28 @@ mod tests {
                 RateBucketInfo::new(20, Duration::from_secs(30)),
             ]
         );
+    }
+
+    #[test]
+    fn parse_compute_endpoint_with_require_sslmode() {
+        let parsed =
+            super::parse_compute_endpoint("postgresql://example.com:5432/db?sslmode=require")
+                .expect("valid endpoint should parse");
+        assert_eq!(parsed.host_str(), Some("example.com"));
+        assert_eq!(parsed.port(), Some(5432));
+    }
+
+    #[test]
+    fn parse_compute_endpoint_rejects_unknown_sslmode() {
+        let err = super::parse_compute_endpoint("postgresql://example.com/db?sslmode=prefer")
+            .expect_err("unsupported sslmode must fail");
+        assert!(err.to_string().contains("unsupported sslmode"));
+    }
+
+    #[test]
+    fn parse_compute_endpoint_allows_missing_sslmode() {
+        let parsed = super::parse_compute_endpoint("postgresql://example.com:5432/db")
+            .expect("missing sslmode should be allowed");
+        assert_eq!(parsed.host_str(), Some("example.com"));
     }
 }
