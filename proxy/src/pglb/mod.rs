@@ -296,7 +296,7 @@ pub(crate) async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let common_names = tls.map(|tls| &tls.common_names);
 
-    let (node, cancel_on_shutdown) = handle_client(
+    let (node, cancel_on_shutdown, tcp_pool_checkout) = handle_client(
         config,
         auth_backend,
         ctx,
@@ -316,18 +316,16 @@ pub(crate) async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
         Some(ConnectionInfoExtra::Azure { link_id }) => Some(link_id.to_smolstr()),
         None => None,
     };
-
     Ok(Some(ProxyPassthrough {
         client,
-        compute: node.stream.into_framed().into_inner(),
-
-        aux: node.aux,
+        compute: node,
         private_link_id,
+        tcp_pool_checkout,
+        tcp_pool_config: config.tcp_pool_config,
 
         _cancel_on_shutdown: cancel_on_shutdown,
 
         _req: request_gauge,
         _conn: conn_gauge,
-        _db_conn: node.guage,
     }))
 }

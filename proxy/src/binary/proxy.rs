@@ -36,7 +36,7 @@ use crate::config::RestConfig;
 use crate::config::refresh_config_loop;
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
-    ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
+    ProxyConfig, ProxyProtocolV2, TcpPoolConfig, remote_storage_from_toml,
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
@@ -157,6 +157,8 @@ struct ProxyCliArgs {
     connect_compute_lock: String,
     #[clap(flatten)]
     sql_over_http: SqlOverHttpArgs,
+    #[clap(flatten)]
+    tcp_pool: TcpPoolArgs,
     /// timeout for scram authentication protocol
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     scram_protocol_timeout: tokio::time::Duration,
@@ -317,6 +319,29 @@ struct SqlOverHttpArgs {
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
     sql_over_http_max_response_size_bytes: usize,
+}
+
+#[derive(clap::Args, Clone, Copy, Debug)]
+struct TcpPoolArgs {
+    /// Enable experimental TCP session pooling.
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    tcp_pool_enabled: bool,
+
+    /// Maximum number of pooled backend connections per endpoint+db+user key.
+    #[clap(long, default_value_t = 20)]
+    tcp_pool_max_conns_per_key: usize,
+
+    /// Maximum number of pooled backend connections across all keys.
+    #[clap(long, default_value_t = 20000)]
+    tcp_pool_max_total_conns: usize,
+
+    /// How long idle pooled backend connections should be kept.
+    #[clap(long, default_value = "5m", value_parser = humantime::parse_duration)]
+    tcp_pool_idle_timeout: tokio::time::Duration,
+
+    /// If pool acquire fails, fallback to the existing direct-connect path.
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    tcp_pool_fallback_direct_connect: bool,
 }
 
 #[derive(clap::Args, Clone, Debug)]
@@ -698,6 +723,13 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         max_request_size_bytes: args.sql_over_http.sql_over_http_max_request_size_bytes,
         max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
+    let tcp_pool_config = TcpPoolConfig {
+        enabled: args.tcp_pool.tcp_pool_enabled,
+        max_conns_per_key: args.tcp_pool.tcp_pool_max_conns_per_key,
+        max_total_conns: args.tcp_pool.tcp_pool_max_total_conns,
+        idle_timeout: args.tcp_pool.tcp_pool_idle_timeout,
+        fallback_direct_connect: args.tcp_pool.tcp_pool_fallback_direct_connect,
+    };
     let authentication_config = AuthenticationConfig {
         jwks_cache: JwkCache::default(),
         scram_thread_pool: thread_pool,
@@ -760,6 +792,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         tls_config,
         metric_collection,
         http_config,
+        tcp_pool_config,
         authentication_config,
         proxy_protocol_v2: args.proxy_protocol_v2,
         handshake_timeout: args.handshake_timeout,

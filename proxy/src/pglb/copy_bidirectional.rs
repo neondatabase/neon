@@ -87,6 +87,55 @@ where
             transfer_one_direction(cx, &mut compute_to_client, compute, client)
                 .map_err(ErrorSource::from_compute)?;
 
+        // Early termination checks from compute to client.
+        if let TransferState::Done(_) = compute_to_client
+            && let TransferState::Running(buf) = &client_to_compute
+        {
+            info!("Compute is done, terminate client");
+            client_to_compute = TransferState::ShuttingDown(buf.amt);
+            client_to_compute_result =
+                transfer_one_direction(cx, &mut client_to_compute, client, compute)
+                    .map_err(ErrorSource::from_client)?;
+        }
+
+        // Early termination checks from client to compute.
+        if let TransferState::Done(_) = client_to_compute
+            && let TransferState::Running(buf) = &compute_to_client
+        {
+            info!("Client is done, terminate compute");
+            compute_to_client = TransferState::ShuttingDown(buf.amt);
+            compute_to_client_result =
+                transfer_one_direction(cx, &mut compute_to_client, compute, client)
+                    .map_err(ErrorSource::from_compute)?;
+        }
+
+        let client_to_compute = ready!(client_to_compute_result);
+        let compute_to_client = ready!(compute_to_client_result);
+        Poll::Ready(Ok((client_to_compute, compute_to_client)))
+    })
+    .await
+}
+
+#[tracing::instrument(skip_all)]
+pub async fn copy_bidirectional_client_compute_pooled<Client, Compute>(
+    client: &mut Client,
+    compute: &mut Compute,
+) -> Result<(u64, u64), ErrorSource>
+where
+    Client: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    Compute: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
+    let mut client_to_compute = TransferState::Running(CopyBuffer::new());
+    let mut compute_to_client = TransferState::Running(CopyBuffer::new());
+
+    poll_fn(|cx| {
+        let mut client_to_compute_result =
+            transfer_one_direction(cx, &mut client_to_compute, client, compute)
+                .map_err(ErrorSource::from_client)?;
+        let compute_to_client_result =
+            transfer_one_direction(cx, &mut compute_to_client, compute, client)
+                .map_err(ErrorSource::from_compute)?;
+
         // TODO: 1 info log, with a enum label for close direction.
 
         // Early termination checks from compute to client.
@@ -105,15 +154,14 @@ where
         if let TransferState::Done(_) = client_to_compute
             && let TransferState::Running(buf) = &compute_to_client
         {
-            info!("Client is done, terminate compute");
-            // Initiate shutdown
-            compute_to_client = TransferState::ShuttingDown(buf.amt);
-            compute_to_client_result =
-                transfer_one_direction(cx, &mut compute_to_client, compute, client)
-                    .map_err(ErrorSource::from_compute)?;
+            info!("Client is done, preserve compute stream");
+            let c2c = match client_to_compute {
+                TransferState::Done(count) => count,
+                _ => 0,
+            };
+            return Poll::Ready(Ok((c2c, buf.amt)));
         }
 
-        // It is not a problem if ready! returns early ... (comment remains the same)
         let client_to_compute = ready!(client_to_compute_result);
         let compute_to_client = ready!(compute_to_client_result);
 

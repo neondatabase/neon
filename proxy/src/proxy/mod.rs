@@ -22,7 +22,7 @@ use smol_str::{SmolStr, format_smolstr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use tracing::Instrument;
+use tracing::{Instrument, warn};
 
 use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
@@ -33,6 +33,7 @@ use crate::pglb::{ClientMode, ClientRequestError};
 use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
+use crate::tcp_pool::{TcpPoolCheckout, TcpPoolKey};
 use crate::types::EndpointCacheKey;
 use crate::{auth, compute};
 
@@ -47,7 +48,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     common_names: Option<&HashSet<String>>,
     params: &StartupMessageParams,
-) -> Result<(ComputeConnection, oneshot::Sender<Infallible>), ClientRequestError> {
+) -> Result<
+    (
+        ComputeConnection,
+        oneshot::Sender<Infallible>,
+        Option<TcpPoolCheckout>,
+    ),
+    ClientRequestError,
+> {
     let hostname = mode.hostname(client.get_ref());
     // Extract credentials which we're going to use for auth.
     let result = auth_backend
@@ -91,29 +99,81 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
     let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
     auth_info.set_startup_params(params, params_compat);
+    let mut auth_info = Some(auth_info);
 
+    let pool_key = TcpPoolKey::new(
+        creds.info.endpoint_cache_key(),
+        params.get("database").unwrap_or(user.as_ref()).into(),
+        creds.info.user.clone(),
+    );
+    let cancel_user_info = creds.info.clone();
     let backend = auth::Backend::ControlPlane(cplane, creds.info);
 
-    // TODO: callback to pglb
-    let res = connect_auth::connect_to_compute_and_auth(
-        ctx,
-        config,
-        &backend,
-        auth_info,
-        connect_compute::TlsNegotiation::Postgres,
-    )
-    .await;
+    let connect = || {
+        let auth_info = auth_info
+            .take()
+            .expect("connect auth info must be consumed once");
+        async {
+            connect_auth::connect_to_compute_and_auth(
+                ctx,
+                config,
+                &backend,
+                auth_info,
+                connect_compute::TlsNegotiation::Postgres,
+            )
+            .await
+        }
+    };
 
-    let mut node = match res {
-        Ok(node) => node,
-        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
+    let (mut node, tcp_pool_checkout) = if config.tcp_pool_config.enabled {
+        match crate::tcp_pool::manager()
+            .acquire_or_connect(&config.tcp_pool_config, pool_key, connect)
+            .await
+        {
+            Ok((node, checkout)) => (node, checkout),
+            Err(crate::tcp_pool::AcquireError::PoolExhausted(e_key))
+                if config.tcp_pool_config.fallback_direct_connect =>
+            {
+                warn!(pool_key = %e_key, "tcp pool exhausted; falling back to direct connect");
+                let auth_info = auth_info
+                    .take()
+                    .expect("auth info must be available if pool connect was not attempted");
+                let node = match connect_auth::connect_to_compute_and_auth(
+                    ctx,
+                    config,
+                    &backend,
+                    auth_info,
+                    connect_compute::TlsNegotiation::Postgres,
+                )
+                .await
+                {
+                    Ok(node) => node,
+                    Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
+                };
+                (node, None)
+            }
+            Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
+        }
+    } else {
+        let auth_info = auth_info
+            .take()
+            .expect("auth info must be available for direct connect");
+        let node = match connect_auth::connect_to_compute_and_auth(
+            ctx,
+            config,
+            &backend,
+            auth_info,
+            connect_compute::TlsNegotiation::Postgres,
+        )
+        .await
+        {
+            Ok(node) => node,
+            Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
+        };
+        (node, None)
     };
 
     send_client_greeting(ctx, &config.greetings, client);
-
-    let auth::Backend::ControlPlane(_, user_info) = backend else {
-        unreachable!("ensured above");
-    };
 
     let session = cancellation_handler.get_key();
 
@@ -136,14 +196,14 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
                         secret_key,
                     },
                     hostname,
-                    user_info,
+                    user_info: cancel_user_info,
                 },
                 &config.connect_to_compute,
             )
             .await;
     });
 
-    Ok((node, cancel_on_shutdown))
+    Ok((node, cancel_on_shutdown, tcp_pool_checkout))
 }
 
 /// Greet the client with any useful information.

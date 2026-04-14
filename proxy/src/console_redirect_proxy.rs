@@ -260,18 +260,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             )
             .await;
     });
-
     Ok(Some(ProxyPassthrough {
         client: stream,
-        compute: node.stream.into_framed().into_inner(),
-
-        aux: node.aux,
+        compute: node,
         private_link_id: None,
+        tcp_pool_checkout: None,
+        tcp_pool_config: config.tcp_pool_config,
 
         _cancel_on_shutdown: cancel_on_shutdown,
 
         _req: request_gauge,
         _conn: conn_gauge,
-        _db_conn: node.guage,
     }))
 }
