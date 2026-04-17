@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused)]
-
 mod common;
 
 use crate::common::{download_to_vec, upload_stream};
@@ -13,7 +10,6 @@ use remote_storage::{
     RemoteStorageConfig, RemoteStorageKind, StorageMetadata,
 };
 use std::collections::HashMap;
-#[path = "common/tests.rs"]
 use std::collections::HashSet;
 use std::fmt::{Debug, Display};
 use std::io::Cursor;
@@ -95,6 +91,7 @@ async fn gcs_get_object_bytes_range_header(ctx: &mut EnabledGCS) -> anyhow::Resu
     let dl_object = download_to_vec(ctx.client.download(&path, &opts, &cancel).await?).await?;
     let s = String::from_utf8(dl_object).unwrap();
     assert_eq!(5, s.len());
+    assert_eq!("world", s);
     Ok(())
 }
 #[test_context(EnabledGCS)]
@@ -107,7 +104,7 @@ async fn gcs_test_suite(ctx: &mut EnabledGCS) -> anyhow::Result<()> {
     // Our test depends on discrepancies in the clock between S3 and the environment the tests
     // run in. Therefore, wait a little bit before and after. The alternative would be
     // to take the time from S3 response headers.
-    const WAIT_TIME: Duration = Duration::from_millis(3_000);
+    const WAIT_TIME: Duration = Duration::from_millis(1_000);
 
     async fn retry<T, O, F, E>(op: O) -> Result<T, E>
     where
