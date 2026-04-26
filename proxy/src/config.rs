@@ -75,9 +75,23 @@ pub struct HttpConfig {
     pub max_response_size_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TcpPoolMode {
+    /// Hold a compute connection for the lifetime of the client session.
+    /// Returns to the pool only when the client disconnects.
+    #[default]
+    Session,
+    /// Return a compute connection to the pool at every transaction
+    /// boundary (compute sends ReadyForQuery with status `'I'`). Subsequent
+    /// transactions on the same client may land on different compute
+    /// connections — same semantic as PgBouncer transaction mode.
+    Transaction,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TcpPoolConfig {
     pub enabled: bool,
+    pub mode: TcpPoolMode,
     pub max_conns_per_key: usize,
     pub max_total_conns: usize,
     pub idle_timeout: Duration,

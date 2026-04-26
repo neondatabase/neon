@@ -283,6 +283,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         http_config,
         tcp_pool_config: TcpPoolConfig {
             enabled: false,
+            mode: crate::config::TcpPoolMode::Session,
             max_conns_per_key: 0,
             max_total_conns: 0,
             idle_timeout: Duration::ZERO,

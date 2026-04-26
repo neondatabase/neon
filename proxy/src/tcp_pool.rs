@@ -72,6 +72,10 @@ impl TcpPoolCheckout {
     pub(crate) fn release(self, config: &TcpPoolConfig, conn: ComputeConnection, reusable: bool) {
         release(&self.manager, config, self.key, conn, reusable);
     }
+
+    pub(crate) fn key(&self) -> &TcpPoolKey {
+        &self.key
+    }
 }
 
 #[derive(Debug, Error)]
@@ -165,6 +169,29 @@ impl TcpPoolManager {
                 Err(AcquireError::Connect(e))
             }
         }
+    }
+
+    /// Pop one idle connection from the pool for the given key, if any.
+    /// Used by the transaction-mode multiplex loop to re-acquire after
+    /// releasing on a transaction boundary, without requiring a connect
+    /// closure. Returns `None` if the per-key pool is empty.
+    pub(crate) fn try_acquire_idle(
+        &self,
+        config: &TcpPoolConfig,
+        key: &TcpPoolKey,
+    ) -> Option<(ComputeConnection, TcpPoolCheckout)> {
+        let pool = self.inner.pools.get(key).map(|p| p.clone())?;
+        let mut pool = pool.lock();
+        let dropped = gc_idle(&mut pool, config);
+        if dropped > 0 {
+            self.inner.open_total.fetch_sub(dropped, Ordering::Relaxed);
+        }
+        let idle = pool.idle.pop()?;
+        let checkout = TcpPoolCheckout {
+            key: key.clone(),
+            manager: self.inner.clone(),
+        };
+        Some((idle.conn, checkout))
     }
 }
 

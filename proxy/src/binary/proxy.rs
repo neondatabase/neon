@@ -349,6 +349,30 @@ struct TcpPoolArgs {
     /// If pool acquire fails, fallback to the existing direct-connect path.
     #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     tcp_pool_fallback_direct_connect: bool,
+
+    /// Pool mode. `session` (default) holds a compute connection for the
+    /// whole client session. `transaction` returns the connection to the
+    /// pool at every transaction boundary (compute sends ReadyForQuery
+    /// status `'I'`); subsequent transactions on the same client may land
+    /// on different compute connections.
+    #[clap(long, value_enum, default_value_t = TcpPoolModeArg::Session)]
+    tcp_pool_mode: TcpPoolModeArg,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum TcpPoolModeArg {
+    Session,
+    Transaction,
+}
+
+impl From<TcpPoolModeArg> for crate::config::TcpPoolMode {
+    fn from(arg: TcpPoolModeArg) -> Self {
+        match arg {
+            TcpPoolModeArg::Session => Self::Session,
+            TcpPoolModeArg::Transaction => Self::Transaction,
+        }
+    }
 }
 
 #[derive(clap::Args, Clone, Debug)]
@@ -732,6 +756,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     };
     let tcp_pool_config = TcpPoolConfig {
         enabled: args.tcp_pool.tcp_pool_enabled,
+        mode: args.tcp_pool.tcp_pool_mode.into(),
         max_conns_per_key: args.tcp_pool.tcp_pool_max_conns_per_key,
         max_total_conns: args.tcp_pool.tcp_pool_max_total_conns,
         idle_timeout: args.tcp_pool.tcp_pool_idle_timeout,
