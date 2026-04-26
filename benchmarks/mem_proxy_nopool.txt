@@ -1,0 +1,3 @@
+config: proxy_nopool  ts: 2026-04-26T14:49:29-04:00
+  PID    RSS      VSZ  %CPU ELAPSED COMMAND
+67108  78032 442871264 124.4   00:08 /Users/mel/neon/target/debug/proxy --auth-backend=postgres --auth-endpoint=postgresql://proxytest@localhost:5432/proxytest_db --compute-endpoint=postgresql://localhost:5433/proxytest_db?sslmode=disable --proxy=127.0.0.1:4432 --mgmt=127.0.0.1:7000 --http=127.0.0.1:7001 --wss=127.0.0.1:7002 --tcp-pool-enabled=false --tcp-pool-max-conns-per-key=200 --tcp-pool-max-total-conns=200 --tcp-pool-fallback-direct-connect=false --endpoint-rps-limit 100000@1s --endpoint-rps-limit 100000@60s --endpoint-rps-limit 100000@600s --wake-compute-limit 100000@1s --wake-compute-limit 100000@60s --wake-compute-limit 100000@600s
