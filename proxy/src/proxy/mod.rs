@@ -125,12 +125,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         }
     };
 
-    let (mut node, tcp_pool_checkout) = if config.tcp_pool_config.enabled {
+    let (mut node, tcp_pool_checkout, was_reused) = if config.tcp_pool_config.enabled {
         match crate::tcp_pool::manager()
             .acquire_or_connect(&config.tcp_pool_config, pool_key, connect)
             .await
         {
-            Ok((node, checkout)) => (node, checkout),
+            Ok((node, checkout, reused)) => (node, checkout, reused),
             Err(crate::tcp_pool::AcquireError::PoolExhausted(e_key))
                 if config.tcp_pool_config.fallback_direct_connect =>
             {
@@ -150,7 +150,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     Ok(node) => node,
                     Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
                 };
-                (node, None)
+                (node, None,false)
             }
             Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
         }
@@ -170,15 +170,22 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             Ok(node) => node,
             Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
         };
-        (node, None)
+        (node, None,false)
     };
 
     send_client_greeting(ctx, &config.greetings, client);
 
     let session = cancellation_handler.get_key();
 
-    let (process_id, secret_key) =
-        forward_compute_params_to_client(ctx, *session.key(), client, &mut node.stream).await?;
+    let (process_id, secret_key) = if was_reused {
+        use crate::pqproto::BeMessage;
+        client.write_message(BeMessage::BackendKeyData(*session.key()));
+        client.write_message(BeMessage::ReadyForQuery);
+        (0,0)
+    } else {
+        forward_compute_params_to_client(ctx, *session.key(), client, &mut node.stream).await?
+    };
+    
     let hostname = node.hostname.to_string();
 
     let session_id = ctx.session_id();

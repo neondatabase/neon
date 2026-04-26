@@ -112,13 +112,13 @@ impl TcpPoolManager {
         config: &TcpPoolConfig,
         key: TcpPoolKey,
         connect: F,
-    ) -> Result<(ComputeConnection, Option<TcpPoolCheckout>), AcquireError>
+    ) -> Result<(ComputeConnection, Option<TcpPoolCheckout>,bool), AcquireError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<ComputeConnection, AuthError>>,
     {
         if !config.enabled {
-            return Ok((connect().await?, None));
+            return Ok((connect().await?, None, false));
         }
 
         let pool = self
@@ -140,7 +140,7 @@ impl TcpPoolManager {
                     key,
                     manager: self.inner.clone(),
                 };
-                return Ok((idle.conn, Some(checkout)));
+                return Ok((idle.conn, Some(checkout), true));
             }
 
             let open_total = self.inner.open_total.load(Ordering::Relaxed);
@@ -158,7 +158,7 @@ impl TcpPoolManager {
                     key,
                     manager: self.inner.clone(),
                 };
-                Ok((conn, Some(checkout)))
+                Ok((conn, Some(checkout), false))
             }
             Err(e) => {
                 decrement_open_counts(&self.inner, &key);

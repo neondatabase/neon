@@ -67,6 +67,38 @@ where
     }
 }
 
+/// Like `transfer_one_direction`, but never calls `poll_shutdown` on the writer
+/// when the reader hits EOF. Used in the pooled bidirectional copy for the
+/// client→compute direction, because shutting down the compute write half
+/// (`shutdown(SHUT_WR)`) breaks the connection for pool reuse: Postgres
+/// reacts to the FIN by closing the backend, and subsequent reads hit
+/// `ENOTCONN`.
+fn transfer_one_direction_no_shutdown<A, B>(
+    cx: &mut Context<'_>,
+    state: &mut TransferState,
+    r: &mut A,
+    w: &mut B,
+) -> Poll<Result<u64, ErrorDirection>>
+where
+    A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
+    let mut r = Pin::new(r);
+    let mut w = Pin::new(w);
+    loop {
+        match state {
+            TransferState::Running(buf) => {
+                let count = ready!(buf.poll_copy(cx, r.as_mut(), w.as_mut()))?;
+                *state = TransferState::Done(count);
+            }
+            TransferState::ShuttingDown(count) => {
+                *state = TransferState::Done(*count);
+            }
+            TransferState::Done(count) => return Poll::Ready(Ok(*count)),
+        }
+    }
+}
+
 #[tracing::instrument(skip_all)]
 pub async fn copy_bidirectional_client_compute<Client, Compute>(
     client: &mut Client,
@@ -125,49 +157,77 @@ where
     Client: AsyncRead + AsyncWrite + Unpin + ?Sized,
     Compute: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
+    let mut filtered_client = TerminateFilter::new(&mut *client);
+
     let mut client_to_compute = TransferState::Running(CopyBuffer::new());
     let mut compute_to_client = TransferState::Running(CopyBuffer::new());
 
-    poll_fn(|cx| {
-        let mut client_to_compute_result =
-            transfer_one_direction(cx, &mut client_to_compute, client, compute)
-                .map_err(ErrorSource::from_client)?;
+    let result: Result<(u64, u64), ErrorSource> = poll_fn(|cx| {
+        // CRITICAL: check for clean Terminate BEFORE driving the state machines.
+        // Once TerminateFilter has seen Terminate, we want to bail without
+        // calling poll_shutdown on compute (which would close the pooled connection).
+        if filtered_client.saw_terminate() {
+            let c2c_count = match &client_to_compute {
+                TransferState::Running(buf) => buf.amt,
+                TransferState::ShuttingDown(n) | TransferState::Done(n) => *n,
+            };
+            let s2c_count = match &compute_to_client {
+                TransferState::Running(buf) => buf.amt,
+                TransferState::ShuttingDown(n) | TransferState::Done(n) => *n,
+            };
+            info!("clean client disconnect via Terminate; compute connection preserved");
+            return Poll::Ready(Ok((c2c_count, s2c_count)));
+        }
+
+        // CRITICAL: never poll_shutdown(compute) — the connection must be
+        // reusable in the pool. If the client closes (or sends Terminate),
+        // we just stop forwarding without half-closing the compute socket.
+        let client_to_compute_result = transfer_one_direction_no_shutdown(
+            cx,
+            &mut client_to_compute,
+            &mut filtered_client,
+            compute,
+        )
+        .map_err(ErrorSource::from_client)?;
+
+        // Re-check after the read side has been driven; the filter may have just
+        // observed Terminate during this poll.
+        if filtered_client.saw_terminate() {
+            let c2c_count = match &client_to_compute {
+                TransferState::Running(buf) => buf.amt,
+                TransferState::ShuttingDown(n) | TransferState::Done(n) => *n,
+            };
+            let s2c_count = match &compute_to_client {
+                TransferState::Running(buf) => buf.amt,
+                TransferState::ShuttingDown(n) | TransferState::Done(n) => *n,
+            };
+            info!("clean client disconnect via Terminate; compute connection preserved");
+            return Poll::Ready(Ok((c2c_count, s2c_count)));
+        }
+
         let compute_to_client_result =
-            transfer_one_direction(cx, &mut compute_to_client, compute, client)
+            transfer_one_direction(cx, &mut compute_to_client, compute, &mut filtered_client)
                 .map_err(ErrorSource::from_compute)?;
 
-        // TODO: 1 info log, with a enum label for close direction.
-
-        // Early termination checks from compute to client.
+        // If compute closes first, this path runs and IS allowed to shut down the
+        // client (since the compute connection is gone anyway and shouldn't be pooled).
         if let TransferState::Done(_) = compute_to_client
             && let TransferState::Running(buf) = &client_to_compute
         {
             info!("Compute is done, terminate client");
-            // Initiate shutdown
             client_to_compute = TransferState::ShuttingDown(buf.amt);
-            client_to_compute_result =
-                transfer_one_direction(cx, &mut client_to_compute, client, compute)
-                    .map_err(ErrorSource::from_client)?;
+            // Note: we do NOT re-drive client_to_compute here because that would
+            // call poll_shutdown(compute) and we've already established compute is done.
+            // Just let the result fall through.
         }
 
-        // Early termination checks from client to compute.
-        if let TransferState::Done(_) = client_to_compute
-            && let TransferState::Running(buf) = &compute_to_client
-        {
-            info!("Client is done, preserve compute stream");
-            let c2c = match client_to_compute {
-                TransferState::Done(count) => count,
-                _ => 0,
-            };
-            return Poll::Ready(Ok((c2c, buf.amt)));
-        }
-
-        let client_to_compute = ready!(client_to_compute_result);
-        let compute_to_client = ready!(compute_to_client_result);
-
-        Poll::Ready(Ok((client_to_compute, compute_to_client)))
+        let c2c = ready!(client_to_compute_result);
+        let s2c = ready!(compute_to_client_result);
+        Poll::Ready(Ok((c2c, s2c)))
     })
-    .await
+    .await;
+
+    result
 }
 
 #[derive(Debug)]
@@ -357,5 +417,151 @@ mod tests {
         let (client_to_compute_count, compute_to_client_count) = result;
         assert_eq!(compute_to_client_count, 5); // 'hello' was transferred
         assert!(client_to_compute_count <= 8); // response only partially transferred or not at all
+    }
+}
+
+pub(crate) struct TerminateFilter<R> {
+    inner: R,
+    state: FilterState,
+    saw_terminate: bool
+}
+
+
+enum  FilterState {
+    AwaitingHeader {header: [u8;5], pos: usize},
+    InBody { remaining: usize}
+}
+
+impl<R> TerminateFilter<R> {
+    pub(crate) fn new(inner: R) -> Self {
+        Self {
+            inner,
+            state: FilterState::AwaitingHeader { header: [0;5], pos: 0 },
+            saw_terminate: false,
+        }
+    }
+
+    pub(crate) fn saw_terminate(&self) -> bool {
+        self.saw_terminate
+    }
+}
+
+
+impl<R: AsyncRead + Unpin> AsyncRead for TerminateFilter<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        // Destructure self once so we have separate borrows of each field.
+        // This is the standard Rust idiom for "split borrow" through a Pin.
+        let this = self.get_mut();
+
+        if this.saw_terminate {
+            return Poll::Ready(Ok(()));
+        }
+
+        loop {
+            match &mut this.state {
+                FilterState::InBody { remaining } => {
+                    if *remaining == 0 {
+                        this.state = FilterState::AwaitingHeader {
+                            header: [0; 5],
+                            pos: 0,
+                        };
+                        continue;
+                    }
+                    let to_read = (*remaining).min(out.remaining());
+                    if to_read == 0 {
+                        return Poll::Ready(Ok(()));
+                    }
+                    let initial_filled = out.filled().len();
+                    let mut limited = out.take(to_read);
+                    match Pin::new(&mut this.inner).poll_read(cx, &mut limited) {
+                        Poll::Ready(Ok(())) => {
+                            let n = limited.filled().len();
+                            if n == 0 {
+                                return Poll::Ready(Ok(()));
+                            }
+                            out.set_filled(initial_filled + n);
+                            *remaining -= n;
+                            return Poll::Ready(Ok(()));
+                        }
+                        other => return other,
+                    }
+                }
+                FilterState::AwaitingHeader { header, pos } => {
+                    let need = 5 - *pos;
+                    let mut tmp = [0u8; 5];
+                    let mut tmp_buf = ReadBuf::new(&mut tmp[..need]);
+                    match Pin::new(&mut this.inner).poll_read(cx, &mut tmp_buf) {
+                        Poll::Ready(Ok(())) => {
+                            let n = tmp_buf.filled().len();
+                            if n == 0 {
+                                if *pos > 0 {
+                                    let to_emit = (*pos).min(out.remaining());
+                                    out.put_slice(&header[..to_emit]);
+                                }
+                                return Poll::Ready(Ok(()));
+                            }
+                            header[*pos..*pos + n].copy_from_slice(&tmp[..n]);
+                            *pos += n;
+                            if *pos < 5 {
+                                continue;
+                            }
+                            let tag = header[0];
+                            let len = u32::from_be_bytes([
+                                header[1], header[2], header[3], header[4],
+                            ]) as usize;
+                            if tag == b'X' && len == 4 {
+                                tracing::info!(
+                                    "TerminateFilter: intercepted Postgres Terminate; \
+                                     compute connection preserved"
+                                );
+                                this.saw_terminate = true;
+                                return Poll::Ready(Ok(()));
+                            }
+                            // Save header bytes locally before mutating this.state.
+                            let header_copy = *header;
+                            let body_len = len.saturating_sub(4);
+                            let to_emit = 5.min(out.remaining());
+                            if to_emit < 5 {
+                                out.put_slice(&header_copy[..to_emit]);
+                                this.state = FilterState::InBody { remaining: body_len };
+                                return Poll::Ready(Ok(()));
+                            }
+                            out.put_slice(&header_copy[..5]);
+                            this.state = FilterState::InBody { remaining: body_len };
+                            return Poll::Ready(Ok(()));
+                        }
+                        other => return other,
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<R: AsyncRead + AsyncWrite + Unpin> tokio::io::AsyncWrite for TerminateFilter<R> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
