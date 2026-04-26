@@ -43,6 +43,7 @@ CONFIGS=(
     "direct|127.0.0.1|5433|"
     "proxy_pool|127.0.0.1|4432|&options=endpoint%3Dep-test-123"
     "proxy_nopool|127.0.0.1|4432|&options=endpoint%3Dep-test-123"
+    "proxy_txn|127.0.0.1|4432|&options=endpoint%3Dep-test-123"
 )
 
 # workload_name|pgbench_flag
@@ -83,6 +84,7 @@ fi
 
 start_proxy() {
     local enabled=$1
+    local mode="${2:-session}"
     pkill -f "target/debug/proxy" 2>/dev/null || true
     sleep 0.5
     while lsof -iTCP:4432 -sTCP:LISTEN >/dev/null 2>&1; do sleep 0.2; done
@@ -93,12 +95,13 @@ start_proxy() {
         --compute-endpoint='postgresql://localhost:5433/proxytest_db?sslmode=disable' \
         --proxy=127.0.0.1:4432 --mgmt=127.0.0.1:7000 --http=127.0.0.1:7001 --wss=127.0.0.1:7002 \
         --tcp-pool-enabled=$enabled \
+        --tcp-pool-mode=$mode \
         --tcp-pool-max-conns-per-key=200 \
         --tcp-pool-max-total-conns=200 \
         --tcp-pool-fallback-direct-connect=false \
         --endpoint-rps-limit "100000@1s" --endpoint-rps-limit "100000@60s" --endpoint-rps-limit "100000@600s" \
         --wake-compute-limit "100000@1s" --wake-compute-limit "100000@60s" --wake-compute-limit "100000@600s" \
-        > "$LOGDIR/proxy_${enabled}.log" 2>&1 &
+        > "$LOGDIR/proxy_${enabled}_${mode}.log" 2>&1 &
     PROXY_PID=$!
 
     until lsof -iTCP:4432 -sTCP:LISTEN >/dev/null 2>&1; do sleep 0.2; done
@@ -196,8 +199,9 @@ for cfg_entry in "${CONFIGS[@]}"; do
     IFS='|' read -r cfg host port extra <<< "$cfg_entry"
     case "$cfg" in
       direct) ;;
-      proxy_pool) start_proxy true ;;
-      proxy_nopool) start_proxy false ;;
+      proxy_pool) start_proxy true session ;;
+      proxy_nopool) start_proxy false session ;;
+      proxy_txn) start_proxy true transaction ;;
     esac
 
     conn="postgresql://${USER}@${host}:${port}/${DB}?sslmode=disable${extra}"

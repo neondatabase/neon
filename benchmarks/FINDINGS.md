@@ -123,6 +123,50 @@ the headline savings claim of proxy-embedded pooling is not in
 absolute memory but in **eliminating a separate process per VM** with
 its own startup time, monitoring surface, and config plane.
 
+## 5. Transaction mode: works, no measurable throughput win on pgbench
+
+A second sweep added a fourth configuration `proxy_txn` (the proxy with
+`--tcp-pool-mode=transaction`). At every `'Z' I` ReadyForQuery from
+compute, the multiplex loop releases the compute connection back to
+the pool and immediately attempts a re-acquire for the next
+transaction.
+
+`readonly_short` (the workload session-level pooling already wins on):
+
+| concurrency | direct | proxy_pool | proxy_txn | txn / pool |
+| ----------- | -----: | ---------: | --------: | ---------: |
+|     1       |    231 |        114 |       120 |       1.05 |
+|    10       |    715 |        621 |       608 |       0.98 |
+|   100       |    855 |        633 |       566 |       0.89 |
+
+Steady-state workloads regress slightly at low concurrency from the
+extra release/re-acquire churn (`tpcb_steady` at C=1: 920 → 765 TPS,
+~17 % overhead), and converge at high concurrency (C=100: 3778 → 3694,
+~2 %).
+
+**Functional verification of multiplexing** (separate from throughput):
+ten concurrent psql sessions each ran three queries through the proxy
+in transaction mode. The 30 queries were served by **5 distinct
+compute backend pids** — multiple clients sharing the same backend
+across transactions — exactly the multiplex behaviour PgBouncer's
+transaction mode delivers. `pg_stat_activity` showed five idle
+backends pooled afterward. So the implementation does what it should;
+the benchmark just doesn't surface a TPS gain because:
+
+- `pgbench -C` opens **one transaction per client session**, so each
+  pgbench connection only goes through one transaction-boundary
+  release/re-acquire cycle. The pool-reuse win is identical to what
+  session mode already achieves.
+- `pgbench` without `-C` keeps every client busy and persistent, so
+  there is no idle gap in which the pool can multiplex. Transaction
+  mode's release window is ~microseconds of pure overhead.
+
+The benefit of transaction mode shows up on workloads with **idle
+think time** between transactions on persistent sessions — typical
+web applications, where a connection is held by an HTTP request
+handler that spends most of its time waiting on the user. pgbench
+does not produce that profile.
+
 ## What the report should say
 
 The proxy preserves steady-state Postgres throughput within ~10–25 % of a
@@ -131,9 +175,16 @@ of RSS. On short-session workloads — the case session-level pooling
 targets — the embedded TCP pool delivers a 1.3×–2.4× throughput
 improvement over the same proxy with pooling disabled. The remaining
 gap to direct on those workloads is not a pool deficiency but per-
-connection auth-Postgres lookup cost; eliminating it requires either
-auth-info caching or transaction-level pooling, the latter being the
-next planned step. Side observation: `pgbench -C` at C ≥ 50 on a single
-host stresses the macOS ephemeral-port range hard enough to log
-transient `EADDRNOTAVAIL` errors — note this when reading the variance
-columns.
+connection auth-Postgres lookup cost.
+
+Transaction-level pooling was implemented and verified to multiplex
+correctly (10 concurrent clients × 3 queries served by 5 backend
+pids), but does not show a TPS gain on pgbench because the workload
+either pays the per-transaction reconnect cost outside the proxy
+(`-C`) or holds connections persistently with no idle gap (default).
+Real-world benefits would surface on workloads with think-time
+between transactions; characterising that is future work.
+
+Side observation: `pgbench -C` at C ≥ 50 on a single host stresses
+the macOS ephemeral-port range hard enough to log transient
+`EADDRNOTAVAIL` errors — note this when reading the variance columns.
