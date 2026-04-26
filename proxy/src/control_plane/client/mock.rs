@@ -1,5 +1,6 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
@@ -52,6 +53,7 @@ impl From<tokio_postgres::Error> for ControlPlaneError {
 pub struct MockControlPlane {
     auth_endpoint: ApiUrl,
     compute_endpoint: Option<ApiUrl>,
+    compute_endpoint_map: HashMap<EndpointId, ApiUrl>,
     ip_allowlist_check_enabled: bool,
 }
 
@@ -59,11 +61,13 @@ impl MockControlPlane {
     pub fn new(
         auth_endpoint: ApiUrl,
         compute_endpoint: Option<ApiUrl>,
+        compute_endpoint_map: HashMap<EndpointId, ApiUrl>,
         ip_allowlist_check_enabled: bool,
     ) -> Self {
         Self {
             auth_endpoint,
             compute_endpoint,
+            compute_endpoint_map,
             ip_allowlist_check_enabled,
         }
     }
@@ -177,8 +181,13 @@ impl MockControlPlane {
         Ok(rows)
     }
 
-    async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
-        let target = self.compute_endpoint.as_ref().unwrap_or(&self.auth_endpoint);
+    async fn do_wake_compute(&self, endpoint: &EndpointId) -> Result<NodeInfo, WakeComputeError> {
+        // Lookup priority: per-endpoint map → global override → auth endpoint.
+        let target = self
+            .compute_endpoint_map
+            .get(endpoint)
+            .or(self.compute_endpoint.as_ref())
+            .unwrap_or(&self.auth_endpoint);
         let port = target.port().unwrap_or(5432);
         let ssl_mode = parse_ssl_mode(target)?;
         let conn_info = match target.host_str() {
@@ -285,8 +294,10 @@ impl super::ControlPlaneApi for MockControlPlane {
     async fn wake_compute(
         &self,
         _ctx: &RequestContext,
-        _user_info: &ComputeUserInfo,
+        user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        self.do_wake_compute().map_ok(Cached::new_uncached).await
+        self.do_wake_compute(&user_info.endpoint)
+            .map_ok(Cached::new_uncached)
+            .await
     }
 }

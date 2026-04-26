@@ -116,6 +116,13 @@ struct ProxyCliArgs {
     #[cfg(any(test, feature = "testing"))]
     #[clap(long)]
     compute_endpoint: Option<String>,
+    /// Per-endpoint compute routing for `--auth-backend=postgres`.
+    /// Comma-separated `endpoint_id=postgresql://host:port/db?sslmode=...` entries.
+    /// Lookup priority: this map → `--compute-endpoint` → `--auth-endpoint`.
+    /// Example: `ep-A=postgresql://localhost:5433/db?sslmode=disable,ep-B=postgresql://localhost:5434/db?sslmode=disable`
+    #[cfg(any(test, feature = "testing"))]
+    #[clap(long)]
+    compute_endpoint_map: Option<String>,
     /// JWT used to connect to control plane.
     #[clap(
         long,
@@ -888,9 +895,16 @@ fn build_auth_backend(
                 .as_deref()
                 .map(parse_compute_endpoint)
                 .transpose()?;
+            let compute_endpoint_map = args
+                .compute_endpoint_map
+                .as_deref()
+                .map(parse_compute_endpoint_map)
+                .transpose()?
+                .unwrap_or_default();
             let api = control_plane::client::mock::MockControlPlane::new(
                 url,
                 compute_endpoint,
+                compute_endpoint_map,
                 !args.is_private_access_proxy,
             );
             let api = control_plane::client::ControlPlaneClient::PostgresMock(api);
@@ -993,6 +1007,30 @@ fn parse_compute_endpoint(endpoint: &str) -> anyhow::Result<ApiUrl> {
     }
 
     Ok(url)
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn parse_compute_endpoint_map(
+    input: &str,
+) -> anyhow::Result<std::collections::HashMap<crate::types::EndpointId, ApiUrl>> {
+    let mut map = std::collections::HashMap::new();
+    for entry in input.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (id, url_str) = entry.split_once('=').with_context(|| {
+            format!("compute-endpoint-map entry missing '=' separator: {entry}")
+        })?;
+        let id = id.trim();
+        ensure!(
+            !id.is_empty(),
+            "compute-endpoint-map entry has empty endpoint id: {entry}"
+        );
+        let url = parse_compute_endpoint(url_str.trim())?;
+        let prev = map.insert(crate::types::EndpointId::from(id), url);
+        ensure!(
+            prev.is_none(),
+            "compute-endpoint-map has duplicate entry for endpoint id: {id}"
+        );
+    }
+    Ok(map)
 }
 
 async fn configure_redis(
