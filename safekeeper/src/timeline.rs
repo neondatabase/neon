@@ -452,8 +452,8 @@ pub struct Timeline {
 
     /// Broadcasts (current term, flush_lsn) updates, walsender is interested in
     /// them when sending in recovery mode (to walproposer or peers). Note: this
-    /// is just a notification, WAL reading should always done with lock held as
-    /// term can change otherwise.
+    /// is just a notification; term is checked before and after WAL reading without
+    /// holding the shared state lock across disk I/O.
     term_flush_lsn_watch_tx: watch::Sender<TermLsn>,
     term_flush_lsn_watch_rx: watch::Receiver<TermLsn>,
 
@@ -1054,9 +1054,9 @@ impl WalResidentTimeline {
         }
         false
     }
-
-    /// Ensure that current term is t, erroring otherwise, and lock the state.
-    pub async fn acquire_term(&self, t: Term) -> Result<ReadGuardSharedState> {
+    /// Ensure that current term is t, erroring otherwise. Lock is not returned;
+    /// caller must not rely on holding SharedState lock across I/O.
+    pub async fn check_term(&self, t: Term) -> Result<()> {
         let ss = self.read_shared_state().await;
         if ss.sk.state().acceptor_state.term != t {
             bail!(
@@ -1065,7 +1065,8 @@ impl WalResidentTimeline {
                 ss.sk.state().acceptor_state.term
             );
         }
-        Ok(ss)
+        Ok(())
+        // ReadGuard is dropped here automatically — BEFORE any I/O
     }
 
     // BEGIN HADRON

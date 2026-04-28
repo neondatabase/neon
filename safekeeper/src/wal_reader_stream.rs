@@ -196,11 +196,10 @@ impl WalReaderStreamState {
 
         // Read WAL
         let send_size = {
-            let _term_guard = if let Some(t) = self.term {
-                Some(self.tli.acquire_term(t).await?)
-            } else {
-                None
-            };
+            // Lock is dropped immediately before disk I/O
+            if let Some(t) = self.term {
+                self.tli.check_term(t).await?;
+            }
             self.wal_reader
                 .reader
                 .as_mut()

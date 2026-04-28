@@ -841,16 +841,30 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             let send_size: usize;
             {
                 // If uncommitted part is being pulled, check that the term is
-                // still the expected one.
-                let _term_guard = if let Some(t) = self.term {
-                    Some(self.tli.acquire_term(t).await?)
-                } else {
-                    None
-                };
+                // still the expected one. Lock is dropped immediately — do NOT
+                // hold it across disk I/O.
+                if let Some(t) = self.term {
+                    self.tli.check_term(t).await?;
+                }
                 // Read WAL into buffer. send_size can be additionally capped to
                 // segment boundary here.
-                send_size = self.wal_reader.read(send_buf).await?
+                send_size = self.wal_reader.read(send_buf).await?;
+
+                // Verify term didn't change while we were reading from disk
+                if let Some(t) = self.term {
+                    if let EndWatch::Flush(rx) = &self.end_watch {
+                        let curr_term = rx.borrow().term;
+                        if curr_term != t {
+                            return Err(CopyStreamHandlerEnd::Other(anyhow::anyhow!(
+                                "term changed during read: requested {}, now {}",
+                                t,
+                                curr_term
+                            )));
+                        }
+                    }
+                }
             };
+
             let send_buf = &send_buf[..send_size];
 
             // and send it, while respecting Timeline::cancel
