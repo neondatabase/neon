@@ -603,6 +603,9 @@ pub async fn run() -> anyhow::Result<()> {
         // TODO: Add gc regardles of the metric collection being enabled.
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
     }
+    if config.tcp_pool_config.enabled {
+        maintenance_tasks.spawn(async move { crate::tcp_pool::manager().gc_worker().await });
+    }
 
     if let Some(client) = redis_client {
         // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.

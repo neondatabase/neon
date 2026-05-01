@@ -105,6 +105,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         params.get("database").unwrap_or(user.as_ref()).into(),
         creds.info.user.clone(),
     );
+    let startup_cache_key = pool_key.clone();
     let cancel_user_info = creds.info.clone();
     let cplane = (*cplane).clone();
     let (mut node, tcp_pool_checkout, was_reused) = match crate::tcp_pool::manager()
@@ -129,11 +130,23 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let (process_id, secret_key) = if was_reused {
         use crate::pqproto::BeMessage;
+        if let Some(startup_params) = crate::tcp_pool::manager().get_startup_params(&startup_cache_key)
+        {
+            for (name, value) in startup_params.iter() {
+                client.write_message(BeMessage::ParameterStatus {
+                    name: name.as_bytes(),
+                    value: value.as_bytes(),
+                });
+            }
+        }
         client.write_message(BeMessage::BackendKeyData(*session.key()));
         client.write_message(BeMessage::ReadyForQuery);
-        (0,0)
+        (0, 0)
     } else {
-        forward_compute_params_to_client(ctx, *session.key(), client, &mut node.stream).await?
+        let (process_id, secret_key, startup_params) =
+            forward_compute_params_to_client(ctx, *session.key(), client, &mut node.stream).await?;
+        crate::tcp_pool::manager().set_startup_params(&startup_cache_key, startup_params);
+        (process_id, secret_key)
     };
     
     let hostname = node.hostname.to_string();
@@ -211,9 +224,10 @@ pub(crate) async fn forward_compute_params_to_client(
     cancel_key_data: CancelKeyData,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     compute: &mut StartupStream<TcpStream, RustlsStream>,
-) -> Result<(i32, i32), ClientRequestError> {
+) -> Result<(i32, i32, Vec<(Box<str>, Box<str>)>), ClientRequestError> {
     let mut process_id = 0;
     let mut secret_key = 0;
+    let mut startup_params = Vec::new();
 
     let err = loop {
         // if the client buffer is too large, let's write out some bytes now to save some space
@@ -240,6 +254,7 @@ pub(crate) async fn forward_compute_params_to_client(
                         name: name.as_bytes(),
                         value: value.as_bytes(),
                     });
+                    startup_params.push((name.to_owned().into_boxed_str(), value.to_owned().into_boxed_str()));
                 }
             }
             // Forward all notices to the client.
@@ -250,7 +265,7 @@ pub(crate) async fn forward_compute_params_to_client(
             }
             Some(Message::ReadyForQuery(_)) => {
                 client.write_message(BeMessage::ReadyForQuery);
-                return Ok((process_id, secret_key));
+                return Ok((process_id, secret_key, startup_params));
             }
             Some(Message::ErrorResponse(body)) => break postgres_client::Error::db(body),
             Some(_) => break postgres_client::Error::unexpected_message(),

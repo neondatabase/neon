@@ -1,10 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
+use std::convert::Infallible;
 
 use async_trait::async_trait;
 use bb8::{ManageConnection, Pool, PooledConnection};
 use once_cell::sync::Lazy;
+use rand::Rng;
 use thiserror::Error;
+use tracing::debug;
 
 use crate::auth::Backend;
 use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
@@ -87,6 +90,7 @@ type KeyedPool = Pool<ComputeConnectionManager>;
 #[derive(Default)]
 struct Inner {
     pools: clashmap::ClashMap<TcpPoolKey, KeyedPool>,
+    startup_params: clashmap::ClashMap<TcpPoolKey, Arc<Vec<(Box<str>, Box<str>)>>>,
 }
 
 pub(crate) struct TcpPoolCheckout {
@@ -139,6 +143,43 @@ pub(crate) struct TcpPoolManager {
 }
 
 impl TcpPoolManager {
+    pub(crate) fn set_startup_params(&self, key: &TcpPoolKey, params: Vec<(Box<str>, Box<str>)>) {
+        self.inner.startup_params.insert(key.clone(), Arc::new(params));
+    }
+
+    pub(crate) fn get_startup_params(
+        &self,
+        key: &TcpPoolKey,
+    ) -> Option<Arc<Vec<(Box<str>, Box<str>)>>> {
+        self.inner.startup_params.get(key).map(|v| v.clone())
+    }
+
+    pub(crate) async fn gc_worker(&self) -> anyhow::Result<Infallible> {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            self.gc_one_shard();
+        }
+    }
+
+    fn gc_one_shard(&self) {
+        let shards = self.inner.pools.shards();
+        if shards.is_empty() {
+            return;
+        }
+
+        let shard_idx = rand::rng().random_range(0..shards.len());
+        let mut shard = shards[shard_idx].write();
+        shard.retain(|(_, pool)| {
+            let state = pool.state();
+            let keep = state.connections > 0;
+            if !keep {
+                debug!("tcp pool: dropping empty keyed pool");
+            }
+            keep
+        });
+    }
+
     async fn get_or_create_pool(
         &self,
         key: TcpPoolKey,
@@ -200,7 +241,6 @@ impl TcpPoolManager {
         })?;
 
         let was_reused = !pooled.fresh;
-        println!("\n\n\n\nwas_reused = {}\n\n\n\n", was_reused);
         let conn = pooled.conn.take().expect("pooled slot must hold a connection");
         Ok((
             conn,
