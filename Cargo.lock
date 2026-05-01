@@ -5475,6 +5475,7 @@ dependencies = [
  "aws-sdk-iam",
  "aws-sigv4",
  "base64 0.22.1",
+ "bb8",
  "bstr",
  "bytes",
  "camino",

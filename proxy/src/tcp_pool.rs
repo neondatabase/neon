@@ -1,17 +1,19 @@
-use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::Duration;
 
+use async_trait::async_trait;
+use bb8::{ManageConnection, Pool, PooledConnection};
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use thiserror::Error;
-use tracing::{debug, info, warn};
 
-use crate::compute::ComputeConnection;
-use crate::config::TcpPoolConfig;
+use crate::auth::Backend;
+use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
+use crate::compute::{AuthInfo, ComputeConnection};
+use crate::config::{ProxyConfig, TcpPoolConfig};
+use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
-use crate::proxy::connect_auth::AuthError;
+use crate::proxy::connect_auth::{self, AuthError};
+use crate::proxy::connect_compute;
 use crate::types::{DbName, EndpointCacheKey, RoleName};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -37,51 +39,81 @@ impl std::fmt::Display for TcpPoolKey {
     }
 }
 
-struct IdleConn {
-    conn: ComputeConnection,
-    returned_at: Instant,
-}
-
-impl std::fmt::Debug for IdleConn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IdleConn")
-            .field("returned_at", &self.returned_at)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, Default)]
-struct KeyPool {
-    open: usize,
-    idle: Vec<IdleConn>,
-}
-
-#[derive(Default)]
-struct Inner {
-    pools: clashmap::ClashMap<TcpPoolKey, Arc<Mutex<KeyPool>>>,
-    open_total: AtomicUsize,
+struct PooledCompute {
+    conn: Option<ComputeConnection>,
+    fresh: bool,
 }
 
 #[derive(Clone)]
+struct ComputeConnectionManager {
+    ctx: RequestContext,
+    config: &'static ProxyConfig,
+    backend: Arc<Backend<'static, ComputeUserInfo>>,
+    auth_info: AuthInfo,
+}
+
+#[async_trait]
+impl ManageConnection for ComputeConnectionManager {
+    type Connection = PooledCompute;
+    type Error = AuthError;
+
+    async fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        let conn = connect_auth::connect_to_compute_and_auth(
+            &self.ctx,
+            self.config,
+            &self.backend,
+            self.auth_info.clone(),
+            connect_compute::TlsNegotiation::Postgres,
+        )
+        .await?;
+
+        Ok(PooledCompute {
+            conn: Some(conn),
+            fresh: true,
+        })
+    }
+
+    async fn is_valid(&self, _conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn has_broken(&self, conn: &mut Self::Connection) -> bool {
+        conn.conn.is_none()
+    }
+}
+
+type KeyedPool = Pool<ComputeConnectionManager>;
+
+#[derive(Default)]
+struct Inner {
+    pools: clashmap::ClashMap<TcpPoolKey, KeyedPool>,
+}
+
 pub(crate) struct TcpPoolCheckout {
     key: TcpPoolKey,
-    manager: Arc<Inner>,
+    pooled: Option<PooledConnection<'static, ComputeConnectionManager>>,
 }
 
 impl TcpPoolCheckout {
-    pub(crate) fn release(self, config: &TcpPoolConfig, conn: ComputeConnection, reusable: bool) {
-        release(&self.manager, config, self.key, conn, reusable);
-    }
-
     pub(crate) fn key(&self) -> &TcpPoolKey {
         &self.key
+    }
+
+    pub(crate) fn release(mut self, conn: ComputeConnection, reusable: bool) {
+        if !reusable {
+            self.pooled.take();
+            return;
+        }
+
+        if let Some(mut pooled) = self.pooled.take() {
+            pooled.conn = Some(conn);
+            pooled.fresh = false;
+        }
     }
 }
 
 #[derive(Debug, Error)]
 pub(crate) enum AcquireError {
-    #[error("pool exhausted for key `{0}`")]
-    PoolExhausted(TcpPoolKey),
     #[error("{0}")]
     Connect(#[from] AuthError),
 }
@@ -89,9 +121,6 @@ pub(crate) enum AcquireError {
 impl UserFacingError for AcquireError {
     fn to_string_client(&self) -> String {
         match self {
-            AcquireError::PoolExhausted(_) => {
-                "Connection pool is exhausted for this endpoint/user/database".to_string()
-            }
             AcquireError::Connect(e) => e.to_string_client(),
         }
     }
@@ -100,7 +129,6 @@ impl UserFacingError for AcquireError {
 impl ReportableError for AcquireError {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
-            AcquireError::PoolExhausted(_) => ErrorKind::RateLimit,
             AcquireError::Connect(e) => e.get_error_kind(),
         }
     }
@@ -111,147 +139,104 @@ pub(crate) struct TcpPoolManager {
 }
 
 impl TcpPoolManager {
-    pub(crate) async fn acquire_or_connect<F, Fut>(
+    async fn get_or_create_pool(
+        &self,
+        key: TcpPoolKey,
+        mgr: ComputeConnectionManager,
+        cfg: TcpPoolConfig,
+    ) -> KeyedPool {
+        if let Some(pool) = self.inner.pools.get(&key).map(|p| p.clone()) {
+            return pool;
+        }
+
+        let pool = Pool::builder()
+            .max_size(cfg.max_conns_per_key as u32)
+            .idle_timeout(Some(cfg.idle_timeout))
+            .connection_timeout(Duration::from_secs(365 * 24 * 60 * 60))
+            .build_unchecked(mgr);
+
+        self.inner
+            .pools
+            .entry(key)
+            .or_insert_with(|| pool.clone())
+            .clone()
+    }
+
+    pub(crate) async fn acquire_or_connect(
         &self,
         config: &TcpPoolConfig,
         key: TcpPoolKey,
-        connect: F,
-    ) -> Result<(ComputeConnection, Option<TcpPoolCheckout>,bool), AcquireError>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<ComputeConnection, AuthError>>,
-    {
+        ctx: RequestContext,
+        proxy_config: &'static ProxyConfig,
+        cplane: crate::control_plane::client::ControlPlaneClient,
+        user_info: ComputeUserInfo,
+        auth_info: AuthInfo,
+    ) -> Result<(ComputeConnection, Option<TcpPoolCheckout>, bool), AcquireError> {
         if !config.enabled {
-            return Ok((connect().await?, None, false));
+            let backend = Backend::ControlPlane(MaybeOwned::Owned(cplane), user_info);
+            let conn = connect_auth::connect_to_compute_and_auth(
+                &ctx,
+                proxy_config,
+                &backend,
+                auth_info,
+                connect_compute::TlsNegotiation::Postgres,
+            )
+            .await?;
+            return Ok((conn, None, false));
         }
 
+        let backend = Arc::new(Backend::ControlPlane(MaybeOwned::Owned(cplane), user_info));
+        let mgr = ComputeConnectionManager {
+            ctx,
+            config: proxy_config,
+            backend,
+            auth_info,
+        };
+
+        let pool = self.get_or_create_pool(key.clone(), mgr, *config).await;
+        let mut pooled = pool.get_owned().await.map_err(|e| match e {
+            bb8::RunError::User(e) => AcquireError::Connect(e),
+            bb8::RunError::TimedOut => unreachable!("connection_timeout is effectively disabled"),
+        })?;
+
+        let was_reused = !pooled.fresh;
+        println!("\n\n\n\nwas_reused = {}\n\n\n\n", was_reused);
+        let conn = pooled.conn.take().expect("pooled slot must hold a connection");
+        Ok((
+            conn,
+            Some(TcpPoolCheckout {
+                key,
+                pooled: Some(pooled),
+            }),
+            was_reused,
+        ))
+    }
+
+    pub(crate) async fn reacquire(
+        &self,
+        key: TcpPoolKey,
+    ) -> Result<(ComputeConnection, TcpPoolCheckout), AcquireError> {
         let pool = self
             .inner
             .pools
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(KeyPool::default())))
-            .clone();
+            .get(&key)
+            .map(|p| p.clone())
+            .expect("pool key must exist before re-acquire");
 
-        {
-            let mut pool = pool.lock();
-            let dropped = gc_idle(&mut pool, config);
-            if dropped > 0 {
-                self.inner.open_total.fetch_sub(dropped, Ordering::Relaxed);
-            }
-            if let Some(idle) = pool.idle.pop() {
-                debug!(pool_key = %key, "tcp pool: reuse connection");
-                let checkout = TcpPoolCheckout {
-                    key,
-                    manager: self.inner.clone(),
-                };
-                return Ok((idle.conn, Some(checkout), true));
-            }
+        let mut pooled = pool.get_owned().await.map_err(|e| match e {
+            bb8::RunError::User(e) => AcquireError::Connect(e),
+            bb8::RunError::TimedOut => unreachable!("connection_timeout is effectively disabled"),
+        })?;
 
-            let open_total = self.inner.open_total.load(Ordering::Relaxed);
-            if pool.open >= config.max_conns_per_key || open_total >= config.max_total_conns {
-                return Err(AcquireError::PoolExhausted(key));
-            }
-            pool.open += 1;
-            self.inner.open_total.fetch_add(1, Ordering::Relaxed);
-        }
-
-        match connect().await {
-            Ok(conn) => {
-                info!(pool_key = %key, "tcp pool: opened new connection");
-                let checkout = TcpPoolCheckout {
-                    key,
-                    manager: self.inner.clone(),
-                };
-                Ok((conn, Some(checkout), false))
-            }
-            Err(e) => {
-                decrement_open_counts(&self.inner, &key);
-                Err(AcquireError::Connect(e))
-            }
-        }
-    }
-
-    /// Pop one idle connection from the pool for the given key, if any.
-    /// Used by the transaction-mode multiplex loop to re-acquire after
-    /// releasing on a transaction boundary, without requiring a connect
-    /// closure. Returns `None` if the per-key pool is empty.
-    pub(crate) fn try_acquire_idle(
-        &self,
-        config: &TcpPoolConfig,
-        key: &TcpPoolKey,
-    ) -> Option<(ComputeConnection, TcpPoolCheckout)> {
-        let pool = self.inner.pools.get(key).map(|p| p.clone())?;
-        let mut pool = pool.lock();
-        let dropped = gc_idle(&mut pool, config);
-        if dropped > 0 {
-            self.inner.open_total.fetch_sub(dropped, Ordering::Relaxed);
-        }
-        let idle = pool.idle.pop()?;
-        let checkout = TcpPoolCheckout {
-            key: key.clone(),
-            manager: self.inner.clone(),
-        };
-        Some((idle.conn, checkout))
-    }
-}
-
-fn decrement_open_counts(inner: &Inner, key: &TcpPoolKey) {
-    if let Some(pool) = inner.pools.get(key) {
-        let mut pool = pool.lock();
-        if pool.open > 0 {
-            pool.open -= 1;
-            inner.open_total.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
-}
-
-fn release(
-    inner: &Arc<Inner>,
-    config: &TcpPoolConfig,
-    key: TcpPoolKey,
-    conn: ComputeConnection,
-    reusable: bool,
-) {
-    let Some(pool) = inner.pools.get(&key).map(|p| p.clone()) else {
-        return;
-    };
-
-    let mut pool = pool.lock();
-    let dropped = gc_idle(&mut pool, config);
-    if dropped > 0 {
-        inner.open_total.fetch_sub(dropped, Ordering::Relaxed);
-    }
-
-    if reusable {
-        debug!(pool_key = %key, "tcp pool: returning connection");
-        pool.idle.push(IdleConn {
+        let conn = pooled.conn.take().expect("pooled slot must hold a connection");
+        Ok((
             conn,
-            returned_at: Instant::now(),
-        });
-        return;
+            TcpPoolCheckout {
+                key,
+                pooled: Some(pooled),
+            },
+        ))
     }
-
-    warn!(pool_key = %key, "tcp pool: discarding connection");
-    if pool.open > 0 {
-        pool.open -= 1;
-        inner.open_total.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-fn gc_idle(pool: &mut KeyPool, config: &TcpPoolConfig) -> usize {
-    if config.idle_timeout.is_zero() {
-        return 0;
-    }
-
-    let now = Instant::now();
-    let old = pool.idle.len();
-    pool.idle
-        .retain(|idle| now.duration_since(idle.returned_at) <= config.idle_timeout);
-    let dropped = old.saturating_sub(pool.idle.len());
-    if dropped > 0 {
-        pool.open = pool.open.saturating_sub(dropped);
-    }
-    dropped
 }
 
 static MANAGER: Lazy<TcpPoolManager> = Lazy::new(|| TcpPoolManager {

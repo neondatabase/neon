@@ -22,7 +22,7 @@ use smol_str::{SmolStr, format_smolstr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use tracing::{Instrument, warn};
+use tracing::Instrument;
 
 use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
@@ -99,7 +99,6 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let params_compat = creds.info.options.get(NeonOptions::PARAMS_COMPAT).is_some();
     let mut auth_info = compute::AuthInfo::with_auth_keys(creds.keys);
     auth_info.set_startup_params(params, params_compat);
-    let mut auth_info = Some(auth_info);
 
     let pool_key = TcpPoolKey::new(
         creds.info.endpoint_cache_key(),
@@ -107,70 +106,21 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         creds.info.user.clone(),
     );
     let cancel_user_info = creds.info.clone();
-    let backend = auth::Backend::ControlPlane(cplane, creds.info);
-
-    let connect = || {
-        let auth_info = auth_info
-            .take()
-            .expect("connect auth info must be consumed once");
-        async {
-            connect_auth::connect_to_compute_and_auth(
-                ctx,
-                config,
-                &backend,
-                auth_info,
-                connect_compute::TlsNegotiation::Postgres,
-            )
-            .await
-        }
-    };
-
-    let (mut node, tcp_pool_checkout, was_reused) = if config.tcp_pool_config.enabled {
-        match crate::tcp_pool::manager()
-            .acquire_or_connect(&config.tcp_pool_config, pool_key, connect)
-            .await
-        {
-            Ok((node, checkout, reused)) => (node, checkout, reused),
-            Err(crate::tcp_pool::AcquireError::PoolExhausted(e_key))
-                if config.tcp_pool_config.fallback_direct_connect =>
-            {
-                warn!(pool_key = %e_key, "tcp pool exhausted; falling back to direct connect");
-                let auth_info = auth_info
-                    .take()
-                    .expect("auth info must be available if pool connect was not attempted");
-                let node = match connect_auth::connect_to_compute_and_auth(
-                    ctx,
-                    config,
-                    &backend,
-                    auth_info,
-                    connect_compute::TlsNegotiation::Postgres,
-                )
-                .await
-                {
-                    Ok(node) => node,
-                    Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
-                };
-                (node, None,false)
-            }
-            Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
-        }
-    } else {
-        let auth_info = auth_info
-            .take()
-            .expect("auth info must be available for direct connect");
-        let node = match connect_auth::connect_to_compute_and_auth(
-            ctx,
+    let cplane = (*cplane).clone();
+    let (mut node, tcp_pool_checkout, was_reused) = match crate::tcp_pool::manager()
+        .acquire_or_connect(
+            &config.tcp_pool_config,
+            pool_key,
+            ctx.clone(),
             config,
-            &backend,
+            cplane,
+            creds.info,
             auth_info,
-            connect_compute::TlsNegotiation::Postgres,
         )
         .await
-        {
-            Ok(node) => node,
-            Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
-        };
-        (node, None,false)
+    {
+        Ok(v) => v,
+        Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
 
     send_client_greeting(ctx, &config.greetings, client);
