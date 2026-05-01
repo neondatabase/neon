@@ -295,6 +295,7 @@ where
         // ReadyForQuery is a complete write to the client by this point
         // (the watcher streams the body byte through during poll_read).
         if watched_compute.take_ready_for_query() {
+            ready!(Pin::new(&mut filtered_client).poll_flush(cx)).map_err(ErrorSource::Client)?;
             let status = watched_compute.last_status().unwrap_or(b'?');
             return Poll::Ready(Ok(BoundaryReason::ReadyForQuery(status)));
         }
@@ -507,7 +508,11 @@ pub(crate) struct TerminateFilter<R> {
 
 enum  FilterState {
     AwaitingHeader {header: [u8;5], pos: usize},
-    InBody { remaining: usize}
+    InBody {
+        remaining: usize,
+        header: [u8; 5],
+        header_emitted: usize,
+    }
 }
 
 impl<R> TerminateFilter<R> {
@@ -541,7 +546,30 @@ impl<R: AsyncRead + Unpin> AsyncRead for TerminateFilter<R> {
 
         loop {
             match &mut this.state {
-                FilterState::InBody { remaining } => {
+                FilterState::InBody { .. } => {
+                    if let FilterState::InBody {
+                        remaining: _,
+                        header,
+                        header_emitted,
+                    } = &mut this.state
+                    {
+                        if *header_emitted < 5 {
+                            if out.remaining() == 0 {
+                                return Poll::Ready(Ok(()));
+                            }
+                            let need = 5 - *header_emitted;
+                            let to_emit = need.min(out.remaining());
+                            let start = *header_emitted;
+                            out.put_slice(&header[start..start + to_emit]);
+                            *header_emitted += to_emit;
+                            if *header_emitted < 5 {
+                                return Poll::Ready(Ok(()));
+                            }
+                        }
+                    }
+                    let FilterState::InBody { remaining, .. } = &mut this.state else {
+                        unreachable!();
+                    };
                     if *remaining == 0 {
                         this.state = FilterState::AwaitingHeader {
                             header: [0; 5],
@@ -603,13 +631,12 @@ impl<R: AsyncRead + Unpin> AsyncRead for TerminateFilter<R> {
                             let header_copy = *header;
                             let body_len = len.saturating_sub(4);
                             let to_emit = 5.min(out.remaining());
-                            if to_emit < 5 {
-                                out.put_slice(&header_copy[..to_emit]);
-                                this.state = FilterState::InBody { remaining: body_len };
-                                return Poll::Ready(Ok(()));
-                            }
-                            out.put_slice(&header_copy[..5]);
-                            this.state = FilterState::InBody { remaining: body_len };
+                            out.put_slice(&header_copy[..to_emit]);
+                            this.state = FilterState::InBody {
+                                remaining: body_len,
+                                header: header_copy,
+                                header_emitted: to_emit,
+                            };
                             return Poll::Ready(Ok(()));
                         }
                         other => return other,
@@ -659,7 +686,13 @@ pub(crate) struct ReadyForQueryWatcher<R> {
 
 enum WatchState {
     AwaitingHeader { header: [u8; 5], pos: usize },
-    InBody { tag: u8, remaining: usize, body_seen: usize },
+    InBody {
+        tag: u8,
+        remaining: usize,
+        body_seen: usize,
+        header: [u8; 5],
+        header_emitted: usize,
+    },
 }
 
 impl<R> ReadyForQueryWatcher<R> {
@@ -691,6 +724,12 @@ impl<R: AsyncRead + Unpin> AsyncRead for ReadyForQueryWatcher<R> {
         out: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
+        // Once a ReadyForQuery boundary is observed, pause reads until the
+        // caller consumes it via take_ready_for_query(). This prevents the
+        // boundary pump from over-reading into subsequent backend messages.
+        if this.saw_ready_for_query {
+            return Poll::Pending;
+        }
 
         loop {
             match &mut this.state {
@@ -731,24 +770,55 @@ impl<R: AsyncRead + Unpin> AsyncRead for ReadyForQueryWatcher<R> {
                                 tag,
                                 remaining: body_len,
                                 body_seen: 0,
+                                header: header_copy,
+                                header_emitted: to_emit,
                             };
 
-                            if to_emit < 5 || out.remaining() == 0 || body_len == 0 {
-                                if body_len == 0 {
-                                    this.state = WatchState::AwaitingHeader {
-                                        header: [0; 5],
-                                        pos: 0,
-                                    };
-                                }
+                            if body_len == 0 && to_emit == 5 {
+                                this.state = WatchState::AwaitingHeader {
+                                    header: [0; 5],
+                                    pos: 0,
+                                };
+                            }
+
+                            if out.remaining() == 0 || to_emit < 5 || body_len == 0 {
                                 return Poll::Ready(Ok(()));
                             }
+
                             // Fall through to read body bytes in the same poll.
                             continue;
                         }
                         other => return other,
                     }
                 }
-                WatchState::InBody { tag, remaining, body_seen } => {
+                WatchState::InBody {
+                    tag,
+                    remaining,
+                    body_seen,
+                    header,
+                    header_emitted,
+                } => {
+                    if *header_emitted < 5 {
+                        if out.remaining() == 0 {
+                            return Poll::Ready(Ok(()));
+                        }
+                        let need = 5 - *header_emitted;
+                        let to_emit = need.min(out.remaining());
+                        let start = *header_emitted;
+                        out.put_slice(&header[start..start + to_emit]);
+                        *header_emitted += to_emit;
+                        if *header_emitted < 5 {
+                            return Poll::Ready(Ok(()));
+                        }
+                        if *remaining == 0 {
+                            this.state = WatchState::AwaitingHeader {
+                                header: [0; 5],
+                                pos: 0,
+                            };
+                            continue;
+                        }
+                    }
+
                     if *remaining == 0 {
                         this.state = WatchState::AwaitingHeader {
                             header: [0; 5],
@@ -769,17 +839,26 @@ impl<R: AsyncRead + Unpin> AsyncRead for ReadyForQueryWatcher<R> {
                                 return Poll::Ready(Ok(()));
                             }
 
-                            // For ReadyForQuery, the first body byte is the
-                            // transaction status. Body length is always 1.
-                            if *tag == b'Z' && *body_seen == 0 {
-                                let status = limited.filled()[0];
-                                this.last_status = Some(status);
-                                this.saw_ready_for_query = true;
+                            // For ReadyForQuery, the body length must be 1 and
+                            // the only byte is the transaction status.
+                            let mut ready_for_query_status = None;
+                            if *tag == b'Z' {
+                                if *body_seen != 0 || *remaining != 1 || n != 1 {
+                                    return Poll::Ready(Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "malformed ReadyForQuery message",
+                                    )));
+                                }
+                                ready_for_query_status = Some(limited.filled()[0]);
                             }
 
                             out.set_filled(initial_filled + n);
                             *remaining -= n;
                             *body_seen += n;
+                            if let Some(status) = ready_for_query_status {
+                                this.last_status = Some(status);
+                                this.saw_ready_for_query = true;
+                            }
                             return Poll::Ready(Ok(()));
                         }
                         other => return other,

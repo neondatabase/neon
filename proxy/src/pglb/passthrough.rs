@@ -318,6 +318,22 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
 
         match boundary {
             Ok(BoundaryReason::ReadyForQuery(status)) => {
+                if !matches!(status, b'I' | b'T' | b'E') {
+                    if let Some(checkout) = current_checkout.take() {
+                        let stream_inner = stream
+                            .take()
+                            .expect("compute stream must exist before release");
+                        let c = join_compute(
+                            compute_parts.take().expect("compute must exist before release"),
+                            stream_inner,
+                        );
+                        checkout.release(c, false);
+                    }
+                    break Err(ErrorSource::Compute(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid ReadyForQuery status: {status}"),
+                    )));
+                }
                 last_known_status = status;
                 if status == b'I' {
                     // Transaction complete: release and wait for next frontend message.
