@@ -86,8 +86,7 @@ impl MockControlPlane {
             // write more code for reopening it if it got closed, which doesn't
             // seem worth it.
             let (client, connection) =
-                tokio_postgres::connect(self.auth_endpoint.as_str(), tokio_postgres::NoTls)
-                    .await?;
+                tokio_postgres::connect(self.auth_endpoint.as_str(), tokio_postgres::NoTls).await?;
 
             tokio::spawn(connection);
 

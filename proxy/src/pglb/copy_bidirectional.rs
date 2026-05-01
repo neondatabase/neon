@@ -13,6 +13,15 @@ enum TransferState {
     Done(u64),
 }
 
+impl TransferState {
+    fn is_buffer_empty_and_flushed(&self) -> bool {
+        match self {
+            TransferState::Running(buf) => buf.is_empty_and_flushed(),
+            TransferState::ShuttingDown(_) | TransferState::Done(_) => true,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum ErrorDirection {
     Read(io::Error),
@@ -270,6 +279,30 @@ where
             return Poll::Ready(Ok(BoundaryReason::ClientTerminated));
         }
 
+        // If compute already produced ReadyForQuery, do not read more client
+        // bytes into this backend. First drain the response bytes that caused
+        // the boundary to the current client; only then may the caller decide
+        // whether this backend is safe to return to the pool.
+        if watched_compute.ready_for_query_pending() {
+            let _ = transfer_one_direction_no_shutdown(
+                cx,
+                &mut compute_to_client,
+                &mut watched_compute,
+                &mut filtered_client,
+            )
+            .map_err(ErrorSource::from_compute)?;
+
+            if compute_to_client.is_buffer_empty_and_flushed() {
+                ready!(Pin::new(&mut filtered_client).poll_flush(cx))
+                    .map_err(ErrorSource::Client)?;
+                let status = watched_compute.last_status().unwrap_or(b'?');
+                watched_compute.take_ready_for_query();
+                return Poll::Ready(Ok(BoundaryReason::ReadyForQuery(status)));
+            }
+
+            return Poll::Pending;
+        }
+
         // Drive client → compute. Never shut down compute here.
         let _ = transfer_one_direction_no_shutdown(
             cx,
@@ -292,11 +325,12 @@ where
         )
         .map_err(ErrorSource::from_compute)?;
 
-        // ReadyForQuery is a complete write to the client by this point
-        // (the watcher streams the body byte through during poll_read).
-        if watched_compute.take_ready_for_query() {
+        if watched_compute.ready_for_query_pending()
+            && compute_to_client.is_buffer_empty_and_flushed()
+        {
             ready!(Pin::new(&mut filtered_client).poll_flush(cx)).map_err(ErrorSource::Client)?;
             let status = watched_compute.last_status().unwrap_or(b'?');
+            watched_compute.take_ready_for_query();
             return Poll::Ready(Ok(BoundaryReason::ReadyForQuery(status)));
         }
 
@@ -330,6 +364,10 @@ impl CopyBuffer {
             amt: 0,
             buf: vec![0; DEFAULT_BUF_SIZE].into_boxed_slice(),
         }
+    }
+
+    fn is_empty_and_flushed(&self) -> bool {
+        self.pos == self.cap && !self.need_flush
     }
 
     fn poll_fill_buf<R>(
@@ -450,9 +488,22 @@ impl CopyBuffer {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    fn command_complete(tag: &[u8]) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(5 + tag.len() + 1);
+        msg.push(b'C');
+        msg.extend_from_slice(&((tag.len() + 1 + 4) as u32).to_be_bytes());
+        msg.extend_from_slice(tag);
+        msg.push(0);
+        msg
+    }
+
+    fn ready_for_query(status: u8) -> [u8; 6] {
+        [b'Z', 0, 0, 0, 5, status]
+    }
 
     #[tokio::test]
     async fn test_client_to_compute() {
@@ -497,29 +548,68 @@ mod tests {
         assert_eq!(compute_to_client_count, 5); // 'hello' was transferred
         assert!(client_to_compute_count <= 8); // response only partially transferred or not at all
     }
+
+    #[tokio::test]
+    async fn transaction_boundary_waits_for_ready_for_query_to_reach_client() {
+        let command = command_complete(b"BEGIN");
+        let ready = ready_for_query(b'T');
+        let mut response = command.clone();
+        response.extend_from_slice(&ready);
+
+        let (mut client_peer, mut client_proxy) = tokio::io::duplex(1);
+        let (mut compute_proxy, mut compute_peer) = tokio::io::duplex(1024);
+
+        compute_peer.write_all(&response).await.unwrap();
+
+        let pump = tokio::spawn(async move {
+            copy_bidirectional_until_boundary(&mut client_proxy, &mut compute_proxy).await
+        });
+
+        let mut got_command = vec![0; command.len()];
+        client_peer.read_exact(&mut got_command).await.unwrap();
+        assert_eq!(got_command, command);
+
+        tokio::task::yield_now().await;
+        assert!(
+            !pump.is_finished(),
+            "boundary returned before ReadyForQuery was written to the client"
+        );
+
+        let mut got_ready = [0; 6];
+        client_peer.read_exact(&mut got_ready).await.unwrap();
+        assert_eq!(got_ready, ready);
+
+        let boundary = pump.await.unwrap().unwrap();
+        assert!(matches!(boundary, BoundaryReason::ReadyForQuery(b'T')));
+    }
 }
 
 pub(crate) struct TerminateFilter<R> {
     inner: R,
     state: FilterState,
-    saw_terminate: bool
+    saw_terminate: bool,
 }
 
-
-enum  FilterState {
-    AwaitingHeader {header: [u8;5], pos: usize},
+enum FilterState {
+    AwaitingHeader {
+        header: [u8; 5],
+        pos: usize,
+    },
     InBody {
         remaining: usize,
         header: [u8; 5],
         header_emitted: usize,
-    }
+    },
 }
 
 impl<R> TerminateFilter<R> {
     pub(crate) fn new(inner: R) -> Self {
         Self {
             inner,
-            state: FilterState::AwaitingHeader { header: [0;5], pos: 0 },
+            state: FilterState::AwaitingHeader {
+                header: [0; 5],
+                pos: 0,
+            },
             saw_terminate: false,
         }
     }
@@ -528,7 +618,6 @@ impl<R> TerminateFilter<R> {
         self.saw_terminate
     }
 }
-
 
 impl<R: AsyncRead + Unpin> AsyncRead for TerminateFilter<R> {
     fn poll_read(
@@ -616,9 +705,9 @@ impl<R: AsyncRead + Unpin> AsyncRead for TerminateFilter<R> {
                                 continue;
                             }
                             let tag = header[0];
-                            let len = u32::from_be_bytes([
-                                header[1], header[2], header[3], header[4],
-                            ]) as usize;
+                            let len =
+                                u32::from_be_bytes([header[1], header[2], header[3], header[4]])
+                                    as usize;
                             if tag == b'X' && len == 4 {
                                 tracing::info!(
                                     "TerminateFilter: intercepted Postgres Terminate; \
@@ -656,17 +745,11 @@ impl<R: AsyncRead + AsyncWrite + Unpin> tokio::io::AsyncWrite for TerminateFilte
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
@@ -685,7 +768,10 @@ pub(crate) struct ReadyForQueryWatcher<R> {
 }
 
 enum WatchState {
-    AwaitingHeader { header: [u8; 5], pos: usize },
+    AwaitingHeader {
+        header: [u8; 5],
+        pos: usize,
+    },
     InBody {
         tag: u8,
         remaining: usize,
@@ -699,7 +785,10 @@ impl<R> ReadyForQueryWatcher<R> {
     pub(crate) fn new(inner: R) -> Self {
         Self {
             inner,
-            state: WatchState::AwaitingHeader { header: [0; 5], pos: 0 },
+            state: WatchState::AwaitingHeader {
+                header: [0; 5],
+                pos: 0,
+            },
             last_status: None,
             saw_ready_for_query: false,
         }
@@ -707,6 +796,10 @@ impl<R> ReadyForQueryWatcher<R> {
 
     pub(crate) fn last_status(&self) -> Option<u8> {
         self.last_status
+    }
+
+    pub(crate) fn ready_for_query_pending(&self) -> bool {
+        self.saw_ready_for_query
     }
 
     /// Returns true if a `ReadyForQuery` was observed since the last call
@@ -754,9 +847,9 @@ impl<R: AsyncRead + Unpin> AsyncRead for ReadyForQueryWatcher<R> {
                             }
 
                             let tag = header[0];
-                            let len = u32::from_be_bytes([
-                                header[1], header[2], header[3], header[4],
-                            ]) as usize;
+                            let len =
+                                u32::from_be_bytes([header[1], header[2], header[3], header[4]])
+                                    as usize;
                             let body_len = len.saturating_sub(4);
 
                             // bidir copy uses a 1024-byte read buffer, so
@@ -877,16 +970,10 @@ impl<R: AsyncRead + AsyncWrite + Unpin> tokio::io::AsyncWrite for ReadyForQueryW
     ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }

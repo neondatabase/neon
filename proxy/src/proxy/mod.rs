@@ -130,7 +130,8 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let (process_id, secret_key) = if was_reused {
         use crate::pqproto::BeMessage;
-        if let Some(startup_params) = crate::tcp_pool::manager().get_startup_params(&startup_cache_key)
+        if let Some(startup_params) =
+            crate::tcp_pool::manager().get_startup_params(&startup_cache_key)
         {
             for (name, value) in startup_params.iter() {
                 client.write_message(BeMessage::ParameterStatus {
@@ -148,7 +149,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         crate::tcp_pool::manager().set_startup_params(&startup_cache_key, startup_params);
         (process_id, secret_key)
     };
-    
+
     let hostname = node.hostname.to_string();
 
     let session_id = ctx.session_id();
@@ -254,7 +255,10 @@ pub(crate) async fn forward_compute_params_to_client(
                         name: name.as_bytes(),
                         value: value.as_bytes(),
                     });
-                    startup_params.push((name.to_owned().into_boxed_str(), value.to_owned().into_boxed_str()));
+                    startup_params.push((
+                        name.to_owned().into_boxed_str(),
+                        value.to_owned().into_boxed_str(),
+                    ));
                 }
             }
             // Forward all notices to the client.

@@ -24,8 +24,7 @@ use crate::cancellation::CancellationHandler;
 #[cfg(feature = "rest_broker")]
 use crate::config::RestConfig;
 use crate::config::{
-    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
-    TcpPoolConfig,
+    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig, TcpPoolConfig,
     refresh_config_loop,
 };
 use crate::control_plane::locks::ApiLocks;

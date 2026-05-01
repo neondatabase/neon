@@ -1,10 +1,12 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use std::convert::Infallible;
 
 use async_trait::async_trait;
 use bb8::{ManageConnection, Pool, PooledConnection};
+use futures::TryStreamExt;
 use once_cell::sync::Lazy;
+use postgres_protocol::message::backend::Message;
 use rand::Rng;
 use thiserror::Error;
 use tracing::debug;
@@ -120,12 +122,15 @@ impl TcpPoolCheckout {
 pub(crate) enum AcquireError {
     #[error("{0}")]
     Connect(#[from] AuthError),
+    #[error("{0}")]
+    Startup(#[from] postgres_client::Error),
 }
 
 impl UserFacingError for AcquireError {
     fn to_string_client(&self) -> String {
         match self {
             AcquireError::Connect(e) => e.to_string_client(),
+            AcquireError::Startup(e) => e.to_string(),
         }
     }
 }
@@ -134,6 +139,27 @@ impl ReportableError for AcquireError {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
             AcquireError::Connect(e) => e.get_error_kind(),
+            AcquireError::Startup(_) => ErrorKind::Postgres,
+        }
+    }
+}
+
+async fn drain_fresh_startup(conn: &mut ComputeConnection) -> Result<(), postgres_client::Error> {
+    loop {
+        let msg = conn
+            .stream
+            .try_next()
+            .await
+            .map_err(postgres_client::Error::io)?;
+
+        match msg {
+            Some(Message::ParameterStatus(_))
+            | Some(Message::BackendKeyData(_))
+            | Some(Message::NoticeResponse(_)) => {}
+            Some(Message::ReadyForQuery(_)) => return Ok(()),
+            Some(Message::ErrorResponse(body)) => return Err(postgres_client::Error::db(body)),
+            Some(_) => return Err(postgres_client::Error::unexpected_message()),
+            None => return Err(postgres_client::Error::closed()),
         }
     }
 }
@@ -144,7 +170,9 @@ pub(crate) struct TcpPoolManager {
 
 impl TcpPoolManager {
     pub(crate) fn set_startup_params(&self, key: &TcpPoolKey, params: Vec<(Box<str>, Box<str>)>) {
-        self.inner.startup_params.insert(key.clone(), Arc::new(params));
+        self.inner
+            .startup_params
+            .insert(key.clone(), Arc::new(params));
     }
 
     pub(crate) fn get_startup_params(
@@ -241,7 +269,10 @@ impl TcpPoolManager {
         })?;
 
         let was_reused = !pooled.fresh;
-        let conn = pooled.conn.take().expect("pooled slot must hold a connection");
+        let conn = pooled
+            .conn
+            .take()
+            .expect("pooled slot must hold a connection");
         Ok((
             conn,
             Some(TcpPoolCheckout {
@@ -268,7 +299,14 @@ impl TcpPoolManager {
             bb8::RunError::TimedOut => unreachable!("connection_timeout is effectively disabled"),
         })?;
 
-        let conn = pooled.conn.take().expect("pooled slot must hold a connection");
+        let mut conn = pooled
+            .conn
+            .take()
+            .expect("pooled slot must hold a connection");
+        if pooled.fresh {
+            drain_fresh_startup(&mut conn).await?;
+            pooled.fresh = false;
+        }
         Ok((
             conn,
             TcpPoolCheckout {

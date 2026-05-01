@@ -2,8 +2,8 @@ use std::convert::Infallible;
 
 use postgres_client::connect_raw::StartupStream;
 use smol_str::SmolStr;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::debug;
 use utils::measured_stream::MeasuredStream;
 
@@ -11,9 +11,7 @@ use super::copy_bidirectional::ErrorSource;
 use crate::compute::{ComputeConnection, MaybeRustlsStream};
 use crate::config::TcpPoolConfig;
 use crate::control_plane::messages::MetricsAuxInfo;
-use crate::metrics::{
-    Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard,
-};
+use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
 use crate::stream::Stream;
 use crate::tcp_pool::TcpPoolCheckout;
 use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
@@ -134,8 +132,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
         //   - pool checkout, mode = Transaction: multiplex loop that releases
         //     and re-acquires the compute conn at every transaction boundary.
         let use_pool = self.tcp_pool_checkout.is_some();
-        let transaction_mode = use_pool
-            && self.tcp_pool_config.mode == crate::config::TcpPoolMode::Transaction;
+        let transaction_mode =
+            use_pool && self.tcp_pool_config.mode == crate::config::TcpPoolMode::Transaction;
 
         if transaction_mode {
             return proxy_pass_transaction_mode(self).await;
@@ -177,9 +175,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
 async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
     pt: ProxyPassthrough<S>,
 ) -> Result<(), ErrorSource> {
-    use crate::pglb::copy_bidirectional::{
-        BoundaryReason, copy_bidirectional_until_boundary,
-    };
+    use crate::pglb::copy_bidirectional::{BoundaryReason, copy_bidirectional_until_boundary};
 
     let ProxyPassthrough {
         mut client,
@@ -252,7 +248,9 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
             .take()
             .expect("compute stream must exist before initial release");
         let c = join_compute(
-            compute_parts.take().expect("compute must exist before release"),
+            compute_parts
+                .take()
+                .expect("compute must exist before release"),
             stream_inner,
         );
         checkout.release(c, true);
@@ -278,12 +276,18 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
                 .map_err(|e| ErrorSource::Compute(std::io::Error::other(e.to_string())))?;
 
             let (next_parts, mut next_stream) = split_compute(next_compute);
-            next_stream.write_u8(tag).await.map_err(ErrorSource::Compute)?;
+            next_stream
+                .write_u8(tag)
+                .await
+                .map_err(ErrorSource::Compute)?;
             next_stream
                 .write_u32((body.len() + 4) as u32)
                 .await
                 .map_err(ErrorSource::Compute)?;
-            next_stream.write_all(body).await.map_err(ErrorSource::Compute)?;
+            next_stream
+                .write_all(body)
+                .await
+                .map_err(ErrorSource::Compute)?;
             next_stream.flush().await.map_err(ErrorSource::Compute)?;
 
             stream = Some(next_stream);
@@ -324,7 +328,9 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
                             .take()
                             .expect("compute stream must exist before release");
                         let c = join_compute(
-                            compute_parts.take().expect("compute must exist before release"),
+                            compute_parts
+                                .take()
+                                .expect("compute must exist before release"),
                             stream_inner,
                         );
                         checkout.release(c, false);
@@ -341,7 +347,9 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
                         .take()
                         .expect("compute stream must exist before release");
                     let c = join_compute(
-                        compute_parts.take().expect("compute must exist before release"),
+                        compute_parts
+                            .take()
+                            .expect("compute must exist before release"),
                         stream_inner,
                     );
                     if let Some(checkout) = current_checkout.take() {
@@ -361,7 +369,9 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
                         .expect("compute stream must exist before release");
                     let reusable = last_known_status == b'I';
                     let c = join_compute(
-                        compute_parts.take().expect("compute must exist before release"),
+                        compute_parts
+                            .take()
+                            .expect("compute must exist before release"),
                         stream_inner,
                     );
                     checkout.release(c, reusable);
@@ -374,7 +384,9 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
                         .take()
                         .expect("compute stream must exist before release");
                     let c = join_compute(
-                        compute_parts.take().expect("compute must exist before release"),
+                        compute_parts
+                            .take()
+                            .expect("compute must exist before release"),
                         stream_inner,
                     );
                     checkout.release(c, false);
@@ -389,7 +401,9 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
                         .take()
                         .expect("compute stream must exist before release");
                     let c = join_compute(
-                        compute_parts.take().expect("compute must exist before release"),
+                        compute_parts
+                            .take()
+                            .expect("compute must exist before release"),
                         stream_inner,
                     );
                     checkout.release(c, false);
