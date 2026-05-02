@@ -12,6 +12,7 @@ members = [
     "pageserver/pagebench",
     "pageserver/page_api",
     "proxy",
+    "proxy-cplane-api",
     "safekeeper",
     "safekeeper/client",
     "storage_broker",
