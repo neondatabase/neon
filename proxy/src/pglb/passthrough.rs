@@ -189,6 +189,7 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
     // SAFETY: transaction mode is only entered when checkout was Some.
     let initial_checkout = tcp_pool_checkout.expect("transaction mode requires a pool checkout");
     let pool_key = initial_checkout.key().clone();
+    let reset_query = initial_checkout.reset_query();
     let mut current_checkout = Some(initial_checkout);
 
     struct ComputeParts {
@@ -271,7 +272,7 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
             }
 
             let (next_compute, next_checkout) = crate::tcp_pool::manager()
-                .reacquire(pool_key.clone())
+                .reacquire(pool_key.clone(), reset_query.clone())
                 .await
                 .map_err(|e| ErrorSource::Compute(std::io::Error::other(e.to_string())))?;
 

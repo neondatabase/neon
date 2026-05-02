@@ -6,17 +6,20 @@ use async_trait::async_trait;
 use bb8::{ManageConnection, Pool, PooledConnection};
 use futures::TryStreamExt;
 use once_cell::sync::Lazy;
+use postgres_client::connect_raw::StartupStream;
 use postgres_protocol::message::backend::Message;
 use rand::Rng;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
 use crate::auth::Backend;
 use crate::auth::backend::{ComputeUserInfo, MaybeOwned};
-use crate::compute::{AuthInfo, ComputeConnection};
+use crate::compute::{AuthInfo, ComputeConnection, MaybeRustlsStream};
 use crate::config::{ProxyConfig, TcpPoolConfig};
 use crate::context::RequestContext;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
+use crate::pqproto;
 use crate::proxy::connect_auth::{self, AuthError};
 use crate::proxy::connect_compute;
 use crate::types::{DbName, EndpointCacheKey, RoleName};
@@ -97,12 +100,17 @@ struct Inner {
 
 pub(crate) struct TcpPoolCheckout {
     key: TcpPoolKey,
+    reset_query: Arc<str>,
     pooled: Option<PooledConnection<'static, ComputeConnectionManager>>,
 }
 
 impl TcpPoolCheckout {
     pub(crate) fn key(&self) -> &TcpPoolKey {
         &self.key
+    }
+
+    pub(crate) fn reset_query(&self) -> Arc<str> {
+        self.reset_query.clone()
     }
 
     pub(crate) fn release(mut self, conn: ComputeConnection, reusable: bool) {
@@ -162,6 +170,78 @@ async fn drain_fresh_startup(conn: &mut ComputeConnection) -> Result<(), postgre
             None => return Err(postgres_client::Error::closed()),
         }
     }
+}
+
+async fn write_simple_query<S>(stream: &mut S, query: &str) -> std::io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    stream.write_u8(b'Q').await?;
+    stream.write_u32((query.len() + 5) as u32).await?;
+    stream.write_all(query.as_bytes()).await?;
+    stream.write_u8(0).await?;
+    stream.flush().await
+}
+
+async fn drain_simple_query<S>(stream: &mut S) -> Result<u8, postgres_client::Error>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    loop {
+        let (tag, body) = pqproto::read_message(stream, &mut buf, 65536)
+            .await
+            .map_err(postgres_client::Error::io)?;
+
+        match tag {
+            b'Z' if body.len() == 1 => return Ok(body[0]),
+            b'Z' => return Err(postgres_client::Error::unexpected_message()),
+            b'C' | b'D' | b'I' | b'N' | b'S' | b'T' => {}
+            b'E' => return Err(postgres_client::Error::unexpected_message()),
+            _ => return Err(postgres_client::Error::unexpected_message()),
+        }
+    }
+}
+
+async fn reset_raw_session(
+    stream: &mut MaybeRustlsStream,
+    reset_query: &str,
+) -> Result<(), postgres_client::Error> {
+    write_simple_query(stream, reset_query)
+        .await
+        .map_err(postgres_client::Error::io)?;
+    let status = drain_simple_query(stream).await?;
+    if status == b'I' {
+        Ok(())
+    } else {
+        Err(postgres_client::Error::unexpected_message())
+    }
+}
+
+pub(crate) async fn reset_session(
+    conn: ComputeConnection,
+    reset_query: &str,
+) -> Result<ComputeConnection, postgres_client::Error> {
+    let ComputeConnection {
+        stream,
+        aux,
+        hostname,
+        ssl_mode,
+        socket_addr,
+        guage,
+    } = conn;
+
+    let mut raw_stream = stream.into_framed().into_inner();
+    reset_raw_session(&mut raw_stream, reset_query).await?;
+
+    Ok(ComputeConnection {
+        stream: StartupStream::new(raw_stream),
+        aux,
+        hostname,
+        ssl_mode,
+        socket_addr,
+        guage,
+    })
 }
 
 pub(crate) struct TcpPoolManager {
@@ -254,6 +334,7 @@ impl TcpPoolManager {
             return Ok((conn, None, false));
         }
 
+        let reset_query = Arc::<str>::from(auth_info.tcp_pool_session_reset_query());
         let backend = Arc::new(Backend::ControlPlane(MaybeOwned::Owned(cplane), user_info));
         let mgr = ComputeConnectionManager {
             ctx,
@@ -277,6 +358,7 @@ impl TcpPoolManager {
             conn,
             Some(TcpPoolCheckout {
                 key,
+                reset_query,
                 pooled: Some(pooled),
             }),
             was_reused,
@@ -286,6 +368,7 @@ impl TcpPoolManager {
     pub(crate) async fn reacquire(
         &self,
         key: TcpPoolKey,
+        reset_query: Arc<str>,
     ) -> Result<(ComputeConnection, TcpPoolCheckout), AcquireError> {
         let pool = self
             .inner
@@ -307,10 +390,12 @@ impl TcpPoolManager {
             drain_fresh_startup(&mut conn).await?;
             pooled.fresh = false;
         }
+        let conn = reset_session(conn, &reset_query).await?;
         Ok((
             conn,
             TcpPoolCheckout {
                 key,
+                reset_query,
                 pooled: Some(pooled),
             },
         ))

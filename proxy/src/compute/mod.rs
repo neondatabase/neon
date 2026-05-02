@@ -213,6 +213,20 @@ impl AuthInfo {
         config
     }
 
+    pub(crate) fn tcp_pool_session_reset_query(&self) -> String {
+        let mut query = String::from("RESET ALL");
+
+        for (k, v) in self.server_params.iter() {
+            match k {
+                "database" | "user" | "replication" => {}
+                "options" => append_startup_options_settings(&mut query, v),
+                _ => append_set_config(&mut query, k, v),
+            }
+        }
+
+        query
+    }
+
     /// Apply startup message params to the connection config.
     pub(crate) fn set_startup_params(
         &mut self,
@@ -265,6 +279,54 @@ impl AuthInfo {
 
         Ok(())
     }
+}
+
+fn append_startup_options_settings(query: &mut String, options: &str) {
+    let mut expect_setting = false;
+
+    for opt in StartupMessageParams::parse_options_raw(options) {
+        if expect_setting {
+            append_name_value_setting(query, opt);
+            expect_setting = false;
+            continue;
+        }
+
+        if opt == "-c" {
+            expect_setting = true;
+        } else if let Some(setting) = opt.strip_prefix("-c")
+            && !setting.is_empty()
+        {
+            append_name_value_setting(query, setting);
+        } else if let Some(setting) = opt.strip_prefix("--command=") {
+            append_name_value_setting(query, setting);
+        }
+    }
+}
+
+fn append_name_value_setting(query: &mut String, setting: &str) {
+    if let Some((name, value)) = setting.split_once('=') {
+        append_set_config(query, name, value);
+    }
+}
+
+fn append_set_config(query: &mut String, name: &str, value: &str) {
+    query.push_str("; SELECT pg_catalog.set_config(");
+    append_sql_literal(query, name);
+    query.push_str(", ");
+    append_sql_literal(query, value);
+    query.push_str(", false)");
+}
+
+fn append_sql_literal(query: &mut String, value: &str) {
+    query.push('\'');
+    for c in value.chars() {
+        if c == '\'' {
+            query.push_str("''");
+        } else {
+            query.push(c);
+        }
+    }
+    query.push('\'');
 }
 
 impl ConnectInfo {

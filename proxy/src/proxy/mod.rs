@@ -150,6 +150,16 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         (process_id, secret_key)
     };
 
+    if let Some(checkout) = tcp_pool_checkout.as_ref() {
+        let reset_query = checkout.reset_query();
+        node = match crate::tcp_pool::reset_session(node, &reset_query).await {
+            Ok(node) => node,
+            Err(err) => Err(client
+                .throw_error(PostgresError::Postgres(err), Some(ctx))
+                .await)?,
+        };
+    }
+
     let hostname = node.hostname.to_string();
 
     let session_id = ctx.session_id();
