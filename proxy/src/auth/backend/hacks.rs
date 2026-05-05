@@ -82,7 +82,8 @@ pub(crate) async fn password_hack_no_authentication(
         ComputeUserInfo {
             user: info.user,
             options: info.options,
-            endpoint: payload.endpoint,
+            use_tcp_pool: payload.endpoint.is_pooler(),
+            endpoint: payload.endpoint.normalize(),
         },
         payload.password,
     ))

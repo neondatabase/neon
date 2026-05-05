@@ -26,7 +26,7 @@ use tracing::Instrument;
 
 use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
-use crate::config::{ProxyConfig, TcpPoolMode};
+use crate::config::{ProxyConfig, TcpPoolConfig, TcpPoolMode};
 use crate::context::RequestContext;
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use crate::pglb::{ClientMode, ClientRequestError};
@@ -110,17 +110,21 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let cancel_user_info = creds.info.clone();
     let cplane = (*cplane).clone();
     let tcp_pool_manager = crate::tcp_pool::manager();
+    let tcp_pool_config = TcpPoolConfig {
+        enabled: config.tcp_pool_config.enabled && creds.info.use_tcp_pool,
+        ..config.tcp_pool_config
+    };
     let transaction_pooling =
-        config.tcp_pool_config.enabled && config.tcp_pool_config.mode == TcpPoolMode::Transaction;
+        tcp_pool_config.enabled && tcp_pool_config.mode == TcpPoolMode::Transaction;
     let lazy_session_pooling =
-        config.tcp_pool_config.enabled && config.tcp_pool_config.mode == TcpPoolMode::Session;
+        tcp_pool_config.enabled && tcp_pool_config.mode == TcpPoolMode::Session;
 
     if (transaction_pooling || lazy_session_pooling)
         && let Some(startup_params) = tcp_pool_manager.get_startup_params(&startup_cache_key)
     {
         let tcp_pool_reacquire = tcp_pool_manager
             .prepare_reacquire(
-                &config.tcp_pool_config,
+                &tcp_pool_config,
                 pool_key,
                 ctx.clone(),
                 config,
@@ -147,7 +151,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let (mut node, tcp_pool_checkout, was_reused) = match crate::tcp_pool::manager()
         .acquire_or_connect(
-            &config.tcp_pool_config,
+            &tcp_pool_config,
             pool_key,
             ctx.clone(),
             config,

@@ -266,6 +266,7 @@ pub(crate) fn get_conn_info(
         endpoint,
         user: username,
         options: options.unwrap_or_default(),
+        use_tcp_pool: false,
     };
 
     let conn_info = ConnInfo { user_info, dbname };
