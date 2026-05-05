@@ -262,12 +262,13 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     });
     Ok(Some(ProxyPassthrough {
         client: stream,
-        compute: node,
+        compute: Some(node),
         private_link_id: None,
         tcp_pool_checkout: None,
+        tcp_pool_reacquire: None,
         tcp_pool_config: config.tcp_pool_config,
 
-        _cancel_on_shutdown: cancel_on_shutdown,
+        _cancel_on_shutdown: Some(cancel_on_shutdown),
 
         _req: request_gauge,
         _conn: conn_gauge,

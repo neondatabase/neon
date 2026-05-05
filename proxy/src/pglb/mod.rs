@@ -296,7 +296,7 @@ pub(crate) async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let common_names = tls.map(|tls| &tls.common_names);
 
-    let (node, cancel_on_shutdown, tcp_pool_checkout) = handle_client(
+    let (node, cancel_on_shutdown, tcp_pool_checkout, tcp_pool_reacquire) = handle_client(
         config,
         auth_backend,
         ctx,
@@ -321,6 +321,7 @@ pub(crate) async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin + Send>(
         compute: node,
         private_link_id,
         tcp_pool_checkout,
+        tcp_pool_reacquire,
         tcp_pool_config: config.tcp_pool_config,
 
         _cancel_on_shutdown: cancel_on_shutdown,

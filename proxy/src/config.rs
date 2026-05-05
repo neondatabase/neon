@@ -77,8 +77,9 @@ pub struct HttpConfig {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TcpPoolMode {
-    /// Hold a compute connection for the lifetime of the client session.
-    /// Returns to the pool only when the client disconnects.
+    /// Hold a compute connection after the first frontend message that needs
+    /// compute. Cached-startup sessions can sit idle before that without
+    /// checking out a compute connection.
     #[default]
     Session,
     /// Return a compute connection to the pool at every transaction

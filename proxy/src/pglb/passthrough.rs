@@ -9,11 +9,11 @@ use utils::measured_stream::MeasuredStream;
 
 use super::copy_bidirectional::ErrorSource;
 use crate::compute::{ComputeConnection, MaybeRustlsStream};
-use crate::config::TcpPoolConfig;
+use crate::config::{TcpPoolConfig, TcpPoolMode};
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
 use crate::stream::Stream;
-use crate::tcp_pool::TcpPoolCheckout;
+use crate::tcp_pool::{TcpPoolCheckout, TcpPoolReacquire};
 use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
 /// Forward bytes in both directions (client <-> compute).
@@ -111,14 +111,79 @@ pub(crate) async fn proxy_pass_pooled(
     Ok(())
 }
 
+struct ComputeParts {
+    aux: MetricsAuxInfo,
+    hostname: crate::types::Host,
+    ssl_mode: postgres_client::config::SslMode,
+    socket_addr: std::net::SocketAddr,
+    guage: crate::metrics::NumDbConnectionsGuard<'static>,
+}
+
+fn split_compute(conn: ComputeConnection) -> (ComputeParts, MaybeRustlsStream) {
+    let stream = conn.stream.into_framed().into_inner();
+    let parts = ComputeParts {
+        aux: conn.aux,
+        hostname: conn.hostname,
+        ssl_mode: conn.ssl_mode,
+        socket_addr: conn.socket_addr,
+        guage: conn.guage,
+    };
+    (parts, stream)
+}
+
+fn join_compute(parts: ComputeParts, stream: MaybeRustlsStream) -> ComputeConnection {
+    ComputeConnection {
+        stream: StartupStream::new(stream),
+        aux: parts.aux,
+        hostname: parts.hostname,
+        ssl_mode: parts.ssl_mode,
+        socket_addr: parts.socket_addr,
+        guage: parts.guage,
+    }
+}
+
+fn release_compute_checkout(
+    current_checkout: &mut Option<TcpPoolCheckout>,
+    stream: &mut Option<MaybeRustlsStream>,
+    compute_parts: &mut Option<ComputeParts>,
+    reusable: bool,
+) {
+    if let Some(checkout) = current_checkout.take() {
+        let stream_inner = stream
+            .take()
+            .expect("compute stream must exist before release");
+        let c = join_compute(
+            compute_parts
+                .take()
+                .expect("compute must exist before release"),
+            stream_inner,
+        );
+        checkout.release(c, reusable);
+    }
+}
+
+async fn write_frontend_message<S>(stream: &mut S, tag: u8, body: &[u8]) -> Result<(), ErrorSource>
+where
+    S: AsyncWrite + Unpin,
+{
+    stream.write_u8(tag).await.map_err(ErrorSource::Compute)?;
+    stream
+        .write_u32((body.len() + 4) as u32)
+        .await
+        .map_err(ErrorSource::Compute)?;
+    stream.write_all(body).await.map_err(ErrorSource::Compute)?;
+    stream.flush().await.map_err(ErrorSource::Compute)
+}
+
 pub(crate) struct ProxyPassthrough<S> {
     pub(crate) client: Stream<S>,
-    pub(crate) compute: ComputeConnection,
+    pub(crate) compute: Option<ComputeConnection>,
     pub(crate) private_link_id: Option<SmolStr>,
     pub(crate) tcp_pool_checkout: Option<TcpPoolCheckout>,
+    pub(crate) tcp_pool_reacquire: Option<TcpPoolReacquire>,
     pub(crate) tcp_pool_config: TcpPoolConfig,
 
-    pub(crate) _cancel_on_shutdown: tokio::sync::oneshot::Sender<Infallible>,
+    pub(crate) _cancel_on_shutdown: Option<tokio::sync::oneshot::Sender<Infallible>>,
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
@@ -126,37 +191,95 @@ pub(crate) struct ProxyPassthrough<S> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
     pub(crate) async fn proxy_pass(self) -> Result<(), ErrorSource> {
+        let mut pt = self;
+
         // Three paths share this entry point:
         //   - no pool checkout: legacy direct passthrough.
-        //   - pool checkout, mode = Session: pooled session-level passthrough.
-        //   - pool checkout, mode = Transaction: multiplex loop that releases
-        //     and re-acquires the compute conn at every transaction boundary.
-        let use_pool = self.tcp_pool_checkout.is_some();
+        //   - session pool metadata: acquire compute only after first frontend
+        //     message, then hold it for the rest of the client session.
+        //   - transaction pool metadata: multiplex loop that acquires compute
+        //     only while a transaction is active.
         let transaction_mode =
-            use_pool && self.tcp_pool_config.mode == crate::config::TcpPoolMode::Transaction;
+            pt.tcp_pool_reacquire.is_some() && pt.tcp_pool_config.mode == TcpPoolMode::Transaction;
+        let session_mode = pt.tcp_pool_config.mode == TcpPoolMode::Session
+            && (pt.tcp_pool_checkout.is_some() || pt.tcp_pool_reacquire.is_some());
 
-        if transaction_mode {
-            return proxy_pass_transaction_mode(self).await;
+        if session_mode || transaction_mode {
+            if let Some(compute) = pt.compute.take() {
+                let checkout = pt
+                    .tcp_pool_checkout
+                    .take()
+                    .expect("initial pooled compute requires a pool checkout");
+                if pt.tcp_pool_reacquire.is_none() {
+                    pt.tcp_pool_reacquire = Some(checkout.reacquire_info());
+                }
+                checkout.release(compute, true);
+            }
         }
 
-        let mut compute = self.compute;
+        if transaction_mode {
+            return proxy_pass_transaction_mode(pt).await;
+        }
+
+        if session_mode {
+            return proxy_pass_session_mode(pt).await;
+        }
+
+        let compute = pt
+            .compute
+            .expect("non-transaction passthrough requires an initial compute connection");
         let _keep_db_guard_live = &compute.guage;
         let mut stream: MaybeRustlsStream = compute.stream.into_framed().into_inner();
         let aux = compute.aux.clone();
 
-        let result = if use_pool {
-            proxy_pass_pooled(self.client, &mut stream, aux, self.private_link_id).await
-        } else {
-            proxy_pass(self.client, &mut stream, aux, self.private_link_id).await
-        };
-
-        if let Some(checkout) = self.tcp_pool_checkout {
-            compute.stream = StartupStream::new(stream);
-            checkout.release(compute, result.is_ok());
-        }
-
-        result
+        proxy_pass(pt.client, &mut stream, aux, pt.private_link_id).await
     }
+}
+
+/// Session-mode pool path. Startup may be cold (an initial compute was needed
+/// to obtain startup params) or warm (startup params were cached). In either
+/// case, do not hold compute while the client is idle after startup.
+async fn proxy_pass_session_mode<S: AsyncRead + AsyncWrite + Unpin>(
+    pt: ProxyPassthrough<S>,
+) -> Result<(), ErrorSource> {
+    let ProxyPassthrough {
+        mut client,
+        private_link_id,
+        tcp_pool_reacquire,
+        ..
+    } = pt;
+
+    debug!("performing the session-mode pump...");
+
+    let reacquire = tcp_pool_reacquire.expect("session mode requires pool reacquire metadata");
+    let pool_key = reacquire.key().clone();
+    let reset_query = reacquire.reset_query();
+
+    let mut client_msg_buf = Vec::new();
+
+    let (tag, body) =
+        crate::pqproto::read_message(&mut client, &mut client_msg_buf, i32::MAX as u32)
+            .await
+            .map_err(ErrorSource::Client)?;
+
+    if tag == b'X' {
+        return Ok(());
+    }
+
+    let (compute, checkout) = crate::tcp_pool::manager()
+        .reacquire(pool_key, reset_query)
+        .await
+        .map_err(|e| ErrorSource::Compute(std::io::Error::other(e.to_string())))?;
+
+    let (parts, mut stream) = split_compute(compute);
+    write_frontend_message(&mut stream, tag, &body).await?;
+
+    let aux = parts.aux.clone();
+    let result = proxy_pass_pooled(client, &mut stream, aux, private_link_id).await;
+    let compute = join_compute(parts, stream);
+    checkout.release(compute, result.is_ok());
+
+    result
 }
 
 /// Transaction-mode multiplex loop. Pumps one transaction at a time using
@@ -179,83 +302,29 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
 
     let ProxyPassthrough {
         mut client,
-        compute,
         private_link_id,
-        tcp_pool_checkout,
+        tcp_pool_reacquire,
         tcp_pool_config: _,
         ..
     } = pt;
 
-    // SAFETY: transaction mode is only entered when checkout was Some.
-    let initial_checkout = tcp_pool_checkout.expect("transaction mode requires a pool checkout");
-    let pool_key = initial_checkout.key().clone();
-    let reset_query = initial_checkout.reset_query();
-    let mut current_checkout = Some(initial_checkout);
-
-    struct ComputeParts {
-        aux: MetricsAuxInfo,
-        hostname: crate::types::Host,
-        ssl_mode: postgres_client::config::SslMode,
-        socket_addr: std::net::SocketAddr,
-        guage: crate::metrics::NumDbConnectionsGuard<'static>,
-    }
-
-    fn split_compute(conn: ComputeConnection) -> (ComputeParts, MaybeRustlsStream) {
-        let stream = conn.stream.into_framed().into_inner();
-        let parts = ComputeParts {
-            aux: conn.aux,
-            hostname: conn.hostname,
-            ssl_mode: conn.ssl_mode,
-            socket_addr: conn.socket_addr,
-            guage: conn.guage,
-        };
-        (parts, stream)
-    }
-
-    fn join_compute(parts: ComputeParts, stream: MaybeRustlsStream) -> ComputeConnection {
-        ComputeConnection {
-            stream: StartupStream::new(stream),
-            aux: parts.aux,
-            hostname: parts.hostname,
-            ssl_mode: parts.ssl_mode,
-            socket_addr: parts.socket_addr,
-            guage: parts.guage,
-        }
-    }
-
-    let (initial_parts, initial_stream) = split_compute(compute);
-    let aux = initial_parts.aux.clone();
-    let mut stream: Option<MaybeRustlsStream> = Some(initial_stream);
-    let mut compute_parts = Some(initial_parts);
+    // SAFETY: transaction mode is only entered with reacquire metadata.
+    let reacquire = tcp_pool_reacquire.expect("transaction mode requires pool reacquire metadata");
+    let pool_key = reacquire.key().clone();
+    let reset_query = reacquire.reset_query();
+    let mut current_checkout: Option<TcpPoolCheckout> = None;
+    let mut stream: Option<MaybeRustlsStream> = None;
+    let mut compute_parts: Option<ComputeParts> = None;
     let mut client_msg_buf = Vec::new();
 
     // Mirror proxy_pass_pooled's metrics wiring so the per-transaction
     // pump still records bytes-in/bytes-out for the session.
-    let usage_tx = USAGE_METRICS.register(Ids {
-        endpoint_id: aux.endpoint_id,
-        branch_id: aux.branch_id,
-        private_link_id,
-    });
+    let mut usage_tx = None;
     let metrics = &Metrics::get().proxy.io_bytes;
     let m_sent = metrics.with_labels(Direction::Tx);
     let m_recv = metrics.with_labels(Direction::Rx);
 
     debug!("performing the transaction-mode pump...");
-
-    // Release immediately: in transaction mode we only need compute when
-    // actual frontend traffic arrives.
-    if let Some(checkout) = current_checkout.take() {
-        let stream_inner = stream
-            .take()
-            .expect("compute stream must exist before initial release");
-        let c = join_compute(
-            compute_parts
-                .take()
-                .expect("compute must exist before release"),
-            stream_inner,
-        );
-        checkout.release(c, true);
-    }
 
     // After startup handshake the backend is idle from transaction perspective.
     let mut last_known_status: u8 = b'I';
@@ -277,24 +346,24 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
                 .map_err(|e| ErrorSource::Compute(std::io::Error::other(e.to_string())))?;
 
             let (next_parts, mut next_stream) = split_compute(next_compute);
-            next_stream
-                .write_u8(tag)
-                .await
-                .map_err(ErrorSource::Compute)?;
-            next_stream
-                .write_u32((body.len() + 4) as u32)
-                .await
-                .map_err(ErrorSource::Compute)?;
-            next_stream
-                .write_all(body)
-                .await
-                .map_err(ErrorSource::Compute)?;
-            next_stream.flush().await.map_err(ErrorSource::Compute)?;
+            write_frontend_message(&mut next_stream, tag, &body).await?;
 
             stream = Some(next_stream);
             compute_parts = Some(next_parts);
             current_checkout = Some(next_checkout);
         }
+
+        let usage_tx = usage_tx.get_or_insert_with(|| {
+            let aux = &compute_parts
+                .as_ref()
+                .expect("compute metadata must be checked out in transaction loop")
+                .aux;
+            USAGE_METRICS.register(Ids {
+                endpoint_id: aux.endpoint_id,
+                branch_id: aux.branch_id,
+                private_link_id: private_link_id.clone(),
+            })
+        });
 
         let mut measured_client = MeasuredStream::new(
             &mut client,
@@ -324,18 +393,12 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
         match boundary {
             Ok(BoundaryReason::ReadyForQuery(status)) => {
                 if !matches!(status, b'I' | b'T' | b'E') {
-                    if let Some(checkout) = current_checkout.take() {
-                        let stream_inner = stream
-                            .take()
-                            .expect("compute stream must exist before release");
-                        let c = join_compute(
-                            compute_parts
-                                .take()
-                                .expect("compute must exist before release"),
-                            stream_inner,
-                        );
-                        checkout.release(c, false);
-                    }
+                    release_compute_checkout(
+                        &mut current_checkout,
+                        &mut stream,
+                        &mut compute_parts,
+                        false,
+                    );
                     break Err(ErrorSource::Compute(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("invalid ReadyForQuery status: {status}"),
@@ -344,18 +407,12 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
                 last_known_status = status;
                 if status == b'I' {
                     // Transaction complete: release and wait for next frontend message.
-                    let stream_inner = stream
-                        .take()
-                        .expect("compute stream must exist before release");
-                    let c = join_compute(
-                        compute_parts
-                            .take()
-                            .expect("compute must exist before release"),
-                        stream_inner,
+                    release_compute_checkout(
+                        &mut current_checkout,
+                        &mut stream,
+                        &mut compute_parts,
+                        true,
                     );
-                    if let Some(checkout) = current_checkout.take() {
-                        checkout.release(c, true);
-                    }
                     last_known_status = b'I';
                 }
                 // 'T'/'E': stay in inner loop, keep compute held.
@@ -364,51 +421,32 @@ async fn proxy_pass_transaction_mode<S: AsyncRead + AsyncWrite + Unpin>(
                 // Pool the compute only if it's known to be idle. If we were
                 // mid-transaction (last_status was 'T' or 'E'), the conn has
                 // an open BEGIN block and is unsafe to share.
-                if let Some(checkout) = current_checkout.take() {
-                    let stream_inner = stream
-                        .take()
-                        .expect("compute stream must exist before release");
-                    let reusable = last_known_status == b'I';
-                    let c = join_compute(
-                        compute_parts
-                            .take()
-                            .expect("compute must exist before release"),
-                        stream_inner,
-                    );
-                    checkout.release(c, reusable);
-                }
+                release_compute_checkout(
+                    &mut current_checkout,
+                    &mut stream,
+                    &mut compute_parts,
+                    last_known_status == b'I',
+                );
                 break Ok(());
             }
             Ok(BoundaryReason::ComputeClosed) => {
-                if let Some(checkout) = current_checkout.take() {
-                    let stream_inner = stream
-                        .take()
-                        .expect("compute stream must exist before release");
-                    let c = join_compute(
-                        compute_parts
-                            .take()
-                            .expect("compute must exist before release"),
-                        stream_inner,
-                    );
-                    checkout.release(c, false);
-                }
+                release_compute_checkout(
+                    &mut current_checkout,
+                    &mut stream,
+                    &mut compute_parts,
+                    false,
+                );
                 break Err(ErrorSource::Compute(std::io::Error::other(
                     "compute closed connection",
                 )));
             }
             Err(e) => {
-                if let Some(checkout) = current_checkout.take() {
-                    let stream_inner = stream
-                        .take()
-                        .expect("compute stream must exist before release");
-                    let c = join_compute(
-                        compute_parts
-                            .take()
-                            .expect("compute must exist before release"),
-                        stream_inner,
-                    );
-                    checkout.release(c, false);
-                }
+                release_compute_checkout(
+                    &mut current_checkout,
+                    &mut stream,
+                    &mut compute_parts,
+                    false,
+                );
                 break Err(e);
             }
         }

@@ -104,13 +104,32 @@ pub(crate) struct TcpPoolCheckout {
     pooled: Option<PooledConnection<'static, ComputeConnectionManager>>,
 }
 
-impl TcpPoolCheckout {
+#[derive(Clone)]
+pub(crate) struct TcpPoolReacquire {
+    key: TcpPoolKey,
+    reset_query: Arc<str>,
+}
+
+impl TcpPoolReacquire {
     pub(crate) fn key(&self) -> &TcpPoolKey {
         &self.key
     }
 
     pub(crate) fn reset_query(&self) -> Arc<str> {
         self.reset_query.clone()
+    }
+}
+
+impl TcpPoolCheckout {
+    pub(crate) fn reset_query(&self) -> Arc<str> {
+        self.reset_query.clone()
+    }
+
+    pub(crate) fn reacquire_info(&self) -> TcpPoolReacquire {
+        TcpPoolReacquire {
+            key: self.key.clone(),
+            reset_query: self.reset_query.clone(),
+        }
     }
 
     pub(crate) fn release(mut self, conn: ComputeConnection, reusable: bool) {
@@ -309,6 +328,30 @@ impl TcpPoolManager {
             .entry(key)
             .or_insert_with(|| pool.clone())
             .clone()
+    }
+
+    pub(crate) async fn prepare_reacquire(
+        &self,
+        config: &TcpPoolConfig,
+        key: TcpPoolKey,
+        ctx: RequestContext,
+        proxy_config: &'static ProxyConfig,
+        cplane: crate::control_plane::client::ControlPlaneClient,
+        user_info: ComputeUserInfo,
+        auth_info: AuthInfo,
+    ) -> TcpPoolReacquire {
+        let reset_query = Arc::<str>::from(auth_info.tcp_pool_session_reset_query());
+        let backend = Arc::new(Backend::ControlPlane(MaybeOwned::Owned(cplane), user_info));
+        let mgr = ComputeConnectionManager {
+            ctx,
+            config: proxy_config,
+            backend,
+            auth_info,
+        };
+
+        self.get_or_create_pool(key.clone(), mgr, *config).await;
+
+        TcpPoolReacquire { key, reset_query }
     }
 
     pub(crate) async fn acquire_or_connect(

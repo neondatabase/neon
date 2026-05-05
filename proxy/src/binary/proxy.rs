@@ -350,11 +350,11 @@ struct TcpPoolArgs {
     #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     tcp_pool_fallback_direct_connect: bool,
 
-    /// Pool mode. `session` (default) holds a compute connection for the
-    /// whole client session. `transaction` returns the connection to the
-    /// pool at every transaction boundary (compute sends ReadyForQuery
-    /// status `'I'`); subsequent transactions on the same client may land
-    /// on different compute connections.
+    /// Pool mode. `session` (default) holds a compute connection after the
+    /// first frontend message that needs compute. `transaction` returns the
+    /// connection to the pool at every transaction boundary (compute sends
+    /// ReadyForQuery status `'I'`); subsequent transactions on the same client
+    /// may land on different compute connections.
     #[clap(long, value_enum, default_value_t = TcpPoolModeArg::Session)]
     tcp_pool_mode: TcpPoolModeArg,
 }

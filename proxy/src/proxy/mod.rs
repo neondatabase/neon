@@ -26,14 +26,14 @@ use tracing::Instrument;
 
 use crate::cancellation::{CancelClosure, CancellationHandler};
 use crate::compute::{ComputeConnection, PostgresError, RustlsStream};
-use crate::config::ProxyConfig;
+use crate::config::{ProxyConfig, TcpPoolMode};
 use crate::context::RequestContext;
 pub use crate::pglb::copy_bidirectional::{ErrorSource, copy_bidirectional_client_compute};
 use crate::pglb::{ClientMode, ClientRequestError};
 use crate::pqproto::{BeMessage, CancelKeyData, StartupMessageParams};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
-use crate::tcp_pool::{TcpPoolCheckout, TcpPoolKey};
+use crate::tcp_pool::{TcpPoolCheckout, TcpPoolKey, TcpPoolReacquire};
 use crate::types::EndpointCacheKey;
 use crate::{auth, compute};
 
@@ -50,9 +50,10 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     params: &StartupMessageParams,
 ) -> Result<
     (
-        ComputeConnection,
-        oneshot::Sender<Infallible>,
+        Option<ComputeConnection>,
+        Option<oneshot::Sender<Infallible>>,
         Option<TcpPoolCheckout>,
+        Option<TcpPoolReacquire>,
     ),
     ClientRequestError,
 > {
@@ -108,6 +109,42 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let startup_cache_key = pool_key.clone();
     let cancel_user_info = creds.info.clone();
     let cplane = (*cplane).clone();
+    let tcp_pool_manager = crate::tcp_pool::manager();
+    let transaction_pooling =
+        config.tcp_pool_config.enabled && config.tcp_pool_config.mode == TcpPoolMode::Transaction;
+    let lazy_session_pooling =
+        config.tcp_pool_config.enabled && config.tcp_pool_config.mode == TcpPoolMode::Session;
+
+    if (transaction_pooling || lazy_session_pooling)
+        && let Some(startup_params) = tcp_pool_manager.get_startup_params(&startup_cache_key)
+    {
+        let tcp_pool_reacquire = tcp_pool_manager
+            .prepare_reacquire(
+                &config.tcp_pool_config,
+                pool_key,
+                ctx.clone(),
+                config,
+                cplane,
+                creds.info,
+                auth_info,
+            )
+            .await;
+
+        send_client_greeting(ctx, &config.greetings, client);
+
+        let session = cancellation_handler.get_key();
+        for (name, value) in startup_params.iter() {
+            client.write_message(BeMessage::ParameterStatus {
+                name: name.as_bytes(),
+                value: value.as_bytes(),
+            });
+        }
+        client.write_message(BeMessage::BackendKeyData(*session.key()));
+        client.write_message(BeMessage::ReadyForQuery);
+
+        return Ok((None, None, None, Some(tcp_pool_reacquire)));
+    }
+
     let (mut node, tcp_pool_checkout, was_reused) = match crate::tcp_pool::manager()
         .acquire_or_connect(
             &config.tcp_pool_config,
@@ -123,13 +160,19 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
         Ok(v) => v,
         Err(e) => Err(client.throw_error(e, Some(ctx)).await)?,
     };
+    let tcp_pool_reacquire = if transaction_pooling {
+        tcp_pool_checkout
+            .as_ref()
+            .map(TcpPoolCheckout::reacquire_info)
+    } else {
+        None
+    };
 
     send_client_greeting(ctx, &config.greetings, client);
 
     let session = cancellation_handler.get_key();
 
     let (process_id, secret_key) = if was_reused {
-        use crate::pqproto::BeMessage;
         if let Some(startup_params) =
             crate::tcp_pool::manager().get_startup_params(&startup_cache_key)
         {
@@ -184,7 +227,12 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             .await;
     });
 
-    Ok((node, cancel_on_shutdown, tcp_pool_checkout))
+    Ok((
+        Some(node),
+        Some(cancel_on_shutdown),
+        tcp_pool_checkout,
+        tcp_pool_reacquire,
+    ))
 }
 
 /// Greet the client with any useful information.
