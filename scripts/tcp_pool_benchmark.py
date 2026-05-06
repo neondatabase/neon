@@ -14,6 +14,7 @@ import glob
 import math
 import os
 import re
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -129,9 +130,11 @@ def parse_resource(raw: str) -> Resource:
     name, sep, spec = raw.partition("=")
     kind, sep2, ident = spec.partition(":")
     if not sep or not sep2 or not name or not kind or not ident:
-        raise argparse.ArgumentTypeError("--resource must be NAME=pid:PID or NAME=docker:CONTAINER")
-    if kind not in {"pid", "docker"}:
-        raise argparse.ArgumentTypeError("resource kind must be pid or docker")
+        raise argparse.ArgumentTypeError(
+            "--resource must be NAME=pid:PID, NAME=pgrep:PATTERN, or NAME=docker:CONTAINER"
+        )
+    if kind not in {"pid", "pgrep", "docker"}:
+        raise argparse.ArgumentTypeError("resource kind must be pid, pgrep, or docker")
     return Resource(name=name, kind=kind, ident=ident)
 
 
@@ -147,6 +150,23 @@ def open_csv(path: Path, fields: list[str]):
 
 def run_cmd(args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, text=True, capture_output=True, env=env)
+
+
+def pgrep(pattern: str) -> list[int]:
+    proc = run_cmd(["pgrep", "-f", pattern])
+    if proc.returncode not in {0, 1}:
+        return []
+    this_pid = os.getpid()
+    parent_pid = os.getppid()
+    pids = []
+    for line in proc.stdout.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid not in {this_pid, parent_pid}:
+            pids.append(pid)
+    return pids
 
 
 def backend_counts(backend_url: str) -> dict[str, str]:
@@ -220,8 +240,15 @@ def resource_sample(resource: Resource) -> dict[str, str]:
         "raw": "",
         "error": "",
     }
-    if resource.kind == "pid":
-        proc = run_cmd(["ps", "-p", resource.ident, "-o", "pcpu=", "-o", "rss=", "-o", "vsz="])
+    if resource.kind in {"pid", "pgrep"}:
+        ident = resource.ident
+        if resource.kind == "pgrep":
+            pids = pgrep(resource.ident)
+            if not pids:
+                row["error"] = f"no process matched {resource.ident!r}"
+                return row
+            ident = str(max(pids))
+        proc = run_cmd(["ps", "-p", ident, "-o", "pcpu=", "-o", "rss=", "-o", "vsz="])
         if proc.returncode != 0 or not proc.stdout.strip():
             row["error"] = (proc.stderr or proc.stdout).strip().replace("\n", " ")[:500]
             return row
@@ -233,8 +260,9 @@ def resource_sample(resource: Resource) -> dict[str, str]:
             row["vsz_mib"] = f"{int(parts[2]) / 1024:.3f}"
         return row
 
+    docker_cmd = shlex.split(os.environ.get("TCP_POOL_BENCH_DOCKER_CMD", "docker"))
     proc = run_cmd([
-        "docker",
+        *docker_cmd,
         "stats",
         "--no-stream",
         "--format",
@@ -650,6 +678,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", default=[10, 50, 100, 250], type=parse_csv_ints)
     parser.add_argument("--reps", default=3, type=int)
     parser.add_argument(
+        "--rep-start",
+        default=1,
+        type=int,
+        help="First repetition number to write. Useful when an external wrapper runs one rep per invocation.",
+    )
+    parser.add_argument(
         "--workload",
         action="append",
         choices=sorted(WORKLOADS),
@@ -668,7 +702,10 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         type=parse_resource,
-        help="CPU/memory resource to sample, NAME=pid:PID or NAME=docker:CONTAINER. Repeatable.",
+        help=(
+            "CPU/memory resource to sample, NAME=pid:PID, NAME=pgrep:PATTERN, "
+            "or NAME=docker:CONTAINER. Repeatable."
+        ),
     )
     parser.add_argument(
         "--keep-pgbench-logs",
@@ -693,7 +730,7 @@ def main() -> None:
         for target in args.target:
             for workload in workloads:
                 for concurrency in args.concurrency:
-                    for rep in range(1, args.reps + 1):
+                    for rep in range(args.rep_start, args.rep_start + args.reps):
                         print(
                             f"{utc_now()} target={target.name} workload={workload} "
                             f"c={concurrency} rep={rep}",
