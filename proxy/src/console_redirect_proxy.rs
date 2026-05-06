@@ -233,7 +233,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     let session = cancellation_handler.get_key();
 
-    let (process_id, secret_key) =
+    let (process_id, secret_key, _) =
         forward_compute_params_to_client(ctx, *session.key(), &mut stream, &mut node.stream)
             .await?;
     let stream = stream.flush_and_into_inner().await?;
@@ -260,18 +260,17 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             )
             .await;
     });
-
     Ok(Some(ProxyPassthrough {
         client: stream,
-        compute: node.stream.into_framed().into_inner(),
-
-        aux: node.aux,
+        compute: Some(node),
         private_link_id: None,
+        tcp_pool_checkout: None,
+        tcp_pool_reacquire: None,
+        tcp_pool_config: config.tcp_pool_config,
 
-        _cancel_on_shutdown: cancel_on_shutdown,
+        _cancel_on_shutdown: Some(cancel_on_shutdown),
 
         _req: request_gauge,
         _conn: conn_gauge,
-        _db_conn: node.guage,
     }))
 }

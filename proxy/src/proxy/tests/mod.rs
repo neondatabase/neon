@@ -563,6 +563,7 @@ fn helper_create_connect_info(
             endpoint: "endpoint".into(),
             user: "user".into(),
             options: NeonOptions::parse_options_raw(""),
+            use_tcp_pool: false,
         },
     )
 }

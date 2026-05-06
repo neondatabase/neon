@@ -159,6 +159,7 @@ pub(crate) struct ComputeUserInfo {
     pub(crate) endpoint: EndpointId,
     pub(crate) user: RoleName,
     pub(crate) options: NeonOptions,
+    pub(crate) use_tcp_pool: bool,
 }
 
 impl ComputeUserInfo {
@@ -184,7 +185,8 @@ impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
                 options: user_info.options,
             }),
             Some(endpoint) => Ok(ComputeUserInfo {
-                endpoint,
+                use_tcp_pool: endpoint.is_pooler(),
+                endpoint: endpoint.normalize(),
                 user: user_info.user,
                 options: user_info.options,
             }),

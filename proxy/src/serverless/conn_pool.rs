@@ -241,6 +241,7 @@ mod tests {
                 user: "user".into(),
                 endpoint: "endpoint".into(),
                 options: NeonOptions::default(),
+                use_tcp_pool: false,
             },
             dbname: "dbname".into(),
         };
@@ -292,6 +293,7 @@ mod tests {
                 user: "user".into(),
                 endpoint: "endpoint-2".into(),
                 options: NeonOptions::default(),
+                use_tcp_pool: false,
             },
             dbname: "dbname".into(),
         };

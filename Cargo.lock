@@ -5475,6 +5475,7 @@ dependencies = [
  "aws-sdk-iam",
  "aws-sigv4",
  "base64 0.22.1",
+ "bb8",
  "bstr",
  "bytes",
  "camino",
@@ -5582,6 +5583,19 @@ dependencies = [
  "x509-cert",
  "zerocopy 0.8.24",
  "zeroize",
+]
+
+[[package]]
+name = "proxy-cplane-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "humantime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "workspace_hack",
 ]
 
 [[package]]

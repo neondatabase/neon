@@ -24,7 +24,7 @@ use crate::cancellation::CancellationHandler;
 #[cfg(feature = "rest_broker")]
 use crate::config::RestConfig;
 use crate::config::{
-    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig,
+    self, AuthenticationConfig, ComputeConfig, HttpConfig, ProxyConfig, RetryConfig, TcpPoolConfig,
     refresh_config_loop,
 };
 use crate::control_plane::locks::ApiLocks;
@@ -280,6 +280,14 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         tls_config: ArcSwapOption::from(None),
         metric_collection: None,
         http_config,
+        tcp_pool_config: TcpPoolConfig {
+            enabled: false,
+            mode: crate::config::TcpPoolMode::Session,
+            max_conns_per_key: 0,
+            max_total_conns: 0,
+            idle_timeout: Duration::ZERO,
+            fallback_direct_connect: false,
+        },
         authentication_config: AuthenticationConfig {
             jwks_cache: JwkCache::default(),
             scram_thread_pool: ThreadPool::new(0),

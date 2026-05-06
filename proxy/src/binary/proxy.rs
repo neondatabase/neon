@@ -36,7 +36,7 @@ use crate::config::RestConfig;
 use crate::config::refresh_config_loop;
 use crate::config::{
     self, AuthenticationConfig, CacheOptions, ComputeConfig, HttpConfig, ProjectInfoCacheOptions,
-    ProxyConfig, ProxyProtocolV2, remote_storage_from_toml,
+    ProxyConfig, ProxyProtocolV2, TcpPoolConfig, remote_storage_from_toml,
 };
 use crate::context::parquet::ParquetUploadArgs;
 use crate::http::health_server::AppMetrics;
@@ -111,6 +111,18 @@ struct ProxyCliArgs {
         default_value = "http://localhost:3000/authenticate_proxy_request/"
     )]
     auth_endpoint: String,
+    /// Upstream compute endpoint for `--auth-backend=postgres`.
+    /// Example: `postgresql://host:5432/db?sslmode=require`
+    #[cfg(any(test, feature = "testing"))]
+    #[clap(long)]
+    compute_endpoint: Option<String>,
+    /// Per-endpoint compute routing for `--auth-backend=postgres`.
+    /// Comma-separated `endpoint_id=postgresql://host:port/db?sslmode=...` entries.
+    /// Lookup priority: this map → `--compute-endpoint` → `--auth-endpoint`.
+    /// Example: `ep-A=postgresql://localhost:5433/db?sslmode=disable,ep-B=postgresql://localhost:5434/db?sslmode=disable`
+    #[cfg(any(test, feature = "testing"))]
+    #[clap(long)]
+    compute_endpoint_map: Option<String>,
     /// JWT used to connect to control plane.
     #[clap(
         long,
@@ -152,6 +164,8 @@ struct ProxyCliArgs {
     connect_compute_lock: String,
     #[clap(flatten)]
     sql_over_http: SqlOverHttpArgs,
+    #[clap(flatten)]
+    tcp_pool: TcpPoolArgs,
     /// timeout for scram authentication protocol
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     scram_protocol_timeout: tokio::time::Duration,
@@ -312,6 +326,53 @@ struct SqlOverHttpArgs {
 
     #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
     sql_over_http_max_response_size_bytes: usize,
+}
+
+#[derive(clap::Args, Clone, Copy, Debug)]
+struct TcpPoolArgs {
+    /// Enable experimental TCP session pooling.
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    tcp_pool_enabled: bool,
+
+    /// Maximum number of pooled backend connections per endpoint+db+user key.
+    #[clap(long, default_value_t = 20)]
+    tcp_pool_max_conns_per_key: usize,
+
+    /// Maximum number of pooled backend connections across all keys.
+    #[clap(long, default_value_t = 20000)]
+    tcp_pool_max_total_conns: usize,
+
+    /// How long idle pooled backend connections should be kept.
+    #[clap(long, default_value = "5m", value_parser = humantime::parse_duration)]
+    tcp_pool_idle_timeout: tokio::time::Duration,
+
+    /// If pool acquire fails, fallback to the existing direct-connect path.
+    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    tcp_pool_fallback_direct_connect: bool,
+
+    /// Pool mode. `session` (default) holds a compute connection after the
+    /// first frontend message that needs compute. `transaction` returns the
+    /// connection to the pool at every transaction boundary (compute sends
+    /// ReadyForQuery status `'I'`); subsequent transactions on the same client
+    /// may land on different compute connections.
+    #[clap(long, value_enum, default_value_t = TcpPoolModeArg::Session)]
+    tcp_pool_mode: TcpPoolModeArg,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+enum TcpPoolModeArg {
+    Session,
+    Transaction,
+}
+
+impl From<TcpPoolModeArg> for crate::config::TcpPoolMode {
+    fn from(arg: TcpPoolModeArg) -> Self {
+        match arg {
+            TcpPoolModeArg::Session => Self::Session,
+            TcpPoolModeArg::Transaction => Self::Transaction,
+        }
+    }
 }
 
 #[derive(clap::Args, Clone, Debug)]
@@ -542,6 +603,9 @@ pub async fn run() -> anyhow::Result<()> {
         // TODO: Add gc regardles of the metric collection being enabled.
         maintenance_tasks.spawn(usage_metrics::task_main(metrics_config));
     }
+    if config.tcp_pool_config.enabled {
+        maintenance_tasks.spawn(async move { crate::tcp_pool::manager().gc_worker().await });
+    }
 
     if let Some(client) = redis_client {
         // Try to connect to Redis 3 times with 1 + (0..0.1) second interval.
@@ -693,6 +757,14 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         max_request_size_bytes: args.sql_over_http.sql_over_http_max_request_size_bytes,
         max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
+    let tcp_pool_config = TcpPoolConfig {
+        enabled: args.tcp_pool.tcp_pool_enabled,
+        mode: args.tcp_pool.tcp_pool_mode.into(),
+        max_conns_per_key: args.tcp_pool.tcp_pool_max_conns_per_key,
+        max_total_conns: args.tcp_pool.tcp_pool_max_total_conns,
+        idle_timeout: args.tcp_pool.tcp_pool_idle_timeout,
+        fallback_direct_connect: args.tcp_pool.tcp_pool_fallback_direct_connect,
+    };
     let authentication_config = AuthenticationConfig {
         jwks_cache: JwkCache::default(),
         scram_thread_pool: thread_pool,
@@ -755,6 +827,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         tls_config,
         metric_collection,
         http_config,
+        tcp_pool_config,
         authentication_config,
         proxy_protocol_v2: args.proxy_protocol_v2,
         handshake_timeout: args.handshake_timeout,
@@ -845,8 +918,21 @@ fn build_auth_backend(
                 url.set_password(Some(&password))
                     .expect("Failed to set password");
             }
+            let compute_endpoint = args
+                .compute_endpoint
+                .as_deref()
+                .map(parse_compute_endpoint)
+                .transpose()?;
+            let compute_endpoint_map = args
+                .compute_endpoint_map
+                .as_deref()
+                .map(parse_compute_endpoint_map)
+                .transpose()?
+                .unwrap_or_default();
             let api = control_plane::client::mock::MockControlPlane::new(
                 url,
+                compute_endpoint,
+                compute_endpoint_map,
                 !args.is_private_access_proxy,
             );
             let api = control_plane::client::ControlPlaneClient::PostgresMock(api);
@@ -929,6 +1015,52 @@ fn build_auth_backend(
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+fn parse_compute_endpoint(endpoint: &str) -> anyhow::Result<ApiUrl> {
+    let url: ApiUrl = endpoint.parse()?;
+    ensure!(
+        url.host_str().is_some(),
+        "compute-endpoint must include a hostname"
+    );
+
+    if let Some((_, sslmode)) = url.query_pairs().find(|(k, _)| k == "sslmode") {
+        match sslmode.as_ref() {
+            "disable" | "require" => {}
+            other => {
+                bail!(
+                    "unsupported sslmode in compute-endpoint: {other}. supported values: disable,require"
+                );
+            }
+        }
+    }
+
+    Ok(url)
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn parse_compute_endpoint_map(
+    input: &str,
+) -> anyhow::Result<std::collections::HashMap<crate::types::EndpointId, ApiUrl>> {
+    let mut map = std::collections::HashMap::new();
+    for entry in input.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (id, url_str) = entry.split_once('=').with_context(|| {
+            format!("compute-endpoint-map entry missing '=' separator: {entry}")
+        })?;
+        let id = id.trim();
+        ensure!(
+            !id.is_empty(),
+            "compute-endpoint-map entry has empty endpoint id: {entry}"
+        );
+        let url = parse_compute_endpoint(url_str.trim())?;
+        let prev = map.insert(crate::types::EndpointId::from(id), url);
+        ensure!(
+            prev.is_none(),
+            "compute-endpoint-map has duplicate entry for endpoint id: {id}"
+        );
+    }
+    Ok(map)
+}
+
 async fn configure_redis(
     args: &ProxyCliArgs,
 ) -> anyhow::Result<Option<ConnectionWithCredentialsProvider>> {
@@ -999,5 +1131,28 @@ mod tests {
                 RateBucketInfo::new(20, Duration::from_secs(30)),
             ]
         );
+    }
+
+    #[test]
+    fn parse_compute_endpoint_with_require_sslmode() {
+        let parsed =
+            super::parse_compute_endpoint("postgresql://example.com:5432/db?sslmode=require")
+                .expect("valid endpoint should parse");
+        assert_eq!(parsed.host_str(), Some("example.com"));
+        assert_eq!(parsed.port(), Some(5432));
+    }
+
+    #[test]
+    fn parse_compute_endpoint_rejects_unknown_sslmode() {
+        let err = super::parse_compute_endpoint("postgresql://example.com/db?sslmode=prefer")
+            .expect_err("unsupported sslmode must fail");
+        assert!(err.to_string().contains("unsupported sslmode"));
+    }
+
+    #[test]
+    fn parse_compute_endpoint_allows_missing_sslmode() {
+        let parsed = super::parse_compute_endpoint("postgresql://example.com:5432/db")
+            .expect("missing sslmode should be allowed");
+        assert_eq!(parsed.host_str(), Some("example.com"));
     }
 }
