@@ -285,12 +285,18 @@ impl ComputeControlPlane {
         mode: ComputeMode,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        exclude_id: Option<&str>,
     ) -> Result<()> {
         if matches!(mode, ComputeMode::Primary) {
             // this check is not complete, as you could have a concurrent attempt at
             // creating another primary, both reading the state before checking it here,
             // but it's better than nothing.
-            let mut duplicates = self.endpoints.iter().filter(|(_k, v)| {
+            let mut duplicates = self.endpoints.iter().filter(|(k, v)| {
+                if let Some(exclude) = exclude_id {
+                    if k.as_str() == exclude {
+                        return false;
+                    }
+                }
                 v.tenant_id == tenant_id
                     && v.timeline_id == timeline_id
                     && v.mode == mode
@@ -1142,6 +1148,36 @@ impl Endpoint {
         mode: EndpointTerminateMode,
         destroy: bool,
     ) -> Result<TerminateResponse> {
+        // If the endpoint has crashed (stale pidfile, process already dead),
+        // skip pg_ctl stop and just clean up.  Verify the postmaster is truly
+        // gone before deleting its pidfile, because Crashed is a heuristic
+        // (300ms TCP timeout) and could false-positive during startup.
+        // Note: kill(pid, None) only checks process existence (ESRCH check),
+        // it does not send a signal.
+        if self.status() == EndpointStatus::Crashed {
+            let pidfile = self.pgdata().join("postmaster.pid");
+            let postmaster_alive = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|s| s.lines().next()?.trim().parse::<i32>().ok())
+                .map(|pid| kill(nix::unistd::Pid::from_raw(pid), None).is_ok())
+                .unwrap_or(false);
+            if !postmaster_alive {
+                // postgres is dead; make sure compute_ctl follows it down
+                // before cleanup.  wait_until_stopped handles dead PIDs
+                // immediately (ESRCH → returns on first retry), so it is
+                // safe to call unconditionally.
+                let _ = self.wait_for_compute_ctl_to_exit(true);
+                if destroy {
+                    std::fs::remove_dir_all(self.endpoint_path())?;
+                } else {
+                    let _ = std::fs::remove_file(&pidfile);
+                }
+                return Ok(TerminateResponse { lsn: None });
+            }
+            // Falls through: postmaster is alive despite Crashed heuristic;
+            // proceed with normal stop path.
+        }
+
         // pg_ctl stop is fast but doesn't allow us to collect LSN. /terminate is
         // slow, and test runs time out. Solution: special mode "immediate-terminate"
         // which uses /terminate

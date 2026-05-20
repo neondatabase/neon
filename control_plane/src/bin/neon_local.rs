@@ -1415,7 +1415,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
             }
 
             if !args.allow_multiple {
-                cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id)?;
+                cplane.check_conflicting_endpoints(mode, tenant_id, timeline_id, None)?;
             }
 
             cplane.new_endpoint(
@@ -1464,6 +1464,7 @@ async fn handle_endpoint(subcmd: &EndpointCmd, env: &local_env::LocalEnv) -> Res
                     endpoint.mode,
                     endpoint.tenant_id,
                     endpoint.timeline_id,
+                    Some(endpoint_id),
                 )?;
             }
 
