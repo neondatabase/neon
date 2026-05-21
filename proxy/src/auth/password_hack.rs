@@ -15,18 +15,18 @@ pub(crate) struct PasswordHackPayload {
 impl PasswordHackPayload {
     pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
         // The format is `project=<utf-8>;<password-bytes>` or `project=<utf-8>$<password-bytes>`.
-        let separators = [";", "$"];
-        for sep in separators {
-            if let Some((endpoint, password)) = bytes.split_once_str(sep) {
-                let endpoint = endpoint.to_str().ok()?;
-                return Some(Self {
-                    endpoint: parse_endpoint_param(endpoint)?.into(),
-                    password: password.to_owned(),
-                });
-            }
-        }
+        // The endpoint name is restricted to alphanumeric/hyphen, so it never
+        // contains either separator; split on whichever one appears first so
+        // we don't truncate the password when it contains the other separator.
+        let split = bytes.iter().position(|&b| b == b';' || b == b'$')?;
+        let (endpoint, rest) = bytes.split_at(split);
+        let password = &rest[1..];
 
-        None
+        let endpoint = endpoint.to_str().ok()?;
+        Some(Self {
+            endpoint: parse_endpoint_param(endpoint)?.into(),
+            password: password.to_owned(),
+        })
     }
 }
 
@@ -117,5 +117,25 @@ mod tests {
         let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
         assert_eq!(payload.endpoint, "foobar");
         assert_eq!(payload.password, b"pass$word");
+    }
+
+    // Whichever separator the client used must win, regardless of what
+    // characters happen to appear later in the password. Previously the parser
+    // always tried `;` before `$`, which truncated the endpoint when a client
+    // used `$` as the separator but had `;` in the password (e.g. AWS DMS
+    // forbids `: ;+%` only in the password text it builds itself, but other
+    // tooling may legitimately pass these through unencoded).
+    #[test]
+    fn parse_uses_first_separator() {
+        let bytes = b"endpoint=foobar$pass;with;semis";
+        let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
+        assert_eq!(payload.endpoint, "foobar");
+        assert_eq!(payload.password, b"pass;with;semis");
+
+        // And the mirror case: `;` is the separator, password contains `$`.
+        let bytes = b"endpoint=foobar;pass$with$dollars";
+        let payload = PasswordHackPayload::parse(bytes).expect("parsing failed");
+        assert_eq!(payload.endpoint, "foobar");
+        assert_eq!(payload.password, b"pass$with$dollars");
     }
 }
