@@ -385,6 +385,9 @@ impl CheckPoint {
         // XID_CHECKPOINT_INTERVAL should not be larger than BLCKSZ*CLOG_XACTS_PER_BYTE
         new_xid =
             new_xid.wrapping_add(XID_CHECKPOINT_INTERVAL - 1) & !(XID_CHECKPOINT_INTERVAL - 1);
+        if new_xid < pg_constants::FIRST_NORMAL_TRANSACTION_ID {
+            new_xid = pg_constants::FIRST_NORMAL_TRANSACTION_ID;
+        }
         let full_xid = self.nextXid.value;
         let old_xid = full_xid as u32;
         if new_xid.wrapping_sub(old_xid) as i32 > 0 {
