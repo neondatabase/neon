@@ -145,6 +145,7 @@ impl NeonControlPlaneClient {
                         ("application_name", ctx.console_application_name().as_str()),
                         ("endpointish", endpoint.as_str()),
                         ("role", role.as_str()),
+                        ("peer_addr", &ctx.peer_addr().to_string()),
                     ])
                     .build()?;
 
@@ -286,6 +287,7 @@ impl NeonControlPlaneClient {
                 .query(&[
                     ("application_name", application_name.as_str()),
                     ("endpointish", user_info.endpoint.as_str()),
+                    ("peer_addr", &ctx.peer_addr().to_string()),
                 ]);
 
             let options = user_info.options.to_deep_object();
