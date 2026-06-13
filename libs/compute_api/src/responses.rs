@@ -206,6 +206,16 @@ pub struct TerminateResponse {
     pub lsn: Option<utils::lsn::Lsn>,
 }
 
+/// Response of `/terminate?if_idle=true` when the compute is NOT idle and was
+/// therefore left running (returned with HTTP 409 Conflict). Reports the counts
+/// that made the compute non-idle so the caller can decide what to do.
+#[derive(Deserialize, Serialize)]
+pub struct TerminateNotIdleResponse {
+    pub num_client_sessions: i64,
+    pub num_walsenders: i64,
+    pub num_autovacuum_workers: i64,
+}
+
 impl Display for ComputeStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
