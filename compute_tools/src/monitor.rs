@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use compute_api::responses::ComputeStatus;
 use compute_api::spec::ComputeFeature;
 use postgres::{Client, NoTls};
-use tracing::{Level, error, info, instrument, span};
+use tracing::{Level, error, info, instrument, span, warn};
 
 use crate::compute::ComputeNode;
 use crate::metrics::{PG_CURR_DOWNTIME_MS, PG_TOTAL_DOWNTIME_MS};
@@ -61,6 +61,11 @@ impl ComputeMonitor {
             .signed_duration_since(self.last_checked)
             .num_milliseconds();
         PG_TOTAL_DOWNTIME_MS.inc_by(inc as u64);
+
+        // Postgres is not confirmed up: the `/status` activity counts are no
+        // longer trustworthy, so reset them to `None` (unknown) rather than
+        // letting a stale value (especially a stale `0`) read as "idle".
+        self.compute.clear_activity_counts();
     }
 
     fn report_up(&mut self) {
@@ -150,7 +155,27 @@ impl ComputeMonitor {
                         match self.check(cli) {
                             Ok(_) => {
                                 self.report_up();
-                                self.compute.update_last_active(self.last_active);
+                                // Collect activity counts and publish them together
+                                // with last_active in a single critical section, so a
+                                // concurrent `/status` sees a consistent snapshot.
+                                match self.collect_activity_counts(cli) {
+                                    Ok((sessions, walsenders, autovacuum_workers)) => {
+                                        self.compute.update_activity(
+                                            self.last_active,
+                                            sessions,
+                                            walsenders,
+                                            autovacuum_workers,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        // Counts are unknown: update last_active but
+                                        // clear the counts so `/status` doesn't serve
+                                        // a stale (possibly "idle"-looking) value.
+                                        warn!("could not collect activity counts: {}", e);
+                                        self.compute.update_last_active(self.last_active);
+                                        self.compute.clear_activity_counts();
+                                    }
+                                }
                             }
                             Err(e) => {
                                 error!(
@@ -347,6 +372,32 @@ impl ComputeMonitor {
         }
 
         Ok(())
+    }
+
+    /// Collect activity counts (client sessions, logical walsenders, autovacuum
+    /// workers) for exposure via `/status`, returning `(sessions, walsenders,
+    /// autovacuum_workers)`. These mirror the conditions `check()` uses to decide
+    /// suspend, but are always computed (not short-circuited) so `/status` can
+    /// report each count. The client-sessions predicate is identical to
+    /// `get_backends_state_change()`: it excludes this connection
+    /// (`pg_backend_pid()`) and internal `cloud_admin` connections (the monitor,
+    /// vm-monitor, exporters, ...).
+    fn collect_activity_counts(&self, cli: &mut Client) -> anyhow::Result<(i64, i64, i64)> {
+        const CLIENT_SESSIONS_QUERY: &str = "select count(*) from pg_stat_activity \
+             where backend_type = 'client backend' \
+             and pid != pg_backend_pid() and usename != 'cloud_admin';";
+        const WALSENDERS_QUERY: &str =
+            "select count(*) from pg_stat_replication where application_name != 'walproposer';";
+        const AUTOVACUUM_QUERY: &str =
+            "select count(*) from pg_stat_activity where backend_type = 'autovacuum worker';";
+
+        let num_client_sessions: i64 = cli
+            .query_one(CLIENT_SESSIONS_QUERY, &[])?
+            .try_get("count")?;
+        let num_walsenders: i64 = cli.query_one(WALSENDERS_QUERY, &[])?.try_get("count")?;
+        let num_autovacuum_workers: i64 = cli.query_one(AUTOVACUUM_QUERY, &[])?.try_get("count")?;
+
+        Ok((num_client_sessions, num_walsenders, num_autovacuum_workers))
     }
 }
 

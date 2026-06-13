@@ -35,6 +35,9 @@ impl From<&ComputeState> for ComputeStatusResponse {
             status: state.status,
             last_active: state.last_active,
             error: state.error.clone(),
+            num_client_sessions: state.num_client_sessions,
+            num_walsenders: state.num_walsenders,
+            num_autovacuum_workers: state.num_autovacuum_workers,
         }
     }
 }

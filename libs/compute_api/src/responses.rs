@@ -148,6 +148,24 @@ pub struct ComputeStatusResponse {
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
+    /// Number of client backend sessions, excluding this connection and internal
+    /// `cloud_admin` connections (compute_ctl's own monitor, vm-monitor,
+    /// exporters, ...). `None` means "unknown": before the activity monitor's
+    /// first successful check (e.g. while `Empty`), and whenever the monitor
+    /// cannot currently confirm Postgres is up (the counts are reset to `None`
+    /// rather than left stale). Updated together with `last_active` in one
+    /// critical section, so a single read sees a consistent snapshot. These are a
+    /// coarse idle-detection hint; an authoritative "is idle now" decision should
+    /// use a fresh check (e.g. `/terminate?if_idle`), not these cached values.
+    #[serde(default)]
+    pub num_client_sessions: Option<i64>,
+    /// Number of logical WAL senders (`pg_stat_replication`, excluding the
+    /// physical `walproposer`). Same `None`/freshness semantics as above.
+    #[serde(default)]
+    pub num_walsenders: Option<i64>,
+    /// Number of running autovacuum workers. Same `None`/freshness semantics.
+    #[serde(default)]
+    pub num_autovacuum_workers: Option<i64>,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]

@@ -179,6 +179,14 @@ pub struct ComputeState {
     pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
 
+    /// Activity counters from the last successful monitor check, exposed via
+    /// `/status` so an external control plane can make a precise suspend
+    /// decision (zero client sessions / walsenders / autovacuum) without a
+    /// separate SQL probe. `None` until the first successful check.
+    pub num_client_sessions: Option<i64>,
+    pub num_walsenders: Option<i64>,
+    pub num_autovacuum_workers: Option<i64>,
+
     /// Compute spec. This can be received from the CLI or - more likely -
     /// passed by the control plane with a /configure HTTP request.
     pub pspec: Option<ParsedSpec>,
@@ -215,6 +223,9 @@ impl ComputeState {
             status: ComputeStatus::Empty,
             last_active: None,
             error: None,
+            num_client_sessions: None,
+            num_walsenders: None,
+            num_autovacuum_workers: None,
             pspec: None,
             startup_span: None,
             metrics: ComputeMetrics::default(),
@@ -2278,6 +2289,36 @@ impl ComputeNode {
             state.last_active = last_active;
             debug!("set the last compute activity time to: {:?}", last_active);
         }
+    }
+
+    /// Update `last_active` and the activity counts (client sessions, logical
+    /// walsenders, autovacuum workers) in a single critical section, so a
+    /// concurrent `/status` read observes a consistent snapshot of all of them.
+    pub fn update_activity(
+        &self,
+        last_active: Option<DateTime<Utc>>,
+        num_client_sessions: i64,
+        num_walsenders: i64,
+        num_autovacuum_workers: i64,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        // NB: `Some(<DateTime>)` is always greater than `None`.
+        if last_active > state.last_active {
+            state.last_active = last_active;
+        }
+        state.num_client_sessions = Some(num_client_sessions);
+        state.num_walsenders = Some(num_walsenders);
+        state.num_autovacuum_workers = Some(num_autovacuum_workers);
+    }
+
+    /// Reset the activity counts to `None` (unknown). Called whenever the monitor
+    /// cannot confirm Postgres is up, so `/status` never reports a stale `0`
+    /// (which would falsely read as "idle") nor a stale non-zero count.
+    pub fn clear_activity_counts(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.num_client_sessions = None;
+        state.num_walsenders = None;
+        state.num_autovacuum_workers = None;
     }
 
     // Look for core dumps and collect backtraces.
