@@ -182,12 +182,16 @@ pub async fn download_extension(
         unzip_dest.to_string() + "/share/extension",
         Path::new(&get_pg_config("--sharedir", pgbin)).join("extension"),
     );
+    let tsearch_data_paths = (
+        unzip_dest.to_string() + "/share/tsearch_data",
+        Path::new(&get_pg_config("--sharedir", pgbin)).join("tsearch_data"),
+    );
     let libdir_paths = (
         unzip_dest.to_string() + "/lib",
         Path::new(&get_pg_config("--pkglibdir", pgbin)).to_path_buf(),
     );
     // move contents of the libdir / sharedir in unzipped archive to the correct local paths
-    for paths in [sharedir_paths, libdir_paths] {
+    for paths in [sharedir_paths, tsearch_data_paths, libdir_paths] {
         let (zip_dir, real_dir) = paths;
 
         let dir = match std::fs::read_dir(&zip_dir) {
