@@ -73,7 +73,7 @@ branch.
 minor Postgres release.
 
     ```shell
-    ./scripts/poetry -k pg15
+    ./scripts/pytest -k pg15
     ```
 
 1. Commit your changes.
