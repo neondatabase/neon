@@ -941,7 +941,9 @@ impl LayerMap {
                     );
                 }
                 Task::FinishFrame { frame_idx } => {
-                    last_result = frames[frame_idx].max_stacked_deltas;
+                    let frame = frames.pop().unwrap();
+                    debug_assert_eq!(frame_idx, frames.len());
+                    last_result = frame.max_stacked_deltas;
                 }
             }
         }
@@ -1860,7 +1862,7 @@ mod tests {
         let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
         let timeline_id = TimelineId::generate();
 
-        // Insert 10,000 overlapping delta layers with increasing LSN ranges
+        // Insert 9,999 overlapping key range delta layers with disjoint increasing LSN ranges
         // Use a non-L0 key range so that all layers are considered reimage-worthy at all partition ranges.
         let key_range = Key::from_i128(0)..Key::from_i128(100);
         for i in 1..10000 {
@@ -1875,7 +1877,7 @@ mod tests {
         }
         updates.flush();
 
-        // This call will recursively traverse all 10,000 layers in the original code, causing stack overflow
+        // This call will recursively traverse all 9,999 layers in the original code, causing stack overflow
         let count = layer_map.count_deltas(&key_range, &(Lsn(0)..Lsn(100000)), None);
         assert_eq!(count, 9999);
     }
