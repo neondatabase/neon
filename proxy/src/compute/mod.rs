@@ -235,6 +235,15 @@ impl AuthInfo {
                     self.server_params.insert(k, v);
                 }
 
+                // Session-level timeout GUCs: safe to forward, no routing/auth implications.
+                // In pooled mode PgBouncer rejects these before they reach compute; clients
+                // should use `options=-c statement_timeout=N` there instead.
+                "statement_timeout"
+                | "lock_timeout"
+                | "idle_in_transaction_session_timeout" => {
+                    self.server_params.insert(k, v);
+                }
+
                 // if we allow arbitrary params, then we forward them through.
                 // this is a flag for a period of backwards compatibility
                 k if arbitrary_params => {
@@ -419,5 +428,50 @@ mod tests {
 
         let params = "project = foo neon_endpoint_type:read_write   neon_lsn:0/2 neon_proxy_params_compat:true";
         assert_eq!(filtered_options(params).as_deref(), Some("project = foo"));
+    }
+}
+
+#[cfg(test)]
+mod timeout_param_tests {
+    use super::*;
+    use crate::auth::backend::ComputeCredentialKeys;
+
+    #[test]
+    fn test_session_timeout_params_forwarded() {
+        // Regression: timeout GUCs were silently dropped by the catch-all; verify
+        // they are forwarded without arbitrary_params and unknown params are not.
+        let params = StartupMessageParams::new([
+            ("user", "alice"),
+            ("database", "mydb"),
+            ("application_name", "myapp"),
+            ("statement_timeout", "5000"),
+            ("lock_timeout", "1000"),
+            ("idle_in_transaction_session_timeout", "30000"),
+            ("some_unknown_param", "should_be_dropped"),
+        ]);
+
+        let mut auth_info = AuthInfo::with_auth_keys(ComputeCredentialKeys::JwtPayload(vec![]));
+        auth_info.set_startup_params(&params, false);
+
+        assert_eq!(
+            auth_info.server_params.get("statement_timeout"),
+            Some("5000"),
+            "statement_timeout must be forwarded to compute"
+        );
+        assert_eq!(
+            auth_info.server_params.get("lock_timeout"),
+            Some("1000"),
+            "lock_timeout must be forwarded to compute"
+        );
+        assert_eq!(
+            auth_info.server_params.get("idle_in_transaction_session_timeout"),
+            Some("30000"),
+            "idle_in_transaction_session_timeout must be forwarded to compute"
+        );
+        assert_eq!(
+            auth_info.server_params.get("some_unknown_param"),
+            None,
+            "unknown params must not be forwarded without arbitrary_params=true"
+        );
     }
 }
