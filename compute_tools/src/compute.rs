@@ -1919,7 +1919,7 @@ impl ComputeNode {
                         "cannot connect to Postgres: {}, retrying with 'zenith_admin' username",
                         e
                     );
-                    let mut zenith_admin_conf = postgres::config::Config::from(conf.clone());
+                    let mut zenith_admin_conf = conf.clone();
                     zenith_admin_conf.application_name("compute_ctl:apply_config");
                     zenith_admin_conf.user("zenith_admin");
 
@@ -1928,20 +1928,32 @@ impl ComputeNode {
                     const ZENITH_OPTIONS: &str = "-c role=zenith_admin -c default_transaction_read_only=off -c search_path='' -c statement_timeout=0";
                     zenith_admin_conf.options(ZENITH_OPTIONS);
 
-                    let mut client =
+                    let (client, zenith_admin_conn) =
                         zenith_admin_conf.connect(NoTls)
+                            .await
                             .context("broken cloud_admin credential: tried connecting with cloud_admin but could not authenticate, and zenith_admin does not work either")?;
 
+                    let zenith_admin_conn_handle = spawn(async move {
+                        if let Err(e) = zenith_admin_conn.await {
+                            error!("zenith_admin connection error: {}", e);
+                        }
+                    });
+
                     // Disable forwarding so that users don't get a cloud_admin role
-                    let mut func = || {
-                        client.simple_query("SET neon.forward_ddl = false")?;
-                        client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
-                        client.simple_query("GRANT zenith_admin TO cloud_admin")?;
+                    let func = async {
+                        client.simple_query("SET neon.forward_ddl = false").await?;
+                        client
+                            .simple_query("CREATE USER cloud_admin WITH SUPERUSER")
+                            .await?;
+                        client
+                            .simple_query("GRANT zenith_admin TO cloud_admin")
+                            .await?;
                         Ok::<_, anyhow::Error>(())
                     };
-                    func().context("apply_config setup cloud_admin")?;
+                    func.await.context("apply_config setup cloud_admin")?;
 
                     drop(client);
+                    let _ = zenith_admin_conn_handle.await;
 
                     // Reconnect with connstring with expected name
                     conf.connect(NoTls).await?
