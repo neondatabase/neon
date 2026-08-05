@@ -25,6 +25,7 @@ pub(in crate::http) async fn install_extension(
             &request.extension,
             &request.database,
             request.version.to_string(),
+            request.schema.clone(),
         )
         .await
     {
