@@ -4,7 +4,7 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
-use std::cmp::min;
+use std::cmp::{Ordering, min};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
@@ -2082,7 +2082,6 @@ impl Timeline {
             coverage_size: usize,
         }
         let holes: Vec<Hole> = {
-            use std::cmp::Ordering;
             impl Ord for Hole {
                 fn cmp(&self, other: &Self) -> Ordering {
                     self.coverage_size.cmp(&other.coverage_size).reverse()
@@ -2099,8 +2098,16 @@ impl Timeline {
             // min-heap (reserve space for one more element added before eviction)
             let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
             let mut prev: Option<Key> = None;
+            let mut all_keys_iter = all_keys
+                .iter()
+                .map(|DeltaEntry { key, lsn, size, .. }| (*key, *lsn, *size));
+            let mut index_entries = 0usize;
 
-            for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
+            while let Some((next_key, _, _)) = all_keys_iter.next() {
+                index_entries += 1;
+                if index_entries % 32_768 == 0 && self.cancel.is_cancelled() {
+                    return Err(CompactionError::new_cancelled());
+                }
                 if let Some(prev_key) = prev {
                     // just first fast filter, do not create hole entries for metadata keys. The last hole in the
                     // compaction is the gap between data key and metadata keys.
@@ -2162,7 +2169,9 @@ impl Timeline {
             )
         };
 
-        // This iterator walks through all keys and is needed to calculate size used by each key
+        // This iterator walks through all keys and is needed to calculate size used by each key.
+        // Coalesce entries for a key exactly as the previous materialized iterator did, while
+        // retaining only one pending merged entry.
         let mut all_keys_iter = all_keys
             .iter()
             .map(|DeltaEntry { key, lsn, size, .. }| (*key, *lsn, *size))
@@ -4582,3 +4591,486 @@ impl CompactionLayer<Key> for ResidentImageLayer {
     }
 }
 impl CompactionImageLayer<TimelineAdaptor> for ResidentImageLayer {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    use crate::tenant::storage_layer::delta_layer::{
+        DeltaLayerIndexIterator, test::TestDeltaIndex,
+    };
+    use crate::tenant::timeline::DeltaLayerTestDesc;
+    use crate::virtual_file::{IoMode, set_io_mode};
+
+    const L0_CALIBRATION_LAYERS: &str = "NEON_L0_COMPACTION_CALIBRATION_LAYERS";
+    const L0_CALIBRATION_ENTRIES_PER_LAYER: &str =
+        "NEON_L0_COMPACTION_CALIBRATION_ENTRIES_PER_LAYER";
+    const L0_CALIBRATION_TARGET_FILE_SIZE: &str = "NEON_L0_COMPACTION_CALIBRATION_TARGET_FILE_SIZE";
+
+    fn calibration_env_usize(name: &str) -> anyhow::Result<usize> {
+        std::env::var(name)
+            .with_context(|| format!("{name} must be set"))?
+            .parse()
+            .with_context(|| format!("{name} must be a positive integer"))
+            .and_then(|value: usize| {
+                anyhow::ensure!(value > 0, "{name} must be positive");
+                Ok(value)
+            })
+    }
+
+    fn calibration_env_u64(name: &str) -> anyhow::Result<u64> {
+        std::env::var(name)
+            .with_context(|| format!("{name} must be set"))?
+            .parse()
+            .with_context(|| format!("{name} must be a positive integer"))
+            .and_then(|value: u64| {
+                anyhow::ensure!(value > 0, "{name} must be positive");
+                Ok(value)
+            })
+    }
+
+    struct MetadataCalibrationResult {
+        elapsed_micros: u128,
+        peak_rss_kib: u64,
+        entries: usize,
+        coalesced_entries: usize,
+        checksum: u128,
+    }
+
+    fn peak_rss_kib() -> anyhow::Result<u64> {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        // SAFETY: getrusage initializes the rusage structure on success.
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        anyhow::ensure!(
+            result == 0,
+            "getrusage failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: checked getrusage success above.
+        let max_rss = unsafe { usage.assume_init() }.ru_maxrss;
+        let max_rss = u64::try_from(max_rss).context("getrusage returned a negative max RSS")?;
+        #[cfg(target_os = "macos")]
+        let max_rss = max_rss / 1024;
+        Ok(max_rss)
+    }
+
+    fn calibration_indexes(layers: &[Vec<(Key, Lsn, u64)>]) -> anyhow::Result<Vec<TestDeltaIndex>> {
+        layers
+            .iter()
+            .map(|entries| TestDeltaIndex::new(entries))
+            .collect()
+    }
+
+    fn calibration_cursors<'a>(
+        indexes: &[TestDeltaIndex],
+        ctx: &'a RequestContext,
+    ) -> Vec<DeltaLayerIndexIterator<'a>> {
+        indexes.iter().map(|index| index.cursor(ctx)).collect()
+    }
+
+    /// Runs the materialized metadata path used by L0 compaction before streaming cursors.
+    /// Cursor construction is outside the timed region because a production compaction opens
+    /// already-written B-tree indexes.
+    async fn run_metadata_calibration(
+        indexes: &[TestDeltaIndex],
+        target_file_size: u64,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<MetadataCalibrationResult> {
+        let mut cursors = calibration_cursors(indexes, ctx);
+
+        let started = Instant::now();
+        let mut materialized = Vec::new();
+        for cursor in &mut cursors {
+            // Match the old L0 phase-1 collection shape: each index traversal returns a layer
+            // vector, which is then extended into a batch-wide vector before sorting.
+            let mut layer_entries = Vec::new();
+            while let Some(entry) = cursor.next().await? {
+                layer_entries.push(entry);
+            }
+            materialized.extend(layer_entries);
+        }
+        materialized.sort_by_key(|entry| (entry.0, entry.1));
+
+        let mut entries = 0;
+        let mut previous = None;
+        let mut checksum = 0_u128;
+        for entry in materialized.iter().copied() {
+            assert!(previous.is_none_or(|previous| previous <= (entry.0, entry.1)));
+            previous = Some((entry.0, entry.1));
+            entries += 1;
+            checksum = checksum
+                .wrapping_mul(31)
+                .wrapping_add(entry.0.to_i128() as u128)
+                .wrapping_add(entry.1.0 as u128)
+                .wrapping_add(entry.2 as u128);
+        }
+
+        let mut coalesced_entries = 0;
+        let mut pending: Option<(Key, Lsn, u64)> = None;
+        for current in materialized {
+            match pending.take() {
+                Some(mut previous) if previous.0 == current.0 && previous.2 < target_file_size => {
+                    previous.2 += current.2;
+                    pending = Some(previous);
+                }
+                Some(previous) => {
+                    coalesced_entries += 1;
+                    checksum = checksum
+                        .wrapping_mul(31)
+                        .wrapping_add(previous.0.to_i128() as u128)
+                        .wrapping_add(previous.1.0 as u128)
+                        .wrapping_add(previous.2 as u128);
+                    pending = Some(current);
+                }
+                None => pending = Some(current),
+            }
+        }
+        if let Some(previous) = pending {
+            coalesced_entries += 1;
+            checksum = checksum
+                .wrapping_mul(31)
+                .wrapping_add(previous.0.to_i128() as u128)
+                .wrapping_add(previous.1.0 as u128)
+                .wrapping_add(previous.2 as u128);
+        }
+
+        Ok(MetadataCalibrationResult {
+            elapsed_micros: started.elapsed().as_micros(),
+            peak_rss_kib: peak_rss_kib()?,
+            entries,
+            coalesced_entries,
+            checksum,
+        })
+    }
+
+    #[tokio::test]
+    async fn l0_compaction_preserves_holes_duplicate_splits_and_restart() -> anyhow::Result<()> {
+        // This fixture uses the real L0 compaction path. Set TEST_OUTPUT=/tmp when running it on
+        // a filesystem that does not support no-replace renames in the workspace.
+        set_io_mode(IoMode::Buffered);
+
+        let harness = TenantHarness::create("l0_compaction_preserves_streaming_semantics").await?;
+        let _span = harness.span().entered();
+        let (tenant, ctx) = harness.load().await;
+        let initdb_lsn = Lsn(0x10);
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, initdb_lsn, crate::DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let key_a = Key::from_i128(100);
+        let key_b = Key::from_i128(1_000);
+        let key_c = key_b.next();
+        let l0_start = Lsn(0x40);
+        const LAYER_LSN_WIDTH: u64 = 0x10;
+        const LAYER_COUNT: usize = 4;
+        let final_lsn = Lsn(l0_start.0 + LAYER_COUNT as u64 * LAYER_LSN_WIDTH);
+        timeline.force_advance_lsn(final_lsn);
+
+        // Three disjoint image ranges inside the A..B gap make it rank as a selected hole.
+        // The B..C gap has no image coverage, so it is not selected.
+        for (image_lsn, first_key, last_key) in
+            [(0x10, 200, 300), (0x20, 400, 500), (0x30, 600, 700)]
+        {
+            timeline
+                .force_create_image_layer(
+                    Lsn(image_lsn),
+                    vec![
+                        (Key::from_i128(first_key), Bytes::from_static(b"coverage")),
+                        (Key::from_i128(last_key), Bytes::from_static(b"coverage")),
+                    ],
+                    Some(initdb_lsn),
+                    &ctx,
+                )
+                .await?;
+        }
+
+        let a_value = Bytes::from(vec![0xa1; 256]);
+        let b_value = Bytes::from(vec![0xb2; 256]);
+        let c_values = (0..LAYER_COUNT)
+            .map(|index| Bytes::from(vec![0xc0 + index as u8; 256]))
+            .collect::<Vec<_>>();
+
+        for layer_index in 0..LAYER_COUNT {
+            let lsn_start = Lsn(l0_start.0 + layer_index as u64 * LAYER_LSN_WIDTH);
+            let mut data = vec![(
+                key_c,
+                Lsn(lsn_start.0 + 1),
+                Value::Image(c_values[layer_index].clone()),
+            )];
+            if layer_index == 0 {
+                data.extend([
+                    (key_a, Lsn(lsn_start.0 + 2), Value::Image(a_value.clone())),
+                    (key_b, Lsn(lsn_start.0 + 3), Value::Image(b_value.clone())),
+                ]);
+            }
+            timeline
+                .force_create_delta_layer(
+                    DeltaLayerTestDesc::new(
+                        lsn_start..Lsn(lsn_start.0 + LAYER_LSN_WIDTH),
+                        Key::MIN..Key::MAX,
+                        data,
+                    ),
+                    Some(initdb_lsn),
+                    &ctx,
+                )
+                .await?;
+        }
+
+        // The layers are test-created rather than flushed from WAL, so advance the durable LSN
+        // explicitly before exercising a shutdown/reload.
+        timeline.force_set_disk_consistent_lsn(final_lsn);
+
+        // This is larger than the combined A and B values, so only the selected hole, rather
+        // than size alone, can separate them. It is smaller than the C version history, which
+        // requires LSN-sliced output layers for that one key.
+        let target_file_size = 640;
+        assert_eq!(
+            timeline
+                .compact_level0(target_file_size, true, None, &ctx)
+                .await?,
+            CompactionOutcome::Done
+        );
+        // force_set_disk_consistent_lsn changes the in-memory test state only. Publish matching
+        // metadata so reloading exercises the compacted layer map rather than discarding these
+        // intentionally test-created layers as future files.
+        timeline.schedule_uploads(final_lsn, std::iter::empty())?;
+
+        let mut output_deltas = {
+            let layer_manager = timeline.layers.read(LayerManagerLockHolder::Testing).await;
+            let layer_map = layer_manager.layer_map()?;
+            assert!(layer_map.level0_deltas().is_empty());
+            let layer_names = layer_map
+                .iter_historic_layers()
+                .map(|layer| layer.layer_name())
+                .collect::<Vec<_>>();
+            assert_eq!(check_valid_layermap(&layer_names), None);
+            layer_map
+                .iter_historic_layers()
+                .filter(|layer| layer.is_delta && layer.lsn_range.start >= l0_start)
+                .map(|layer| layer.key())
+                .collect::<Vec<_>>()
+        };
+        output_deltas.sort_by_key(|layer| (layer.key_range.start, layer.lsn_range.start));
+
+        // The selected A..B hole produces an A-only output layer. Without the hole, the two
+        // small keys fit together under target_file_size.
+        assert!(output_deltas.iter().any(|layer| {
+            layer.key_range.start == key_a
+                && layer.key_range.end == key_a.next()
+                && layer.lsn_range == (l0_start..final_lsn)
+                && layer.is_delta
+        }));
+        assert!(output_deltas.iter().any(|layer| {
+            layer.key_range.start == key_b
+                && layer.key_range.end == key_b.next()
+                && layer.lsn_range == (l0_start..final_lsn)
+                && layer.is_delta
+        }));
+
+        let mut c_splits = output_deltas
+            .iter()
+            .filter(|layer| layer.key_range.start == key_c && layer.key_range.end == key_c.next())
+            .collect::<Vec<_>>();
+        c_splits.sort_by_key(|layer| layer.lsn_range.start);
+        assert!(
+            c_splits.len() >= 2,
+            "expected multiple LSN-sliced output layers for {key_c}, got {c_splits:?}"
+        );
+        assert!(
+            c_splits
+                .windows(2)
+                .all(|pair| pair[0].lsn_range.end == pair[1].lsn_range.start),
+            "duplicate-key LSN slices are not contiguous: {c_splits:?}"
+        );
+
+        let mut expected_values = vec![(key_a, final_lsn, a_value), (key_b, final_lsn, b_value)];
+        expected_values.extend(c_values.iter().enumerate().map(|(layer_index, value)| {
+            (
+                key_c,
+                Lsn(l0_start.0 + layer_index as u64 * LAYER_LSN_WIDTH + 1),
+                value.clone(),
+            )
+        }));
+        for (key, lsn, expected) in &expected_values {
+            assert_eq!(timeline.get(*key, *lsn, &ctx).await?, *expected);
+        }
+
+        // Make the compacted layer-map durable and verify the same sampled values after reopening it.
+        timeline.remote_client.wait_completion().await?;
+        tenant
+            .shutdown(
+                Default::default(),
+                crate::tenant::timeline::ShutdownMode::FreezeAndFlush,
+            )
+            .await
+            .expect("test tenant should shut down");
+        drop(timeline);
+        drop(tenant);
+
+        let (reloaded_tenant, reloaded_ctx) = harness.load().await;
+        let reloaded_timeline = reloaded_tenant.get_timeline(TIMELINE_ID, true)?;
+        for (key, lsn, expected) in &expected_values {
+            assert_eq!(
+                reloaded_timeline.get(*key, *lsn, &reloaded_ctx).await?,
+                *expected
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Calibrates the two ordered metadata passes used for an L0 batch without requiring a
+    /// filesystem-backed tenant. The cursor and materialized metadata collection are the same
+    /// ones used by the compaction path; test B-trees are built before timing.
+    #[tokio::test]
+    #[ignore = "large L0 index metadata calibration"]
+    async fn l0_index_metadata_calibration() -> anyhow::Result<()> {
+        let layer_count = calibration_env_usize(L0_CALIBRATION_LAYERS)?;
+        let entries_per_layer = calibration_env_usize(L0_CALIBRATION_ENTRIES_PER_LAYER)?;
+        let target_file_size = calibration_env_u64(L0_CALIBRATION_TARGET_FILE_SIZE)?;
+        anyhow::ensure!(
+            layer_count >= 2,
+            "{L0_CALIBRATION_LAYERS} must be at least 2"
+        );
+
+        let layers = (0..layer_count)
+            .map(|layer_index| {
+                (0..entries_per_layer)
+                    .map(|key_index| {
+                        (
+                            Key::from_i128(key_index as i128),
+                            Lsn(0x10 + layer_index as u64 * 0x10),
+                            64,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let indexes = calibration_indexes(&layers)?;
+        drop(layers);
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let result = run_metadata_calibration(&indexes, target_file_size, &ctx).await?;
+
+        assert_eq!(result.entries, layer_count * entries_per_layer);
+        assert!(result.coalesced_entries > 0);
+        assert_ne!(result.checksum, 0);
+        println!(
+            "l0_index_metadata_calibration_micros={}",
+            result.elapsed_micros
+        );
+        println!(
+            "l0_index_metadata_calibration_peak_rss_kib={}",
+            result.peak_rss_kib
+        );
+        Ok(())
+    }
+
+    /// Exercises the threshold-triggered L0 pass selected by the normal tenant compaction
+    /// iteration with a configurable stack of overlapping delta layers. The input construction is
+    /// deliberately outside the timer: a production compaction already receives completed layers,
+    /// while the timed section starts at the same `compaction_iteration` entry point used by the
+    /// background loop and includes layer-map replacement.
+    ///
+    /// This test is ignored because its intended calibration shape is large. Run it with the
+    /// default ten-layer threshold and one million entries per layer:
+    ///
+    /// ```text
+    /// TEST_OUTPUT=/tmp \
+    /// NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=std-fs \
+    /// NEON_L0_COMPACTION_CALIBRATION_LAYERS=10 \
+    /// NEON_L0_COMPACTION_CALIBRATION_ENTRIES_PER_LAYER=1000000 \
+    /// NEON_L0_COMPACTION_CALIBRATION_TARGET_FILE_SIZE=67108864 \
+    /// cargo test -p pageserver --lib tenant::timeline::compaction::tests::l0_compaction_metadata_calibration -- --ignored --exact --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "large L0 compaction calibration"]
+    async fn l0_compaction_metadata_calibration() -> anyhow::Result<()> {
+        // The ignored test is run alone. Buffered IO makes its test fixture portable to filesystems
+        // that do not permit O_DIRECT while preserving the production compaction code path. Set
+        // TEST_OUTPUT to a filesystem that supports no-replace renames (such as /tmp in CI).
+        set_io_mode(IoMode::Buffered);
+
+        let layer_count = calibration_env_usize(L0_CALIBRATION_LAYERS)?;
+        let entries_per_layer = calibration_env_usize(L0_CALIBRATION_ENTRIES_PER_LAYER)?;
+        let target_file_size = calibration_env_u64(L0_CALIBRATION_TARGET_FILE_SIZE)?;
+        let harness = TenantHarness::create("l0_compaction_metadata_calibration").await?;
+        let _span = harness.span().entered();
+        let (tenant, ctx) = harness.load().await;
+        tenant.update_tenant_config(|mut config| {
+            config.checkpoint_distance = Some(target_file_size);
+            Ok(config)
+        })?;
+        let threshold = tenant.get_compaction_threshold();
+        anyhow::ensure!(
+            layer_count >= threshold,
+            "{L0_CALIBRATION_LAYERS} ({layer_count}) must meet the normal compaction threshold ({threshold})"
+        );
+        let initdb_lsn = Lsn(0x10);
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, initdb_lsn, crate::DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        const LAYER_LSN_WIDTH: u64 = 0x10;
+        let final_lsn = Lsn(initdb_lsn.0 + layer_count as u64 * LAYER_LSN_WIDTH);
+        timeline.force_advance_lsn(final_lsn);
+
+        for layer_index in 0..layer_count {
+            let lsn_start = Lsn(initdb_lsn.0 + layer_index as u64 * LAYER_LSN_WIDTH);
+            let lsn_range = lsn_start..Lsn(lsn_start.0 + LAYER_LSN_WIDTH);
+            let value = Bytes::from(vec![layer_index as u8; 64]);
+            let data = (0..entries_per_layer)
+                .map(|key_index| {
+                    (
+                        Key::from_i128(key_index as i128),
+                        Lsn(lsn_start.0 + 1),
+                        Value::Image(value.clone()),
+                    )
+                })
+                .collect();
+            timeline
+                .force_create_delta_layer(
+                    DeltaLayerTestDesc::new(lsn_range, Key::MIN..Key::MAX, data),
+                    Some(initdb_lsn),
+                    &ctx,
+                )
+                .await?;
+        }
+
+        let compaction_ctx =
+            RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
+        let cancel = CancellationToken::new();
+        let started = Instant::now();
+        let outcome = tenant
+            .compaction_iteration(&cancel, &compaction_ctx)
+            .await?;
+        let elapsed_micros = started.elapsed().as_micros();
+
+        assert_eq!(outcome, CompactionOutcome::Done);
+        let layer_manager = timeline.layers.read(LayerManagerLockHolder::Testing).await;
+        let layer_map = layer_manager.layer_map()?;
+        assert!(layer_map.level0_deltas().is_empty());
+        let layer_names = layer_map
+            .iter_historic_layers()
+            .map(|layer| layer.layer_name())
+            .collect::<Vec<_>>();
+        assert_eq!(check_valid_layermap(&layer_names), None);
+        drop(layer_manager);
+
+        for key_index in [0, entries_per_layer / 2, entries_per_layer - 1] {
+            let value = timeline
+                .get(Key::from_i128(key_index as i128), final_lsn, &ctx)
+                .await?;
+            assert_eq!(value, Bytes::from(vec![(layer_count - 1) as u8; 64]));
+        }
+
+        println!("l0_compaction_metadata_calibration_micros={elapsed_micros}");
+        println!(
+            "l0_compaction_metadata_calibration_peak_rss_kib={}",
+            peak_rss_kib()?
+        );
+        Ok(())
+    }
+}

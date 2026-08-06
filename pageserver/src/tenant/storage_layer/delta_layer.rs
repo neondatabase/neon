@@ -66,7 +66,7 @@ use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{
-    DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
+    DiskBtreeArrayIterator, DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
 use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
@@ -1141,6 +1141,21 @@ impl DeltaLayerInner {
         Ok(all_keys)
     }
 
+    /// Return an ordered cursor over index metadata without materializing the whole index.
+    pub(crate) fn index_iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIndexIterator<'a> {
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            block_reader,
+        );
+        DeltaLayerIndexIterator {
+            index_start_offset: self.index_start_offset(),
+            index_iter: tree_reader.iter_array(&[0; DELTA_KEY_SIZE], ctx),
+            pending: None,
+        }
+    }
+
     /// Using the given writer, write out a version which has the earlier Lsns than `until`.
     ///
     /// Return the amount of key value records pushed to the writer.
@@ -1544,6 +1559,45 @@ impl<'a> pageserver_compaction::interface::CompactionDeltaEntry<'a, Key> for Del
     }
 }
 
+/// Ordered metadata cursor for a delta layer index.
+///
+/// The index stores blob offsets rather than sizes, so one pending entry is retained until the
+/// next offset is known. This keeps only one index entry per layer live.
+pub(crate) struct DeltaLayerIndexIterator<'a> {
+    index_start_offset: u64,
+    index_iter: DiskBtreeArrayIterator<'a, DELTA_KEY_SIZE>,
+    pending: Option<(Key, Lsn, BlobRef)>,
+}
+
+impl DeltaLayerIndexIterator<'_> {
+    async fn next_raw(&mut self) -> anyhow::Result<Option<(Key, Lsn, BlobRef)>> {
+        let Some(entry) = self.index_iter.next().await else {
+            return Ok(None);
+        };
+        let (raw_key, value) = entry?;
+        let delta_key = DeltaKey::from_slice(&raw_key);
+        Ok(Some((delta_key.key(), delta_key.lsn(), BlobRef(value))))
+    }
+
+    /// Return the next `(key, lsn, stored_value_size)` index entry.
+    pub(crate) async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, u64)>> {
+        if self.pending.is_none() {
+            self.pending = self.next_raw().await?;
+        }
+        let Some((key, lsn, blob_ref)) = self.pending.take() else {
+            return Ok(None);
+        };
+
+        let next = self.next_raw().await?;
+        let size = match next.as_ref() {
+            Some((_, _, next_blob_ref)) => next_blob_ref.pos() - blob_ref.pos(),
+            None => self.index_start_offset - blob_ref.pos(),
+        };
+        self.pending = next;
+        Ok(Some((key, lsn, size)))
+    }
+}
+
 pub struct DeltaLayerIterator<'a> {
     delta_layer: &'a DeltaLayerInner,
     ctx: &'a RequestContext,
@@ -1621,6 +1675,7 @@ impl DeltaLayerIterator<'_> {
 #[cfg(test)]
 pub(crate) mod test {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -1637,6 +1692,60 @@ pub(crate) mod test {
     use rand::prelude::{SeedableRng, StdRng};
     use rand::seq::IndexedRandom;
     use rand::{Rng, RngCore};
+
+    /// In-memory delta index used by cursor and merge tests. The B-tree pages are shared by
+    /// cursors so repeated scans do not rebuild the test fixture.
+    pub(crate) struct TestDeltaIndex {
+        index_start_offset: u64,
+        root_offset: u32,
+        disk: Arc<TestDisk>,
+    }
+
+    impl TestDeltaIndex {
+        pub(crate) fn new(entries: &[(Key, Lsn, u64)]) -> anyhow::Result<Self> {
+            assert!(!entries.is_empty());
+            assert!(
+                entries
+                    .windows(2)
+                    .all(|entries| { (entries[0].0, entries[0].1) < (entries[1].0, entries[1].1) })
+            );
+
+            let mut disk = TestDisk::default();
+            let mut writer = DiskBtreeBuilder::<_, DELTA_KEY_SIZE>::new(&mut disk);
+            let mut offset = 0;
+            for (key, lsn, size) in entries {
+                let index_key = DeltaKey::from_key_lsn(key, *lsn);
+                writer.append(&index_key.0, BlobRef::new(offset, false).0)?;
+                offset += *size;
+            }
+            let (root_offset, _writer) = writer.finish()?;
+            Ok(Self {
+                index_start_offset: offset,
+                root_offset,
+                disk: Arc::new(disk),
+            })
+        }
+
+        pub(crate) fn cursor<'a>(&self, ctx: &'a RequestContext) -> DeltaLayerIndexIterator<'a> {
+            let reader =
+                DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(0, self.root_offset, self.disk.clone());
+            DeltaLayerIndexIterator {
+                index_start_offset: self.index_start_offset,
+                index_iter: reader.iter_array(&[0; DELTA_KEY_SIZE], ctx),
+                pending: None,
+            }
+        }
+    }
+
+    /// Build an in-memory delta index cursor with blob offsets derived from the supplied sizes.
+    /// This is shared with the compaction merge tests to exercise the real cursor without a
+    /// filesystem-backed layer.
+    pub(crate) fn make_index_cursor<'a>(
+        entries: &[(Key, Lsn, u64)],
+        ctx: &'a RequestContext,
+    ) -> anyhow::Result<DeltaLayerIndexIterator<'a>> {
+        Ok(TestDeltaIndex::new(entries)?.cursor(ctx))
+    }
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -2278,6 +2387,26 @@ pub(crate) mod test {
             assert_eq!(l1, *l2);
             assert_eq!(&v1, v2);
         }
+    }
+
+    #[tokio::test]
+    async fn index_cursor_derives_sizes_from_offsets() -> anyhow::Result<()> {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let key = Key::from_i128(42);
+        let expected = vec![
+            (key, Lsn(0x20), 3),
+            (key, Lsn(0x30), 17),
+            (key.add(1), Lsn(0x18), 5),
+            (key.add(3), Lsn(0x40), 29),
+        ];
+        let mut cursor = make_index_cursor(&expected, &ctx)?;
+        let mut actual = Vec::new();
+        while let Some(entry) = cursor.next().await? {
+            actual.push(entry);
+        }
+
+        assert_eq!(actual, expected);
+        Ok(())
     }
 
     #[tokio::test]
