@@ -1357,7 +1357,19 @@ Retry:
 		 * function reads the buffer tag from the slot.
 		 */
 		slot->buftag = hashkey.buftag;
-		slot->shard_no = get_shard_number(&tag);
+
+		/*
+		 * Compute the shard from hashkey.buftag (the per-block tag), not
+		 * from `tag`. `tag` is the tag of the *first* block of the batch and
+		 * is never advanced in this loop, while get_shard_number() hashes
+		 * blockNum / stripe_size. With `tag`, every block of a multi-block
+		 * batch would be routed to the shard owning the first block, so a
+		 * batch crossing a stripe boundary would send its tail to the wrong
+		 * pageserver shard, which drops the connection with
+		 * PageStreamError::Reconnect ("getpage@lsn request routed to wrong
+		 * shard").
+		 */
+		slot->shard_no = get_shard_number(&hashkey.buftag);
 		slot->my_ring_index = last_ring_index;
 		slot->flags = 0;
 
