@@ -2041,6 +2041,7 @@ impl Timeline {
         stats.compaction_prerequisites_micros = stats.read_lock_acquisition_micros.till_now();
 
         // TODO: replace with streaming k-merge
+        let index_metadata_started = tokio::time::Instant::now();
         let all_keys = {
             let mut all_keys = Vec::new();
             for l in deltas_to_compact.iter() {
@@ -2059,8 +2060,16 @@ impl Timeline {
             all_keys.sort_by_key(|DeltaEntry { key, lsn, .. }| (*key, *lsn));
             all_keys
         };
-
-        stats.read_lock_held_key_sort_micros = stats.compaction_prerequisites_micros.till_now();
+        let index_metadata_finished = tokio::time::Instant::now();
+        let index_metadata_elapsed = index_metadata_finished - index_metadata_started;
+        stats.read_lock_held_key_sort_micros = DurationRecorder::Recorded(
+            RecordedDuration(index_metadata_elapsed),
+            index_metadata_finished,
+        );
+        stats.read_lock_held_index_metadata_micros = DurationRecorder::Recorded(
+            RecordedDuration(index_metadata_elapsed),
+            index_metadata_finished,
+        );
 
         // Determine N largest holes where N is number of compacted layers. The vec is sorted by key range start.
         //
@@ -2486,6 +2495,7 @@ struct CompactLevel0Phase1StatsBuilder {
     timeline_id: Option<TimelineId>,
     read_lock_acquisition_micros: DurationRecorder,
     read_lock_held_key_sort_micros: DurationRecorder,
+    read_lock_held_index_metadata_micros: DurationRecorder,
     compaction_prerequisites_micros: DurationRecorder,
     read_lock_held_compute_holes_micros: DurationRecorder,
     read_lock_drop_micros: DurationRecorder,
@@ -2502,6 +2512,7 @@ struct CompactLevel0Phase1Stats {
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
     read_lock_held_key_sort_micros: RecordedDuration,
+    read_lock_held_index_metadata_micros: RecordedDuration,
     compaction_prerequisites_micros: RecordedDuration,
     read_lock_held_compute_holes_micros: RecordedDuration,
     read_lock_drop_micros: RecordedDuration,
@@ -2531,6 +2542,10 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .read_lock_held_key_sort_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_key_sort_micros not set"))?,
+            read_lock_held_index_metadata_micros: value
+                .read_lock_held_index_metadata_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_held_index_metadata_micros not set"))?,
             compaction_prerequisites_micros: value
                 .compaction_prerequisites_micros
                 .into_recorded()
