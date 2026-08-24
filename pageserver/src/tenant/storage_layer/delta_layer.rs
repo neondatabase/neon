@@ -1465,6 +1465,12 @@ impl DeltaLayerInner {
         offset
     }
 
+    /// Return the physical B-tree portion of this layer. This tracks metadata cardinality even
+    /// when the values themselves are very small.
+    pub(crate) fn index_size_bytes(&self, file_size: u64) -> u64 {
+        file_size.saturating_sub(self.index_start_blk as u64 * PAGE_SZ as u64)
+    }
+
     pub fn iter_with_options<'a>(
         &'a self,
         ctx: &'a RequestContext,
