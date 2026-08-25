@@ -1141,6 +1141,47 @@ impl DeltaLayerInner {
         Ok(all_keys)
     }
 
+    /// Return the first and last keys in the index without materializing its entries.
+    pub(crate) async fn index_key_bounds(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<Option<(Key, Key)>> {
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+            self.index_start_blk,
+            self.index_root_blk,
+            block_reader,
+        );
+
+        let mut first = None;
+        tree_reader
+            .visit(
+                &[0; DELTA_KEY_SIZE],
+                VisitDirection::Forwards,
+                |key, _| {
+                    first = Some(DeltaKey::from_slice(key).key());
+                    false
+                },
+                ctx,
+            )
+            .await?;
+
+        let mut last = None;
+        tree_reader
+            .visit(
+                &[u8::MAX; DELTA_KEY_SIZE],
+                VisitDirection::Backwards,
+                |key, _| {
+                    last = Some(DeltaKey::from_slice(key).key());
+                    false
+                },
+                ctx,
+            )
+            .await?;
+
+        Ok(first.zip(last))
+    }
+
     /// Return an ordered cursor over index metadata without materializing the whole index.
     pub(crate) fn index_iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIndexIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);

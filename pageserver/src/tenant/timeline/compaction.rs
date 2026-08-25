@@ -16,7 +16,6 @@ use super::{
     GetVectoredError, ImageLayerCreationMode, LastImageLayerCreationStatus, RecordedDuration,
     Timeline,
 };
-use camino::Utf8Path;
 
 use crate::pgdatadir_mapping::CollectKeySpaceError;
 use crate::tenant::timeline::{DeltaEntry, RepartitionError};
@@ -36,7 +35,6 @@ use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
 use pageserver_compaction::helpers::{fully_contains, overlaps_with};
 use pageserver_compaction::interface::*;
 use serde::Serialize;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, trace, warn};
@@ -120,11 +118,14 @@ impl Ord for IndexMergeHeapEntry {
 /// materialized path for a million-entry batch.
 const L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 4 * 1024 * 1024;
 
+/// A disjoint batch has no cross-layer merge work to amortize the cursor heap. Keep the
+/// materialized fast path for the same bounded, roughly two-million-entry scale as the output
+/// metadata plan; larger disjoint batches remain on the bounded replay path.
+const L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
+
 /// A streamed hole pass keeps this many already-coalesced output-size entries in memory. Larger
-/// plans spill to an unlinked temporary file so output sizing can replay the same cursor pass.
-const L0_METADATA_OUTPUT_PLAN_MAX_ENTRIES: usize = 1_000_000;
-const L0_METADATA_SPOOL_BUFFER_SIZE: usize = 64 * 1024;
-const L0_METADATA_SPOOL_ENTRY_SIZE: usize = KEY_SIZE + 16;
+/// plans discard the bounded prefix so output sizing can replay fresh cursors.
+const L0_METADATA_OUTPUT_PLAN_MAX_ENTRIES: usize = 2_000_000;
 
 type IndexMetadataEntry = (Key, Lsn, u64);
 
@@ -143,158 +144,68 @@ fn index_metadata_traversal(index_size: u64) -> IndexMetadataTraversal {
     }
 }
 
+async fn index_ranges_are_disjoint(
+    deltas: &[&DeltaLayerInner],
+    ctx: &RequestContext,
+) -> anyhow::Result<bool> {
+    // Layer summaries are exact enough to prove disjointness and avoid reopening every index on
+    // the common production path. A summary may be wider than the actual index, so overlapping
+    // summaries get an exact first/last-key check before the fast path is selected.
+    let mut layer_ranges = deltas
+        .iter()
+        .map(|delta| (delta.key_range().start, delta.key_range().end))
+        .collect::<Vec<_>>();
+    layer_ranges.sort_unstable_by_key(|(first, _)| *first);
+    if layer_ranges
+        .windows(2)
+        .all(|window| window[0].1 <= window[1].0)
+    {
+        return Ok(true);
+    }
+
+    let mut bounds = Vec::with_capacity(deltas.len());
+    for delta in deltas {
+        if let Some(bound) = delta.index_key_bounds(ctx).await? {
+            bounds.push(bound);
+        }
+    }
+    bounds.sort_unstable_by_key(|(first, _)| *first);
+    Ok(bounds.windows(2).all(|window| window[0].1 < window[1].0))
+}
+
 /// A coalesced output-size plan collected during the hole pass. Most overlapping L0 stacks fit
-/// in memory; a wide disjoint stack uses a temporary file instead of making another index pass.
+/// in memory. When a disjoint plan exceeds the bound, the plan is discarded and the output
+/// writer replays fresh B-tree cursors instead of paying temporary-file I/O.
 enum CoalescedOutputMetadata {
     InMemory(Vec<IndexMetadataEntry>),
-    OnDisk(IndexMetadataSpoolReader),
+    Replay,
 }
 
 enum CoalescedOutputMetadataCollector {
     InMemory(Vec<IndexMetadataEntry>),
-    OnDisk(IndexMetadataSpoolWriter),
+    Replay,
 }
 
 impl CoalescedOutputMetadataCollector {
-    async fn append(
-        &mut self,
-        entry: IndexMetadataEntry,
-        target_file_size: u64,
-        max_entries: usize,
-        temp_dir: &Utf8Path,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<()> {
+    fn append(&mut self, entry: IndexMetadataEntry, target_file_size: u64, max_entries: usize) {
         match self {
             Self::InMemory(entries) => {
                 if append_coalesced_output_metadata(entries, entry, target_file_size, max_entries) {
-                    return Ok(());
+                    return;
                 }
-
-                let entries = std::mem::take(entries);
-                let mut spool = IndexMetadataSpoolWriter::new(temp_dir)?;
-                for (index, entry) in entries.into_iter().enumerate() {
-                    if index % 32_768 == 0 && cancel.is_cancelled() {
-                        anyhow::bail!("L0 metadata spool cancelled");
-                    }
-                    spool.append(entry, target_file_size).await?;
-                }
-                spool.append(entry, target_file_size).await?;
-                *self = Self::OnDisk(spool);
+                // The output writer can create a fresh cursor merge after the hole pass. Do not
+                // turn a rare wide disjoint plan into a synchronous temp-file write/read cycle.
+                *self = Self::Replay;
             }
-            Self::OnDisk(spool) => spool.append(entry, target_file_size).await?,
+            Self::Replay => {}
         }
-        Ok(())
     }
 
-    async fn finish(self) -> anyhow::Result<CoalescedOutputMetadata> {
+    fn finish(self) -> CoalescedOutputMetadata {
         match self {
-            Self::InMemory(entries) => Ok(CoalescedOutputMetadata::InMemory(entries)),
-            Self::OnDisk(spool) => Ok(CoalescedOutputMetadata::OnDisk(spool.finish().await?)),
+            Self::InMemory(entries) => CoalescedOutputMetadata::InMemory(entries),
+            Self::Replay => CoalescedOutputMetadata::Replay,
         }
-    }
-}
-
-/// Fixed-width temporary-file writer for coalesced `(key, LSN, stored-size)` metadata.
-struct IndexMetadataSpoolWriter {
-    writer: BufWriter<tokio::fs::File>,
-    pending: Option<IndexMetadataEntry>,
-    entries: u64,
-}
-
-impl IndexMetadataSpoolWriter {
-    fn new(temp_dir: &Utf8Path) -> anyhow::Result<Self> {
-        // tempfile_in unlinks the file immediately. It is reclaimed even if a cancelled
-        // compaction does not get to run normal Rust destructors.
-        let file = camino_tempfile::tempfile_in(temp_dir)
-            .with_context(|| format!("create L0 metadata spool in {temp_dir}"))?;
-        Ok(Self {
-            writer: BufWriter::with_capacity(
-                L0_METADATA_SPOOL_BUFFER_SIZE,
-                tokio::fs::File::from_std(file),
-            ),
-            pending: None,
-            entries: 0,
-        })
-    }
-
-    async fn append(
-        &mut self,
-        entry: IndexMetadataEntry,
-        target_file_size: u64,
-    ) -> anyhow::Result<()> {
-        if let Some(previous) = self.pending.as_mut()
-            && previous.0 == entry.0
-            && previous.2 < target_file_size
-        {
-            previous.2 += entry.2;
-            return Ok(());
-        }
-
-        if let Some(previous) = self.pending.replace(entry) {
-            self.write_entry(previous).await?;
-        }
-        Ok(())
-    }
-
-    async fn write_entry(&mut self, entry: IndexMetadataEntry) -> anyhow::Result<()> {
-        let mut buf = [0; L0_METADATA_SPOOL_ENTRY_SIZE];
-        entry.0.write_to_byte_slice(&mut buf[..KEY_SIZE]);
-        buf[KEY_SIZE..KEY_SIZE + 8].copy_from_slice(&entry.1.0.to_be_bytes());
-        buf[KEY_SIZE + 8..].copy_from_slice(&entry.2.to_be_bytes());
-        self.writer
-            .write_all(&buf)
-            .await
-            .context("write L0 metadata spool entry")?;
-        self.entries += 1;
-        Ok(())
-    }
-
-    async fn finish(mut self) -> anyhow::Result<IndexMetadataSpoolReader> {
-        if let Some(entry) = self.pending.take() {
-            self.write_entry(entry).await?;
-        }
-        self.writer
-            .flush()
-            .await
-            .context("flush L0 metadata spool")?;
-        let mut file = self.writer.into_inner();
-        file.rewind().await.context("rewind L0 metadata spool")?;
-        Ok(IndexMetadataSpoolReader {
-            reader: BufReader::with_capacity(L0_METADATA_SPOOL_BUFFER_SIZE, file),
-            remaining: self.entries,
-        })
-    }
-}
-
-struct IndexMetadataSpoolReader {
-    reader: BufReader<tokio::fs::File>,
-    remaining: u64,
-}
-
-impl IndexMetadataSpoolReader {
-    async fn next(&mut self) -> anyhow::Result<Option<IndexMetadataEntry>> {
-        if self.remaining == 0 {
-            return Ok(None);
-        }
-
-        let mut buf = [0; L0_METADATA_SPOOL_ENTRY_SIZE];
-        self.reader
-            .read_exact(&mut buf)
-            .await
-            .context("read L0 metadata spool entry")?;
-        self.remaining -= 1;
-        let key = Key::from_slice(&buf[..KEY_SIZE]);
-        let lsn = Lsn(u64::from_be_bytes(
-            buf[KEY_SIZE..KEY_SIZE + 8]
-                .try_into()
-                .expect("fixed-width LSN field"),
-        ));
-        let size = u64::from_be_bytes(
-            buf[KEY_SIZE + 8..]
-                .try_into()
-                .expect("fixed-width size field"),
-        );
-        Ok(Some((key, lsn, size)))
     }
 }
 
@@ -431,20 +342,18 @@ impl<'a> CoalescedIndexMergeIterator<'a> {
     }
 }
 
-/// Metadata consumed by the output writer. Streamed plans are already coalesced while the hole
-/// pass runs; only the materialized fast path needs a coalescing adapter here.
+/// Metadata consumed by the output writer. Plans that remain in memory are already coalesced;
+/// materialized and replayed cursor merges use the coalescing adapter here.
 enum OutputMetadataIterator<'a> {
-    Materialized(CoalescedIndexMergeIterator<'a>),
+    Coalesced(CoalescedIndexMergeIterator<'a>),
     InMemory(std::vec::IntoIter<IndexMetadataEntry>),
-    OnDisk(IndexMetadataSpoolReader),
 }
 
 impl OutputMetadataIterator<'_> {
     async fn next(&mut self) -> anyhow::Result<Option<IndexMetadataEntry>> {
         match self {
-            Self::Materialized(iterator) => iterator.next().await,
+            Self::Coalesced(iterator) => iterator.next().await,
             Self::InMemory(entries) => Ok(entries.next()),
-            Self::OnDisk(reader) => reader.next().await,
         }
     }
 }
@@ -2436,16 +2345,21 @@ impl Timeline {
                 .fold(0u64, |size, (delta, layer)| {
                     size.saturating_add(delta.index_size_bytes(layer.metadata().file_size))
                 });
-        let metadata_traversal = stats.metadata_traversal(metadata_index_size);
+        let metadata_traversal =
+            if index_metadata_traversal(metadata_index_size) == IndexMetadataTraversal::Streaming {
+                let disjoint_index_ranges = index_ranges_are_disjoint(&deltas, &index_ctx)
+                    .await
+                    .map_err(CompactionError::Other)?;
+                stats.metadata_traversal(metadata_index_size, disjoint_index_ranges)
+            } else {
+                stats.metadata_traversal(metadata_index_size, false)
+            };
         let materialize_metadata = metadata_traversal == IndexMetadataTraversal::Materialized;
         debug!(
             metadata_index_size,
             ?metadata_traversal,
             "selected L0 metadata traversal mode"
         );
-        let metadata_spool_dir = self
-            .conf
-            .timeline_path(&self.tenant_shard_id, &self.timeline_id);
         let materialized_metadata: Option<Vec<IndexMetadataEntry>> = if materialize_metadata {
             let mut all_keys = Vec::new();
             for delta in &deltas {
@@ -2514,9 +2428,8 @@ impl Timeline {
                     .await
                     .map_err(CompactionError::Other)?,
             };
-            // Reuse the streamed hole pass for output sizing. A large disjoint plan spills its
-            // already-coalesced entries instead of forcing output sizing to traverse every index
-            // a second time.
+            // Reuse the streamed hole pass for output sizing. A plan that exceeds the bound is
+            // replayed from fresh cursors instead of retaining or spooling every entry.
             let mut output_metadata = (!materialize_metadata)
                 .then(|| CoalescedOutputMetadataCollector::InMemory(Vec::new()));
             let mut index_entries = 0usize;
@@ -2525,22 +2438,11 @@ impl Timeline {
                 all_keys_iter.next().await.map_err(CompactionError::Other)?
             {
                 if let Some(output_metadata) = output_metadata.as_mut() {
-                    output_metadata
-                        .append(
-                            entry,
-                            target_file_size,
-                            L0_METADATA_OUTPUT_PLAN_MAX_ENTRIES,
-                            &metadata_spool_dir,
-                            &self.cancel,
-                        )
-                        .await
-                        .map_err(|error| {
-                            if self.cancel.is_cancelled() {
-                                CompactionError::new_cancelled()
-                            } else {
-                                CompactionError::Other(error)
-                            }
-                        })?;
+                    output_metadata.append(
+                        entry,
+                        target_file_size,
+                        L0_METADATA_OUTPUT_PLAN_MAX_ENTRIES,
+                    );
                 }
                 index_entries += 1;
                 if index_entries % 32_768 == 0 && self.cancel.is_cancelled() {
@@ -2580,15 +2482,7 @@ impl Timeline {
             }
             let mut holes = heap.into_vec();
             holes.sort_unstable_by_key(|hole| hole.key_range.start);
-            let output_metadata = match output_metadata {
-                Some(output_metadata) => Some(
-                    output_metadata
-                        .finish()
-                        .await
-                        .map_err(CompactionError::Other)?,
-                ),
-                None => None,
-            };
+            let output_metadata = output_metadata.map(CoalescedOutputMetadataCollector::finish);
             (holes, output_metadata)
         };
         let metadata_pass_finished = tokio::time::Instant::now();
@@ -2644,16 +2538,14 @@ impl Timeline {
         );
 
         // This iterator walks through all keys and is needed to calculate size used by each key.
-        // The streamed hole pass has already produced the coalesced metadata for this consumer,
-        // either in memory or in an unlinked temporary file. Replaying it avoids another B-tree
-        // traversal for disjoint large batches.
+        // The streamed hole pass has already produced the coalesced metadata for this consumer
+        // when it fit within the bound. A wide plan is replayed from fresh B-tree cursors so the
+        // hole pass does not retain or spool the whole plan.
         let mut all_keys_iter = match materialized_metadata.as_deref() {
-            Some(entries) => {
-                OutputMetadataIterator::Materialized(CoalescedIndexMergeIterator::new(
-                    IndexMergeIterator::from_entries(entries),
-                    target_file_size,
-                ))
-            }
+            Some(entries) => OutputMetadataIterator::Coalesced(CoalescedIndexMergeIterator::new(
+                IndexMergeIterator::from_entries(entries),
+                target_file_size,
+            )),
             None => match streamed_output_metadata
                 .take()
                 .expect("streamed metadata exists outside the materialized path")
@@ -2661,7 +2553,14 @@ impl Timeline {
                 CoalescedOutputMetadata::InMemory(entries) => {
                     OutputMetadataIterator::InMemory(entries.into_iter())
                 }
-                CoalescedOutputMetadata::OnDisk(reader) => OutputMetadataIterator::OnDisk(reader),
+                CoalescedOutputMetadata::Replay => {
+                    OutputMetadataIterator::Coalesced(CoalescedIndexMergeIterator::new(
+                        IndexMergeIterator::create(&deltas, &index_ctx)
+                            .await
+                            .map_err(CompactionError::Other)?,
+                        target_file_size,
+                    ))
+                }
             },
         };
 
@@ -3001,12 +2900,21 @@ struct CompactLevel0Phase1Stats {
 }
 
 impl CompactLevel0Phase1StatsBuilder {
-    fn metadata_traversal(&self, index_size: u64) -> IndexMetadataTraversal {
+    fn metadata_traversal(
+        &self,
+        index_size: u64,
+        disjoint_index_ranges: bool,
+    ) -> IndexMetadataTraversal {
         #[cfg(test)]
         if let Some(traversal) = self.metadata_traversal_override {
             return traversal;
         }
-        index_metadata_traversal(index_size)
+        if disjoint_index_ranges && index_size <= L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT
+        {
+            IndexMetadataTraversal::Materialized
+        } else {
+            index_metadata_traversal(index_size)
+        }
     }
 }
 
@@ -5230,9 +5138,25 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn coalesced_output_metadata_spills_and_replays() -> anyhow::Result<()> {
-        let temp_dir = camino_tempfile::tempdir()?;
+    #[test]
+    fn disjoint_metadata_materialization_stays_bounded() {
+        let stats = CompactLevel0Phase1StatsBuilder::default();
+        assert_eq!(
+            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT, true),
+            IndexMetadataTraversal::Materialized
+        );
+        assert_eq!(
+            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT + 1, true),
+            IndexMetadataTraversal::Streaming
+        );
+        assert_eq!(
+            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT, false),
+            IndexMetadataTraversal::Streaming
+        );
+    }
+
+    #[test]
+    fn coalesced_output_metadata_replays_after_bound() {
         let key = Key::from_i128(100);
         let input = [
             (key, Lsn(0x20), 3),
@@ -5240,29 +5164,15 @@ mod tests {
             (key.next(), Lsn(0x50), 1),
             (key.add(2), Lsn(0x60), 1),
         ];
-        let expected = vec![
-            (key, Lsn(0x20), 7),
-            (key.next(), Lsn(0x50), 1),
-            (key.add(2), Lsn(0x60), 1),
-        ];
 
-        let cancel = CancellationToken::new();
         let mut collector = CoalescedOutputMetadataCollector::InMemory(Vec::new());
         for entry in input {
-            collector
-                .append(entry, 10, 2, temp_dir.path(), &cancel)
-                .await?;
+            collector.append(entry, 10, 2);
         }
-        let CoalescedOutputMetadata::OnDisk(mut reader) = collector.finish().await? else {
-            panic!("two-entry plan should spill when a third distinct key is appended");
-        };
-
-        let mut actual = Vec::new();
-        while let Some(entry) = reader.next().await? {
-            actual.push(entry);
-        }
-        assert_eq!(actual, expected);
-        Ok(())
+        assert!(matches!(
+            collector.finish(),
+            CoalescedOutputMetadata::Replay
+        ));
     }
 
     #[tokio::test]
