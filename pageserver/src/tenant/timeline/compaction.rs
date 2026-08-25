@@ -5156,6 +5156,8 @@ mod tests {
     const L0_CALIBRATION_TARGET_FILE_SIZE: &str = "NEON_L0_COMPACTION_CALIBRATION_TARGET_FILE_SIZE";
     const L0_CALIBRATION_VALUE_BYTES: &str = "NEON_L0_COMPACTION_CALIBRATION_VALUE_BYTES";
     const L0_CALIBRATION_DISJOINT_KEYS: &str = "NEON_L0_COMPACTION_CALIBRATION_DISJOINT_KEYS";
+    const L0_CALIBRATION_REVERSE_DISJOINT_KEYS: &str =
+        "NEON_L0_COMPACTION_CALIBRATION_REVERSE_DISJOINT_KEYS";
 
     fn calibration_env_usize(name: &str) -> anyhow::Result<usize> {
         std::env::var(name)
@@ -5703,8 +5705,10 @@ mod tests {
 
     /// Exercises the threshold-triggered L0 pass selected by the normal tenant compaction
     /// iteration with a configurable stack of delta layers. The default stack overlaps; set
-    /// `NEON_L0_COMPACTION_CALIBRATION_DISJOINT_KEYS=1` to exercise a wide output plan and
-    /// `NEON_L0_COMPACTION_CALIBRATION_VALUE_BYTES=1` for tiny-value metadata density. The input
+    /// `NEON_L0_COMPACTION_CALIBRATION_DISJOINT_KEYS=1` to exercise a wide output plan,
+    /// `NEON_L0_COMPACTION_CALIBRATION_REVERSE_DISJOINT_KEYS=1` to make the materialized control
+    /// sort reverse-ordered runs, and `NEON_L0_COMPACTION_CALIBRATION_VALUE_BYTES=1` for
+    /// tiny-value metadata density. The input
     /// construction is deliberately outside the timer: a production compaction already receives
     /// completed layers, while the timed section starts at the same `compaction_iteration` entry
     /// point used by the background loop and includes layer-map replacement.
@@ -5734,6 +5738,11 @@ mod tests {
         let target_file_size = calibration_env_u64(L0_CALIBRATION_TARGET_FILE_SIZE)?;
         let value_bytes = calibration_env_usize_or(L0_CALIBRATION_VALUE_BYTES, 64)?;
         let disjoint_keys = calibration_env_bool(L0_CALIBRATION_DISJOINT_KEYS)?;
+        let reverse_disjoint_keys = calibration_env_bool(L0_CALIBRATION_REVERSE_DISJOINT_KEYS)?;
+        anyhow::ensure!(
+            !reverse_disjoint_keys || disjoint_keys,
+            "{L0_CALIBRATION_REVERSE_DISJOINT_KEYS} requires {L0_CALIBRATION_DISJOINT_KEYS}=1"
+        );
         let harness = TenantHarness::create("l0_compaction_metadata_calibration").await?;
         let _span = harness.span().entered();
         let (tenant, ctx) = harness.load().await;
@@ -5763,7 +5772,12 @@ mod tests {
             let lsn_start = Lsn(initdb_lsn.0 + layer_index as u64 * LAYER_LSN_WIDTH);
             let lsn_range = lsn_start..Lsn(lsn_start.0 + LAYER_LSN_WIDTH);
             let value = Bytes::from(vec![layer_index as u8; value_bytes]);
-            let key_start = usize::from(disjoint_keys) * layer_index * entries_per_layer;
+            let key_layer_index = if reverse_disjoint_keys {
+                layer_count - layer_index - 1
+            } else {
+                layer_index
+            };
+            let key_start = usize::from(disjoint_keys) * key_layer_index * entries_per_layer;
             let data = (0..entries_per_layer)
                 .map(|key_index| {
                     (
@@ -5813,7 +5827,12 @@ mod tests {
             vec![layer_count - 1]
         };
         for layer_index in sampled_layers {
-            let key_start = usize::from(disjoint_keys) * layer_index * entries_per_layer;
+            let key_layer_index = if reverse_disjoint_keys {
+                layer_count - layer_index - 1
+            } else {
+                layer_index
+            };
+            let key_start = usize::from(disjoint_keys) * key_layer_index * entries_per_layer;
             for key_index in [0, entries_per_layer / 2, entries_per_layer - 1] {
                 let value = timeline
                     .get(
