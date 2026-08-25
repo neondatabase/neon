@@ -122,10 +122,9 @@ const L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 128 * 1024 * 1024;
 /// and build the compact per-key output-size plan.
 const L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 
-/// Avoid a pair of exact B-tree bound walks for very wide batches whose broad descriptors do not
-/// prove disjointness. Such batches retain the existing materialized path instead of paying the
-/// bound walks and then scanning the indexes again.
-const L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS: usize = 512;
+/// Bound heap and exact-range work for broad overlapping batches. Layer summaries can still prove
+/// disjointness without a bound walk; otherwise wider batches retain the materialized path.
+const L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS: usize = 16;
 
 #[cfg(test)]
 static LAST_INDEX_METADATA_MICROS: std::sync::atomic::AtomicU64 =
@@ -260,7 +259,7 @@ async fn index_range_order_if_disjoint(
     if let Some(order) = disjoint_layer_order(layer_ranges, true) {
         return Ok(Some(order));
     }
-    if deltas.len() > L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS {
+    if deltas.len() > L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS {
         return Ok(None);
     }
 
@@ -2995,9 +2994,9 @@ impl CompactLevel0Phase1StatsBuilder {
             } else {
                 IndexMetadataTraversal::Streaming
             }
-        } else if layer_count > L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS {
+        } else if layer_count > L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS {
             // Broad descriptors cannot prove whether this many layers overlap. Avoid exact bound
-            // walks followed by another metadata pass; the fallback keeps the old cost profile.
+            // walks followed by a cursor merge; the fallback keeps the old cost profile.
             IndexMetadataTraversal::Materialized
         } else {
             index_metadata_traversal(index_size)
@@ -5292,7 +5291,7 @@ mod tests {
             stats.metadata_traversal(
                 L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT + 1,
                 false,
-                L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS + 1,
+                L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS + 1,
             ),
             IndexMetadataTraversal::Materialized
         );
