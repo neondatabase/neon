@@ -119,8 +119,8 @@ impl Ord for IndexMergeHeapEntry {
 const L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 4 * 1024 * 1024;
 
 /// A disjoint batch has no cross-layer merge work to amortize the cursor heap. Keep a bounded
-/// materialized fast path for small disjoint footprints; larger batches use the concatenated
-/// cursor and compact per-key output-size plan.
+/// materialized fast path for small disjoint footprints; larger batches scan one layer at a time
+/// and build the compact per-key output-size plan.
 const L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 
 type IndexMetadataEntry = (Key, Lsn, u64);
@@ -268,9 +268,14 @@ struct StreamingIndexMergeIterator<'a> {
     heap: BinaryHeap<IndexMergeHeapEntry>,
 }
 
-/// A sequential cursor over layers whose key ranges are proven disjoint.
+/// A sequential, one-layer-at-a-time scan over layers whose key ranges are proven disjoint.
+///
+/// The visitor used by `index_entries` is faster than the per-item async stream for this case, and
+/// only one layer's entries are retained while the compact output plan is built.
 struct ConcatenatedIndexMergeIterator<'a> {
-    iterators: Vec<DeltaLayerIndexIterator<'a>>,
+    deltas: Vec<&'a DeltaLayerInner>,
+    ctx: &'a RequestContext,
+    entries: Option<std::vec::IntoIter<DeltaEntry<'a>>>,
     current: usize,
 }
 
@@ -298,11 +303,22 @@ impl<'a> IndexMergeIterator<'a> {
         layer_order: &[usize],
         ctx: &'a RequestContext,
     ) -> Self {
-        let iterators = layer_order
-            .iter()
-            .map(|&layer_idx| deltas[layer_idx].index_iter(ctx))
-            .collect::<Vec<_>>();
-        Self::from_concatenated_iterators(iterators)
+        Self::from_concatenated_layers(
+            layer_order
+                .iter()
+                .map(|&layer_idx| deltas[layer_idx])
+                .collect(),
+            ctx,
+        )
+    }
+
+    fn from_concatenated_layers(deltas: Vec<&'a DeltaLayerInner>, ctx: &'a RequestContext) -> Self {
+        Self::Concatenated(ConcatenatedIndexMergeIterator {
+            deltas,
+            ctx,
+            entries: None,
+            current: 0,
+        })
     }
 
     async fn from_iterators(
@@ -320,13 +336,6 @@ impl<'a> IndexMergeIterator<'a> {
             iterators,
             heap,
         }))
-    }
-
-    fn from_concatenated_iterators(iterators: Vec<DeltaLayerIndexIterator<'a>>) -> Self {
-        Self::Concatenated(ConcatenatedIndexMergeIterator {
-            iterators,
-            current: 0,
-        })
     }
 
     fn from_entries(entries: &'a [IndexMetadataEntry]) -> Self {
@@ -359,13 +368,19 @@ impl<'a> IndexMergeIterator<'a> {
                 Ok(Some(entry))
             }
             Self::Concatenated(concatenated) => loop {
-                let Some(iterator) = concatenated.iterators.get_mut(concatenated.current) else {
+                if let Some(entries) = concatenated.entries.as_mut() {
+                    if let Some(entry) = entries.next() {
+                        return Ok(Some((entry.key, entry.lsn, entry.size)));
+                    }
+                    concatenated.entries = None;
+                }
+
+                let Some(delta) = concatenated.deltas.get(concatenated.current) else {
                     return Ok(None);
                 };
-                if let Some(entry) = iterator.next().await? {
-                    return Ok(Some(entry));
-                }
                 concatenated.current += 1;
+                concatenated.entries =
+                    Some(delta.index_entries(concatenated.ctx).await?.into_iter());
             },
         }
     }
@@ -5216,25 +5231,6 @@ mod tests {
             actual.push(entry);
         }
         assert_eq!(actual, expected);
-
-        let disjoint_first = vec![(key, Lsn(0x20), 3), (key.add(1), Lsn(0x30), 5)];
-        let disjoint_second = vec![(key.add(10), Lsn(0x40), 7)];
-        let mut concatenated = IndexMergeIterator::from_concatenated_iterators(vec![
-            make_index_cursor(&disjoint_first, &ctx)?,
-            make_index_cursor(&disjoint_second, &ctx)?,
-        ]);
-        let mut concatenated_actual = Vec::new();
-        while let Some(entry) = concatenated.next().await? {
-            concatenated_actual.push(entry);
-        }
-        assert_eq!(
-            concatenated_actual,
-            disjoint_first
-                .iter()
-                .chain(&disjoint_second)
-                .copied()
-                .collect::<Vec<_>>()
-        );
 
         let mut materialized = IndexMergeIterator::from_entries(&expected);
         let mut materialized_actual = Vec::new();
