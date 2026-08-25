@@ -2990,10 +2990,13 @@ impl CompactLevel0Phase1StatsBuilder {
         if let Some(traversal) = self.metadata_traversal_override {
             return traversal;
         }
-        if disjoint_index_ranges && index_size <= L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT
-        {
-            IndexMetadataTraversal::Materialized
-        } else if !disjoint_index_ranges && layer_count > L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS {
+        if disjoint_index_ranges {
+            if index_size <= L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT {
+                IndexMetadataTraversal::Materialized
+            } else {
+                IndexMetadataTraversal::Streaming
+            }
+        } else if layer_count > L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS {
             // Broad descriptors cannot prove whether this many layers overlap. Avoid exact bound
             // walks followed by another metadata pass; the fallback keeps the old cost profile.
             IndexMetadataTraversal::Materialized
@@ -5255,10 +5258,10 @@ mod tests {
             index_metadata_traversal(L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT + 1),
             IndexMetadataTraversal::Streaming
         );
-        // Every B-tree entry has a five-byte value, before its key and node overhead. A million
-        // entries therefore cannot accidentally select the materialized path.
+        // A batch whose index metadata exceeds the threshold uses the streaming path even when
+        // the entries themselves are small.
         assert_eq!(
-            index_metadata_traversal(5 * 1_000_000),
+            index_metadata_traversal(L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT + 5),
             IndexMetadataTraversal::Streaming
         );
     }
@@ -5279,12 +5282,16 @@ mod tests {
             IndexMetadataTraversal::Streaming
         );
         assert_eq!(
-            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT, false, 10,),
+            stats.metadata_traversal(L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT, false, 10,),
+            IndexMetadataTraversal::Materialized
+        );
+        assert_eq!(
+            stats.metadata_traversal(L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT + 1, false, 10,),
             IndexMetadataTraversal::Streaming
         );
         assert_eq!(
             stats.metadata_traversal(
-                L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT + 1,
+                L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT + 1,
                 false,
                 L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS + 1,
             ),
