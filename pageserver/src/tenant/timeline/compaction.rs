@@ -2421,8 +2421,11 @@ impl Timeline {
                 .fold(0u64, |size, (delta, layer)| {
                     size.saturating_add(delta.index_size_bytes(layer.metadata().file_size))
                 });
+        // Disjoint batches have a lower materialization bound than overlapping batches. Check
+        // their exact index ranges as soon as they cross that lower bound, even while the general
+        // overlapping-batch gate still selects materialization.
         let disjoint_index_order =
-            if index_metadata_traversal(metadata_index_size) == IndexMetadataTraversal::Streaming {
+            if metadata_index_size > L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT {
                 index_range_order_if_disjoint(&deltas, &index_ctx)
                     .await
                     .map_err(CompactionError::Other)?
