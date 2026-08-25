@@ -124,7 +124,7 @@ const L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 
 /// Bound heap and exact-range work for broad overlapping batches. Layer summaries can still prove
 /// disjointness without a bound walk; otherwise wider batches retain the materialized path.
-const L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS: usize = 16;
+const L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS: usize = 10;
 
 #[cfg(test)]
 static LAST_INDEX_METADATA_MICROS: std::sync::atomic::AtomicU64 =
