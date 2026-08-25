@@ -118,16 +118,89 @@ impl Ord for IndexMergeHeapEntry {
 /// materialized path for a million-entry batch.
 const L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 4 * 1024 * 1024;
 
-/// A disjoint batch has no cross-layer merge work to amortize the cursor heap. Keep the
-/// materialized fast path for the same bounded, roughly two-million-entry scale as the output
-/// metadata plan; larger disjoint batches remain on the bounded replay path.
+/// A disjoint batch has no cross-layer merge work to amortize the cursor heap. Keep a bounded
+/// materialized fast path for small disjoint footprints; larger batches use the concatenated
+/// cursor and compact per-key output-size plan.
 const L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 
-/// A streamed hole pass keeps this many already-coalesced output-size entries in memory. Larger
-/// plans discard the bounded prefix so output sizing can replay fresh cursors.
-const L0_METADATA_OUTPUT_PLAN_MAX_ENTRIES: usize = 2_000_000;
-
 type IndexMetadataEntry = (Key, Lsn, u64);
+
+/// Output sizing needs one total per key and only the LSNs where a duplicate-key run is split.
+/// Keeping this compact plan avoids retaining the complete index entry stream or reopening the
+/// B-trees after the hole pass.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OutputSizePlan {
+    key_sizes: Vec<u64>,
+    duplicate_splits: Vec<(usize, Lsn)>,
+}
+
+struct OutputSizePlanBuilder {
+    target_file_size: u64,
+    pending: Option<IndexMetadataEntry>,
+    plan: OutputSizePlan,
+    current_key: Option<Key>,
+    current_key_index: usize,
+    current_segment_size: u64,
+    current_segment_lsn: Option<Lsn>,
+}
+
+impl OutputSizePlanBuilder {
+    fn new(target_file_size: u64) -> Self {
+        Self {
+            target_file_size,
+            pending: None,
+            plan: OutputSizePlan::default(),
+            current_key: None,
+            current_key_index: 0,
+            current_segment_size: 0,
+            current_segment_lsn: None,
+        }
+    }
+
+    /// Apply the same strict-`< target` coalescing used by the former output metadata cursor.
+    fn push(&mut self, entry: IndexMetadataEntry) {
+        if let Some(previous) = self.pending.take() {
+            if previous.0 == entry.0 && previous.2 < self.target_file_size {
+                self.pending = Some((previous.0, previous.1, previous.2 + entry.2));
+                return;
+            }
+            self.add_coalesced(previous);
+        }
+        self.pending = Some(entry);
+    }
+
+    fn add_coalesced(&mut self, (key, lsn, size): IndexMetadataEntry) {
+        if self.current_key != Some(key) {
+            self.current_key = Some(key);
+            self.current_key_index = self.plan.key_sizes.len();
+            self.plan.key_sizes.push(size);
+            self.current_segment_size = size;
+            self.current_segment_lsn = Some(lsn);
+            return;
+        }
+
+        self.plan.key_sizes[self.current_key_index] =
+            self.plan.key_sizes[self.current_key_index].saturating_add(size);
+        if self.current_segment_size.saturating_add(size) > self.target_file_size
+            && self.current_segment_lsn != Some(lsn)
+        {
+            self.plan
+                .duplicate_splits
+                .push((self.current_key_index, lsn));
+            self.current_segment_size = size;
+            self.current_segment_lsn = Some(lsn);
+        } else {
+            self.current_segment_size = self.current_segment_size.saturating_add(size);
+        }
+    }
+
+    fn finish(mut self) -> OutputSizePlan {
+        if let Some(pending) = self.pending.take() {
+            self.add_coalesced(pending);
+        }
+        self.plan
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum IndexMetadataTraversal {
@@ -144,69 +217,49 @@ fn index_metadata_traversal(index_size: u64) -> IndexMetadataTraversal {
     }
 }
 
-async fn index_ranges_are_disjoint(
+fn disjoint_layer_order(
+    mut ranges: Vec<(usize, Key, Key)>,
+    exclusive_end: bool,
+) -> Option<Vec<usize>> {
+    ranges.sort_unstable_by_key(|(_, first, _)| *first);
+    let disjoint = ranges.windows(2).all(|window| {
+        if exclusive_end {
+            window[0].2 <= window[1].1
+        } else {
+            window[0].2 < window[1].1
+        }
+    });
+    disjoint.then(|| {
+        ranges
+            .into_iter()
+            .map(|(layer_idx, _, _)| layer_idx)
+            .collect()
+    })
+}
+
+async fn index_range_order_if_disjoint(
     deltas: &[&DeltaLayerInner],
     ctx: &RequestContext,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<Vec<usize>>> {
     // Layer summaries are exact enough to prove disjointness and avoid reopening every index on
     // the common production path. A summary may be wider than the actual index, so overlapping
     // summaries get an exact first/last-key check before the fast path is selected.
-    let mut layer_ranges = deltas
+    let layer_ranges = deltas
         .iter()
-        .map(|delta| (delta.key_range().start, delta.key_range().end))
+        .enumerate()
+        .map(|(layer_idx, delta)| (layer_idx, delta.key_range().start, delta.key_range().end))
         .collect::<Vec<_>>();
-    layer_ranges.sort_unstable_by_key(|(first, _)| *first);
-    if layer_ranges
-        .windows(2)
-        .all(|window| window[0].1 <= window[1].0)
-    {
-        return Ok(true);
+    if let Some(order) = disjoint_layer_order(layer_ranges, true) {
+        return Ok(Some(order));
     }
 
     let mut bounds = Vec::with_capacity(deltas.len());
-    for delta in deltas {
-        if let Some(bound) = delta.index_key_bounds(ctx).await? {
-            bounds.push(bound);
+    for (layer_idx, delta) in deltas.iter().enumerate() {
+        if let Some((first, last)) = delta.index_key_bounds(ctx).await? {
+            bounds.push((layer_idx, first, last));
         }
     }
-    bounds.sort_unstable_by_key(|(first, _)| *first);
-    Ok(bounds.windows(2).all(|window| window[0].1 < window[1].0))
-}
-
-/// A coalesced output-size plan collected during the hole pass. Most overlapping L0 stacks fit
-/// in memory. When a disjoint plan exceeds the bound, the plan is discarded and the output
-/// writer replays fresh B-tree cursors instead of paying temporary-file I/O.
-enum CoalescedOutputMetadata {
-    InMemory(Vec<IndexMetadataEntry>),
-    Replay,
-}
-
-enum CoalescedOutputMetadataCollector {
-    InMemory(Vec<IndexMetadataEntry>),
-    Replay,
-}
-
-impl CoalescedOutputMetadataCollector {
-    fn append(&mut self, entry: IndexMetadataEntry, target_file_size: u64, max_entries: usize) {
-        match self {
-            Self::InMemory(entries) => {
-                if append_coalesced_output_metadata(entries, entry, target_file_size, max_entries) {
-                    return;
-                }
-                // The output writer can create a fresh cursor merge after the hole pass. Do not
-                // turn a rare wide disjoint plan into a synchronous temp-file write/read cycle.
-                *self = Self::Replay;
-            }
-            Self::Replay => {}
-        }
-    }
-
-    fn finish(self) -> CoalescedOutputMetadata {
-        match self {
-            Self::InMemory(entries) => CoalescedOutputMetadata::InMemory(entries),
-            Self::Replay => CoalescedOutputMetadata::Replay,
-        }
-    }
+    Ok(disjoint_layer_order(bounds, false))
 }
 
 /// Bounded k-way merge over the metadata indexes of a set of delta layers.
@@ -215,10 +268,17 @@ struct StreamingIndexMergeIterator<'a> {
     heap: BinaryHeap<IndexMergeHeapEntry>,
 }
 
+/// A sequential cursor over layers whose key ranges are proven disjoint.
+struct ConcatenatedIndexMergeIterator<'a> {
+    iterators: Vec<DeltaLayerIndexIterator<'a>>,
+    current: usize,
+}
+
 /// Ordered metadata from either the small-batch materialized fast path or a bounded cursor merge.
 enum IndexMergeIterator<'a> {
     Materialized(std::iter::Copied<std::slice::Iter<'a, IndexMetadataEntry>>),
     Streaming(StreamingIndexMergeIterator<'a>),
+    Concatenated(ConcatenatedIndexMergeIterator<'a>),
 }
 
 impl<'a> IndexMergeIterator<'a> {
@@ -231,6 +291,18 @@ impl<'a> IndexMergeIterator<'a> {
             .map(|delta| delta.index_iter(ctx))
             .collect::<Vec<_>>();
         Self::from_iterators(iterators).await
+    }
+
+    fn create_concatenated(
+        deltas: &[&'a DeltaLayerInner],
+        layer_order: &[usize],
+        ctx: &'a RequestContext,
+    ) -> Self {
+        let iterators = layer_order
+            .iter()
+            .map(|&layer_idx| deltas[layer_idx].index_iter(ctx))
+            .collect::<Vec<_>>();
+        Self::from_concatenated_iterators(iterators)
     }
 
     async fn from_iterators(
@@ -248,6 +320,13 @@ impl<'a> IndexMergeIterator<'a> {
             iterators,
             heap,
         }))
+    }
+
+    fn from_concatenated_iterators(iterators: Vec<DeltaLayerIndexIterator<'a>>) -> Self {
+        Self::Concatenated(ConcatenatedIndexMergeIterator {
+            iterators,
+            current: 0,
+        })
     }
 
     fn from_entries(entries: &'a [IndexMetadataEntry]) -> Self {
@@ -279,40 +358,28 @@ impl<'a> IndexMergeIterator<'a> {
                 }
                 Ok(Some(entry))
             }
+            Self::Concatenated(concatenated) => loop {
+                let Some(iterator) = concatenated.iterators.get_mut(concatenated.current) else {
+                    return Ok(None);
+                };
+                if let Some(entry) = iterator.next().await? {
+                    return Ok(Some(entry));
+                }
+                concatenated.current += 1;
+            },
         }
     }
 }
 
-/// Append metadata in the same segments that `CoalescedIndexMergeIterator` exposes to output
-/// sizing. Returning false tells the caller to discard the plan rather than retain more metadata.
-fn append_coalesced_output_metadata(
-    entries: &mut Vec<IndexMetadataEntry>,
-    current: IndexMetadataEntry,
-    target_file_size: u64,
-    max_entries: usize,
-) -> bool {
-    if let Some(previous) = entries.last_mut()
-        && previous.0 == current.0
-        && previous.2 < target_file_size
-    {
-        previous.2 += current.2;
-        return true;
-    }
-
-    if entries.len() == max_entries {
-        return false;
-    }
-    entries.push(current);
-    true
-}
-
 /// Equivalent of the former `Itertools::coalesce` call used for output sizing.
+#[cfg(test)]
 struct CoalescedIndexMergeIterator<'a> {
     inner: IndexMergeIterator<'a>,
     pending: Option<IndexMetadataEntry>,
     target_file_size: u64,
 }
 
+#[cfg(test)]
 impl<'a> CoalescedIndexMergeIterator<'a> {
     fn new(inner: IndexMergeIterator<'a>, target_file_size: u64) -> Self {
         Self {
@@ -339,22 +406,6 @@ impl<'a> CoalescedIndexMergeIterator<'a> {
             }
         }
         Ok(Some(previous))
-    }
-}
-
-/// Metadata consumed by the output writer. Plans that remain in memory are already coalesced;
-/// materialized and replayed cursor merges use the coalescing adapter here.
-enum OutputMetadataIterator<'a> {
-    Coalesced(CoalescedIndexMergeIterator<'a>),
-    InMemory(std::vec::IntoIter<IndexMetadataEntry>),
-}
-
-impl OutputMetadataIterator<'_> {
-    async fn next(&mut self) -> anyhow::Result<Option<IndexMetadataEntry>> {
-        match self {
-            Self::Coalesced(iterator) => iterator.next().await,
-            Self::InMemory(entries) => Ok(entries.next()),
-        }
     }
 }
 
@@ -2345,15 +2396,16 @@ impl Timeline {
                 .fold(0u64, |size, (delta, layer)| {
                     size.saturating_add(delta.index_size_bytes(layer.metadata().file_size))
                 });
-        let metadata_traversal =
+        let disjoint_index_order =
             if index_metadata_traversal(metadata_index_size) == IndexMetadataTraversal::Streaming {
-                let disjoint_index_ranges = index_ranges_are_disjoint(&deltas, &index_ctx)
+                index_range_order_if_disjoint(&deltas, &index_ctx)
                     .await
-                    .map_err(CompactionError::Other)?;
-                stats.metadata_traversal(metadata_index_size, disjoint_index_ranges)
+                    .map_err(CompactionError::Other)?
             } else {
-                stats.metadata_traversal(metadata_index_size, false)
+                None
             };
+        let metadata_traversal =
+            stats.metadata_traversal(metadata_index_size, disjoint_index_order.is_some());
         let materialize_metadata = metadata_traversal == IndexMetadataTraversal::Materialized;
         debug!(
             metadata_index_size,
@@ -2405,7 +2457,7 @@ impl Timeline {
             key_range: Range<Key>,
             coverage_size: usize,
         }
-        let (holes, mut streamed_output_metadata): (Vec<Hole>, Option<CoalescedOutputMetadata>) = {
+        let (holes, output_size_plan): (Vec<Hole>, OutputSizePlan) = {
             impl Ord for Hole {
                 fn cmp(&self, other: &Self) -> Ordering {
                     self.coverage_size.cmp(&other.coverage_size).reverse()
@@ -2424,26 +2476,25 @@ impl Timeline {
             let mut prev: Option<Key> = None;
             let mut all_keys_iter = match materialized_metadata.as_deref() {
                 Some(entries) => IndexMergeIterator::from_entries(entries),
-                None => IndexMergeIterator::create(&deltas, &index_ctx)
-                    .await
-                    .map_err(CompactionError::Other)?,
+                None => match disjoint_index_order.as_deref() {
+                    Some(order) => {
+                        IndexMergeIterator::create_concatenated(&deltas, order, &index_ctx)
+                    }
+                    None => IndexMergeIterator::create(&deltas, &index_ctx)
+                        .await
+                        .map_err(CompactionError::Other)?,
+                },
             };
-            // Reuse the streamed hole pass for output sizing. A plan that exceeds the bound is
-            // replayed from fresh cursors instead of retaining or spooling every entry.
-            let mut output_metadata = (!materialize_metadata)
-                .then(|| CoalescedOutputMetadataCollector::InMemory(Vec::new()));
+            // Build the compact output-size plan while the ordered metadata cursor is already
+            // open. It retains one total per key and duplicate split boundaries, not every index
+            // entry, so output sizing never needs a second B-tree traversal.
+            let mut output_size_plan = OutputSizePlanBuilder::new(target_file_size);
             let mut index_entries = 0usize;
 
             while let Some(entry @ (next_key, _, _)) =
                 all_keys_iter.next().await.map_err(CompactionError::Other)?
             {
-                if let Some(output_metadata) = output_metadata.as_mut() {
-                    output_metadata.append(
-                        entry,
-                        target_file_size,
-                        L0_METADATA_OUTPUT_PLAN_MAX_ENTRIES,
-                    );
-                }
+                output_size_plan.push(entry);
                 index_entries += 1;
                 if index_entries % 32_768 == 0 && self.cancel.is_cancelled() {
                     return Err(CompactionError::new_cancelled());
@@ -2482,8 +2533,7 @@ impl Timeline {
             }
             let mut holes = heap.into_vec();
             holes.sort_unstable_by_key(|hole| hole.key_range.start);
-            let output_metadata = output_metadata.map(CoalescedOutputMetadataCollector::finish);
-            (holes, output_metadata)
+            (holes, output_size_plan.finish())
         };
         let metadata_pass_finished = tokio::time::Instant::now();
         if let Some(key_sort_finished) = materialized_key_sort_finished {
@@ -2523,6 +2573,9 @@ impl Timeline {
             return Err(CompactionError::new_cancelled());
         }
 
+        // The compact plan is the only metadata needed by the writer. Release the small-batch
+        // materialized entries before reading values as well.
+        drop(materialized_metadata);
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
 
         // This iterator walks through all key-value pairs from all the layers
@@ -2537,32 +2590,12 @@ impl Timeline {
             1024,
         );
 
-        // This iterator walks through all keys and is needed to calculate size used by each key.
-        // The streamed hole pass has already produced the coalesced metadata for this consumer
-        // when it fit within the bound. A wide plan is replayed from fresh B-tree cursors so the
-        // hole pass does not retain or spool the whole plan.
-        let mut all_keys_iter = match materialized_metadata.as_deref() {
-            Some(entries) => OutputMetadataIterator::Coalesced(CoalescedIndexMergeIterator::new(
-                IndexMergeIterator::from_entries(entries),
-                target_file_size,
-            )),
-            None => match streamed_output_metadata
-                .take()
-                .expect("streamed metadata exists outside the materialized path")
-            {
-                CoalescedOutputMetadata::InMemory(entries) => {
-                    OutputMetadataIterator::InMemory(entries.into_iter())
-                }
-                CoalescedOutputMetadata::Replay => {
-                    OutputMetadataIterator::Coalesced(CoalescedIndexMergeIterator::new(
-                        IndexMergeIterator::create(&deltas, &index_ctx)
-                            .await
-                            .map_err(CompactionError::Other)?,
-                        target_file_size,
-                    ))
-                }
-            },
-        };
+        // The metadata pass has already reduced the ordered index stream to one total per key
+        // and the LSN boundaries needed for duplicate-key slices. Consume that compact plan while
+        // the value merge writes output; no index cursor is reopened here.
+        let mut output_key_index = 0usize;
+        let mut next_duplicate_split = 0usize;
+        let mut current_key_duplicate_split_end = 0usize;
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -2633,46 +2666,49 @@ impl Timeline {
             }
 
             let same_key = prev_key == Some(key);
-            // We need to check key boundaries once we reach next key or end of layer with the same key
+            // The metadata pass recorded the total size of each key and the LSN boundaries where
+            // an oversized duplicate-key run must be sliced. Consume that compact plan at the
+            // same key boundaries as the value merge instead of reopening the index.
             if !same_key || lsn == dup_end_lsn {
-                let mut next_key_size = 0u64;
                 let is_dup_layer = dup_end_lsn.is_valid();
-                dup_start_lsn = Lsn::INVALID;
                 if !same_key {
+                    if output_key_index > 0
+                        && next_duplicate_split != current_key_duplicate_split_end
+                    {
+                        return Err(CompactionError::Other(anyhow!(
+                            "output metadata plan left duplicate split boundaries unconsumed"
+                        )));
+                    }
+                    dup_start_lsn = Lsn::INVALID;
                     dup_end_lsn = Lsn::INVALID;
-                }
-                // Determine size occupied by this key. We stop at next key or when size becomes larger than target_file_size.
-                while let Some((next_key, next_lsn, next_size)) =
-                    all_keys_iter.next().await.map_err(CompactionError::Other)?
-                {
-                    next_key_size = next_size;
-                    if key != next_key {
-                        if dup_end_lsn.is_valid() {
-                            // We are writting segment with duplicates:
-                            // place all remaining values of this key in separate segment
-                            dup_start_lsn = dup_end_lsn; // new segments starts where old stops
-                            dup_end_lsn = lsn_range.end; // there are no more values of this key till end of LSN range
-                        }
-                        break;
+                    let key_index = output_key_index;
+                    let Some(key_size) = output_size_plan.key_sizes.get(key_index).copied() else {
+                        return Err(CompactionError::Other(anyhow!(
+                            "output metadata plan has no size for value key {key}"
+                        )));
+                    };
+                    output_key_index += 1;
+                    key_values_total_size = key_size;
+                    current_key_duplicate_split_end = next_duplicate_split;
+                    while output_size_plan
+                        .duplicate_splits
+                        .get(current_key_duplicate_split_end)
+                        .is_some_and(|(split_key, _)| *split_key == key_index)
+                    {
+                        current_key_duplicate_split_end += 1;
                     }
-                    key_values_total_size += next_size;
-                    // Check if it is time to split segment: if total keys size is larger than target file size.
-                    // We need to avoid generation of empty segments if next_size > target_file_size.
-                    if key_values_total_size > target_file_size && lsn != next_lsn {
-                        // Split key between multiple layers: such layer can contain only single key
-                        dup_start_lsn = if dup_end_lsn.is_valid() {
-                            dup_end_lsn // new segment with duplicates starts where old one stops
-                        } else {
-                            lsn // start with the first LSN for this key
-                        };
-                        dup_end_lsn = next_lsn; // upper LSN boundary is exclusive
-                        break;
+                    if next_duplicate_split < current_key_duplicate_split_end {
+                        dup_start_lsn = lsn;
+                        dup_end_lsn = output_size_plan.duplicate_splits[next_duplicate_split].1;
                     }
-                }
-                // handle case when loop reaches last key: in this case dup_end is non-zero but dup_start is not set.
-                if dup_end_lsn.is_valid() && !dup_start_lsn.is_valid() {
+                } else {
                     dup_start_lsn = dup_end_lsn;
-                    dup_end_lsn = lsn_range.end;
+                    next_duplicate_split += 1;
+                    dup_end_lsn = if next_duplicate_split < current_key_duplicate_split_end {
+                        output_size_plan.duplicate_splits[next_duplicate_split].1
+                    } else {
+                        lsn_range.end
+                    };
                 }
                 if writer.is_some() {
                     let written_size = writer.as_mut().unwrap().size();
@@ -2703,8 +2739,6 @@ impl Timeline {
                         }
                     }
                 }
-                // Remember size of key value because at next iteration we will access next item
-                key_values_total_size = next_key_size;
             }
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
                 Err(CompactionError::Other(anyhow::anyhow!(
@@ -2761,6 +2795,13 @@ impl Timeline {
             }
 
             prev_key = Some(key);
+        }
+        if output_key_index != output_size_plan.key_sizes.len()
+            || next_duplicate_split != output_size_plan.duplicate_splits.len()
+        {
+            return Err(CompactionError::Other(anyhow!(
+                "output values do not match the index metadata plan"
+            )));
         }
         if let Some(writer) = writer {
             let (desc, path) = writer
@@ -2829,7 +2870,6 @@ impl Timeline {
 
         // Without this, rustc complains about deltas_to_compact still
         // being borrowed when we `.into_iter()` below.
-        drop(all_keys_iter);
         drop(all_values_iter);
         drop(deltas);
 
@@ -5089,35 +5129,21 @@ mod tests {
     }
 
     #[test]
-    fn coalesced_output_metadata_plan_is_bounded() {
+    fn output_size_plan_coalesces_and_records_duplicate_splits() {
         let key = Key::from_i128(100);
-        let mut plan = Vec::new();
-        assert!(append_coalesced_output_metadata(
-            &mut plan,
+        let mut builder = OutputSizePlanBuilder::new(5);
+        for entry in [
             (key, Lsn(0x10), 3),
-            10,
-            2,
-        ));
-        assert!(append_coalesced_output_metadata(
-            &mut plan,
             (key, Lsn(0x20), 4),
-            10,
-            2,
-        ));
-        assert_eq!(plan, vec![(key, Lsn(0x10), 7)]);
-        assert!(append_coalesced_output_metadata(
-            &mut plan,
-            (key.next(), Lsn(0x30), 1),
-            10,
-            2,
-        ));
-        assert!(!append_coalesced_output_metadata(
-            &mut plan,
-            (key.add(2), Lsn(0x40), 1),
-            10,
-            2,
-        ));
-        assert_eq!(plan.len(), 2);
+            (key, Lsn(0x30), 4),
+            (key.next(), Lsn(0x40), 2),
+        ] {
+            builder.push(entry);
+        }
+
+        let plan = builder.finish();
+        assert_eq!(plan.key_sizes, vec![11, 2]);
+        assert_eq!(plan.duplicate_splits, vec![(0, Lsn(0x30))]);
     }
 
     #[test]
@@ -5153,26 +5179,6 @@ mod tests {
             stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT, false),
             IndexMetadataTraversal::Streaming
         );
-    }
-
-    #[test]
-    fn coalesced_output_metadata_replays_after_bound() {
-        let key = Key::from_i128(100);
-        let input = [
-            (key, Lsn(0x20), 3),
-            (key, Lsn(0x40), 4),
-            (key.next(), Lsn(0x50), 1),
-            (key.add(2), Lsn(0x60), 1),
-        ];
-
-        let mut collector = CoalescedOutputMetadataCollector::InMemory(Vec::new());
-        for entry in input {
-            collector.append(entry, 10, 2);
-        }
-        assert!(matches!(
-            collector.finish(),
-            CoalescedOutputMetadata::Replay
-        ));
     }
 
     #[tokio::test]
@@ -5211,6 +5217,25 @@ mod tests {
         }
         assert_eq!(actual, expected);
 
+        let disjoint_first = vec![(key, Lsn(0x20), 3), (key.add(1), Lsn(0x30), 5)];
+        let disjoint_second = vec![(key.add(10), Lsn(0x40), 7)];
+        let mut concatenated = IndexMergeIterator::from_concatenated_iterators(vec![
+            make_index_cursor(&disjoint_first, &ctx)?,
+            make_index_cursor(&disjoint_second, &ctx)?,
+        ]);
+        let mut concatenated_actual = Vec::new();
+        while let Some(entry) = concatenated.next().await? {
+            concatenated_actual.push(entry);
+        }
+        assert_eq!(
+            concatenated_actual,
+            disjoint_first
+                .iter()
+                .chain(&disjoint_second)
+                .copied()
+                .collect::<Vec<_>>()
+        );
+
         let mut materialized = IndexMergeIterator::from_entries(&expected);
         let mut materialized_actual = Vec::new();
         while let Some(entry) = materialized.next().await? {
@@ -5247,27 +5272,21 @@ mod tests {
         }
         assert_eq!(actual_coalesced, expected_coalesced);
 
-        let mut output_plan = Vec::new();
+        let mut output_plan_builder = OutputSizePlanBuilder::new(target_file_size);
         for entry in expected.iter().copied() {
-            assert!(append_coalesced_output_metadata(
-                &mut output_plan,
-                entry,
-                target_file_size,
-                expected.len(),
-            ));
+            output_plan_builder.push(entry);
         }
-        assert_eq!(output_plan, expected_coalesced);
-
-        // The plan is already coalesced, so the normal consumer leaves it unchanged.
-        let mut planned_coalesced = CoalescedIndexMergeIterator::new(
-            IndexMergeIterator::from_entries(&output_plan),
-            target_file_size,
+        let output_plan = output_plan_builder.finish();
+        assert_eq!(
+            output_plan.key_sizes,
+            vec![38, 5, 20],
+            "the plan keeps one total per output key"
         );
-        let mut planned_actual = Vec::new();
-        while let Some(entry) = planned_coalesced.next().await? {
-            planned_actual.push(entry);
-        }
-        assert_eq!(planned_actual, expected_coalesced);
+        assert_eq!(
+            output_plan.duplicate_splits,
+            vec![(0, Lsn(0x40)), (0, Lsn(0x50)), (2, Lsn(0x70))],
+            "duplicate boundaries retain the coalescing target semantics"
+        );
 
         Ok(())
     }
@@ -5353,6 +5372,46 @@ mod tests {
                 assert_eq!(
                     actual_coalesced, expected_coalesced,
                     "coalescing mismatch in case {case_index}, target {target_file_size}"
+                );
+
+                // Independently apply the output writer's boundary rule to the stable sorted
+                // stream, then compare it with the compact plan built from the cursor merge.
+                let mut expected_plan = OutputSizePlan::default();
+                let mut expected_key: Option<Key> = None;
+                let mut expected_key_index = 0;
+                let mut expected_segment_size = 0;
+                let mut expected_segment_lsn = None;
+                for (key, lsn, size) in expected_coalesced.iter().copied() {
+                    if expected_key != Some(key) {
+                        expected_key = Some(key);
+                        expected_key_index = expected_plan.key_sizes.len();
+                        expected_plan.key_sizes.push(size);
+                        expected_segment_size = size;
+                        expected_segment_lsn = Some(lsn);
+                        continue;
+                    }
+
+                    expected_plan.key_sizes[expected_key_index] += size;
+                    if expected_segment_size + size > target_file_size
+                        && expected_segment_lsn != Some(lsn)
+                    {
+                        expected_plan
+                            .duplicate_splits
+                            .push((expected_key_index, lsn));
+                        expected_segment_size = size;
+                        expected_segment_lsn = Some(lsn);
+                    } else {
+                        expected_segment_size += size;
+                    }
+                }
+                let mut plan_builder = OutputSizePlanBuilder::new(target_file_size);
+                for entry in expected.iter().copied() {
+                    plan_builder.push(entry);
+                }
+                assert_eq!(
+                    plan_builder.finish(),
+                    expected_plan,
+                    "output plan mismatch in case {case_index}, target {target_file_size}"
                 );
             }
         }
