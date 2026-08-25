@@ -5777,6 +5777,7 @@ mod tests {
             .compaction_iteration(&cancel, &compaction_ctx)
             .await?;
         let elapsed_micros = started.elapsed().as_micros();
+        let compaction_allocation_bytes = allocation_bytes();
 
         assert_eq!(outcome, CompactionOutcome::Done);
         let layer_manager = timeline.layers.read(LayerManagerLockHolder::Testing).await;
@@ -5815,7 +5816,7 @@ mod tests {
         );
         println!(
             "l0_compaction_metadata_calibration_allocation_bytes={}",
-            allocation_bytes()
+            compaction_allocation_bytes
         );
         Ok(())
     }
