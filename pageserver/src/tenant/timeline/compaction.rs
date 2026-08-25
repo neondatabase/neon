@@ -5085,6 +5085,58 @@ mod tests {
     use crate::tenant::timeline::DeltaLayerTestDesc;
     use crate::virtual_file::{IoMode, set_io_mode};
 
+    struct CountingAllocator;
+
+    static ALLOCATED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    #[global_allocator]
+    static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let ptr = unsafe { std::alloc::System.alloc(layout) };
+            if !ptr.is_null() {
+                ALLOCATED_BYTES
+                    .fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            ptr
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let ptr = unsafe { std::alloc::System.alloc_zeroed(layout) };
+            if !ptr.is_null() {
+                ALLOCATED_BYTES
+                    .fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) };
+        }
+
+        unsafe fn realloc(
+            &self,
+            ptr: *mut u8,
+            layout: std::alloc::Layout,
+            new_size: usize,
+        ) -> *mut u8 {
+            let new_ptr = unsafe { std::alloc::System.realloc(ptr, layout, new_size) };
+            if !new_ptr.is_null() {
+                ALLOCATED_BYTES.fetch_add(new_size as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            new_ptr
+        }
+    }
+
+    fn reset_allocation_bytes() {
+        ALLOCATED_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn allocation_bytes() -> u64 {
+        ALLOCATED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     const L0_CALIBRATION_LAYERS: &str = "NEON_L0_COMPACTION_CALIBRATION_LAYERS";
     const L0_CALIBRATION_ENTRIES_PER_LAYER: &str =
         "NEON_L0_COMPACTION_CALIBRATION_ENTRIES_PER_LAYER";
@@ -5720,6 +5772,7 @@ mod tests {
         let compaction_ctx =
             RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         let cancel = CancellationToken::new();
+        reset_allocation_bytes();
         let started = Instant::now();
         let outcome = tenant
             .compaction_iteration(&cancel, &compaction_ctx)
@@ -5760,6 +5813,10 @@ mod tests {
         println!(
             "l0_compaction_metadata_calibration_peak_rss_kib={}",
             peak_rss_kib()?
+        );
+        println!(
+            "l0_compaction_metadata_calibration_allocation_bytes={}",
+            allocation_bytes()
         );
         Ok(())
     }
