@@ -123,6 +123,11 @@ const L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 4 * 1024 * 1024;
 /// and build the compact per-key output-size plan.
 const L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 
+/// Avoid a pair of exact B-tree bound walks for very wide batches whose broad descriptors do not
+/// prove disjointness. Such batches retain the existing materialized path instead of paying the
+/// bound walks and then scanning the indexes again.
+const L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS: usize = 512;
+
 type IndexMetadataEntry = (Key, Lsn, u64);
 
 /// Output sizing needs one total per key and only the LSNs where a duplicate-key run is split.
@@ -251,6 +256,9 @@ async fn index_range_order_if_disjoint(
         .collect::<Vec<_>>();
     if let Some(order) = disjoint_layer_order(layer_ranges, true) {
         return Ok(Some(order));
+    }
+    if deltas.len() > L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS {
+        return Ok(None);
     }
 
     let mut bounds = Vec::with_capacity(deltas.len());
@@ -2419,8 +2427,11 @@ impl Timeline {
             } else {
                 None
             };
-        let metadata_traversal =
-            stats.metadata_traversal(metadata_index_size, disjoint_index_order.is_some());
+        let metadata_traversal = stats.metadata_traversal(
+            metadata_index_size,
+            disjoint_index_order.is_some(),
+            deltas.len(),
+        );
         let materialize_metadata = metadata_traversal == IndexMetadataTraversal::Materialized;
         debug!(
             metadata_index_size,
@@ -2959,6 +2970,7 @@ impl CompactLevel0Phase1StatsBuilder {
         &self,
         index_size: u64,
         disjoint_index_ranges: bool,
+        layer_count: usize,
     ) -> IndexMetadataTraversal {
         #[cfg(test)]
         if let Some(traversal) = self.metadata_traversal_override {
@@ -2966,6 +2978,10 @@ impl CompactLevel0Phase1StatsBuilder {
         }
         if disjoint_index_ranges && index_size <= L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT
         {
+            IndexMetadataTraversal::Materialized
+        } else if !disjoint_index_ranges && layer_count > L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS {
+            // Broad descriptors cannot prove whether this many layers overlap. Avoid exact bound
+            // walks followed by another metadata pass; the fallback keeps the old cost profile.
             IndexMetadataTraversal::Materialized
         } else {
             index_metadata_traversal(index_size)
@@ -5183,16 +5199,28 @@ mod tests {
     fn disjoint_metadata_materialization_stays_bounded() {
         let stats = CompactLevel0Phase1StatsBuilder::default();
         assert_eq!(
-            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT, true),
+            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT, true, 10,),
             IndexMetadataTraversal::Materialized
         );
         assert_eq!(
-            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT + 1, true),
+            stats.metadata_traversal(
+                L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT + 1,
+                true,
+                10,
+            ),
             IndexMetadataTraversal::Streaming
         );
         assert_eq!(
-            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT, false),
+            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT, false, 10,),
             IndexMetadataTraversal::Streaming
+        );
+        assert_eq!(
+            stats.metadata_traversal(
+                L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT + 1,
+                false,
+                L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS + 1,
+            ),
+            IndexMetadataTraversal::Materialized
         );
     }
 
