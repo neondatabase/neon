@@ -114,8 +114,9 @@ impl Ord for IndexMergeHeapEntry {
 
 /// Keep the materialized fast path below this selected B-tree index size. Unlike total layer
 /// bytes, index bytes grow with the number of metadata entries even when their values are tiny.
-/// The comparison arm keeps the materialized implementation for the official calibration shapes.
-const L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 8 * 1024 * 1024 * 1024;
+/// Every on-disk B-tree entry needs at least its five-byte value, so this cannot select the
+/// materialized path for a million-entry batch.
+const L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 4 * 1024 * 1024;
 
 /// A disjoint batch has no cross-layer merge work to amortize the cursor heap. Keep a bounded
 /// materialized fast path for small disjoint footprints; larger batches scan one layer at a time
