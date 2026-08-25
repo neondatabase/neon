@@ -127,6 +127,10 @@ const L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 /// bound walks and then scanning the indexes again.
 const L0_METADATA_EXACT_RANGE_SCAN_MAX_LAYERS: usize = 512;
 
+#[cfg(test)]
+static LAST_INDEX_METADATA_MICROS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 type IndexMetadataEntry = (Key, Lsn, u64);
 
 /// Output sizing needs one total per key and only the LSNs where a duplicate-key run is split.
@@ -2879,14 +2883,24 @@ impl Timeline {
         stats.new_deltas_count = Some(new_layers.len());
         stats.new_deltas_size = Some(new_layers.iter().map(|l| l.layer_desc().file_size).sum());
 
-        match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
-            .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
-        {
-            Ok(stats_json) => {
-                info!(
-                    stats_json = stats_json.as_str(),
-                    "compact_level0_phase1 stats available"
-                )
+        match TryInto::<CompactLevel0Phase1Stats>::try_into(stats) {
+            Ok(stats) => {
+                #[cfg(test)]
+                LAST_INDEX_METADATA_MICROS.store(
+                    stats.read_lock_held_index_metadata_micros.0.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                match serde_json::to_string(&stats).context("serde_json::to_string") {
+                    Ok(stats_json) => {
+                        info!(
+                            stats_json = stats_json.as_str(),
+                            "compact_level0_phase1 stats available"
+                        )
+                    }
+                    Err(e) => {
+                        warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
+                    }
+                }
             }
             Err(e) => {
                 warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
@@ -5772,12 +5786,15 @@ mod tests {
             RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         let cancel = CancellationToken::new();
         reset_allocation_bytes();
+        LAST_INDEX_METADATA_MICROS.store(0, std::sync::atomic::Ordering::Relaxed);
         let started = Instant::now();
         let outcome = tenant
             .compaction_iteration(&cancel, &compaction_ctx)
             .await?;
         let elapsed_micros = started.elapsed().as_micros();
         let compaction_allocation_bytes = allocation_bytes();
+        let index_metadata_micros =
+            LAST_INDEX_METADATA_MICROS.load(std::sync::atomic::Ordering::Relaxed);
 
         assert_eq!(outcome, CompactionOutcome::Done);
         let layer_manager = timeline.layers.read(LayerManagerLockHolder::Testing).await;
@@ -5817,6 +5834,10 @@ mod tests {
         println!(
             "l0_compaction_metadata_calibration_allocation_bytes={}",
             compaction_allocation_bytes
+        );
+        println!(
+            "l0_compaction_metadata_calibration_index_metadata_micros={}",
+            index_metadata_micros
         );
         Ok(())
     }
