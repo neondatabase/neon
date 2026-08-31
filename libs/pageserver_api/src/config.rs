@@ -651,6 +651,9 @@ pub struct TenantConfigToml {
     // FIXME: Remove skip_serializing_if when the feature is stable.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub basebackup_cache_enabled: bool,
+
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rel_size_v1_access_disabled: bool,
 }
 
 pub mod defaults {
@@ -964,6 +967,7 @@ impl Default for TenantConfigToml {
             sampling_ratio: None,
             relsize_snapshot_cache_capacity: DEFAULT_RELSIZE_SNAPSHOT_CACHE_CAPACITY,
             basebackup_cache_enabled: false,
+            rel_size_v1_access_disabled: false,
         }
     }
 }

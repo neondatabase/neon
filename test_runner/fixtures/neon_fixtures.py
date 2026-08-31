@@ -1311,8 +1311,8 @@ class NeonEnv:
                 )
 
             tenant_config = ps_cfg.setdefault("tenant_config", {})
-            # This feature is pending rollout.
-            # tenant_config["rel_size_v2_enabled"] = True
+            # Enable relsize_v2 by default in tests.
+            tenant_config["rel_size_v2_enabled"] = True
 
             # Test authors tend to forget about the default 10min initial lease deadline
             # when writing tests, which turns their immediate gc requests via mgmt API

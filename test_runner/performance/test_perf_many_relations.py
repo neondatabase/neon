@@ -80,7 +80,12 @@ def test_perf_simple_many_relations_reldir(
     """
     Test creating many relations in a single database.
     """
-    env = neon_env_builder.init_start(initial_tenant_conf={"rel_size_v2_enabled": reldir != "v1"})
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "rel_size_v2_enabled": reldir != "v1",
+            "rel_size_v1_access_disabled": reldir == "v2",
+        }
+    )
     ep = env.endpoints.create_start(
         "main",
         config_lines=[
@@ -108,10 +113,6 @@ def test_perf_simple_many_relations_reldir(
             == "migrating"
         )
     elif reldir == "v2":
-        # only read/write to the v2 keyspace
-        env.pageserver.http_client().timeline_patch_index_part(
-            env.initial_tenant, env.initial_timeline, {"rel_size_migration": "migrated"}
-        )
         assert (
             env.pageserver.http_client().timeline_detail(env.initial_tenant, env.initial_timeline)[
                 "rel_size_migration"
