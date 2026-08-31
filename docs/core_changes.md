@@ -371,20 +371,6 @@ several GB, and downloading them all made the startup time too long.
 FUSE hook or LD_PRELOAD trick to intercept the reads on SLRU files
 
 
-## WAL-log an all-zeros page as one large hole
-
-- In XLogRecordAssemble()
-
-### Problem we're trying to solve
-
-This change was made in v16. Starting with v16, when PostgreSQL extends a relation, it first extends
-it with zeros, and it can extend the relation more than one block at a time. The all-zeros page is WAL-ogged, but it's very wasteful to include 8 kB of zeros in the WAL for that. This hack was made so that we WAL logged a compact record with a whole-page "hole". However, PostgreSQL has assertions that prevent that such WAL records from being replayed, so this breaks compatibility such that unmodified PostreSQL cannot process Neon-generated WAL.
-
-### How to get rid of the patch
-
-Find another compact representation for a full-page image of an all-zeros page. A compressed image perhaps.
-
-
 ## Shut down walproposer after checkpointer
 
 ```

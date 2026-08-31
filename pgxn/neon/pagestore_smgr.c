@@ -899,7 +899,6 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 #endif
 {
 	XLogRecPtr	lsn;
-	BlockNumber n_blocks = 0;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -946,15 +945,13 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	}
 
 	/*
-	 * Usually Postgres doesn't extend relation on more than one page (leaving
-	 * holes). But this rule is violated in PG-15 where
-	 * CreateAndCopyRelationData call smgrextend for destination relation n
-	 * using size of source relation
+	 * If callers extend by more than one block at a time (e.g. PG 15
+	 * CreateAndCopyRelationData), the trailing neon_wallog_page below acts as
+	 * a single marker FPI for the last extended block. On ingest the
+	 * pageserver advances relsize to blkno + 1 and zero-fills the
+	 * intermediate blocks via its existing relation-extend gap-fill, so any
+	 * later read of an intermediate block returns an all-zero page.
 	 */
-	n_blocks = neon_nblocks(reln, forkNum);
-	while (n_blocks < blkno)
-		neon_wallog_page(reln, forkNum, n_blocks++, buffer, true);
-
 	neon_wallog_page(reln, forkNum, blkno, buffer, false);
 	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blkno + 1);
 
@@ -992,9 +989,9 @@ static void
 neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 				int nblocks, bool skipFsync)
 {
-	const PGIOAlignedBlock buffer = {0};
-	int			remblocks = nblocks;
-	XLogRecPtr	lsn = 0;
+	PGIOAlignedBlock marker;
+	BlockNumber last_block;
+	XLogRecPtr	lsn;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1055,41 +1052,27 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	if (!XLogInsertAllowed())
 		return;
 
-	/* ensure we have enough xlog buffers to log max-sized records */
-	XLogEnsureRecordSpace(Min(remblocks, (XLR_MAX_BLOCK_ID - 1)), 0);
-
 	/*
-	 * Iterate over all the pages. They are collected into batches of
-	 * XLR_MAX_BLOCK_ID pages, and a single WAL-record is written for each
-	 * batch.
+	 * Emit a single marker FPI for the last extended block. On ingest the
+	 * pageserver advances relsize to last_block + 1 and zero-fills the
+	 * intermediate blocks (blocknum .. last_block - 1) via its existing
+	 * relation-extend gap-fill, so any later read of those blocks returns an
+	 * all-zero page on the main GetPage@LSN path.
+	 *
+	 * The marker buffer is PageInit'd so vanilla PG's standard hole
+	 * compression (pd_lower..pd_upper) handles it -- no Neon-specific
+	 * PageIsNew hole hack needed.
 	 */
-	while (remblocks > 0)
-	{
-		int			count = Min(remblocks, XLR_MAX_BLOCK_ID);
+	PageInit((Page) marker.data, BLCKSZ, 0);
+	last_block = blocknum + nblocks - 1;
 
-		XLogBeginInsert();
-
-		for (int i = 0; i < count; i++)
-			XLogRegisterBlock(i, &InfoFromSMgrRel(reln), forkNum, blocknum + i,
-							  (char *) buffer.data, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-
-		lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
-
-		for (int i = 0; i < count; i++)
-		{
-			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
-			neon_set_lwlsn_block(lsn, InfoFromSMgrRel(reln), forkNum,
-									  blocknum + i);
-		}
-
-		blocknum += count;
-		remblocks -= count;
-	}
-
-	Assert(lsn != 0);
+	XLogBeginInsert();
+	XLogRegisterBlock(0, &InfoFromSMgrRel(reln), forkNum, last_block,
+					  (char *) marker.data, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
+	lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
 
 	neon_set_lwlsn_relation(lsn, InfoFromSMgrRel(reln), forkNum);
-	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum);
+	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum + nblocks);
 }
 #endif
 
