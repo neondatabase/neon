@@ -265,6 +265,19 @@ where
         }
     }
 
+    pub(crate) fn iter_array<'a>(
+        self,
+        start_key: &'a [u8; L],
+        ctx: &'a RequestContext,
+    ) -> DiskBtreeArrayIterator<'a, L>
+    where
+        R: 'a + Send,
+    {
+        DiskBtreeArrayIterator {
+            stream: Box::pin(self.into_stream_array(start_key, ctx)),
+        }
+    }
+
     /// Return a stream which yields all key, value pairs from the index
     /// starting from the first key greater or equal to `start_key`.
     ///
@@ -285,6 +298,19 @@ where
         start_key: &'a [u8; L],
         ctx: &'a RequestContext,
     ) -> impl Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a
+    where
+        R: 'a,
+    {
+        self.into_stream_array(start_key, ctx)
+            .map(|entry| entry.map(|(key, value)| (key.to_vec(), value)))
+    }
+
+    /// Internal allocation-free variant of [`Self::into_stream`].
+    pub(crate) fn into_stream_array<'a>(
+        self,
+        start_key: &'a [u8; L],
+        ctx: &'a RequestContext,
+    ) -> impl Stream<Item = std::result::Result<([u8; L], u64), DiskBtreeError>> + 'a
     where
         R: 'a,
     {
@@ -310,9 +336,8 @@ where
 
                 assert!(node.num_children > 0);
 
-                let mut keybuf = Vec::new();
-                keybuf.extend(node.prefix);
-                keybuf.resize(prefix_len + suffix_len, 0);
+                let mut keybuf = [0_u8; L];
+                keybuf[..prefix_len].copy_from_slice(node.prefix);
 
                 let mut iter: Either<Range<usize>, Rev<RangeInclusive<usize>>> = if let Some(iter) = opt_iter {
                     iter
@@ -357,7 +382,7 @@ where
                     #[allow(clippy::collapsible_if)]
                     if node.level == 0 {
                         // leaf
-                        yield (keybuf.clone(), value.to_u64());
+                        yield (keybuf, value.to_u64());
                     } else {
                         stack.push((node_blknum, Some(iter)));
                         stack.push((value.to_blknum(), None));
@@ -529,6 +554,21 @@ pub struct DiskBtreeIterator<'a> {
 
 impl DiskBtreeIterator<'_> {
     pub async fn next(&mut self) -> Option<std::result::Result<(Vec<u8>, u64), DiskBtreeError>> {
+        self.stream.next().await
+    }
+}
+
+pub(crate) struct DiskBtreeArrayIterator<'a, const L: usize> {
+    #[allow(clippy::type_complexity)]
+    stream: std::pin::Pin<
+        Box<dyn Stream<Item = std::result::Result<([u8; L], u64), DiskBtreeError>> + 'a + Send>,
+    >,
+}
+
+impl<const L: usize> DiskBtreeArrayIterator<'_, L> {
+    pub(crate) async fn next(
+        &mut self,
+    ) -> Option<std::result::Result<([u8; L], u64), DiskBtreeError>> {
         self.stream.next().await
     }
 }
@@ -829,6 +869,7 @@ impl<const L: usize> BuildNode<L> {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rand::Rng;
@@ -855,6 +896,11 @@ pub(crate) mod tests {
     impl BlockReader for TestDisk {
         fn block_cursor(&self) -> BlockCursor<'_> {
             BlockCursor::new(BlockReaderRef::TestDisk(self))
+        }
+    }
+    impl BlockReader for Arc<TestDisk> {
+        fn block_cursor(&self) -> BlockCursor<'_> {
+            BlockCursor::new(BlockReaderRef::TestDisk(self.as_ref()))
         }
     }
     impl BlockWriter for &mut TestDisk {
@@ -974,6 +1020,16 @@ pub(crate) mod tests {
             .await?;
         assert_eq!(data, expected);
 
+        // The fixed-array cursor is used by streaming metadata consumers. Verify that it
+        // reconstructs every prefix-compressed key without the Vec allocation used by `iter`.
+        let mut iter = reader.iter_array(&[0u8; 6], &ctx);
+        let mut data = Vec::new();
+        while let Some(entry) = iter.next().await {
+            let (key, value) = entry?;
+            data.push((key.to_vec(), value));
+        }
+        assert_eq!(data, expected);
+
         Ok(())
     }
 
@@ -1077,6 +1133,20 @@ pub(crate) mod tests {
             .map(|(&key, &val)| (key, val))
             .collect::<Vec<(u64, u64)>>();
         assert_eq!(*result.lock().unwrap(), expected);
+
+        // Exercise the fixed-array cursor across internal B-tree pages as well as leaves.
+        let start_key = u64::to_be_bytes(0);
+        let mut iter = reader.iter_array(&start_key, &ctx);
+        let mut streamed = Vec::new();
+        while let Some(entry) = iter.next().await {
+            let (key, value) = entry?;
+            streamed.push((u64::from_be_bytes(key), value));
+        }
+        let expected = all_data
+            .iter()
+            .map(|(&key, &value)| (key, value))
+            .collect::<Vec<_>>();
+        assert_eq!(streamed, expected);
 
         Ok(())
     }

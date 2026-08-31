@@ -4,7 +4,7 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
-use std::cmp::min;
+use std::cmp::{Ordering, min};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
@@ -44,7 +44,7 @@ use utils::lsn::Lsn;
 use wal_decoder::models::record::NeonWalRecord;
 use wal_decoder::models::value::Value;
 
-use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
+use crate::context::{AccessStatsBehavior, PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
@@ -55,6 +55,7 @@ use crate::tenant::remote_timeline_client::index::GcCompactionState;
 use crate::tenant::storage_layer::batch_split_writer::{
     BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
 };
+use crate::tenant::storage_layer::delta_layer::{DeltaLayerIndexIterator, DeltaLayerInner};
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{
@@ -78,6 +79,360 @@ const COMPACTION_DELTA_THRESHOLD: usize = 5;
 /// We choose a value < 0.5 to avoid rewriting all visible layers every time we do a power-of-two
 /// shard split, which gets expensive for large tenants.
 const ANCESTOR_COMPACTION_REWRITE_THRESHOLD: f64 = 0.3;
+
+/// Heap entry for a k-way merge of ordered delta-layer index cursors.
+struct IndexMergeHeapEntry {
+    entry: (Key, Lsn, u64),
+    layer_idx: usize,
+}
+
+impl PartialEq for IndexMergeHeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        (self.entry.0, self.entry.1, self.layer_idx)
+            == (other.entry.0, other.entry.1, other.layer_idx)
+    }
+}
+
+impl Eq for IndexMergeHeapEntry {}
+
+impl PartialOrd for IndexMergeHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexMergeHeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap is a max heap. Reverse the order so its head is the next key/LSN to emit.
+        (other.entry.0, other.entry.1, other.layer_idx).cmp(&(
+            self.entry.0,
+            self.entry.1,
+            self.layer_idx,
+        ))
+    }
+}
+
+/// Keep the materialized fast path below this selected B-tree index size. Unlike total layer
+/// bytes, index bytes grow with the number of metadata entries even when their values are tiny.
+/// Large indexes still take the streaming path without relying on the layer byte-size cap.
+const L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 128 * 1024 * 1024;
+
+/// A disjoint batch has no cross-layer merge work to amortize the cursor heap. Keep a bounded
+/// materialized fast path for small disjoint footprints; larger batches scan one layer at a time
+/// and build the compact per-key output-size plan.
+const L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
+
+/// Bound heap and exact-range work for broad overlapping batches. Layer summaries can still prove
+/// disjointness without a bound walk; otherwise wider batches retain the materialized path.
+const L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS: usize = 10;
+
+#[cfg(test)]
+static LAST_INDEX_METADATA_MICROS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+type IndexMetadataEntry = (Key, Lsn, u64);
+
+/// Output sizing needs one total per key and only the LSNs where a duplicate-key run is split.
+/// Keeping this compact plan avoids retaining the complete index entry stream or reopening the
+/// B-trees after the hole pass.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OutputSizePlan {
+    key_sizes: Vec<u64>,
+    duplicate_splits: Vec<(usize, Lsn)>,
+}
+
+struct OutputSizePlanBuilder {
+    target_file_size: u64,
+    pending: Option<IndexMetadataEntry>,
+    plan: OutputSizePlan,
+    current_key: Option<Key>,
+    current_key_index: usize,
+    current_segment_size: u64,
+    current_segment_lsn: Option<Lsn>,
+}
+
+impl OutputSizePlanBuilder {
+    fn new(target_file_size: u64) -> Self {
+        Self {
+            target_file_size,
+            pending: None,
+            plan: OutputSizePlan::default(),
+            current_key: None,
+            current_key_index: 0,
+            current_segment_size: 0,
+            current_segment_lsn: None,
+        }
+    }
+
+    /// Apply the same strict-`< target` coalescing used by the former output metadata cursor.
+    fn push(&mut self, entry: IndexMetadataEntry) {
+        if let Some(previous) = self.pending.take() {
+            if previous.0 == entry.0 && previous.2 < self.target_file_size {
+                self.pending = Some((previous.0, previous.1, previous.2 + entry.2));
+                return;
+            }
+            self.add_coalesced(previous);
+        }
+        self.pending = Some(entry);
+    }
+
+    fn add_coalesced(&mut self, (key, lsn, size): IndexMetadataEntry) {
+        if self.current_key != Some(key) {
+            self.current_key = Some(key);
+            self.current_key_index = self.plan.key_sizes.len();
+            self.plan.key_sizes.push(size);
+            self.current_segment_size = size;
+            self.current_segment_lsn = Some(lsn);
+            return;
+        }
+
+        self.plan.key_sizes[self.current_key_index] =
+            self.plan.key_sizes[self.current_key_index].saturating_add(size);
+        if self.current_segment_size.saturating_add(size) > self.target_file_size
+            && self.current_segment_lsn != Some(lsn)
+        {
+            self.plan
+                .duplicate_splits
+                .push((self.current_key_index, lsn));
+            self.current_segment_size = size;
+            self.current_segment_lsn = Some(lsn);
+        } else {
+            self.current_segment_size = self.current_segment_size.saturating_add(size);
+        }
+    }
+
+    fn finish(mut self) -> OutputSizePlan {
+        if let Some(pending) = self.pending.take() {
+            self.add_coalesced(pending);
+        }
+        self.plan
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum IndexMetadataTraversal {
+    #[default]
+    Materialized,
+    Streaming,
+}
+
+fn index_metadata_traversal(index_size: u64) -> IndexMetadataTraversal {
+    if index_size <= L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT {
+        IndexMetadataTraversal::Materialized
+    } else {
+        IndexMetadataTraversal::Streaming
+    }
+}
+
+fn disjoint_layer_order(
+    mut ranges: Vec<(usize, Key, Key)>,
+    exclusive_end: bool,
+) -> Option<Vec<usize>> {
+    ranges.sort_unstable_by_key(|(_, first, _)| *first);
+    let disjoint = ranges.windows(2).all(|window| {
+        if exclusive_end {
+            window[0].2 <= window[1].1
+        } else {
+            window[0].2 < window[1].1
+        }
+    });
+    disjoint.then(|| {
+        ranges
+            .into_iter()
+            .map(|(layer_idx, _, _)| layer_idx)
+            .collect()
+    })
+}
+
+async fn index_range_order_if_disjoint(
+    deltas: &[&DeltaLayerInner],
+    ctx: &RequestContext,
+) -> anyhow::Result<Option<Vec<usize>>> {
+    // Layer summaries are exact enough to prove disjointness and avoid reopening every index on
+    // the common production path. A summary may be wider than the actual index, so overlapping
+    // summaries get an exact first/last-key check before the fast path is selected.
+    let layer_ranges = deltas
+        .iter()
+        .enumerate()
+        .map(|(layer_idx, delta)| (layer_idx, delta.key_range().start, delta.key_range().end))
+        .collect::<Vec<_>>();
+    if let Some(order) = disjoint_layer_order(layer_ranges, true) {
+        return Ok(Some(order));
+    }
+    if deltas.len() > L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS {
+        return Ok(None);
+    }
+
+    let mut bounds = Vec::with_capacity(deltas.len());
+    for (layer_idx, delta) in deltas.iter().enumerate() {
+        if let Some((first, last)) = delta.index_key_bounds(ctx).await? {
+            bounds.push((layer_idx, first, last));
+        }
+    }
+    Ok(disjoint_layer_order(bounds, false))
+}
+
+/// Bounded k-way merge over the metadata indexes of a set of delta layers.
+struct StreamingIndexMergeIterator<'a> {
+    iterators: Vec<DeltaLayerIndexIterator<'a>>,
+    heap: BinaryHeap<IndexMergeHeapEntry>,
+}
+
+/// A sequential, one-layer-at-a-time scan over layers whose key ranges are proven disjoint.
+///
+/// The visitor used by `index_entries` is faster than the per-item async stream for this case, and
+/// only one layer's entries are retained while the compact output plan is built.
+struct ConcatenatedIndexMergeIterator<'a> {
+    deltas: Vec<&'a DeltaLayerInner>,
+    ctx: &'a RequestContext,
+    entries: Option<std::vec::IntoIter<DeltaEntry<'a>>>,
+    current: usize,
+}
+
+/// Ordered metadata from either the small-batch materialized fast path or a bounded cursor merge.
+enum IndexMergeIterator<'a> {
+    Materialized(std::iter::Copied<std::slice::Iter<'a, IndexMetadataEntry>>),
+    Streaming(StreamingIndexMergeIterator<'a>),
+    Concatenated(ConcatenatedIndexMergeIterator<'a>),
+}
+
+impl<'a> IndexMergeIterator<'a> {
+    async fn create(
+        deltas: &[&'a DeltaLayerInner],
+        ctx: &'a RequestContext,
+    ) -> anyhow::Result<Self> {
+        let iterators = deltas
+            .iter()
+            .map(|delta| delta.index_iter(ctx))
+            .collect::<Vec<_>>();
+        Self::from_iterators(iterators).await
+    }
+
+    fn create_concatenated(
+        deltas: &[&'a DeltaLayerInner],
+        layer_order: &[usize],
+        ctx: &'a RequestContext,
+    ) -> Self {
+        Self::from_concatenated_layers(
+            layer_order
+                .iter()
+                .map(|&layer_idx| deltas[layer_idx])
+                .collect(),
+            ctx,
+        )
+    }
+
+    fn from_concatenated_layers(deltas: Vec<&'a DeltaLayerInner>, ctx: &'a RequestContext) -> Self {
+        Self::Concatenated(ConcatenatedIndexMergeIterator {
+            deltas,
+            ctx,
+            entries: None,
+            current: 0,
+        })
+    }
+
+    async fn from_iterators(
+        mut iterators: Vec<DeltaLayerIndexIterator<'a>>,
+    ) -> anyhow::Result<Self> {
+        let mut heap = BinaryHeap::with_capacity(iterators.len());
+
+        for (layer_idx, iterator) in iterators.iter_mut().enumerate() {
+            if let Some(entry) = iterator.next().await? {
+                heap.push(IndexMergeHeapEntry { entry, layer_idx });
+            }
+        }
+
+        Ok(Self::Streaming(StreamingIndexMergeIterator {
+            iterators,
+            heap,
+        }))
+    }
+
+    fn from_entries(entries: &'a [IndexMetadataEntry]) -> Self {
+        Self::Materialized(entries.iter().copied())
+    }
+
+    async fn next(&mut self) -> anyhow::Result<Option<IndexMetadataEntry>> {
+        match self {
+            Self::Materialized(entries) => Ok(entries.next()),
+            Self::Streaming(streaming) => {
+                // Replacing the heap head needs one repair, while pop followed by push would
+                // repair it twice for every index entry in a wide L0 merge.
+                let Some((layer_idx, entry)) = streaming
+                    .heap
+                    .peek()
+                    .map(|head| (head.layer_idx, head.entry))
+                else {
+                    return Ok(None);
+                };
+
+                if let Some(next) = streaming.iterators[layer_idx].next().await? {
+                    let mut head = streaming.heap.peek_mut().expect("head was just peeked");
+                    debug_assert_eq!(head.layer_idx, layer_idx);
+                    head.entry = next;
+                } else {
+                    std::collections::binary_heap::PeekMut::pop(
+                        streaming.heap.peek_mut().expect("head was just peeked"),
+                    );
+                }
+                Ok(Some(entry))
+            }
+            Self::Concatenated(concatenated) => loop {
+                if let Some(entries) = concatenated.entries.as_mut() {
+                    if let Some(entry) = entries.next() {
+                        return Ok(Some((entry.key, entry.lsn, entry.size)));
+                    }
+                    concatenated.entries = None;
+                }
+
+                let Some(delta) = concatenated.deltas.get(concatenated.current) else {
+                    return Ok(None);
+                };
+                concatenated.current += 1;
+                concatenated.entries =
+                    Some(delta.index_entries(concatenated.ctx).await?.into_iter());
+            },
+        }
+    }
+}
+
+/// Equivalent of the former `Itertools::coalesce` call used for output sizing.
+#[cfg(test)]
+struct CoalescedIndexMergeIterator<'a> {
+    inner: IndexMergeIterator<'a>,
+    pending: Option<IndexMetadataEntry>,
+    target_file_size: u64,
+}
+
+#[cfg(test)]
+impl<'a> CoalescedIndexMergeIterator<'a> {
+    fn new(inner: IndexMergeIterator<'a>, target_file_size: u64) -> Self {
+        Self {
+            inner,
+            pending: None,
+            target_file_size,
+        }
+    }
+
+    async fn next(&mut self) -> anyhow::Result<Option<IndexMetadataEntry>> {
+        let Some(mut previous) = (match self.pending.take() {
+            Some(entry) => Some(entry),
+            None => self.inner.next().await?,
+        }) else {
+            return Ok(None);
+        };
+
+        while let Some(current) = self.inner.next().await? {
+            if previous.0 == current.0 && previous.2 < self.target_file_size {
+                previous.2 += current.2;
+            } else {
+                self.pending = Some(current);
+                break;
+            }
+        }
+        Ok(Some(previous))
+    }
+}
 
 #[derive(Default, Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 pub struct GcCompactionJobId(pub usize);
@@ -1848,6 +2203,7 @@ impl Timeline {
             new_layers,
             deltas_to_compact,
             outcome,
+            ..
         } = {
             let phase1_span = info_span!("compact_level0_phase1");
             let ctx = ctx.attached_child();
@@ -2040,27 +2396,78 @@ impl Timeline {
 
         stats.compaction_prerequisites_micros = stats.read_lock_acquisition_micros.till_now();
 
-        // TODO: replace with streaming k-merge
-        let all_keys = {
+        let metadata_pass_started = tokio::time::Instant::now();
+        let index_ctx = RequestContextBuilder::from(ctx)
+            .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
+            .attached_child();
+        let mut deltas: Vec<&DeltaLayerInner> = Vec::with_capacity(deltas_to_compact.len());
+        for layer in &deltas_to_compact {
+            if self.cancel.is_cancelled() {
+                return Err(CompactionError::new_cancelled());
+            }
+            deltas.push(
+                layer
+                    .get_as_delta(ctx)
+                    .await
+                    .map_err(CompactionError::Other)?,
+            );
+        }
+        // Use the B-tree footprint rather than total layer bytes as the fast-path gate. A batch
+        // with tiny values can have millions of index entries while its data files stay small.
+        let metadata_index_size =
+            deltas
+                .iter()
+                .zip(&deltas_to_compact)
+                .fold(0u64, |size, (delta, layer)| {
+                    size.saturating_add(delta.index_size_bytes(layer.metadata().file_size))
+                });
+        // Disjoint batches have a lower materialization bound than overlapping batches. Check
+        // their exact index ranges as soon as they cross that lower bound, even while the general
+        // overlapping-batch gate still selects materialization.
+        let disjoint_index_order =
+            if metadata_index_size > L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT {
+                index_range_order_if_disjoint(&deltas, &index_ctx)
+                    .await
+                    .map_err(CompactionError::Other)?
+            } else {
+                None
+            };
+        let metadata_traversal = stats.metadata_traversal(
+            metadata_index_size,
+            disjoint_index_order.is_some(),
+            deltas.len(),
+        );
+        let materialize_metadata = metadata_traversal == IndexMetadataTraversal::Materialized;
+        debug!(
+            metadata_index_size,
+            ?metadata_traversal,
+            "selected L0 metadata traversal mode"
+        );
+        let materialized_metadata: Option<Vec<IndexMetadataEntry>> = if materialize_metadata {
             let mut all_keys = Vec::new();
-            for l in deltas_to_compact.iter() {
+            for delta in &deltas {
                 if self.cancel.is_cancelled() {
                     return Err(CompactionError::new_cancelled());
                 }
-                let delta = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
-                let keys = delta
+                let entries = delta
                     .index_entries(ctx)
                     .await
                     .map_err(CompactionError::Other)?;
-                all_keys.extend(keys);
+                all_keys.extend(
+                    entries
+                        .into_iter()
+                        .map(|entry| (entry.key, entry.lsn, entry.size)),
+                );
             }
-            // The current stdlib sorting implementation is designed in a way where it is
-            // particularly fast where the slice is made up of sorted sub-ranges.
-            all_keys.sort_by_key(|DeltaEntry { key, lsn, .. }| (*key, *lsn));
-            all_keys
+            all_keys.sort_by_key(|entry| (entry.0, entry.1));
+            Some(all_keys)
+        } else {
+            None
         };
-
-        stats.read_lock_held_key_sort_micros = stats.compaction_prerequisites_micros.till_now();
+        let materialized_key_sort_finished = materialized_metadata
+            .as_ref()
+            .map(|_| tokio::time::Instant::now());
+        let mut hole_coverage_elapsed = Duration::ZERO;
 
         // Determine N largest holes where N is number of compacted layers. The vec is sorted by key range start.
         //
@@ -2081,8 +2488,7 @@ impl Timeline {
             key_range: Range<Key>,
             coverage_size: usize,
         }
-        let holes: Vec<Hole> = {
-            use std::cmp::Ordering;
+        let (holes, output_size_plan): (Vec<Hole>, OutputSizePlan) = {
             impl Ord for Hole {
                 fn cmp(&self, other: &Self) -> Ordering {
                     self.coverage_size.cmp(&other.coverage_size).reverse()
@@ -2099,8 +2505,31 @@ impl Timeline {
             // min-heap (reserve space for one more element added before eviction)
             let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
             let mut prev: Option<Key> = None;
+            let mut all_keys_iter = match materialized_metadata.as_deref() {
+                Some(entries) => IndexMergeIterator::from_entries(entries),
+                None => match disjoint_index_order.as_deref() {
+                    Some(order) => {
+                        IndexMergeIterator::create_concatenated(&deltas, order, &index_ctx)
+                    }
+                    None => IndexMergeIterator::create(&deltas, &index_ctx)
+                        .await
+                        .map_err(CompactionError::Other)?,
+                },
+            };
+            // Build the compact output-size plan while the ordered metadata cursor is already
+            // open. It retains one total per key and duplicate split boundaries, not every index
+            // entry, so output sizing never needs a second B-tree traversal.
+            let mut output_size_plan = OutputSizePlanBuilder::new(target_file_size);
+            let mut index_entries = 0usize;
 
-            for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
+            while let Some(entry @ (next_key, _, _)) =
+                all_keys_iter.next().await.map_err(CompactionError::Other)?
+            {
+                output_size_plan.push(entry);
+                index_entries += 1;
+                if index_entries % 32_768 == 0 && self.cancel.is_cancelled() {
+                    return Err(CompactionError::new_cancelled());
+                }
                 if let Some(prev_key) = prev {
                     // just first fast filter, do not create hole entries for metadata keys. The last hole in the
                     // compaction is the gap between data key and metadata keys.
@@ -2112,12 +2541,14 @@ impl Timeline {
                         // has not so much sense, because largest holes will corresponds field1/field2 changes.
                         // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
                         // That is why it is better to measure size of hole as number of covering image layers.
+                        let coverage_started = tokio::time::Instant::now();
                         let coverage_size = {
                             // TODO: optimize this with copy-on-write layer map.
                             let guard = self.layers.read(LayerManagerLockHolder::Compaction).await;
                             let layers = guard.layer_map()?;
                             layers.image_coverage(&key_range, l0_last_record_lsn).len()
                         };
+                        hole_coverage_elapsed += coverage_started.elapsed();
                         if coverage_size >= min_hole_coverage_size {
                             heap.push(Hole {
                                 key_range,
@@ -2133,53 +2564,69 @@ impl Timeline {
             }
             let mut holes = heap.into_vec();
             holes.sort_unstable_by_key(|hole| hole.key_range.start);
-            holes
+            (holes, output_size_plan.finish())
         };
-        stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
+        let metadata_pass_finished = tokio::time::Instant::now();
+        if let Some(key_sort_finished) = materialized_key_sort_finished {
+            // Preserve the legacy phase split for small materialized batches.
+            let index_metadata_elapsed = key_sort_finished - metadata_pass_started;
+            stats.read_lock_held_key_sort_micros = DurationRecorder::Recorded(
+                RecordedDuration(index_metadata_elapsed),
+                key_sort_finished,
+            );
+            stats.read_lock_held_index_metadata_micros = DurationRecorder::Recorded(
+                RecordedDuration(index_metadata_elapsed),
+                key_sort_finished,
+            );
+            stats.read_lock_held_compute_holes_micros =
+                stats.read_lock_held_key_sort_micros.till_now();
+        } else {
+            // Keep the legacy field limited to the index collection and sort that the
+            // materialized path performs. Streaming does neither operation, so its value is zero;
+            // the separately named field reports the cursor traversal and coalescing.
+            let index_metadata_elapsed = (metadata_pass_finished - metadata_pass_started)
+                .saturating_sub(hole_coverage_elapsed);
+            stats.read_lock_held_key_sort_micros = DurationRecorder::Recorded(
+                RecordedDuration(Duration::ZERO),
+                metadata_pass_finished,
+            );
+            stats.read_lock_held_index_metadata_micros = DurationRecorder::Recorded(
+                RecordedDuration(index_metadata_elapsed),
+                metadata_pass_finished,
+            );
+            stats.read_lock_held_compute_holes_micros = DurationRecorder::Recorded(
+                RecordedDuration(hole_coverage_elapsed),
+                metadata_pass_finished,
+            );
+        }
 
         if self.cancel.is_cancelled() {
             return Err(CompactionError::new_cancelled());
         }
 
+        // The compact plan is the only metadata needed by the writer. Release the small-batch
+        // materialized entries before reading values as well.
+        drop(materialized_metadata);
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
         // If there's both a Value::Image and Value::WalRecord for the same (key,lsn),
         // then the Value::Image is ordered before Value::WalRecord.
-        let mut all_values_iter = {
-            let mut deltas = Vec::with_capacity(deltas_to_compact.len());
-            for l in deltas_to_compact.iter() {
-                let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
-                deltas.push(l);
-            }
-            MergeIterator::create_with_options(
-                &deltas,
-                &[],
-                ctx,
-                1024 * 8192, /* 8 MiB buffer per layer iterator */
-                1024,
-            )
-        };
+        let mut all_values_iter = MergeIterator::create_with_options(
+            &deltas,
+            &[],
+            ctx,
+            1024 * 8192, /* 8 MiB buffer per layer iterator */
+            1024,
+        );
 
-        // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = all_keys
-            .iter()
-            .map(|DeltaEntry { key, lsn, size, .. }| (*key, *lsn, *size))
-            .coalesce(|mut prev, cur| {
-                // Coalesce keys that belong to the same key pair.
-                // This ensures that compaction doesn't put them
-                // into different layer files.
-                // Still limit this by the target file size,
-                // so that we keep the size of the files in
-                // check.
-                if prev.0 == cur.0 && prev.2 < target_file_size {
-                    prev.2 += cur.2;
-                    Ok(prev)
-                } else {
-                    Err((prev, cur))
-                }
-            });
+        // The metadata pass has already reduced the ordered index stream to one total per key
+        // and the LSN boundaries needed for duplicate-key slices. Consume that compact plan while
+        // the value merge writes output; no index cursor is reopened here.
+        let mut output_key_index = 0usize;
+        let mut next_duplicate_split = 0usize;
+        let mut current_key_duplicate_split_end = 0usize;
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -2250,44 +2697,49 @@ impl Timeline {
             }
 
             let same_key = prev_key == Some(key);
-            // We need to check key boundaries once we reach next key or end of layer with the same key
+            // The metadata pass recorded the total size of each key and the LSN boundaries where
+            // an oversized duplicate-key run must be sliced. Consume that compact plan at the
+            // same key boundaries as the value merge instead of reopening the index.
             if !same_key || lsn == dup_end_lsn {
-                let mut next_key_size = 0u64;
                 let is_dup_layer = dup_end_lsn.is_valid();
-                dup_start_lsn = Lsn::INVALID;
                 if !same_key {
+                    if output_key_index > 0
+                        && next_duplicate_split != current_key_duplicate_split_end
+                    {
+                        return Err(CompactionError::Other(anyhow!(
+                            "output metadata plan left duplicate split boundaries unconsumed"
+                        )));
+                    }
+                    dup_start_lsn = Lsn::INVALID;
                     dup_end_lsn = Lsn::INVALID;
-                }
-                // Determine size occupied by this key. We stop at next key or when size becomes larger than target_file_size
-                for (next_key, next_lsn, next_size) in all_keys_iter.by_ref() {
-                    next_key_size = next_size;
-                    if key != next_key {
-                        if dup_end_lsn.is_valid() {
-                            // We are writting segment with duplicates:
-                            // place all remaining values of this key in separate segment
-                            dup_start_lsn = dup_end_lsn; // new segments starts where old stops
-                            dup_end_lsn = lsn_range.end; // there are no more values of this key till end of LSN range
-                        }
-                        break;
+                    let key_index = output_key_index;
+                    let Some(key_size) = output_size_plan.key_sizes.get(key_index).copied() else {
+                        return Err(CompactionError::Other(anyhow!(
+                            "output metadata plan has no size for value key {key}"
+                        )));
+                    };
+                    output_key_index += 1;
+                    key_values_total_size = key_size;
+                    current_key_duplicate_split_end = next_duplicate_split;
+                    while output_size_plan
+                        .duplicate_splits
+                        .get(current_key_duplicate_split_end)
+                        .is_some_and(|(split_key, _)| *split_key == key_index)
+                    {
+                        current_key_duplicate_split_end += 1;
                     }
-                    key_values_total_size += next_size;
-                    // Check if it is time to split segment: if total keys size is larger than target file size.
-                    // We need to avoid generation of empty segments if next_size > target_file_size.
-                    if key_values_total_size > target_file_size && lsn != next_lsn {
-                        // Split key between multiple layers: such layer can contain only single key
-                        dup_start_lsn = if dup_end_lsn.is_valid() {
-                            dup_end_lsn // new segment with duplicates starts where old one stops
-                        } else {
-                            lsn // start with the first LSN for this key
-                        };
-                        dup_end_lsn = next_lsn; // upper LSN boundary is exclusive
-                        break;
+                    if next_duplicate_split < current_key_duplicate_split_end {
+                        dup_start_lsn = lsn;
+                        dup_end_lsn = output_size_plan.duplicate_splits[next_duplicate_split].1;
                     }
-                }
-                // handle case when loop reaches last key: in this case dup_end is non-zero but dup_start is not set.
-                if dup_end_lsn.is_valid() && !dup_start_lsn.is_valid() {
+                } else {
                     dup_start_lsn = dup_end_lsn;
-                    dup_end_lsn = lsn_range.end;
+                    next_duplicate_split += 1;
+                    dup_end_lsn = if next_duplicate_split < current_key_duplicate_split_end {
+                        output_size_plan.duplicate_splits[next_duplicate_split].1
+                    } else {
+                        lsn_range.end
+                    };
                 }
                 if writer.is_some() {
                     let written_size = writer.as_mut().unwrap().size();
@@ -2318,8 +2770,6 @@ impl Timeline {
                         }
                     }
                 }
-                // Remember size of key value because at next iteration we will access next item
-                key_values_total_size = next_key_size;
             }
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
                 Err(CompactionError::Other(anyhow::anyhow!(
@@ -2377,6 +2827,13 @@ impl Timeline {
 
             prev_key = Some(key);
         }
+        if output_key_index != output_size_plan.key_sizes.len()
+            || next_duplicate_split != output_size_plan.duplicate_splits.len()
+        {
+            return Err(CompactionError::Other(anyhow!(
+                "output values do not match the index metadata plan"
+            )));
+        }
         if let Some(writer) = writer {
             let (desc, path) = writer
                 .finish(prev_key.unwrap().next(), ctx)
@@ -2428,14 +2885,24 @@ impl Timeline {
         stats.new_deltas_count = Some(new_layers.len());
         stats.new_deltas_size = Some(new_layers.iter().map(|l| l.layer_desc().file_size).sum());
 
-        match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
-            .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
-        {
-            Ok(stats_json) => {
-                info!(
-                    stats_json = stats_json.as_str(),
-                    "compact_level0_phase1 stats available"
-                )
+        match TryInto::<CompactLevel0Phase1Stats>::try_into(stats) {
+            Ok(stats) => {
+                #[cfg(test)]
+                LAST_INDEX_METADATA_MICROS.store(
+                    stats.read_lock_held_index_metadata_micros.0.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                match serde_json::to_string(&stats).context("serde_json::to_string") {
+                    Ok(stats_json) => {
+                        info!(
+                            stats_json = stats_json.as_str(),
+                            "compact_level0_phase1 stats available"
+                        )
+                    }
+                    Err(e) => {
+                        warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
+                    }
+                }
             }
             Err(e) => {
                 warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
@@ -2445,6 +2912,7 @@ impl Timeline {
         // Without this, rustc complains about deltas_to_compact still
         // being borrowed when we `.into_iter()` below.
         drop(all_values_iter);
+        drop(deltas);
 
         Ok(CompactLevel0Phase1Result {
             new_layers,
@@ -2452,6 +2920,8 @@ impl Timeline {
                 .into_iter()
                 .map(|x| x.drop_eviction_guard())
                 .collect::<Vec<_>>(),
+            #[cfg(test)]
+            metadata_traversal,
             outcome: if fully_compacted {
                 CompactionOutcome::Done
             } else {
@@ -2465,6 +2935,8 @@ impl Timeline {
 struct CompactLevel0Phase1Result {
     new_layers: Vec<ResidentLayer>,
     deltas_to_compact: Vec<Layer>,
+    #[cfg(test)]
+    metadata_traversal: IndexMetadataTraversal,
     // Whether we have included all L0 layers, or selected only part of them due to the
     // L0 compaction size limit.
     outcome: CompactionOutcome,
@@ -2475,8 +2947,13 @@ struct CompactLevel0Phase1StatsBuilder {
     version: Option<u64>,
     tenant_id: Option<TenantShardId>,
     timeline_id: Option<TimelineId>,
+    // The test-only override lets the end-to-end fixture exercise the streaming branch without
+    // inflating its values just to cross the production byte threshold.
+    #[cfg(test)]
+    metadata_traversal_override: Option<IndexMetadataTraversal>,
     read_lock_acquisition_micros: DurationRecorder,
     read_lock_held_key_sort_micros: DurationRecorder,
+    read_lock_held_index_metadata_micros: DurationRecorder,
     compaction_prerequisites_micros: DurationRecorder,
     read_lock_held_compute_holes_micros: DurationRecorder,
     read_lock_drop_micros: DurationRecorder,
@@ -2493,6 +2970,7 @@ struct CompactLevel0Phase1Stats {
     timeline_id: TimelineId,
     read_lock_acquisition_micros: RecordedDuration,
     read_lock_held_key_sort_micros: RecordedDuration,
+    read_lock_held_index_metadata_micros: RecordedDuration,
     compaction_prerequisites_micros: RecordedDuration,
     read_lock_held_compute_holes_micros: RecordedDuration,
     read_lock_drop_micros: RecordedDuration,
@@ -2500,6 +2978,33 @@ struct CompactLevel0Phase1Stats {
     level0_deltas_count: usize,
     new_deltas_count: usize,
     new_deltas_size: u64,
+}
+
+impl CompactLevel0Phase1StatsBuilder {
+    fn metadata_traversal(
+        &self,
+        index_size: u64,
+        disjoint_index_ranges: bool,
+        layer_count: usize,
+    ) -> IndexMetadataTraversal {
+        #[cfg(test)]
+        if let Some(traversal) = self.metadata_traversal_override {
+            return traversal;
+        }
+        if disjoint_index_ranges {
+            if index_size <= L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT {
+                IndexMetadataTraversal::Materialized
+            } else {
+                IndexMetadataTraversal::Streaming
+            }
+        } else if layer_count > L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS {
+            // Broad descriptors cannot prove whether this many layers overlap. Avoid exact bound
+            // walks followed by a cursor merge; the fallback keeps the old cost profile.
+            IndexMetadataTraversal::Materialized
+        } else {
+            index_metadata_traversal(index_size)
+        }
+    }
 }
 
 impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
@@ -2522,6 +3027,10 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .read_lock_held_key_sort_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("read_lock_held_key_sort_micros not set"))?,
+            read_lock_held_index_metadata_micros: value
+                .read_lock_held_index_metadata_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_held_index_metadata_micros not set"))?,
             compaction_prerequisites_micros: value
                 .compaction_prerequisites_micros
                 .into_recorded()
@@ -4582,3 +5091,782 @@ impl CompactionLayer<Key> for ResidentImageLayer {
     }
 }
 impl CompactionImageLayer<TimelineAdaptor> for ResidentImageLayer {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::context::DownloadBehavior;
+    use crate::task_mgr::TaskKind;
+    use crate::tenant::harness::{TIMELINE_ID, TenantHarness};
+    use crate::tenant::storage_layer::delta_layer::test::make_index_cursor;
+    use crate::tenant::timeline::DeltaLayerTestDesc;
+    use crate::virtual_file::{IoMode, set_io_mode};
+
+    struct CountingAllocator;
+
+    static ALLOCATED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    #[global_allocator]
+    static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let ptr = unsafe { std::alloc::System.alloc(layout) };
+            if !ptr.is_null() {
+                ALLOCATED_BYTES
+                    .fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            ptr
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let ptr = unsafe { std::alloc::System.alloc_zeroed(layout) };
+            if !ptr.is_null() {
+                ALLOCATED_BYTES
+                    .fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) };
+        }
+
+        unsafe fn realloc(
+            &self,
+            ptr: *mut u8,
+            layout: std::alloc::Layout,
+            new_size: usize,
+        ) -> *mut u8 {
+            let new_ptr = unsafe { std::alloc::System.realloc(ptr, layout, new_size) };
+            if !new_ptr.is_null() {
+                ALLOCATED_BYTES.fetch_add(new_size as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            new_ptr
+        }
+    }
+
+    fn reset_allocation_bytes() {
+        ALLOCATED_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn allocation_bytes() -> u64 {
+        ALLOCATED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    const L0_CALIBRATION_LAYERS: &str = "NEON_L0_COMPACTION_CALIBRATION_LAYERS";
+    const L0_CALIBRATION_ENTRIES_PER_LAYER: &str =
+        "NEON_L0_COMPACTION_CALIBRATION_ENTRIES_PER_LAYER";
+    const L0_CALIBRATION_TARGET_FILE_SIZE: &str = "NEON_L0_COMPACTION_CALIBRATION_TARGET_FILE_SIZE";
+    const L0_CALIBRATION_VALUE_BYTES: &str = "NEON_L0_COMPACTION_CALIBRATION_VALUE_BYTES";
+    const L0_CALIBRATION_DISJOINT_KEYS: &str = "NEON_L0_COMPACTION_CALIBRATION_DISJOINT_KEYS";
+    const L0_CALIBRATION_REVERSE_DISJOINT_KEYS: &str =
+        "NEON_L0_COMPACTION_CALIBRATION_REVERSE_DISJOINT_KEYS";
+
+    fn calibration_env_usize(name: &str) -> anyhow::Result<usize> {
+        std::env::var(name)
+            .with_context(|| format!("{name} must be set"))?
+            .parse()
+            .with_context(|| format!("{name} must be a positive integer"))
+            .and_then(|value: usize| {
+                anyhow::ensure!(value > 0, "{name} must be positive");
+                Ok(value)
+            })
+    }
+
+    fn calibration_env_usize_or(name: &str, default: usize) -> anyhow::Result<usize> {
+        let value = match std::env::var(name) {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return Ok(default),
+            Err(err) => return Err(err).with_context(|| format!("read {name}")),
+        };
+        value
+            .parse()
+            .with_context(|| format!("{name} must be a positive integer"))
+            .and_then(|value: usize| {
+                anyhow::ensure!(value > 0, "{name} must be positive");
+                Ok(value)
+            })
+    }
+
+    fn calibration_env_bool(name: &str) -> anyhow::Result<bool> {
+        let value = match std::env::var(name) {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return Ok(false),
+            Err(err) => return Err(err).with_context(|| format!("read {name}")),
+        };
+        match value.as_str() {
+            "1" | "true" | "TRUE" => Ok(true),
+            "0" | "false" | "FALSE" => Ok(false),
+            _ => anyhow::bail!("{name} must be one of 0, 1, false, or true"),
+        }
+    }
+
+    fn calibration_env_u64(name: &str) -> anyhow::Result<u64> {
+        std::env::var(name)
+            .with_context(|| format!("{name} must be set"))?
+            .parse()
+            .with_context(|| format!("{name} must be a positive integer"))
+            .and_then(|value: u64| {
+                anyhow::ensure!(value > 0, "{name} must be positive");
+                Ok(value)
+            })
+    }
+
+    fn peak_rss_kib() -> anyhow::Result<u64> {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        // SAFETY: getrusage initializes the rusage structure on success.
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        anyhow::ensure!(
+            result == 0,
+            "getrusage failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: checked getrusage success above.
+        let max_rss = unsafe { usage.assume_init() }.ru_maxrss;
+        let max_rss = u64::try_from(max_rss).context("getrusage returned a negative max RSS")?;
+        #[cfg(target_os = "macos")]
+        let max_rss = max_rss / 1024;
+        Ok(max_rss)
+    }
+
+    #[test]
+    fn output_size_plan_coalesces_and_records_duplicate_splits() {
+        let key = Key::from_i128(100);
+        let mut builder = OutputSizePlanBuilder::new(5);
+        for entry in [
+            (key, Lsn(0x10), 3),
+            (key, Lsn(0x20), 4),
+            (key, Lsn(0x30), 4),
+            (key.next(), Lsn(0x40), 2),
+        ] {
+            builder.push(entry);
+        }
+
+        let plan = builder.finish();
+        assert_eq!(plan.key_sizes, vec![11, 2]);
+        assert_eq!(plan.duplicate_splits, vec![(0, Lsn(0x30))]);
+    }
+
+    #[test]
+    fn metadata_materialization_is_bounded_by_index_size() {
+        assert_eq!(
+            index_metadata_traversal(L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT),
+            IndexMetadataTraversal::Materialized
+        );
+        assert_eq!(
+            index_metadata_traversal(L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT + 1),
+            IndexMetadataTraversal::Streaming
+        );
+        // A batch whose index metadata exceeds the threshold uses the streaming path even when
+        // the entries themselves are small.
+        assert_eq!(
+            index_metadata_traversal(L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT + 5),
+            IndexMetadataTraversal::Streaming
+        );
+    }
+
+    #[test]
+    fn disjoint_metadata_materialization_stays_bounded() {
+        let stats = CompactLevel0Phase1StatsBuilder::default();
+        assert_eq!(
+            stats.metadata_traversal(L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT, true, 10,),
+            IndexMetadataTraversal::Materialized
+        );
+        assert_eq!(
+            stats.metadata_traversal(
+                L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT + 1,
+                true,
+                10,
+            ),
+            IndexMetadataTraversal::Streaming
+        );
+        assert_eq!(
+            stats.metadata_traversal(L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT, false, 10,),
+            IndexMetadataTraversal::Materialized
+        );
+        assert_eq!(
+            stats.metadata_traversal(L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT + 1, false, 10,),
+            IndexMetadataTraversal::Streaming
+        );
+        assert_eq!(
+            stats.metadata_traversal(
+                L0_METADATA_MATERIALIZE_INDEX_SIZE_LIMIT + 1,
+                false,
+                L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS + 1,
+            ),
+            IndexMetadataTraversal::Materialized
+        );
+    }
+
+    #[tokio::test]
+    async fn index_merge_matches_materialized_order_and_coalescing() -> anyhow::Result<()> {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let key = Key::from_i128(100);
+        let first_layer = vec![
+            (key, Lsn(0x20), 3),
+            (key, Lsn(0x40), 11),
+            (key.add(2), Lsn(0x4f), 7),
+        ];
+        let second_layer = vec![
+            // This exact key/LSN tie must retain selected-layer order, matching the stable
+            // materialized sort that L0 compaction used previously.
+            (key, Lsn(0x40), 19),
+            (key, Lsn(0x50), 5),
+            (key.add(1), Lsn(0x60), 5),
+            (key.add(2), Lsn(0x70), 13),
+        ];
+
+        let mut expected = first_layer
+            .iter()
+            .chain(&second_layer)
+            .copied()
+            .collect::<Vec<_>>();
+        expected.sort_by_key(|entry| (entry.0, entry.1));
+
+        let mut merged = IndexMergeIterator::from_iterators(vec![
+            make_index_cursor(&first_layer, &ctx)?,
+            make_index_cursor(&second_layer, &ctx)?,
+        ])
+        .await?;
+        let mut actual = Vec::new();
+        while let Some(entry) = merged.next().await? {
+            actual.push(entry);
+        }
+        assert_eq!(actual, expected);
+
+        let mut materialized = IndexMergeIterator::from_entries(&expected);
+        let mut materialized_actual = Vec::new();
+        while let Some(entry) = materialized.next().await? {
+            materialized_actual.push(entry);
+        }
+        assert_eq!(materialized_actual, expected);
+
+        // A target equal to the first entry's size prevents coalescing the following versions
+        // of this key. This exercises the duplicate-key output boundary used by L0 compaction.
+        let target_file_size = expected[0].2;
+        let mut expected_coalesced: Vec<(Key, Lsn, u64)> = Vec::new();
+        for current in expected.iter().copied() {
+            if let Some(previous) = expected_coalesced.last_mut()
+                && previous.0 == current.0
+                && previous.2 < target_file_size
+            {
+                previous.2 += current.2;
+            } else {
+                expected_coalesced.push(current);
+            }
+        }
+
+        let mut coalesced = CoalescedIndexMergeIterator::new(
+            IndexMergeIterator::from_iterators(vec![
+                make_index_cursor(&first_layer, &ctx)?,
+                make_index_cursor(&second_layer, &ctx)?,
+            ])
+            .await?,
+            target_file_size,
+        );
+        let mut actual_coalesced = Vec::new();
+        while let Some(entry) = coalesced.next().await? {
+            actual_coalesced.push(entry);
+        }
+        assert_eq!(actual_coalesced, expected_coalesced);
+
+        let mut output_plan_builder = OutputSizePlanBuilder::new(target_file_size);
+        for entry in expected.iter().copied() {
+            output_plan_builder.push(entry);
+        }
+        let output_plan = output_plan_builder.finish();
+        assert_eq!(
+            output_plan.key_sizes,
+            vec![38, 5, 20],
+            "the plan keeps one total per output key"
+        );
+        assert_eq!(
+            output_plan.duplicate_splits,
+            vec![(0, Lsn(0x40)), (0, Lsn(0x50)), (2, Lsn(0x70))],
+            "duplicate boundaries retain the coalescing target semantics"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn randomized_index_merge_matches_materialized_sort() -> anyhow::Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let mut rng = StdRng::seed_from_u64(0x1D3E_3C63);
+
+        for case_index in 0..128 {
+            let layer_count = rng.random_range(1..=8);
+            let mut layers = Vec::with_capacity(layer_count);
+            for _ in 0..layer_count {
+                let entry_count = rng.random_range(1..=64);
+                let mut entries: Vec<IndexMetadataEntry> = (0..entry_count)
+                    .map(|_| {
+                        (
+                            Key::from_i128(rng.random_range(0..=15)),
+                            Lsn(rng.random_range(1..=16)),
+                            rng.random_range(1..=128),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                entries.sort_by_key(|entry| (entry.0, entry.1));
+                entries.dedup_by_key(|entry| (entry.0, entry.1));
+                if entries.is_empty() {
+                    entries.push((Key::from_i128(0), Lsn(1), 1));
+                }
+                layers.push(entries);
+            }
+
+            // This is the former implementation's stable extension followed by sort. Small key
+            // and LSN domains deliberately create ties across layers and duplicate-key runs.
+            let mut expected = layers.iter().flatten().copied().collect::<Vec<_>>();
+            expected.sort_by_key(|entry| (entry.0, entry.1));
+
+            let cursors = layers
+                .iter()
+                .map(|entries| make_index_cursor(entries, &ctx))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let mut merged = IndexMergeIterator::from_iterators(cursors).await?;
+            let mut actual = Vec::with_capacity(expected.len());
+            while let Some(entry) = merged.next().await? {
+                actual.push(entry);
+            }
+            assert_eq!(
+                actual, expected,
+                "merged order mismatch in case {case_index}"
+            );
+
+            // Include exact entry sizes as targets so both sides exercise the strict `< target`
+            // coalescing boundary, in addition to targets on either side of it.
+            let mut target_sizes = vec![1, 2, 8, 32, 128];
+            target_sizes.extend(expected.iter().map(|entry| entry.2));
+            target_sizes.sort_unstable();
+            target_sizes.dedup();
+            for target_file_size in target_sizes {
+                let mut expected_coalesced: Vec<IndexMetadataEntry> = Vec::new();
+                for current in expected.iter().copied() {
+                    if let Some(previous) = expected_coalesced.last_mut()
+                        && previous.0 == current.0
+                        && previous.2 < target_file_size
+                    {
+                        previous.2 += current.2;
+                    } else {
+                        expected_coalesced.push(current);
+                    }
+                }
+
+                let cursors = layers
+                    .iter()
+                    .map(|entries| make_index_cursor(entries, &ctx))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let inner = IndexMergeIterator::from_iterators(cursors).await?;
+                let mut coalesced = CoalescedIndexMergeIterator::new(inner, target_file_size);
+                let mut actual_coalesced = Vec::new();
+                while let Some(entry) = coalesced.next().await? {
+                    actual_coalesced.push(entry);
+                }
+                assert_eq!(
+                    actual_coalesced, expected_coalesced,
+                    "coalescing mismatch in case {case_index}, target {target_file_size}"
+                );
+
+                // Independently apply the output writer's boundary rule to the stable sorted
+                // stream, then compare it with the compact plan built from the cursor merge.
+                let mut expected_plan = OutputSizePlan::default();
+                let mut expected_key: Option<Key> = None;
+                let mut expected_key_index = 0;
+                let mut expected_segment_size = 0;
+                let mut expected_segment_lsn = None;
+                for (key, lsn, size) in expected_coalesced.iter().copied() {
+                    if expected_key != Some(key) {
+                        expected_key = Some(key);
+                        expected_key_index = expected_plan.key_sizes.len();
+                        expected_plan.key_sizes.push(size);
+                        expected_segment_size = size;
+                        expected_segment_lsn = Some(lsn);
+                        continue;
+                    }
+
+                    expected_plan.key_sizes[expected_key_index] += size;
+                    if expected_segment_size + size > target_file_size
+                        && expected_segment_lsn != Some(lsn)
+                    {
+                        expected_plan
+                            .duplicate_splits
+                            .push((expected_key_index, lsn));
+                        expected_segment_size = size;
+                        expected_segment_lsn = Some(lsn);
+                    } else {
+                        expected_segment_size += size;
+                    }
+                }
+                let mut plan_builder = OutputSizePlanBuilder::new(target_file_size);
+                for entry in expected.iter().copied() {
+                    plan_builder.push(entry);
+                }
+                assert_eq!(
+                    plan_builder.finish(),
+                    expected_plan,
+                    "output plan mismatch in case {case_index}, target {target_file_size}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn l0_compaction_preserves_holes_duplicate_splits_and_restart() -> anyhow::Result<()> {
+        // This fixture uses the real L0 compaction path. Set TEST_OUTPUT=/tmp when running it on
+        // a filesystem that does not support no-replace renames in the workspace.
+        set_io_mode(IoMode::Buffered);
+
+        let harness = TenantHarness::create("l0_compaction_preserves_streaming_semantics").await?;
+        let _span = harness.span().entered();
+        let (tenant, ctx) = harness.load().await;
+        let initdb_lsn = Lsn(0x10);
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, initdb_lsn, crate::DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        let key_a = Key::from_i128(100);
+        let key_b = Key::from_i128(1_000);
+        let key_c = key_b.next();
+        let l0_start = Lsn(0x40);
+        const LAYER_LSN_WIDTH: u64 = 0x10;
+        const LAYER_COUNT: usize = 4;
+        let final_lsn = Lsn(l0_start.0 + LAYER_COUNT as u64 * LAYER_LSN_WIDTH);
+        timeline.force_advance_lsn(final_lsn);
+
+        // Three disjoint image ranges inside the A..B gap make it rank as a selected hole.
+        // The B..C gap has no image coverage, so it is not selected.
+        for (image_lsn, first_key, last_key) in
+            [(0x10, 200, 300), (0x20, 400, 500), (0x30, 600, 700)]
+        {
+            timeline
+                .force_create_image_layer(
+                    Lsn(image_lsn),
+                    vec![
+                        (Key::from_i128(first_key), Bytes::from_static(b"coverage")),
+                        (Key::from_i128(last_key), Bytes::from_static(b"coverage")),
+                    ],
+                    Some(initdb_lsn),
+                    &ctx,
+                )
+                .await?;
+        }
+
+        let a_value = Bytes::from(vec![0xa1; 256]);
+        let b_value = Bytes::from(vec![0xb2; 256]);
+        let c_values = (0..LAYER_COUNT)
+            .map(|index| Bytes::from(vec![0xc0 + index as u8; 256]))
+            .collect::<Vec<_>>();
+
+        for layer_index in 0..LAYER_COUNT {
+            let lsn_start = Lsn(l0_start.0 + layer_index as u64 * LAYER_LSN_WIDTH);
+            let mut data = vec![(
+                key_c,
+                Lsn(lsn_start.0 + 1),
+                Value::Image(c_values[layer_index].clone()),
+            )];
+            if layer_index == 0 {
+                data.extend([
+                    (key_a, Lsn(lsn_start.0 + 2), Value::Image(a_value.clone())),
+                    (key_b, Lsn(lsn_start.0 + 3), Value::Image(b_value.clone())),
+                ]);
+            }
+            timeline
+                .force_create_delta_layer(
+                    DeltaLayerTestDesc::new(
+                        lsn_start..Lsn(lsn_start.0 + LAYER_LSN_WIDTH),
+                        Key::MIN..Key::MAX,
+                        data,
+                    ),
+                    Some(initdb_lsn),
+                    &ctx,
+                )
+                .await?;
+        }
+
+        // The layers are test-created rather than flushed from WAL, so advance the durable LSN
+        // explicitly before exercising a shutdown/reload.
+        timeline.force_set_disk_consistent_lsn(final_lsn);
+
+        // This is larger than the combined A and B values, so only the selected hole, rather
+        // than size alone, can separate them. It is smaller than the C version history, which
+        // requires LSN-sliced output layers for that one key.
+        let target_file_size = 640;
+        // This boundary-visible override makes the assertions below run through the same
+        // phase-1 streaming branch that production selects for a large index.
+        let compaction_ctx = ctx.with_scope_timeline(&timeline);
+        let phase1 = timeline
+            .compact_level0_phase1(
+                CompactLevel0Phase1StatsBuilder {
+                    version: Some(2),
+                    tenant_id: Some(timeline.tenant_shard_id),
+                    timeline_id: Some(timeline.timeline_id),
+                    metadata_traversal_override: Some(IndexMetadataTraversal::Streaming),
+                    ..Default::default()
+                },
+                target_file_size,
+                true,
+                None,
+                &compaction_ctx,
+            )
+            .await?;
+        assert_eq!(phase1.metadata_traversal, IndexMetadataTraversal::Streaming);
+        assert_eq!(phase1.outcome, CompactionOutcome::Done);
+        timeline
+            .finish_compact_batch(&phase1.new_layers, &[], &phase1.deltas_to_compact)
+            .await?;
+        // force_set_disk_consistent_lsn changes the in-memory test state only. Publish matching
+        // metadata so reloading exercises the compacted layer map rather than discarding these
+        // intentionally test-created layers as future files.
+        timeline.schedule_uploads(final_lsn, std::iter::empty())?;
+
+        let mut output_deltas = {
+            let layer_manager = timeline.layers.read(LayerManagerLockHolder::Testing).await;
+            let layer_map = layer_manager.layer_map()?;
+            assert!(layer_map.level0_deltas().is_empty());
+            let layer_names = layer_map
+                .iter_historic_layers()
+                .map(|layer| layer.layer_name())
+                .collect::<Vec<_>>();
+            assert_eq!(check_valid_layermap(&layer_names), None);
+            layer_map
+                .iter_historic_layers()
+                .filter(|layer| layer.is_delta && layer.lsn_range.start >= l0_start)
+                .map(|layer| layer.key())
+                .collect::<Vec<_>>()
+        };
+        output_deltas.sort_by_key(|layer| (layer.key_range.start, layer.lsn_range.start));
+
+        // The selected A..B hole produces an A-only output layer. Without the hole, the two
+        // small keys fit together under target_file_size.
+        assert!(output_deltas.iter().any(|layer| {
+            layer.key_range.start == key_a
+                && layer.key_range.end == key_a.next()
+                && layer.lsn_range == (l0_start..final_lsn)
+                && layer.is_delta
+        }));
+        assert!(output_deltas.iter().any(|layer| {
+            layer.key_range.start == key_b
+                && layer.key_range.end == key_b.next()
+                && layer.lsn_range == (l0_start..final_lsn)
+                && layer.is_delta
+        }));
+
+        let mut c_splits = output_deltas
+            .iter()
+            .filter(|layer| layer.key_range.start == key_c && layer.key_range.end == key_c.next())
+            .collect::<Vec<_>>();
+        c_splits.sort_by_key(|layer| layer.lsn_range.start);
+        assert!(
+            c_splits.len() >= 2,
+            "expected multiple LSN-sliced output layers for {key_c}, got {c_splits:?}"
+        );
+        assert!(
+            c_splits
+                .windows(2)
+                .all(|pair| pair[0].lsn_range.end == pair[1].lsn_range.start),
+            "duplicate-key LSN slices are not contiguous: {c_splits:?}"
+        );
+
+        let mut expected_values = vec![(key_a, final_lsn, a_value), (key_b, final_lsn, b_value)];
+        expected_values.extend(c_values.iter().enumerate().map(|(layer_index, value)| {
+            (
+                key_c,
+                Lsn(l0_start.0 + layer_index as u64 * LAYER_LSN_WIDTH + 1),
+                value.clone(),
+            )
+        }));
+        for (key, lsn, expected) in &expected_values {
+            assert_eq!(timeline.get(*key, *lsn, &ctx).await?, *expected);
+        }
+
+        // Make the compacted layer-map durable and verify the same sampled values after reopening it.
+        timeline.remote_client.wait_completion().await?;
+        tenant
+            .shutdown(
+                Default::default(),
+                crate::tenant::timeline::ShutdownMode::FreezeAndFlush,
+            )
+            .await
+            .expect("test tenant should shut down");
+        drop(timeline);
+        drop(tenant);
+
+        let (reloaded_tenant, reloaded_ctx) = harness.load().await;
+        let reloaded_timeline = reloaded_tenant.get_timeline(TIMELINE_ID, true)?;
+        for (key, lsn, expected) in &expected_values {
+            assert_eq!(
+                reloaded_timeline.get(*key, *lsn, &reloaded_ctx).await?,
+                *expected
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Exercises the threshold-triggered L0 pass selected by the normal tenant compaction
+    /// iteration with a configurable stack of delta layers. The default stack overlaps; set
+    /// `NEON_L0_COMPACTION_CALIBRATION_DISJOINT_KEYS=1` to exercise a wide output plan,
+    /// `NEON_L0_COMPACTION_CALIBRATION_REVERSE_DISJOINT_KEYS=1` to make the materialized control
+    /// sort reverse-ordered runs, and `NEON_L0_COMPACTION_CALIBRATION_VALUE_BYTES=1` for
+    /// tiny-value metadata density. The input
+    /// construction is deliberately outside the timer: a production compaction already receives
+    /// completed layers, while the timed section starts at the same `compaction_iteration` entry
+    /// point used by the background loop and includes layer-map replacement.
+    ///
+    /// This test is ignored because its intended calibration shape is large. Run it with the
+    /// default ten-layer threshold and one million entries per layer:
+    ///
+    /// ```text
+    /// TEST_OUTPUT=/dev/shm \
+    /// NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=std-fs \
+    /// NEON_L0_COMPACTION_CALIBRATION_LAYERS=10 \
+    /// NEON_L0_COMPACTION_CALIBRATION_ENTRIES_PER_LAYER=1000000 \
+    /// NEON_L0_COMPACTION_CALIBRATION_TARGET_FILE_SIZE=67108864 \
+    /// cargo test -p pageserver --lib tenant::timeline::compaction::tests::l0_compaction_metadata_calibration -- --ignored --exact --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "large L0 compaction calibration"]
+    async fn l0_compaction_metadata_calibration() -> anyhow::Result<()> {
+        // The ignored test is run alone. Buffered IO makes its test fixture portable to filesystems
+        // that do not permit O_DIRECT while preserving the production compaction code path. Set
+        // TEST_OUTPUT to a filesystem that supports no-replace renames (such as /dev/shm in
+        // sandboxed CI).
+        set_io_mode(IoMode::Buffered);
+
+        let layer_count = calibration_env_usize(L0_CALIBRATION_LAYERS)?;
+        let entries_per_layer = calibration_env_usize(L0_CALIBRATION_ENTRIES_PER_LAYER)?;
+        let target_file_size = calibration_env_u64(L0_CALIBRATION_TARGET_FILE_SIZE)?;
+        let value_bytes = calibration_env_usize_or(L0_CALIBRATION_VALUE_BYTES, 64)?;
+        let disjoint_keys = calibration_env_bool(L0_CALIBRATION_DISJOINT_KEYS)?;
+        let reverse_disjoint_keys = calibration_env_bool(L0_CALIBRATION_REVERSE_DISJOINT_KEYS)?;
+        anyhow::ensure!(
+            !reverse_disjoint_keys || disjoint_keys,
+            "{L0_CALIBRATION_REVERSE_DISJOINT_KEYS} requires {L0_CALIBRATION_DISJOINT_KEYS}=1"
+        );
+        let harness = TenantHarness::create("l0_compaction_metadata_calibration").await?;
+        let _span = harness.span().entered();
+        let (tenant, ctx) = harness.load().await;
+        tenant.update_tenant_config(|mut config| {
+            config.checkpoint_distance = Some(target_file_size);
+            Ok(config)
+        })?;
+        let threshold = tenant.get_compaction_threshold();
+        anyhow::ensure!(
+            layer_count >= threshold,
+            "{L0_CALIBRATION_LAYERS} ({layer_count}) must meet the normal compaction threshold ({threshold})"
+        );
+        anyhow::ensure!(
+            !disjoint_keys || layer_count <= usize::MAX / entries_per_layer,
+            "disjoint calibration key range overflows usize"
+        );
+        let initdb_lsn = Lsn(0x10);
+        let timeline = tenant
+            .create_test_timeline(TIMELINE_ID, initdb_lsn, crate::DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        const LAYER_LSN_WIDTH: u64 = 0x10;
+        let final_lsn = Lsn(initdb_lsn.0 + layer_count as u64 * LAYER_LSN_WIDTH);
+        timeline.force_advance_lsn(final_lsn);
+
+        for layer_index in 0..layer_count {
+            let lsn_start = Lsn(initdb_lsn.0 + layer_index as u64 * LAYER_LSN_WIDTH);
+            let lsn_range = lsn_start..Lsn(lsn_start.0 + LAYER_LSN_WIDTH);
+            let value = Bytes::from(vec![layer_index as u8; value_bytes]);
+            let key_layer_index = if reverse_disjoint_keys {
+                layer_count - layer_index - 1
+            } else {
+                layer_index
+            };
+            let key_start = usize::from(disjoint_keys) * key_layer_index * entries_per_layer;
+            let data = (0..entries_per_layer)
+                .map(|key_index| {
+                    (
+                        Key::from_i128((key_start + key_index) as i128),
+                        Lsn(lsn_start.0 + 1),
+                        Value::Image(value.clone()),
+                    )
+                })
+                .collect();
+            timeline
+                .force_create_delta_layer(
+                    DeltaLayerTestDesc::new(lsn_range, Key::MIN..Key::MAX, data),
+                    Some(initdb_lsn),
+                    &ctx,
+                )
+                .await?;
+        }
+
+        let compaction_ctx =
+            RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
+        let cancel = CancellationToken::new();
+        reset_allocation_bytes();
+        LAST_INDEX_METADATA_MICROS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let started = Instant::now();
+        let outcome = tenant
+            .compaction_iteration(&cancel, &compaction_ctx)
+            .await?;
+        let elapsed_micros = started.elapsed().as_micros();
+        let compaction_allocation_bytes = allocation_bytes();
+        let index_metadata_micros =
+            LAST_INDEX_METADATA_MICROS.load(std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(outcome, CompactionOutcome::Done);
+        let layer_manager = timeline.layers.read(LayerManagerLockHolder::Testing).await;
+        let layer_map = layer_manager.layer_map()?;
+        assert!(layer_map.level0_deltas().is_empty());
+        let layer_names = layer_map
+            .iter_historic_layers()
+            .map(|layer| layer.layer_name())
+            .collect::<Vec<_>>();
+        assert_eq!(check_valid_layermap(&layer_names), None);
+        drop(layer_manager);
+
+        let sampled_layers = if disjoint_keys {
+            vec![0, layer_count / 2, layer_count - 1]
+        } else {
+            vec![layer_count - 1]
+        };
+        for layer_index in sampled_layers {
+            let key_layer_index = if reverse_disjoint_keys {
+                layer_count - layer_index - 1
+            } else {
+                layer_index
+            };
+            let key_start = usize::from(disjoint_keys) * key_layer_index * entries_per_layer;
+            for key_index in [0, entries_per_layer / 2, entries_per_layer - 1] {
+                let value = timeline
+                    .get(
+                        Key::from_i128((key_start + key_index) as i128),
+                        final_lsn,
+                        &ctx,
+                    )
+                    .await?;
+                assert_eq!(value, Bytes::from(vec![layer_index as u8; value_bytes]));
+            }
+        }
+
+        println!("l0_compaction_metadata_calibration_micros={elapsed_micros}");
+        println!(
+            "l0_compaction_metadata_calibration_peak_rss_kib={}",
+            peak_rss_kib()?
+        );
+        println!(
+            "l0_compaction_metadata_calibration_allocation_bytes={}",
+            compaction_allocation_bytes
+        );
+        println!(
+            "l0_compaction_metadata_calibration_index_metadata_micros={}",
+            index_metadata_micros
+        );
+        Ok(())
+    }
+}
