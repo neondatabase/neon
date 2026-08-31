@@ -19,6 +19,7 @@ anyhow.workspace = true
 bincode.workspace = true
 bytes.workspace = true
 camino.workspace = true
+camino-tempfile.workspace = true
 chrono.workspace = true
 diatomic-waker.workspace = true
 git-version.workspace = true
@@ -28,6 +29,7 @@ fail.workspace = true
 futures = { workspace = true }
 jsonwebtoken.workspace = true
 nix = { workspace = true, features = ["ioctl"] }
+oid-registry.workspace = true
 once_cell.workspace = true
 pem.workspace = true
 pin-project-lite.workspace = true
@@ -48,9 +50,12 @@ tracing-utils.workspace = true
 rand.workspace = true
 scopeguard.workspace = true
 uuid.workspace = true
+rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 walkdir.workspace = true
+x509-parser.workspace = true
 
 pq_proto.workspace = true
 postgres_connection.workspace = true
@@ -67,6 +72,7 @@ camino-tempfile.workspace = true
 pprof.workspace = true
 serde_assert.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+rcgen = { version = "=0.13.1", features = ["crypto", "aws_lc_rs"] }
 
 [[bench]]
 name = "benchmarks"

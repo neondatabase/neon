@@ -14,6 +14,7 @@ use desim::network::TCP;
 use desim::node_os::NodeOs;
 use desim::proto::{AnyMessage, NetEvent, NodeEvent};
 use http::Uri;
+use postgres_backend::AuthType;
 use safekeeper::SafeKeeperConf;
 use safekeeper::safekeeper::{
     ProposerAcceptorMessage, SK_PROTO_VERSION_3, SafeKeeper, UNKNOWN_SERVER_VERSION,
@@ -169,6 +170,7 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         availability_zone: None,
         peer_recovery_enabled: false,
         backup_parallel_jobs: 0,
+        auth_type: AuthType::NeonJWT,
         pg_auth: None,
         pg_tenant_only_auth: None,
         http_auth: None,

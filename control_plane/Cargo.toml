@@ -46,3 +46,5 @@ endpoint_storage.workspace = true
 compute_api.workspace = true
 workspace_hack.workspace = true
 tracing.workspace = true
+x509-parser.workspace = true
+rsa = "0.9"

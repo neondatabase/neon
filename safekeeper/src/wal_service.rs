@@ -103,7 +103,7 @@ async fn handle_socket(
     };
     let auth_type = match auth_key {
         None => AuthType::Trust,
-        Some(_) => AuthType::NeonJWT,
+        Some(_) => conf.auth_type,
     };
     let auth_pair = auth_key.map(|key| (allowed_auth_scope, key));
     let mut conn_handler = SafekeeperPostgresHandler::new(

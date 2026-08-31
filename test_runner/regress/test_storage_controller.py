@@ -1406,6 +1406,9 @@ def test_storage_controller_s3_time_travel_recovery(
 def test_storage_controller_auth(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()
+
+    assert env.auth_token_type == "NeonJWT"
+
     svc = env.storage_controller
     api = env.storage_controller_api
 

@@ -462,25 +462,37 @@ fn start_pageserver(
     let http_auth;
     let pg_auth;
     let grpc_auth;
-    if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type].contains(&AuthType::NeonJWT) {
+    if [conf.http_auth_type, conf.pg_auth_type, conf.grpc_auth_type]
+        .iter()
+        .any(|auth_type| *auth_type == AuthType::NeonJWT || *auth_type == AuthType::HadronJWT)
+    {
         // unwrap is ok because check is performed when creating config, so path is set and exists
         let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
         info!("Loading public key(s) for verifying JWT tokens from {key_path:?}");
 
-        let jwt_auth = JwtAuth::from_key_path(key_path)?;
+        let use_hadron_jwt = conf.http_auth_type == AuthType::HadronJWT
+            || conf.pg_auth_type == AuthType::HadronJWT
+            || conf.grpc_auth_type == AuthType::HadronJWT;
+
+        let jwt_auth = if use_hadron_jwt {
+            // To validate Hadron JWTs we need to extract decoding keys from X509 certificates.
+            JwtAuth::from_cert_path(key_path)?
+        } else {
+            JwtAuth::from_key_path(key_path)?
+        };
         let auth: Arc<SwappableJwtAuth> = Arc::new(SwappableJwtAuth::new(jwt_auth));
 
         http_auth = match conf.http_auth_type {
             AuthType::Trust => None,
-            AuthType::NeonJWT => Some(auth.clone()),
+            AuthType::NeonJWT | AuthType::HadronJWT => Some(auth.clone()),
         };
         pg_auth = match conf.pg_auth_type {
             AuthType::Trust => None,
-            AuthType::NeonJWT => Some(auth.clone()),
+            AuthType::NeonJWT | AuthType::HadronJWT => Some(auth.clone()),
         };
         grpc_auth = match conf.grpc_auth_type {
             AuthType::Trust => None,
-            AuthType::NeonJWT => Some(auth),
+            AuthType::NeonJWT | AuthType::HadronJWT => Some(auth),
         };
     } else {
         http_auth = None;

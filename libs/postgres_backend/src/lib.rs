@@ -194,6 +194,10 @@ pub enum AuthType {
     Trust,
     // This mimics postgres's AuthenticationCleartextPassword but instead of password expects JWT
     NeonJWT,
+    // Similar to above but uses Hadron JWT. Hadron JWTs are slightly different in that:
+    // 1. Decoding keys are loaded from PEM-encoded X509 certificates instead of plain key files.
+    // 2. Signature algorithm is RSA-based (may change in the future).
+    HadronJWT,
 }
 
 impl FromStr for AuthType {
@@ -203,6 +207,7 @@ impl FromStr for AuthType {
         match s {
             "Trust" => Ok(Self::Trust),
             "NeonJWT" => Ok(Self::NeonJWT),
+            "HadronJWT" => Ok(Self::HadronJWT),
             _ => anyhow::bail!("invalid value \"{s}\" for auth type"),
         }
     }
@@ -213,6 +218,7 @@ impl fmt::Display for AuthType {
         f.write_str(match self {
             AuthType::Trust => "Trust",
             AuthType::NeonJWT => "NeonJWT",
+            AuthType::HadronJWT => "HadronJWT",
         })
     }
 }
@@ -613,7 +619,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         if self.state == ProtoState::Authentication {
             match self.framed.read_message().await? {
                 Some(FeMessage::PasswordMessage(m)) => {
-                    assert!(self.auth_type == AuthType::NeonJWT);
+                    assert!(matches!(
+                        self.auth_type,
+                        AuthType::NeonJWT | AuthType::HadronJWT
+                    ));
 
                     let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
@@ -712,7 +721,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                             .await?;
                         self.state = ProtoState::Established;
                     }
-                    AuthType::NeonJWT => {
+                    AuthType::NeonJWT | AuthType::HadronJWT => {
                         self.write_message(&BeMessage::AuthenticationCleartextPassword)
                             .await?;
                         self.state = ProtoState::Authentication;
