@@ -100,7 +100,7 @@ are described in a later section.
 There are broadly two parts to the implementation:
 
 1. The pageserver split API, which splits one shard on one pageserver
-2. The overall tenant split proccess which is coordinated by the storage controller,
+2. The overall tenant split process which is coordinated by the storage controller,
    and calls into the pageserver split API as needed.
 
 ### Pageserver Split API
