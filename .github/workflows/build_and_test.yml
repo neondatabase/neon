@@ -1455,7 +1455,8 @@ jobs:
               -f dockerTag=${{needs.meta.outputs.build-tag}}
             ;;
           compute-release)
-            gh workflow --repo neondatabase/infra run deploy-compute-dev.yml --ref main -f dockerTag=${{needs.meta.outputs.build-tag}}
+            gh workflow --repo neondatabase/infra run deploy-compute.yml --ref main -f dockerTag=${{needs.meta.outputs.build-tag}} -f env=dev
+            gh workflow --repo neondatabase/infra run deploy-compute.yml --ref main -f dockerTag=${{needs.meta.outputs.build-tag}} -f env=prod
             ;;
           *)
             echo "RUN_KIND (value '${RUN_KIND}') is not set to either 'push-main', 'storage-release', 'proxy-release' or 'compute-release'"
