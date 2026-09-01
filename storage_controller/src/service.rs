@@ -459,7 +459,7 @@ pub struct Config {
 
     pub heartbeat_interval: Duration,
 
-    pub address_for_peers: Option<Uri>,
+    pub address_for_peers: Uri,
 
     pub start_as_candidate: bool,
 
