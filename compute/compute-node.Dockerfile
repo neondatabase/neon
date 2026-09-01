@@ -1633,6 +1633,12 @@ FROM pg-build-with-cargo AS neon-ext-build
 ARG PG_VERSION
 
 USER root
+
+# Update the rust toolchain. Running 'make' will do this, but better to do
+# it as a separately cacheable step.
+COPY rust-toolchain.toml .
+RUN rustup show
+
 COPY . .
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) -C pgxn -s install-compute \
@@ -1731,6 +1737,12 @@ ARG BUILD_TAG
 ENV BUILD_TAG=$BUILD_TAG
 
 USER nonroot
+
+# Update the rust toolchain. Running 'cargo build' will do this, but
+# better to do it as a separately cacheable step.
+COPY --chown=nonroot rust-toolchain.toml .
+RUN rustup show
+
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
 RUN --mount=type=cache,uid=1000,target=/home/nonroot/.cargo/registry \
