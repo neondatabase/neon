@@ -1,0 +1,593 @@
+diff --git a/src/test/regress/sql/box.sql b/src/test/regress/sql/box.sql
+index 249636c76c3..540c2b54dda 100644
+--- a/src/test/regress/sql/box.sql
++++ b/src/test/regress/sql/box.sql
+@@ -196,7 +196,7 @@ CREATE TABLE quad_box_tbl (id int, b box);
+ 
+ INSERT INTO quad_box_tbl
+   SELECT (x - 1) * 100 + y, box(point(x * 10, y * 10), point(x * 10 + 5, y * 10 + 5))
+-  FROM generate_series(1, 95 * 100) x,
++  FROM generate_series(1, 100) x,
+        generate_series(1, 95 * 100) y;
+ 
+ -- insert repeating data to test allTheSame
+diff --git a/src/test/regress/sql/brin.sql b/src/test/regress/sql/brin.sql
+index 39d3cd7821a..86efbb72609 100644
+--- a/src/test/regress/sql/brin.sql
++++ b/src/test/regress/sql/brin.sql
+@@ -476,7 +476,7 @@ CREATE TABLE brintest_3 (a text, b text, c text, d text);
+ 
+ -- long random strings (~2000 chars each, so ~6kB for min/max on two
+ -- columns) to trigger toasting
+-WITH rand_value AS (SELECT string_agg(fipshash(i::text),'') AS val FROM generate_series(1, 95 * 60) s(i))
++WITH rand_value AS (SELECT string_agg(fipshash(i::text),'') AS val FROM generate_series(1,60) s(i))
+ INSERT INTO brintest_3
+ SELECT val, val, val, val FROM rand_value;
+ 
+@@ -495,7 +495,7 @@ VACUUM brintest_3;
+ -- retry insert with a different random-looking (but deterministic) value
+ -- the value is different, and so should replace either min or max in the
+ -- brin summary
+-WITH rand_value AS (SELECT string_agg(fipshash((-i)::text),'') AS val FROM generate_series(1, 95 * 60) s(i))
++WITH rand_value AS (SELECT string_agg(fipshash((-i)::text),'') AS val FROM generate_series(1,60) s(i))
+ INSERT INTO brintest_3
+ SELECT val, val, val, val FROM rand_value;
+ 
+diff --git a/src/test/regress/sql/brin_multi.sql b/src/test/regress/sql/brin_multi.sql
+index b7f7a9e8803..b1a109fe07f 100644
+--- a/src/test/regress/sql/brin_multi.sql
++++ b/src/test/regress/sql/brin_multi.sql
+@@ -612,7 +612,7 @@ CREATE TABLE brin_date_test(a DATE);
+ INSERT INTO brin_date_test SELECT '4713-01-01 BC'::date + i FROM generate_series(1, 95 * 30) s(i);
+ 
+ -- insert values close to date minimum
+-INSERT INTO brin_date_test SELECT '5874897-12-01'::date + i FROM generate_series(1, 95 * 30) s(i);
++INSERT INTO brin_date_test SELECT '5874897-12-01'::date + i FROM generate_series(1, 30) s(i);
+ 
+ CREATE INDEX ON brin_date_test USING brin (a date_minmax_multi_ops) WITH (pages_per_range=1);
+ 
+diff --git a/src/test/regress/sql/btree_index.sql b/src/test/regress/sql/btree_index.sql
+index d0d86db1667..88a752264a0 100644
+--- a/src/test/regress/sql/btree_index.sql
++++ b/src/test/regress/sql/btree_index.sql
+@@ -267,7 +267,7 @@ VACUUM delete_test_table;
+ --
+ -- The vacuum above should've turned the leaf page into a fast root. We just
+ -- need to insert some rows to cause the fast root page to split.
+-INSERT INTO delete_test_table SELECT i, 1, 2, 3 FROM generate_series(1, 95 * 1000) i;
++INSERT INTO delete_test_table SELECT i, 1, 2, 3 FROM generate_series(1,1000) i;
+ 
+ -- Test unsupported btree opclass parameters
+ create index on btree_tall_tbl (id int4_ops(foo=1));
+diff --git a/src/test/regress/sql/create_table.sql b/src/test/regress/sql/create_table.sql
+index 13006372064..1fd4cbfa7ef 100644
+--- a/src/test/regress/sql/create_table.sql
++++ b/src/test/regress/sql/create_table.sql
+@@ -47,7 +47,7 @@ DEALLOCATE select1;
+ -- (temporarily hide query, to avoid the long CREATE TABLE stmt)
+ \set ECHO none
+ SELECT 'CREATE TABLE extra_wide_table(firstc text, '|| array_to_string(array_agg('c'||i||' bool'),',')||', lastc text);'
+-FROM generate_series(1, 95 * 1100) g(i)
++FROM generate_series(1, 1100) g(i)
+ \gexec
+ \set ECHO all
+ INSERT INTO extra_wide_table(firstc, lastc) VALUES('first col', 'last col');
+@@ -74,7 +74,7 @@ CREATE TABLE default_expr_agg (a int DEFAULT (avg(1)));
+ -- invalid use of subquery
+ CREATE TABLE default_expr_agg (a int DEFAULT (select 1));
+ -- invalid use of set-returning function
+-CREATE TABLE default_expr_agg (a int DEFAULT (generate_series(1, 95 * 3)));
++CREATE TABLE default_expr_agg (a int DEFAULT (generate_series(1,3)));
+ 
+ -- Verify that subtransaction rollback restores rd_createSubid.
+ BEGIN;
+@@ -359,7 +359,7 @@ CREATE TABLE part_bogus_expr_fail PARTITION OF range_parted
+ CREATE TABLE part_bogus_expr_fail PARTITION OF range_parted
+   FOR VALUES FROM ((select 1)) TO ('2019-01-01');
+ CREATE TABLE part_bogus_expr_fail PARTITION OF range_parted
+-  FOR VALUES FROM (generate_series(1, 95 * 3)) TO ('2019-01-01');
++  FOR VALUES FROM (generate_series(1, 3)) TO ('2019-01-01');
+ 
+ -- trying to specify list for range partitioned table
+ CREATE TABLE fail_part PARTITION OF range_parted FOR VALUES IN ('a');
+diff --git a/src/test/regress/sql/fast_default.sql b/src/test/regress/sql/fast_default.sql
+index 28fefad6fe6..7d7060820e4 100644
+--- a/src/test/regress/sql/fast_default.sql
++++ b/src/test/regress/sql/fast_default.sql
+@@ -318,7 +318,7 @@ CREATE TABLE T (pk INT NOT NULL PRIMARY KEY);
+ 
+ SELECT set('t');
+ 
+-INSERT INTO T SELECT * FROM generate_series(1, 95 * 10) a;
++INSERT INTO T SELECT * FROM generate_series(1, 10) a;
+ 
+ ALTER TABLE T ADD COLUMN c_bigint BIGINT NOT NULL DEFAULT -1;
+ 
+@@ -326,7 +326,7 @@ INSERT INTO T SELECT b, b - 10 FROM generate_series(11, 20) a(b);
+ 
+ ALTER TABLE T ADD COLUMN c_text TEXT DEFAULT 'hello';
+ 
+-INSERT INTO T SELECT b, b - 10, (b + 10)::text FROM generate_series(21, 30) a(b);
++INSERT INTO T SELECT b, b - 10, (b + 10)::text FROM generate_series(21, 95 * 30) a(b);
+ 
+ -- WHERE clause
+ SELECT c_bigint, c_text FROM T WHERE c_bigint = -1 LIMIT 1;
+diff --git a/src/test/regress/sql/hash_index.sql b/src/test/regress/sql/hash_index.sql
+index fcd5f91a39f..6ac90c57730 100644
+--- a/src/test/regress/sql/hash_index.sql
++++ b/src/test/regress/sql/hash_index.sql
+@@ -220,7 +220,7 @@ SELECT h.seqno AS f20000
+ CREATE TABLE hash_split_heap (keycol INT);
+ INSERT INTO hash_split_heap SELECT 1 FROM generate_series(1, 95 * 500) a;
+ CREATE INDEX hash_split_index on hash_split_heap USING HASH (keycol);
+-INSERT INTO hash_split_heap SELECT 1 FROM generate_series(1, 95 * 5000) a;
++INSERT INTO hash_split_heap SELECT 1 FROM generate_series(1, POW(95, 0.5) * 5000) a;
+ 
+ -- Let's do a backward scan.
+ BEGIN;
+@@ -236,7 +236,7 @@ END;
+ 
+ -- DELETE, INSERT, VACUUM.
+ DELETE FROM hash_split_heap WHERE keycol = 1;
+-INSERT INTO hash_split_heap SELECT a/2 FROM generate_series(1, 95 * 25000) a;
++INSERT INTO hash_split_heap SELECT a/2 FROM generate_series(1, POW(95, 0.5) * 25000) a;
+ 
+ VACUUM hash_split_heap;
+ 
+diff --git a/src/test/regress/sql/horology.sql b/src/test/regress/sql/horology.sql
+index 3920a9528ae..d6ce372d799 100644
+--- a/src/test/regress/sql/horology.sql
++++ b/src/test/regress/sql/horology.sql
+@@ -551,14 +551,14 @@ SELECT to_timestamp('2011-12-18 11:38 +01:xyz', 'YYYY-MM-DD HH12:MI OF');  -- er
+ SELECT to_timestamp('2018-11-02 12:34:56.025', 'YYYY-MM-DD HH24:MI:SS.MS');
+ 
+ SELECT i, to_timestamp('2018-11-02 12:34:56', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 95 * 6) i;
+-SELECT i, to_timestamp('2018-11-02 12:34:56.1', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 95 * 6) i;
+-SELECT i, to_timestamp('2018-11-02 12:34:56.12', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 95 * 6) i;
+-SELECT i, to_timestamp('2018-11-02 12:34:56.123', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 95 * 6) i;
+-SELECT i, to_timestamp('2018-11-02 12:34:56.1234', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 95 * 6) i;
+-SELECT i, to_timestamp('2018-11-02 12:34:56.12345', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 95 * 6) i;
++SELECT i, to_timestamp('2018-11-02 12:34:56.1', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 6) i;
++SELECT i, to_timestamp('2018-11-02 12:34:56.12', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 6) i;
++SELECT i, to_timestamp('2018-11-02 12:34:56.123', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 6) i;
++SELECT i, to_timestamp('2018-11-02 12:34:56.1234', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 6) i;
++SELECT i, to_timestamp('2018-11-02 12:34:56.12345', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 6) i;
+ SELECT i, to_timestamp('2018-11-02 12:34:56.123456', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 95 * 6) i;
+ SELECT i, to_timestamp('2018-11-02 12:34:56.123456789', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 95 * 6) i;
+-SELECT i, to_timestamp('20181102123456123456', 'YYYYMMDDHH24MISSFF' || i) FROM generate_series(1, 95 * 6) i;
++SELECT i, to_timestamp('20181102123456123456', 'YYYYMMDDHH24MISSFF' || i) FROM generate_series(1, 6) i;
+ 
+ SELECT to_date('1 4 1902', 'Q MM YYYY');  -- Q is ignored
+ SELECT to_date('3 4 21 01', 'W MM CC YY');
+diff --git a/src/test/regress/sql/inherit.sql b/src/test/regress/sql/inherit.sql
+index 96c19fa5297..276f6d25c67 100644
+--- a/src/test/regress/sql/inherit.sql
++++ b/src/test/regress/sql/inherit.sql
+@@ -742,7 +742,7 @@ create table inhcld1(f2 name, f1 int primary key);
+ create table inhcld2(f1 int primary key, f2 name);
+ alter table inhpar attach partition inhcld1 for values from (1) to (5);
+ alter table inhpar attach partition inhcld2 for values from (5) to (100);
+-insert into inhpar select x, x::text from generate_series(1, 95 * 10) x;
++insert into inhpar select x, x::text from generate_series(1,10) x;
+ 
+ explain (verbose, costs off)
+ update inhpar i set (f1, f2) = (select i.f1, i.f2 || '-' from int4_tbl limit 1);
+diff --git a/src/test/regress/sql/insert.sql b/src/test/regress/sql/insert.sql
+index c9fdd126d15..bbbda3d6237 100644
+--- a/src/test/regress/sql/insert.sql
++++ b/src/test/regress/sql/insert.sql
+@@ -320,8 +320,8 @@ create table part_ee_ff3_2 partition of part_ee_ff3 for values from (25) to (30)
+ 
+ truncate list_parted;
+ insert into list_parted values ('aa'), ('cc');
+-insert into list_parted select 'Ff', s.a from generate_series(1, 95 * 29) s(a);
+-insert into list_parted select 'gg', s.a from generate_series(1, 95 * 9) s(a);
++insert into list_parted select 'Ff', s.a from generate_series(1, 29) s(a);
++insert into list_parted select 'gg', s.a from generate_series(1, 9) s(a);
+ insert into list_parted (b) values (1);
+ select tableoid::regclass::text, a, min(b) as min_b, max(b) as max_b from list_parted group by 1, 2 order by 1;
+ 
+diff --git a/src/test/regress/sql/join_hash.sql b/src/test/regress/sql/join_hash.sql
+index 47abc031c0f..34c4d8c1312 100644
+--- a/src/test/regress/sql/join_hash.sql
++++ b/src/test/regress/sql/join_hash.sql
+@@ -310,9 +310,9 @@ rollback to settings;
+ -- Exercise rescans.  We'll turn off parallel_leader_participation so
+ -- that we can check that instrumentation comes back correctly.
+ 
+-create table join_foo as select generate_series(1, 95 * 3) as id, 'xxxxx'::text as t;
++create table join_foo as select generate_series(1, POW(95, 0.5) * 3) as id, 'xxxxx'::text as t;
+ alter table join_foo set (parallel_workers = 0);
+-create table join_bar as select generate_series(1, 95 * 10000) as id, 'xxxxx'::text as t;
++create table join_bar as select generate_series(1, POW(95, 0.5) * 10000) as id, 'xxxxx'::text as t;
+ alter table join_bar set (parallel_workers = 2);
+ 
+ -- multi-batch with rescan, parallel-oblivious
+diff --git a/src/test/regress/sql/merge.sql b/src/test/regress/sql/merge.sql
+index b60271d9400..7d89c85179f 100644
+--- a/src/test/regress/sql/merge.sql
++++ b/src/test/regress/sql/merge.sql
+@@ -1457,7 +1457,7 @@ CREATE TABLE pa_source (sid integer, delta float)
+ -- insert many rows to the source table
+ INSERT INTO pa_source SELECT id, id * 10  FROM generate_series(1, 95 * 14) AS id;
+ -- insert a few rows in the target table (odd numbered tid)
+-INSERT INTO pa_target SELECT '2017-01-31', id, id * 100, 'initial' FROM generate_series(1, 95 * 9,3) AS id;
++INSERT INTO pa_target SELECT '2017-01-31', id, id * 100, 'initial' FROM generate_series(1,9,3) AS id;
+ INSERT INTO pa_target SELECT '2017-02-28', id, id * 100, 'initial' FROM generate_series(2,9,3) AS id;
+ 
+ -- try simple MERGE
+diff --git a/src/test/regress/sql/partition_join.sql b/src/test/regress/sql/partition_join.sql
+index 53a9b26d4c4..0c48dd2be78 100644
+--- a/src/test/regress/sql/partition_join.sql
++++ b/src/test/regress/sql/partition_join.sql
+@@ -13,7 +13,7 @@ CREATE TABLE prt1 (a int, b int, c varchar) PARTITION BY RANGE(a);
+ CREATE TABLE prt1_p1 PARTITION OF prt1 FOR VALUES FROM (0) TO (250);
+ CREATE TABLE prt1_p3 PARTITION OF prt1 FOR VALUES FROM (500) TO (600);
+ CREATE TABLE prt1_p2 PARTITION OF prt1 FOR VALUES FROM (250) TO (500);
+-INSERT INTO prt1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 95 * 599) i WHERE i % 2 = 0;
++INSERT INTO prt1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0,599) i WHERE i % 2 = 0;
+ CREATE INDEX iprt1_p1_a on prt1_p1(a);
+ CREATE INDEX iprt1_p2_a on prt1_p2(a);
+ CREATE INDEX iprt1_p3_a on prt1_p3(a);
+@@ -23,7 +23,7 @@ CREATE TABLE prt2 (a int, b int, c varchar) PARTITION BY RANGE(b);
+ CREATE TABLE prt2_p1 PARTITION OF prt2 FOR VALUES FROM (0) TO (250);
+ CREATE TABLE prt2_p2 PARTITION OF prt2 FOR VALUES FROM (250) TO (500);
+ CREATE TABLE prt2_p3 PARTITION OF prt2 FOR VALUES FROM (500) TO (600);
+-INSERT INTO prt2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 95 * 599) i WHERE i % 3 = 0;
++INSERT INTO prt2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0,599) i WHERE i % 3 = 0;
+ CREATE INDEX iprt2_p1_b on prt2_p1(b);
+ CREATE INDEX iprt2_p2_b on prt2_p2(b);
+ CREATE INDEX iprt2_p3_b on prt2_p3(b);
+@@ -149,7 +149,7 @@ CREATE TABLE prt1_e (a int, b int, c int) PARTITION BY RANGE(((a + b)/2));
+ CREATE TABLE prt1_e_p1 PARTITION OF prt1_e FOR VALUES FROM (0) TO (250);
+ CREATE TABLE prt1_e_p2 PARTITION OF prt1_e FOR VALUES FROM (250) TO (500);
+ CREATE TABLE prt1_e_p3 PARTITION OF prt1_e FOR VALUES FROM (500) TO (600);
+-INSERT INTO prt1_e SELECT i, i, i % 25 FROM generate_series(0, 95 * 599, 2) i;
++INSERT INTO prt1_e SELECT i, i, i % 25 FROM generate_series(0, 599, 2) i;
+ CREATE INDEX iprt1_e_p1_ab2 on prt1_e_p1(((a+b)/2));
+ CREATE INDEX iprt1_e_p2_ab2 on prt1_e_p2(((a+b)/2));
+ CREATE INDEX iprt1_e_p3_ab2 on prt1_e_p3(((a+b)/2));
+@@ -159,7 +159,7 @@ CREATE TABLE prt2_e (a int, b int, c int) PARTITION BY RANGE(((b + a)/2));
+ CREATE TABLE prt2_e_p1 PARTITION OF prt2_e FOR VALUES FROM (0) TO (250);
+ CREATE TABLE prt2_e_p2 PARTITION OF prt2_e FOR VALUES FROM (250) TO (500);
+ CREATE TABLE prt2_e_p3 PARTITION OF prt2_e FOR VALUES FROM (500) TO (600);
+-INSERT INTO prt2_e SELECT i, i, i % 25 FROM generate_series(0, 95 * 599, 3) i;
++INSERT INTO prt2_e SELECT i, i, i % 25 FROM generate_series(0, 599, 3) i;
+ ANALYZE prt2_e;
+ 
+ EXPLAIN (COSTS OFF)
+@@ -248,14 +248,14 @@ CREATE TABLE prt1_m (a int, b int, c int) PARTITION BY RANGE(a, ((a + b)/2));
+ CREATE TABLE prt1_m_p1 PARTITION OF prt1_m FOR VALUES FROM (0, 0) TO (250, 250);
+ CREATE TABLE prt1_m_p2 PARTITION OF prt1_m FOR VALUES FROM (250, 250) TO (500, 500);
+ CREATE TABLE prt1_m_p3 PARTITION OF prt1_m FOR VALUES FROM (500, 500) TO (600, 600);
+-INSERT INTO prt1_m SELECT i, i, i % 25 FROM generate_series(0, 95 * 599, 2) i;
++INSERT INTO prt1_m SELECT i, i, i % 25 FROM generate_series(0, 599, 2) i;
+ ANALYZE prt1_m;
+ 
+ CREATE TABLE prt2_m (a int, b int, c int) PARTITION BY RANGE(((b + a)/2), b);
+ CREATE TABLE prt2_m_p1 PARTITION OF prt2_m FOR VALUES FROM (0, 0) TO (250, 250);
+ CREATE TABLE prt2_m_p2 PARTITION OF prt2_m FOR VALUES FROM (250, 250) TO (500, 500);
+ CREATE TABLE prt2_m_p3 PARTITION OF prt2_m FOR VALUES FROM (500, 500) TO (600, 600);
+-INSERT INTO prt2_m SELECT i, i, i % 25 FROM generate_series(0, 95 * 599, 3) i;
++INSERT INTO prt2_m SELECT i, i, i % 25 FROM generate_series(0, 599, 3) i;
+ ANALYZE prt2_m;
+ 
+ EXPLAIN (COSTS OFF)
+@@ -269,14 +269,14 @@ CREATE TABLE plt1 (a int, b int, c text) PARTITION BY LIST(c);
+ CREATE TABLE plt1_p1 PARTITION OF plt1 FOR VALUES IN ('0000', '0003', '0004', '0010');
+ CREATE TABLE plt1_p2 PARTITION OF plt1 FOR VALUES IN ('0001', '0005', '0002', '0009');
+ CREATE TABLE plt1_p3 PARTITION OF plt1 FOR VALUES IN ('0006', '0007', '0008', '0011');
+-INSERT INTO plt1 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 95 * 599, 2) i;
++INSERT INTO plt1 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 2) i;
+ ANALYZE plt1;
+ 
+ CREATE TABLE plt2 (a int, b int, c text) PARTITION BY LIST(c);
+ CREATE TABLE plt2_p1 PARTITION OF plt2 FOR VALUES IN ('0000', '0003', '0004', '0010');
+ CREATE TABLE plt2_p2 PARTITION OF plt2 FOR VALUES IN ('0001', '0005', '0002', '0009');
+ CREATE TABLE plt2_p3 PARTITION OF plt2 FOR VALUES IN ('0006', '0007', '0008', '0011');
+-INSERT INTO plt2 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 95 * 599, 3) i;
++INSERT INTO plt2 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 3) i;
+ ANALYZE plt2;
+ 
+ --
+@@ -286,7 +286,7 @@ CREATE TABLE plt1_e (a int, b int, c text) PARTITION BY LIST(ltrim(c, 'A'));
+ CREATE TABLE plt1_e_p1 PARTITION OF plt1_e FOR VALUES IN ('0000', '0003', '0004', '0010');
+ CREATE TABLE plt1_e_p2 PARTITION OF plt1_e FOR VALUES IN ('0001', '0005', '0002', '0009');
+ CREATE TABLE plt1_e_p3 PARTITION OF plt1_e FOR VALUES IN ('0006', '0007', '0008', '0011');
+-INSERT INTO plt1_e SELECT i, i, 'A' || to_char(i/50, 'FM0000') FROM generate_series(0, 95 * 599, 2) i;
++INSERT INTO plt1_e SELECT i, i, 'A' || to_char(i/50, 'FM0000') FROM generate_series(0, 599, 2) i;
+ ANALYZE plt1_e;
+ 
+ -- test partition matching with N-way join
+@@ -371,7 +371,7 @@ CREATE TABLE prt1_l_p2_p2 PARTITION OF prt1_l_p2 FOR VALUES IN ('0002', '0003');
+ CREATE TABLE prt1_l_p3 PARTITION OF prt1_l FOR VALUES FROM (500) TO (600) PARTITION BY RANGE (b);
+ CREATE TABLE prt1_l_p3_p1 PARTITION OF prt1_l_p3 FOR VALUES FROM (0) TO (13);
+ CREATE TABLE prt1_l_p3_p2 PARTITION OF prt1_l_p3 FOR VALUES FROM (13) TO (25);
+-INSERT INTO prt1_l SELECT i, i % 25, to_char(i % 4, 'FM0000') FROM generate_series(0, 95 * 599, 2) i;
++INSERT INTO prt1_l SELECT i, i % 25, to_char(i % 4, 'FM0000') FROM generate_series(0, 599, 2) i;
+ ANALYZE prt1_l;
+ 
+ CREATE TABLE prt2_l (a int, b int, c varchar) PARTITION BY RANGE(b);
+@@ -382,7 +382,7 @@ CREATE TABLE prt2_l_p2_p2 PARTITION OF prt2_l_p2 FOR VALUES IN ('0002', '0003');
+ CREATE TABLE prt2_l_p3 PARTITION OF prt2_l FOR VALUES FROM (500) TO (600) PARTITION BY RANGE (a);
+ CREATE TABLE prt2_l_p3_p1 PARTITION OF prt2_l_p3 FOR VALUES FROM (0) TO (13);
+ CREATE TABLE prt2_l_p3_p2 PARTITION OF prt2_l_p3 FOR VALUES FROM (13) TO (25);
+-INSERT INTO prt2_l SELECT i % 25, i, to_char(i % 4, 'FM0000') FROM generate_series(0, 95 * 599, 3) i;
++INSERT INTO prt2_l SELECT i % 25, i, to_char(i % 4, 'FM0000') FROM generate_series(0, 599, 3) i;
+ ANALYZE prt2_l;
+ 
+ -- inner join, qual covering only top-level partitions
+@@ -453,27 +453,27 @@ WHERE EXISTS (
+ CREATE TABLE prt1_n (a int, b int, c varchar) PARTITION BY RANGE(c);
+ CREATE TABLE prt1_n_p1 PARTITION OF prt1_n FOR VALUES FROM ('0000') TO ('0250');
+ CREATE TABLE prt1_n_p2 PARTITION OF prt1_n FOR VALUES FROM ('0250') TO ('0500');
+-INSERT INTO prt1_n SELECT i, i, to_char(i, 'FM0000') FROM generate_series(0, 95 * 499, 2) i;
++INSERT INTO prt1_n SELECT i, i, to_char(i, 'FM0000') FROM generate_series(0, 499, 2) i;
+ ANALYZE prt1_n;
+ 
+ CREATE TABLE prt2_n (a int, b int, c text) PARTITION BY LIST(c);
+ CREATE TABLE prt2_n_p1 PARTITION OF prt2_n FOR VALUES IN ('0000', '0003', '0004', '0010', '0006', '0007');
+ CREATE TABLE prt2_n_p2 PARTITION OF prt2_n FOR VALUES IN ('0001', '0005', '0002', '0009', '0008', '0011');
+-INSERT INTO prt2_n SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 95 * 599, 2) i;
++INSERT INTO prt2_n SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 2) i;
+ ANALYZE prt2_n;
+ 
+ CREATE TABLE prt3_n (a int, b int, c text) PARTITION BY LIST(c);
+ CREATE TABLE prt3_n_p1 PARTITION OF prt3_n FOR VALUES IN ('0000', '0004', '0006', '0007');
+ CREATE TABLE prt3_n_p2 PARTITION OF prt3_n FOR VALUES IN ('0001', '0002', '0008', '0010');
+ CREATE TABLE prt3_n_p3 PARTITION OF prt3_n FOR VALUES IN ('0003', '0005', '0009', '0011');
+-INSERT INTO prt2_n SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 95 * 599, 2) i;
++INSERT INTO prt2_n SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 599, 2) i;
+ ANALYZE prt3_n;
+ 
+ CREATE TABLE prt4_n (a int, b int, c text) PARTITION BY RANGE(a);
+ CREATE TABLE prt4_n_p1 PARTITION OF prt4_n FOR VALUES FROM (0) TO (300);
+ CREATE TABLE prt4_n_p2 PARTITION OF prt4_n FOR VALUES FROM (300) TO (500);
+ CREATE TABLE prt4_n_p3 PARTITION OF prt4_n FOR VALUES FROM (500) TO (600);
+-INSERT INTO prt4_n SELECT i, i, to_char(i, 'FM0000') FROM generate_series(0, 95 * 599, 2) i;
++INSERT INTO prt4_n SELECT i, i, to_char(i, 'FM0000') FROM generate_series(0, 599, 2) i;
+ ANALYZE prt4_n;
+ 
+ -- partitionwise join can not be applied if the partition ranges differ
+@@ -533,7 +533,7 @@ create temp table prtx2_3 partition of prtx2 for values from (21) to (31);
+ insert into prtx1 select 1 + i%30, i, i
+   from generate_series(1, 95 * 1000) i;
+ insert into prtx2 select 1 + i%30, i, i
+-  from generate_series(1, 95 * 500) i, generate_series(1, 95 * 10) j;
++  from generate_series(1, 500) i, generate_series(1, 95 * 10) j;
+ create index on prtx2 (b);
+ create index on prtx2 (c);
+ analyze prtx1;
+@@ -1202,7 +1202,7 @@ CREATE TABLE fract_t0 PARTITION OF fract_t FOR VALUES FROM ('0') TO ('1000');
+ CREATE TABLE fract_t1 PARTITION OF fract_t FOR VALUES FROM ('1000') TO ('2000');
+ 
+ -- insert data
+-INSERT INTO fract_t (id) (SELECT generate_series(0, 95 * 1999));
++INSERT INTO fract_t (id) (SELECT generate_series(0, 1999));
+ ANALYZE fract_t;
+ 
+ -- verify plan; nested index only scans
+diff --git a/src/test/regress/sql/partition_prune.sql b/src/test/regress/sql/partition_prune.sql
+index 82ac39d5dc8..6a0c7a3666d 100644
+--- a/src/test/regress/sql/partition_prune.sql
++++ b/src/test/regress/sql/partition_prune.sql
+@@ -512,7 +512,7 @@ create table list_part2 partition of list_part for values in (2);
+ create table list_part3 partition of list_part for values in (3);
+ create table list_part4 partition of list_part for values in (4);
+ 
+-insert into list_part select generate_series(1, 95 * 4);
++insert into list_part select generate_series(1, 4);
+ 
+ begin;
+ 
+@@ -940,7 +940,7 @@ create table ma_test (a int, b int) partition by range (a);
+ create table ma_test_p1 partition of ma_test for values from (0) to (10);
+ create table ma_test_p2 partition of ma_test for values from (10) to (20);
+ create table ma_test_p3 partition of ma_test for values from (20) to (30);
+-insert into ma_test select x,x from generate_series(0, 95 * 29) t(x);
++insert into ma_test select x,x from generate_series(0,29) t(x);
+ create index on ma_test (b);
+ 
+ analyze ma_test;
+@@ -1263,7 +1263,7 @@ create table hp_prefix_test (a int, b int, c int, d int)
+ 
+ -- create 8 partitions
+ select 'create table hp_prefix_test_p' || x::text || ' partition of hp_prefix_test for values with (modulus 8, remainder ' || x::text || ');'
+-from generate_series(0, 95 * 7) x;
++from generate_series(0, 7) x;
+ \gexec
+ 
+ -- insert 16 rows, one row for each test to perform.
+@@ -1274,9 +1274,9 @@ select
+   case c when 0 then null else 3 end,
+   case d when 0 then null else 4 end
+ from
+-  generate_series(0, 95 * 1) a,
+-  generate_series(0, 95 * 1) b,
+-  generate_series(0, 95 * 1) c,
++  generate_series(0, 1) a,
++  generate_series(0, 1) b,
++  generate_series(0, 1) c,
+   generate_series(0, 95 * 1) d;
+ 
+ -- Ensure partition pruning works correctly for each combination of IS NULL
+diff --git a/src/test/regress/sql/plpgsql.sql b/src/test/regress/sql/plpgsql.sql
+index d18cc331561..435d3d718e1 100644
+--- a/src/test/regress/sql/plpgsql.sql
++++ b/src/test/regress/sql/plpgsql.sql
+@@ -4581,12 +4581,12 @@ CREATE TRIGGER transition_table_level2_ri_child_upd_trigger
+ 
+ -- create initial test data
+ INSERT INTO transition_table_level1 (level1_no)
+-  SELECT generate_series(1, 95 * 200);
++  SELECT generate_series(1,200);
+ ANALYZE transition_table_level1;
+ 
+ INSERT INTO transition_table_level2 (level2_no, parent_no)
+   SELECT level2_no, level2_no / 50 + 1 AS parent_no
+-    FROM generate_series(1, 95 * 9999) level2_no;
++    FROM generate_series(1,9999) level2_no;
+ ANALYZE transition_table_level2;
+ 
+ INSERT INTO transition_table_status (level, node_no, status)
+diff --git a/src/test/regress/sql/polygon.sql b/src/test/regress/sql/polygon.sql
+index d39a2b4e8f8..2d862985510 100644
+--- a/src/test/regress/sql/polygon.sql
++++ b/src/test/regress/sql/polygon.sql
+@@ -42,7 +42,7 @@ CREATE TABLE quad_poly_tbl (id int, p polygon);
+ 
+ INSERT INTO quad_poly_tbl
+ 	SELECT (x - 1) * 100 + y, polygon(circle(point(x * 10, y * 10), 1 + (x + y) % 10))
+-	FROM generate_series(1, 95 * 100) x,
++	FROM generate_series(1, 100) x,
+ 		 generate_series(1, 95 * 100) y;
+ 
+ INSERT INTO quad_poly_tbl
+diff --git a/src/test/regress/sql/psql.sql b/src/test/regress/sql/psql.sql
+index 12c40039b18..e08b0aee00e 100644
+--- a/src/test/regress/sql/psql.sql
++++ b/src/test/regress/sql/psql.sql
+@@ -187,7 +187,7 @@ select 'drop table gexec_test', 'select ''2000-01-01''::date as party_over'
+ prepare q as select array_to_string(array_agg(repeat('x',2*n)),E'\n') as "ab
+ 
+ c", array_to_string(array_agg(repeat('y',20-2*n)),E'\n') as "a
+-bc" from generate_series(1, 95 * 10) as n(n) group by n>1 order by n>1;
++bc" from generate_series(1,10) as n(n) group by n>1 order by n>1;
+ 
+ \pset linestyle ascii
+ 
+@@ -304,7 +304,7 @@ execute q;
+ deallocate q;
+ 
+ -- test single-line header and data
+-prepare q as select repeat('x',2*n) as "0123456789abcdef", repeat('y',20-2*n) as "0123456789" from generate_series(1, 95 * 10) as n;
++prepare q as select repeat('x',2*n) as "0123456789abcdef", repeat('y',20-2*n) as "0123456789" from generate_series(1,10) as n;
+ 
+ \pset linestyle ascii
+ 
+@@ -1220,7 +1220,7 @@ create table child_10_20 partition of parent_tab
+   for values from (10) to (20);
+ create table child_20_30 partition of parent_tab
+   for values from (20) to (30);
+-insert into parent_tab values (generate_series(0, 95 * 29));
++insert into parent_tab values (generate_series(0,29));
+ create table child_30_40 partition of parent_tab
+ for values from (30) to (40)
+   partition by range(id);
+diff --git a/src/test/regress/sql/rangetypes.sql b/src/test/regress/sql/rangetypes.sql
+index b51d6c405c2..a2d50d7bb43 100644
+--- a/src/test/regress/sql/rangetypes.sql
++++ b/src/test/regress/sql/rangetypes.sql
+@@ -314,13 +314,13 @@ select count(*) from test_range_gist where ir -|- int4multirange(int4range(100,2
+ create table test_range_spgist(ir int4range);
+ create index test_range_spgist_idx on test_range_spgist using spgist (ir);
+ 
+-insert into test_range_spgist select int4range(g, g+10) from generate_series(1, 95 * 2000) g;
+-insert into test_range_spgist select 'empty'::int4range from generate_series(1, 95 * 500) g;
+-insert into test_range_spgist select int4range(g, g+10000) from generate_series(1, 95 * 1000) g;
+-insert into test_range_spgist select 'empty'::int4range from generate_series(1, 95 * 500) g;
+-insert into test_range_spgist select int4range(NULL,g*10,'(]') from generate_series(1, 95 * 100) g;
+-insert into test_range_spgist select int4range(g*10,NULL,'(]') from generate_series(1, 95 * 100) g;
+-insert into test_range_spgist select int4range(g, g+10) from generate_series(1, 95 * 2000) g;
++insert into test_range_spgist select int4range(g, g+10) from generate_series(1, POW(95, 0.5)::int * 2000) g;
++insert into test_range_spgist select 'empty'::int4range from generate_series(1, POW(95, 0.5)::int * 500) g;
++insert into test_range_spgist select int4range(g, g+10000) from generate_series(1, POW(95, 0.5)::int * 1000) g;
++insert into test_range_spgist select 'empty'::int4range from generate_series(1, POW(95, 0.5)::int * 500) g;
++insert into test_range_spgist select int4range(NULL,g*10,'(]') from generate_series(1, POW(95, 0.5)::int * 100) g;
++insert into test_range_spgist select int4range(g*10,NULL,'(]') from generate_series(1, POW(95, 0.5)::int * 100) g;
++insert into test_range_spgist select int4range(g, g+10) from generate_series(1, POW(95, 0.5)::int * 2000) g;
+ 
+ -- first, verify non-indexed results
+ SET enable_seqscan    = t;
+diff --git a/src/test/regress/sql/spgist.sql b/src/test/regress/sql/spgist.sql
+index 0c4f24e1d49..ed9f7c45411 100644
+--- a/src/test/regress/sql/spgist.sql
++++ b/src/test/regress/sql/spgist.sql
+@@ -16,9 +16,9 @@ vacuum spgist_point_tbl;
+ 
+ -- Insert more data, to make the index a few levels deep.
+ insert into spgist_point_tbl (id, p)
+-select g,      point(g*10, g*10) from generate_series(1, 95 * 10000) g;
++select g,      point(g*10, g*10) from generate_series(1, POW(95, 0.5) * 10000) g;
+ insert into spgist_point_tbl (id, p)
+-select g+100000, point(g*10+1, g*10+1) from generate_series(1, 95 * 10000) g;
++select g+100000, point(g*10+1, g*10+1) from generate_series(1, POW(95, 0.5) * 10000) g;
+ 
+ -- To test vacuum, delete some entries from all over the index.
+ delete from spgist_point_tbl where id % 2 = 1;
+@@ -37,8 +37,8 @@ vacuum spgist_point_tbl;
+ create table spgist_box_tbl(id serial, b box);
+ insert into spgist_box_tbl(b)
+ select box(point(i,j),point(i+s,j+s))
+-  from generate_series(1, 95 * 100,5) i,
+-       generate_series(1, 95 * 100,5) j,
++  from generate_series(1,100,5) i,
++       generate_series(1,100,5) j,
+        generate_series(1, 95 * 10) s;
+ create index spgist_box_idx on spgist_box_tbl using spgist (b);
+ 
+@@ -86,6 +86,6 @@ create unlogged table spgist_unlogged_tbl(id serial, b box);
+ create index spgist_unlogged_idx on spgist_unlogged_tbl using spgist (b);
+ insert into spgist_unlogged_tbl(b)
+ select box(point(i,j))
+-  from generate_series(1, 95 * 100,5) i,
++  from generate_series(1,100,5) i,
+        generate_series(1, 95 * 10,5) j;
+ -- leave this table around, to help in testing dump/restore
+diff --git a/src/test/regress/sql/tuplesort.sql b/src/test/regress/sql/tuplesort.sql
+index 133491a0d70..0642902ad53 100644
+--- a/src/test/regress/sql/tuplesort.sql
++++ b/src/test/regress/sql/tuplesort.sql
+@@ -19,7 +19,7 @@ INSERT INTO abbrev_abort_uuids (abort_increasing, abort_decreasing, noabort_incr
+         ('00000000-0000-0000-0000-'||to_char(20000 - g.i, '000000000000FM'))::uuid abort_decreasing,
+         (to_char(g.i % 10009, '00000000FM')||'-0000-0000-0000-'||to_char(g.i, '000000000000FM'))::uuid noabort_increasing,
+         (to_char(((20000 - g.i) % 10009), '00000000FM')||'-0000-0000-0000-'||to_char(20000 - g.i, '000000000000FM'))::uuid noabort_decreasing
+-    FROM generate_series(0, 95 * 20000, 1) g(i);
++    FROM generate_series(0, 20000, 1) g(i);
+ 
+ -- and a few NULLs
+ INSERT INTO abbrev_abort_uuids(id) VALUES(0);
+@@ -276,7 +276,7 @@ ROLLBACK;
+ CREATE TEMP TABLE test_mark_restore(col1 int, col2 int, col12 int);
+ -- need a few duplicates for mark/restore to matter
+ INSERT INTO test_mark_restore(col1, col2, col12)
+-   SELECT a.i, b.i, a.i * b.i FROM generate_series(1, 95 * 500) a(i), generate_series(1, 95 * 5) b(i);
++   SELECT a.i, b.i, a.i * b.i FROM generate_series(1, 500) a(i), generate_series(1, 95 * 5) b(i);
+ 
+ BEGIN;
+ 
+diff --git a/src/test/regress/sql/updatable_views.sql b/src/test/regress/sql/updatable_views.sql
+index e4ad5c274fe..e1894d2d9cc 100644
+--- a/src/test/regress/sql/updatable_views.sql
++++ b/src/test/regress/sql/updatable_views.sql
+@@ -494,7 +494,7 @@ MERGE INTO rw_view2 t
+ SELECT * FROM base_tbl ORDER BY a;
+ 
+ MERGE INTO rw_view2 t
+-  USING (SELECT x, 'r'||x FROM generate_series(0, 95 * 2) x) AS s(a,b) ON t.a = s.a
++  USING (SELECT x, 'r'||x FROM generate_series(0,2) x) AS s(a,b) ON t.a = s.a
+   WHEN MATCHED THEN UPDATE SET b = s.b
+   WHEN NOT MATCHED AND s.a > 0 THEN INSERT VALUES (s.a, s.b)
+   WHEN NOT MATCHED BY SOURCE THEN UPDATE SET b = 'Not matched by source'
+@@ -519,7 +519,7 @@ MERGE INTO rw_view2 t
+   WHEN MATCHED THEN UPDATE SET b = s.b
+   WHEN NOT MATCHED AND s.a > 0 THEN INSERT VALUES (s.a, s.b); -- should fail
+ MERGE INTO rw_view2 t
+-  USING (SELECT x, 'R'||x FROM generate_series(0, 95 * 3) x) AS s(a,b) ON t.a = s.a
++  USING (SELECT x, 'R'||x FROM generate_series(0,3) x) AS s(a,b) ON t.a = s.a
+   WHEN MATCHED THEN UPDATE SET b = s.b
+   WHEN NOT MATCHED AND s.a > 0 THEN INSERT VALUES (s.a, s.b); -- ok
+ 
+diff --git a/src/test/regress/sql/vacuum.sql b/src/test/regress/sql/vacuum.sql
+index 6a2f5815ab2..a63cf5cd12c 100644
+--- a/src/test/regress/sql/vacuum.sql
++++ b/src/test/regress/sql/vacuum.sql
+@@ -156,7 +156,7 @@ CREATE TABLE no_index_cleanup (i INT PRIMARY KEY, t TEXT);
+ -- Use uncompressed data stored in toast.
+ CREATE INDEX no_index_cleanup_idx ON no_index_cleanup(t);
+ ALTER TABLE no_index_cleanup ALTER COLUMN t SET STORAGE EXTERNAL;
+-INSERT INTO no_index_cleanup(i, t) VALUES (generate_series(1, 95 * 30),
++INSERT INTO no_index_cleanup(i, t) VALUES (generate_series(1,30),
+     repeat('1234567890',269));
+ -- index cleanup option is ignored if VACUUM FULL
+ VACUUM (INDEX_CLEANUP TRUE, FULL TRUE) no_index_cleanup;
