@@ -559,6 +559,7 @@ pin_project_lite::pin_project! {
     struct TimedDownload<S> {
         started_at: std::time::Instant,
         outcome: AttemptOutcome,
+        bytes: u64,
         #[pin]
         inner: S
     }
@@ -566,6 +567,7 @@ pin_project_lite::pin_project! {
     impl<S> PinnedDrop for TimedDownload<S> {
         fn drop(mut this: Pin<&mut Self>) {
             crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(RequestKind::Get, this.outcome, this.started_at);
+            crate::metrics::BUCKET_METRICS.response_bytes.observe(this.bytes as f64);
         }
     }
 }
@@ -575,6 +577,7 @@ impl<S> TimedDownload<S> {
         TimedDownload {
             started_at,
             outcome: AttemptOutcome::Cancelled,
+            bytes: 0,
             inner,
         }
     }
@@ -590,7 +593,7 @@ impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
 
         let res = ready!(this.inner.poll_next(cx));
         match &res {
-            Some(Ok(_)) => {}
+            Some(Ok(chunk)) => *this.bytes += chunk.len() as u64,
             Some(Err(_)) => *this.outcome = AttemptOutcome::Err,
             None => *this.outcome = AttemptOutcome::Ok,
         }
@@ -872,6 +875,9 @@ impl RemoteStorage for S3Bucket {
             crate::metrics::BUCKET_METRICS
                 .req_seconds
                 .observe_elapsed(kind, inner, started_at);
+            crate::metrics::BUCKET_METRICS
+                .request_bytes
+                .observe(from_size_bytes as f64);
         }
 
         match res {
@@ -1139,6 +1145,32 @@ mod tests {
     use camino::Utf8Path;
 
     use crate::{RemotePath, S3Bucket, S3Config};
+
+    #[tokio::test]
+    async fn timed_download_observes_response_bytes() {
+        use bytes::Bytes;
+        use futures_util::StreamExt;
+
+        let metric = &crate::metrics::BUCKET_METRICS.response_bytes;
+        let count_before = metric.get_sample_count();
+        let sum_before = metric.get_sample_sum();
+
+        let chunks: Vec<std::io::Result<Bytes>> = vec![
+            Ok(Bytes::from(vec![0u8; 100])),
+            Ok(Bytes::from(vec![0u8; 250])),
+        ];
+        let mut download =
+            super::TimedDownload::new(std::time::Instant::now(), futures::stream::iter(chunks));
+
+        // drain the stream; response_bytes is observed when `download` is dropped
+        while download.next().await.is_some() {}
+        drop(download);
+
+        // download paths are the only producer of this metric and they don't run in unit tests,
+        // so this observation is the only one in the test binary.
+        assert_eq!(metric.get_sample_count(), count_before + 1);
+        assert_eq!(metric.get_sample_sum() - sum_before, 350.0);
+    }
 
     #[tokio::test]
     async fn relative_path() {

@@ -1,5 +1,6 @@
 use metrics::{
-    Histogram, IntCounter, register_histogram_vec, register_int_counter, register_int_counter_vec,
+    Histogram, IntCounter, register_histogram, register_histogram_vec, register_int_counter,
+    register_int_counter_vec,
 };
 use once_cell::sync::Lazy;
 
@@ -176,6 +177,11 @@ pub(crate) struct BucketMetrics {
 
     /// Total amount of deleted objects in batches or single requests.
     pub(crate) deleted_objects_total: IntCounter,
+
+    /// Size in bytes of request bodies we upload (Put).
+    pub(crate) request_bytes: Histogram,
+    /// Size in bytes of response bodies we download (Get).
+    pub(crate) response_bytes: Histogram,
 }
 
 impl Default for BucketMetrics {
@@ -220,11 +226,38 @@ impl Default for BucketMetrics {
         )
         .unwrap();
 
+        // 1 KiB .. 1 GiB: uploads/downloads range from small index blobs to large layer files.
+        let byte_buckets = vec![
+            1024.0,
+            8192.0,
+            65536.0,
+            262144.0,
+            1048576.0,
+            8388608.0,
+            67108864.0,
+            268435456.0,
+            1073741824.0,
+        ];
+        let request_bytes = register_histogram!(
+            "remote_storage_s3_request_bytes",
+            "Size of request bodies uploaded to S3, in bytes",
+            byte_buckets.clone(),
+        )
+        .unwrap();
+        let response_bytes = register_histogram!(
+            "remote_storage_s3_response_bytes",
+            "Size of response bodies downloaded from S3, in bytes",
+            byte_buckets,
+        )
+        .unwrap();
+
         Self {
             req_seconds,
             wait_seconds,
             cancelled_waits,
             deleted_objects_total,
+            request_bytes,
+            response_bytes,
         }
     }
 }
