@@ -241,7 +241,7 @@ impl PageServerNode {
             .context("write identity toml")?;
         drop(identity_toml);
 
-        if self.env.generate_local_ssl_certs {
+        if self.env.generate_local_tls_certs {
             self.env.generate_ssl_cert(
                 datadir.join("server.crt").as_path(),
                 datadir.join("server.key").as_path(),

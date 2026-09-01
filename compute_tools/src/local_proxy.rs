@@ -11,9 +11,11 @@ use utils::pid_file::{self, PidFileRead};
 
 pub fn configure(local_proxy: &LocalProxySpec) -> Result<()> {
     write_local_proxy_conf("/etc/local_proxy/config.json".as_ref(), local_proxy)?;
-    notify_local_proxy("/etc/local_proxy/pid".as_ref())?;
+    reload()
+}
 
-    Ok(())
+pub fn reload() -> Result<()> {
+    notify_local_proxy("/etc/local_proxy/pid".as_ref())
 }
 
 /// Create or completely rewrite configuration file specified by `path`

@@ -23,7 +23,7 @@ impl StorageBroker {
     }
 
     pub fn initialize(&self) -> anyhow::Result<()> {
-        if self.env.generate_local_ssl_certs {
+        if self.env.generate_local_tls_certs {
             self.env.generate_ssl_cert(
                 &self.env.storage_broker_data_dir().join("server.crt"),
                 &self.env.storage_broker_data_dir().join("server.key"),

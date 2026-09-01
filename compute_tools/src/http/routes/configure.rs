@@ -27,32 +27,6 @@ pub(in crate::http) async fn configure(
         Err(e) => return JsonResponse::error(StatusCode::BAD_REQUEST, e),
     };
 
-    // XXX: wrap state update under lock in a code block. Otherwise, we will try
-    // to `Send` `mut state` into the spawned thread bellow, which will cause
-    // the following rustc error:
-    //
-    // error: future cannot be sent between threads safely
-    {
-        let mut state = compute.state.lock().unwrap();
-        if !matches!(state.status, ComputeStatus::Empty | ComputeStatus::Running) {
-            return JsonResponse::invalid_status(state.status);
-        }
-
-        // Pass the tracing span to the main thread that performs the startup,
-        // so that the start_compute operation is considered a child of this
-        // configure request for tracing purposes.
-        state.startup_span = Some(tracing::Span::current());
-
-        if compute.params.lakebase_mode {
-            ComputeNode::set_spec(&compute.params, &mut state, pspec);
-        } else {
-            state.pspec = Some(pspec);
-        }
-
-        state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
-        drop(state);
-    }
-
     // Spawn a blocking thread to wait for compute to become Running. This is
     // needed to not block the main pool of workers and to be able to serve
     // other requests while some particular request is waiting for compute to
@@ -60,6 +34,32 @@ pub(in crate::http) async fn configure(
     let c = compute.clone();
     let completed = task::spawn_blocking(move || {
         let mut state = c.state.lock().unwrap();
+        loop {
+            match state.status {
+                // ideal state.
+                ComputeStatus::Empty | ComputeStatus::Running => break,
+                // we need to wait until reloaded
+                ComputeStatus::Reloading => {
+                    state = c.state_changed.wait(state).unwrap();
+                }
+                // All other cases are unexpected.
+                _ => return Err(JsonResponse::invalid_status(state.status)),
+            }
+        }
+
+        // Pass the tracing span to the main thread that performs the startup,
+        // so that the start_compute operation is considered a child of this
+        // configure request for tracing purposes.
+        state.startup_span = Some(tracing::Span::current());
+
+        if c.params.lakebase_mode {
+            ComputeNode::set_spec(&c.params, &mut state, pspec);
+        } else {
+            state.pspec = Some(pspec);
+        }
+
+        state.set_status(ComputeStatus::ConfigurationPending, &c.state_changed);
+
         while state.status != ComputeStatus::Running {
             state = c.state_changed.wait(state).unwrap();
             info!(
@@ -71,7 +71,7 @@ pub(in crate::http) async fn configure(
             if state.status == ComputeStatus::Failed {
                 let err = state.error.as_ref().map_or("unknown error", |x| x);
                 let msg = format!("compute configuration failed: {err:?}");
-                return Err(msg);
+                return Err(JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, msg));
             }
         }
 
@@ -81,7 +81,7 @@ pub(in crate::http) async fn configure(
     .unwrap();
 
     if let Err(e) = completed {
-        return JsonResponse::error(StatusCode::INTERNAL_SERVER_ERROR, e);
+        return e;
     }
 
     // Return current compute state if everything went well.
