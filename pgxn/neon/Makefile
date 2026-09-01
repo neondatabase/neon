@@ -19,6 +19,7 @@ OBJS = \
 	neon_walreader.o \
 	pagestore_smgr.o \
 	relsize_cache.o \
+	relperst_cache.o \
 	unstable_extensions.o \
 	walproposer.o \
 	walproposer_pg.o \
