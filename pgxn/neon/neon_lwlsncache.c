@@ -85,12 +85,54 @@ static set_lwlsn_db_hook_type prev_set_lwlsn_db_hook = NULL;
 static void neon_set_max_lwlsn(XLogRecPtr lsn);
 
 void
-init_lwlsncache(void)
+pg_init_lwlsncache(void)
 {
 	if (!process_shared_preload_libraries_in_progress)
 		ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR), errmsg("Loading of shared preload libraries is not in progress. Exiting"));
 	
 	lwlc_register_gucs();
+}
+
+
+void
+LwLsnCacheShmemRequest(void)
+{
+	Size		requested_size;
+
+	if (neon_use_communicator_worker)
+		return;
+
+	requested_size = sizeof(LwLsnCacheCtl);
+	requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
+
+	RequestAddinShmemSpace(requested_size);
+}
+
+void
+LwLsnCacheShmemInit(void)
+{
+	static HASHCTL info;
+	bool		found;
+
+	if (neon_use_communicator_worker)
+		return;
+
+	Assert(lwlsn_cache_size > 0);
+
+	info.keysize = sizeof(BufferTag);
+	info.entrysize = sizeof(LastWrittenLsnCacheEntry);
+	lastWrittenLsnCache = ShmemInitHash("last_written_lsn_cache",
+										lwlsn_cache_size, lwlsn_cache_size,
+										&info,
+										HASH_ELEM | HASH_BLOBS);
+	LwLsnCache = ShmemInitStruct("neon/LwLsnCacheCtl", sizeof(LwLsnCacheCtl), &found);
+	// Now set the size in the struct
+	LwLsnCache->lastWrittenLsnCacheSize = lwlsn_cache_size;
+	if (found) {
+		return;
+	}
+	dlist_init(&LwLsnCache->lastWrittenLsnLRU);
+    LwLsnCache->maxLastWrittenLsn = GetRedoRecPtr();
 
 	prev_set_lwlsn_block_range_hook = set_lwlsn_block_range_hook;
 	set_lwlsn_block_range_hook = neon_set_lwlsn_block_range;
@@ -104,41 +146,6 @@ init_lwlsncache(void)
 	set_lwlsn_relation_hook = neon_set_lwlsn_relation;
 	prev_set_lwlsn_db_hook = set_lwlsn_db_hook;
 	set_lwlsn_db_hook = neon_set_lwlsn_db;
-}
-
-
-void
-LwLsnCacheShmemRequest(void)
-{
-	Size requested_size = sizeof(LwLsnCacheCtl);
-
-	requested_size += hash_estimate_size(lwlsn_cache_size, sizeof(LastWrittenLsnCacheEntry));
-
-	RequestAddinShmemSpace(requested_size);
-}
-
-void
-LwLsnCacheShmemInit(void)
-{
-	static HASHCTL info;
-	bool found;
-	if (lwlsn_cache_size > 0)
-	{
-		info.keysize = sizeof(BufferTag);
-		info.entrysize = sizeof(LastWrittenLsnCacheEntry);
-		lastWrittenLsnCache = ShmemInitHash("last_written_lsn_cache",
-			lwlsn_cache_size, lwlsn_cache_size,
-										&info,
-										HASH_ELEM | HASH_BLOBS);
-		LwLsnCache = ShmemInitStruct("neon/LwLsnCacheCtl", sizeof(LwLsnCacheCtl), &found);
-		// Now set the size in the struct
-		LwLsnCache->lastWrittenLsnCacheSize = lwlsn_cache_size;
-		if (found) {
-			return;
-		}
-	}
-	dlist_init(&LwLsnCache->lastWrittenLsnLRU);
-    LwLsnCache->maxLastWrittenLsn = GetRedoRecPtr();
 }
 
 /*
@@ -155,6 +162,7 @@ neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 	XLogRecPtr lsn;
 	LastWrittenLsnCacheEntry* entry;
 
+	Assert(!neon_use_communicator_worker);
 	Assert(LwLsnCache->lastWrittenLsnCacheSize != 0);
 
 	LWLockAcquire(LastWrittenLsnLock, LW_SHARED);
@@ -207,7 +215,10 @@ neon_get_lwlsn(NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 	return lsn;
 }
 
-static void neon_set_max_lwlsn(XLogRecPtr lsn) {
+static void
+neon_set_max_lwlsn(XLogRecPtr lsn)
+{
+	Assert(!neon_use_communicator_worker);
 	LWLockAcquire(LastWrittenLsnLock, LW_EXCLUSIVE);
 	LwLsnCache->maxLastWrittenLsn = lsn;
 	LWLockRelease(LastWrittenLsnLock);
@@ -228,6 +239,7 @@ neon_get_lwlsn_v(NRelFileInfo relfilenode, ForkNumber forknum,
 	LastWrittenLsnCacheEntry* entry;
 	XLogRecPtr lsn;
 
+	Assert(!neon_use_communicator_worker);
 	Assert(LwLsnCache->lastWrittenLsnCacheSize != 0);
 	Assert(nblocks > 0);
 	Assert(PointerIsValid(lsns));
@@ -376,6 +388,8 @@ SetLastWrittenLSNForBlockRangeInternal(XLogRecPtr lsn,
 XLogRecPtr
 neon_set_lwlsn_block_range(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum, BlockNumber from, BlockNumber n_blocks)
 {
+	Assert(!neon_use_communicator_worker);
+
 	if (lsn == InvalidXLogRecPtr || n_blocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0)
 		return lsn;
 
@@ -411,6 +425,8 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 	Oid spcOid = NInfoGetSpcOid(relfilenode);
 	Oid dbOid = NInfoGetDbOid(relfilenode);
 	Oid relNumber = NInfoGetRelNumber(relfilenode);
+
+	Assert(!neon_use_communicator_worker);
 
 	if (lsns == NULL || nblocks == 0 || LwLsnCache->lastWrittenLsnCacheSize == 0 ||
 		NInfoGetRelNumber(relfilenode) == InvalidOid)
@@ -469,6 +485,7 @@ neon_set_lwlsn_block_v(const XLogRecPtr *lsns, NRelFileInfo relfilenode,
 XLogRecPtr
 neon_set_lwlsn_block(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum, BlockNumber blkno)
 {
+	Assert(!neon_use_communicator_worker);
 	return neon_set_lwlsn_block_range(lsn, rlocator, forknum, blkno, 1);
 }
 
@@ -478,6 +495,7 @@ neon_set_lwlsn_block(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum, 
 XLogRecPtr
 neon_set_lwlsn_relation(XLogRecPtr lsn, NRelFileInfo rlocator, ForkNumber forknum)
 {
+	Assert(!neon_use_communicator_worker);
 	return neon_set_lwlsn_block(lsn, rlocator, forknum, REL_METADATA_PSEUDO_BLOCKNO);
 }
 
@@ -488,6 +506,8 @@ XLogRecPtr
 neon_set_lwlsn_db(XLogRecPtr lsn)
 {
 	NRelFileInfo dummyNode = {InvalidOid, InvalidOid, InvalidOid};
+
+	Assert(!neon_use_communicator_worker);
 	return neon_set_lwlsn_block(lsn, dummyNode, MAIN_FORKNUM, 0);
 }
 

@@ -61,6 +61,10 @@ impl<K, V> OccupiedEntry<'_, '_, K, V> {
     ///
     /// This may result in multiple bucket accesses if the entry was obtained by index as the
     /// previous chain entry needs to be discovered in this case.
+    ///
+    /// # Panics
+    /// Panics if the `prev_pos` field is equal to [`PrevPos::Unknown`]. In practice, this means
+    /// the entry was obtained via calling something like [`super::HashMapAccess::entry_at_bucket`].
     pub fn remove(mut self) -> V {
         // If this bucket was queried by index, go ahead and follow its chain from the start.
         let prev = if let PrevPos::Unknown(hash) = self.prev_pos {

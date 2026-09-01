@@ -21,6 +21,7 @@ use nix::unistd::ftruncate as nix_ftruncate;
 /// the underlying file is resized. Do not access the area beyond the current size. Currently, that
 /// will cause the file to be expanded, but we might use `mprotect()` etc. to enforce that in the
 /// future.
+#[derive(Debug)]
 pub struct ShmemHandle {
     /// memfd file descriptor
     fd: OwnedFd,
@@ -35,6 +36,7 @@ pub struct ShmemHandle {
 }
 
 /// This is stored at the beginning in the shared memory area.
+#[derive(Debug)]
 struct SharedStruct {
     max_size: usize,
 

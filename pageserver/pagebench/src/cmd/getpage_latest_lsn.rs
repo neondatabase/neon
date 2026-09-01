@@ -34,6 +34,10 @@ use crate::util::{request_stats, tokio_thread_local_stats};
 /// GetPage@LatestLSN, uniformly distributed across the compute-accessible keyspace.
 #[derive(clap::Parser)]
 pub(crate) struct Args {
+    #[clap(long, default_value = "false")]
+    grpc: bool,
+    #[clap(long, default_value = "false")]
+    grpc_stream: bool,
     #[clap(long, default_value = "http://localhost:9898")]
     mgmt_api_endpoint: String,
     /// Pageserver connection string. Supports postgresql:// and grpc:// protocols.
@@ -78,6 +82,9 @@ pub(crate) struct Args {
     #[clap(long)]
     set_io_mode: Option<pageserver_api::models::virtual_file::IoMode>,
 
+    #[clap(long)]
+    only_relnode: Option<u32>,
+
     /// Queue depth generated in each client.
     #[clap(long, default_value = "1")]
     queue_depth: NonZeroUsize,
@@ -92,10 +99,31 @@ pub(crate) struct Args {
     #[clap(long, default_value = "1")]
     batch_size: NonZeroUsize,
 
-    #[clap(long)]
-    only_relnode: Option<u32>,
-
     targets: Option<Vec<TenantTimelineId>>,
+
+    #[clap(long, default_value = "100")]
+    pool_max_consumers: NonZeroUsize,
+
+    #[clap(long, default_value = "5")]
+    pool_error_threshold: NonZeroUsize,
+
+    #[clap(long, default_value = "5000")]
+    pool_connect_timeout: NonZeroUsize,
+
+    #[clap(long, default_value = "1000")]
+    pool_connect_backoff: NonZeroUsize,
+
+    #[clap(long, default_value = "60000")]
+    pool_max_idle_duration: NonZeroUsize,
+
+    #[clap(long, default_value = "0")]
+    max_delay_ms: usize,
+
+    #[clap(long, default_value = "0")]
+    percent_drops: usize,
+
+    #[clap(long, default_value = "0")]
+    percent_hangs: usize,
 }
 
 /// State shared by all clients
@@ -152,7 +180,6 @@ pub(crate) fn main(args: Args) -> anyhow::Result<()> {
         main_impl(args, thread_local_stats)
     })
 }
-
 async fn main_impl(
     args: Args,
     all_thread_local_stats: AllThreadLocalStats<request_stats::Stats>,
@@ -317,6 +344,7 @@ async fn main_impl(
     let rps_period = args
         .per_client_rate
         .map(|rps_limit| Duration::from_secs_f64(1.0 / (rps_limit as f64)));
+
     let make_worker: &dyn Fn(WorkerId) -> Pin<Box<dyn Send + Future<Output = ()>>> = &|worker_id| {
         let ss = shared_state.clone();
         let cancel = cancel.clone();

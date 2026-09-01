@@ -5,10 +5,12 @@ MODULE_big = neon
 OBJS = \
 	$(WIN32RES) \
 	communicator.o \
+	communicator_new.o \
 	communicator_process.o \
 	extension_server.o \
 	file_cache.o \
 	hll.o \
+	lfc_prewarm.o \
 	libpagestore.o \
 	logical_replication_monitor.o \
 	neon.o \
@@ -67,6 +69,7 @@ WALPROP_OBJS = \
 
 # libcommunicator.a is built by cargo from the Rust sources under communicator/
 # subdirectory. `cargo build` also generates communicator_bindings.h.
+communicator_new.o: communicator/communicator_bindings.h
 communicator_process.o: communicator/communicator_bindings.h
 file_cache.o: communicator/communicator_bindings.h
 

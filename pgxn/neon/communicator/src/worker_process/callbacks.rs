@@ -4,10 +4,13 @@
 //!
 //! These are called from the communicator threads! Careful what you do, most Postgres
 //! functions are not safe to call in that context.
+use utils::lsn::Lsn;
 
 #[cfg(not(test))]
 unsafe extern "C" {
+    pub fn notify_proc_unsafe(procno: std::ffi::c_int);
     pub fn callback_set_my_latch_unsafe();
+    pub fn callback_get_request_lsn_unsafe() -> crate::neon_request::CLsn;
     pub fn callback_get_lfc_metrics_unsafe() -> LfcMetrics;
 }
 
@@ -16,7 +19,15 @@ unsafe extern "C" {
 // package, but the code coverage build still builds these and tries to link with the
 // external C code.)
 #[cfg(test)]
+unsafe fn notify_proc_unsafe(_procno: std::ffi::c_int) {
+    panic!("not usable in unit tests");
+}
+#[cfg(test)]
 unsafe fn callback_set_my_latch_unsafe() {
+    panic!("not usable in unit tests");
+}
+#[cfg(test)]
+unsafe fn callback_get_request_lsn_unsafe() -> crate::neon_request::CLsn {
     panic!("not usable in unit tests");
 }
 #[cfg(test)]
@@ -26,8 +37,16 @@ unsafe fn callback_get_lfc_metrics_unsafe() -> LfcMetrics {
 
 // safe wrappers
 
+pub(super) fn notify_proc(procno: std::ffi::c_int) {
+    unsafe { notify_proc_unsafe(procno) };
+}
+
 pub(super) fn callback_set_my_latch() {
     unsafe { callback_set_my_latch_unsafe() };
+}
+
+pub(super) fn get_request_lsn() -> Lsn {
+    Lsn(unsafe { callback_get_request_lsn_unsafe() })
 }
 
 pub(super) fn callback_get_lfc_metrics() -> LfcMetrics {

@@ -25,6 +25,9 @@ tracing.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+axum.workspace = true
+http.workspace = true
+metrics.workspace = true
 tonic.workspace = true
 url.workspace = true
 

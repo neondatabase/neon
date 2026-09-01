@@ -121,6 +121,11 @@
                     "vartype": "string"
                 },
                 {
+                    "name": "neon.pageserver_grpc_urls",
+                    "value": "grpc://pageserver:6401/",
+                    "vartype": "string"
+                },
+                {
                     "name": "max_replication_write_lag",
                     "value": "500MB",
                     "vartype": "string"

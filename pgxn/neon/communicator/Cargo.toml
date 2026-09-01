@@ -17,12 +17,30 @@ rest_broker = []
 
 [dependencies]
 axum.workspace = true
+bytes.workspace = true
+clashmap.workspace = true
 http.workspace = true
+libc.workspace = true
+nix.workspace = true
+atomic_enum = "0.3.0"
+measured.workspace = true
+prometheus.workspace = true
+prost.workspace = true
+strum_macros.workspace = true
+thiserror.workspace = true
+tonic = { workspace = true, default-features = false, features=["codegen", "prost", "transport"] }
 tokio = { workspace = true, features = ["macros", "net", "io-util", "rt", "rt-multi-thread"] }
+tokio-pipe = { version = "0.2.12" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-measured.workspace = true
+uring-common = { workspace = true, features = ["bytes"] }
+
+pageserver_client_grpc.workspace = true
+pageserver_api.workspace = true
+pageserver_page_api.workspace = true
+
+neon-shmem.workspace = true
 utils.workspace = true
 workspace_hack = { version = "0.1", path = "../../../workspace_hack" }
 

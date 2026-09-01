@@ -453,6 +453,7 @@ impl TimelineHandles {
             handles: Default::default(),
         }
     }
+
     async fn get(
         &mut self,
         tenant_id: TenantId,

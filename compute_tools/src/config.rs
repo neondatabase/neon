@@ -8,7 +8,7 @@ use std::path::Path;
 
 use compute_api::responses::TlsConfig;
 use compute_api::spec::{
-    ComputeAudit, ComputeMode, ComputeSpec, DatabricksSettings, GenericOption,
+    ComputeAudit, ComputeMode, ComputeSpec, DatabricksSettings, GenericOption, PageserverProtocol,
 };
 
 use crate::compute::ComputeNodeParams;
@@ -69,6 +69,15 @@ pub fn write_postgres_conf(
     writeln!(file, "# Neon storage settings")?;
     writeln!(file)?;
     if let Some(conninfo) = &spec.pageserver_connection_info {
+        match conninfo.prefer_protocol {
+            PageserverProtocol::Libpq => {
+                writeln!(file, "neon.use_communicator_worker=false")?;
+            }
+            PageserverProtocol::Grpc => {
+                writeln!(file, "neon.use_communicator_worker=true")?;
+            }
+        }
+
         // Stripe size GUC should be defined prior to connection string
         if let Some(stripe_size) = conninfo.stripe_size {
             writeln!(
@@ -79,6 +88,7 @@ pub fn write_postgres_conf(
         }
 
         let mut libpq_urls: Option<Vec<String>> = Some(Vec::new());
+        let mut grpc_urls: Option<Vec<String>> = Some(Vec::new());
         let num_shards = if conninfo.shard_count.0 == 0 {
             1 // unsharded, treat it as a single shard
         } else {
@@ -111,6 +121,14 @@ pub fn write_postgres_conf(
             } else {
                 libpq_urls = None
             }
+            // Similarly for gRPC URLs
+            if let Some(url) = &first_pageserver.grpc_url {
+                if let Some(ref mut urls) = grpc_urls {
+                    urls.push(url.clone());
+                }
+            } else {
+                grpc_urls = None
+            }
         }
         if let Some(libpq_urls) = libpq_urls {
             writeln!(
@@ -125,7 +143,22 @@ pub fn write_postgres_conf(
         } else {
             writeln!(file, "# no neon.pageserver_connstring")?;
         }
+        if let Some(grpc_urls) = grpc_urls {
+            writeln!(
+                file,
+                "# derived from compute spec's pageserver_conninfo field"
+            )?;
+            writeln!(
+                file,
+                "neon.pageserver_grpc_urls={}",
+                escape_conf_value(&grpc_urls.join(","))
+            )?;
+        } else {
+            writeln!(file, "# no neon.pageserver_grpc_urls")?;
+        }
     } else {
+        writeln!(file, "neon.use_communicator_worker=false")?;
+
         // Stripe size GUC should be defined prior to connection string
         if let Some(stripe_size) = spec.shard_stripe_size {
             writeln!(file, "# from compute spec's shard_stripe_size field")?;

@@ -72,6 +72,7 @@ char	   *neon_branch_id;
 char	   *neon_endpoint_id;
 int32		max_cluster_size;
 char	   *pageserver_connstring;
+char	   *pageserver_grpc_urls;
 char	   *neon_auth_token;
 
 int			readahead_buffer_size = 128;
@@ -81,7 +82,7 @@ int         neon_protocol_version = 3;
 
 static int	neon_compute_mode = 0;
 static int	max_reconnect_attempts = 60;
-static int	stripe_size;
+int		neon_stripe_size;
 static int	max_sockets;
 
 static int pageserver_response_log_timeout = 10000;
@@ -91,13 +92,6 @@ static int pageserver_response_disconnect_timeout = 150000;
 static int	conf_refresh_reconnect_attempt_threshold = 16;
 // Hadron: timeout for refresh errors (1 minute)
 static uint64 	kRefreshErrorTimeoutUSec = 1 * USECS_PER_MINUTE;
-
-typedef struct
-{
-	char		connstring[MAX_SHARDS][MAX_PAGESERVER_CONNSTRING_SIZE];
-	size_t		num_shards;
-	size_t		stripe_size;
-} ShardMap;
 
 /*
  * PagestoreShmemState is kept in shared memory. It contains the connection
@@ -187,6 +181,8 @@ static void pageserver_disconnect_shard(shardno_t shard_no);
 // HADRON
 shardno_t get_num_shards(void);
 
+static void AssignShardMap(const char *newval);
+
 static bool
 PagestoreShmemIsValid(void)
 {
@@ -200,8 +196,8 @@ PagestoreShmemIsValid(void)
  * not valid, returns false. The contents of *result are undefined in
  * that case, and must not be relied on.
  */
-static bool
-ParseShardMap(const char *connstr, ShardMap *result)
+bool
+parse_shard_map(const char *connstr, ShardMap *result)
 {
 	const char *p;
 	int			nshards = 0;
@@ -246,24 +242,31 @@ ParseShardMap(const char *connstr, ShardMap *result)
 	if (result)
 	{
 		result->num_shards = nshards;
-		result->stripe_size = stripe_size;
+		result->stripe_size = neon_stripe_size;
 	}
 
 	return true;
 }
 
+/* GUC hooks for neon.pageserver_connstring */
 static bool
 CheckPageserverConnstring(char **newval, void **extra, GucSource source)
 {
 	char	   *p = *newval;
 
-	return ParseShardMap(p, NULL);
+	return parse_shard_map(p, NULL);
 }
 
 static void
 AssignPageserverConnstring(const char *newval, void *extra)
 {
-	ShardMap	shard_map;
+	/*
+	 * 'neon.pageserver_connstring' is ignored if the new communicator is used.
+	 * In that case, the shard map is loaded from 'neon.pageserver_grpc_urls'
+	 * instead, and that happens in the communicator process only.
+	 */
+	if (neon_use_communicator_worker)
+		return;
 
 	/*
 	 * Only postmaster updates the copy in shared memory.
@@ -271,11 +274,29 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	if (!PagestoreShmemIsValid() || IsUnderPostmaster)
 		return;
 
-	if (!ParseShardMap(newval, &shard_map))
+	AssignShardMap(newval);
+}
+
+
+/* GUC hooks for neon.pageserver_connstring */
+static bool
+CheckPageserverGrpcUrls(char **newval, void **extra, GucSource source)
+{
+	char	   *p = *newval;
+
+	return parse_shard_map(p, NULL);
+}
+
+static void
+AssignShardMap(const char *newval)
+{
+	ShardMap	shard_map;
+
+	if (!parse_shard_map(newval, &shard_map))
 	{
 		/*
 		 * shouldn't happen, because we already checked the value in
-		 * CheckPageserverConnstring
+		 * CheckPageserverConnstring/CheckPageserverGrpcUrls
 		 */
 		elog(ERROR, "could not parse shard map");
 	}
@@ -292,6 +313,27 @@ AssignPageserverConnstring(const char *newval, void *extra)
 	{
 		/* no change */
 	}
+}
+
+/*
+ * Set the 'num_shards' variable in shared memory.
+ *
+ * This is only used with the new communicator. The new communicator doesn't
+ * use the shard_map in shared memory, except for the shard count, which is
+ * needed by get_num_shards() calls in the walproposer. This is called to set
+ * that. This is only called from the communicator process, at process startup
+ * or if the configuration is reloaded.
+ */
+void
+AssignNumShards(shardno_t num_shards)
+{
+	Assert(neon_use_communicator_worker);
+
+	pg_atomic_add_fetch_u64(&pagestore_shared->begin_update_counter, 1);
+	pg_write_barrier();
+	pagestore_shared->shard_map.num_shards = num_shards;
+	pg_write_barrier();
+	pg_atomic_add_fetch_u64(&pagestore_shared->end_update_counter, 1);
 }
 
 /* BEGIN_HADRON */
@@ -397,10 +439,10 @@ get_shard_number(BufferTag *tag)
 
 #if PG_MAJORVERSION_NUM < 16
 	hash = murmurhash32(tag->rnode.relNode);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / neon_stripe_size));
 #else
 	hash = murmurhash32(tag->relNumber);
-	hash = hash_combine(hash, murmurhash32(tag->blockNum / stripe_size));
+	hash = hash_combine(hash, murmurhash32(tag->blockNum / neon_stripe_size));
 #endif
 
 	return hash % n_shards;
@@ -1478,6 +1520,15 @@ pg_init_libpagestore(void)
 							   0,	/* no flags required */
 							   CheckPageserverConnstring, AssignPageserverConnstring, NULL);
 
+	DefineCustomStringVariable("neon.pageserver_grpc_urls",
+							   "list of gRPC URLs for the page servers",
+							   NULL,
+							   &pageserver_grpc_urls,
+							   "",
+							   PGC_SIGHUP,
+							   0,	/* no flags required */
+							   CheckPageserverGrpcUrls, NULL, NULL);
+
 	DefineCustomStringVariable("neon.timeline_id",
 							   "Neon timeline_id the server is running on",
 							   NULL,
@@ -1524,7 +1575,7 @@ pg_init_libpagestore(void)
 	DefineCustomIntVariable("neon.stripe_size",
 							"sharding stripe size",
 							NULL,
-							&stripe_size,
+							&neon_stripe_size,
 							2048, 1, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_BLOCKS,
@@ -1643,7 +1694,7 @@ pg_init_libpagestore(void)
 	if (neon_auth_token)
 		neon_log(LOG, "using storage auth token from NEON_AUTH_TOKEN environment variable");
 
-	if (pageserver_connstring[0])
+	if (pageserver_connstring[0] || pageserver_grpc_urls[0])
 	{
 		neon_log(PageStoreTrace, "set neon_smgr hook");
 		smgr_hook = smgr_neon;
