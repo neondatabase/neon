@@ -562,7 +562,7 @@ impl PageServerNode {
                 .transpose()
                 .context("Failed to parse 'sampling_ratio'")?,
             relsize_snapshot_cache_capacity: settings
-                .remove("relsize snapshot cache capacity")
+                .remove("relsize_snapshot_cache_capacity")
                 .map(|x| x.parse::<usize>())
                 .transpose()
                 .context("Failed to parse 'relsize_snapshot_cache_capacity' as integer")?,
