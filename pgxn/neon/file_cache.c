@@ -839,6 +839,7 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 			}
 			PG_CATCH();
 			{
+				FlushErrorState();
 				elog(LOG, "LFC: cancel prewarm");
 				lfc_ctl->prewarm_canceled = true;
 				interrupted = true;
