@@ -72,6 +72,23 @@ pub struct ExtensionInstallRequest {
     pub extension: PgIdent,
     pub database: PgIdent,
     pub version: ExtVersion,
+    /// Target schema for `CREATE EXTENSION ... WITH SCHEMA`.
+    ///
+    /// Defaults to `public` when omitted, which preserves the historical
+    /// behaviour for every existing caller.
+    ///
+    /// Callers must set this explicitly for extensions whose control file
+    /// declares a fixed schema, e.g. `supabase_vault` ships
+    /// `schema = vault` / `relocatable = false`; installing it with
+    /// `WITH SCHEMA public` makes PostgreSQL reject the statement with
+    /// `extension "supabase_vault" must be installed in schema "vault"`.
+    #[serde(default = "default_extension_schema")]
+    pub schema: PgIdent,
+}
+
+/// Default target schema for [`ExtensionInstallRequest::schema`].
+fn default_extension_schema() -> PgIdent {
+    "public".to_string()
 }
 
 #[derive(Deserialize, Debug)]

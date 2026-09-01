@@ -2554,6 +2554,7 @@ LIMIT 100",
         ext_name: &PgIdent,
         db_name: &PgIdent,
         ext_version: ExtVersion,
+        schema: PgIdent,
     ) -> Result<ExtVersion> {
         use tokio_postgres::NoTls;
 
@@ -2576,6 +2577,7 @@ LIMIT 100",
         // sanitize the inputs as postgres idents.
         let ext_name: String = ext_name.pg_quote();
         let quoted_version: String = ext_version.pg_quote();
+        let quoted_schema: String = schema.pg_quote();
 
         if let Some(installed_version) = version {
             if installed_version == ext_version {
@@ -2587,8 +2589,15 @@ LIMIT 100",
                 .await
                 .with_context(|| format!("Failed to execute query: {query}"))?;
         } else {
+            // `schema` defaults to `public` (see ExtensionInstallRequest), so this
+            // preserves the historical behaviour for every existing caller.
+            // Callers must pass a different schema for extensions whose control
+            // file pins one, e.g. `supabase_vault` ships `schema = vault` /
+            // `relocatable = false`; installing it with `WITH SCHEMA public`
+            // makes PostgreSQL reject the statement with
+            // `extension "supabase_vault" must be installed in schema "vault"`.
             let query = format!(
-                "CREATE EXTENSION IF NOT EXISTS {ext_name} WITH SCHEMA public VERSION {quoted_version}"
+                "CREATE EXTENSION IF NOT EXISTS {ext_name} WITH SCHEMA {quoted_schema} VERSION {quoted_version}"
             );
             db_client
                 .simple_query(&query)
