@@ -1233,6 +1233,24 @@ impl WalIngest {
                 let mut checkpoint_bytes = [0u8; pgv::xlog_utils::SIZEOF_CHECKPOINT];
                 buf.copy_to_slice(&mut checkpoint_bytes);
                 let xlog_checkpoint = pgv::CheckPoint::decode(&checkpoint_bytes)?;
+
+                if xlog_checkpoint.nextXid.value > cp.nextXid.value {
+                    cp.nextXid = xlog_checkpoint.nextXid;
+                    self.checkpoint_modified = true;
+                }
+                if (xlog_checkpoint.nextOid.wrapping_sub(cp.nextOid) as i32) > 0 {
+                    cp.nextOid = xlog_checkpoint.nextOid;
+                    self.checkpoint_modified = true;
+                }
+                if (xlog_checkpoint.nextMulti.wrapping_sub(cp.nextMulti) as i32) > 0 {
+                    cp.nextMulti = xlog_checkpoint.nextMulti;
+                    self.checkpoint_modified = true;
+                }
+                if (xlog_checkpoint.nextMultiOffset.wrapping_sub(cp.nextMultiOffset) as i32) > 0 {
+                    cp.nextMultiOffset = xlog_checkpoint.nextMultiOffset;
+                    self.checkpoint_modified = true;
+                }
+
                 trace!(
                     "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
                     xlog_checkpoint.oldestXid, cp.oldestXid

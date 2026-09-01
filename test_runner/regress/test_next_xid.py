@@ -284,6 +284,40 @@ def advance_multixid_to(
             time.sleep(0.5)
 
 
+def advance_xid_to(
+    pg_bin: PgBin, vanilla_pg: VanillaPostgres, next_xid: int
+):
+    """
+    Use pg_resetwal to advance the nextXid value in a stand-alone Postgres cluster.
+    To avoid Postgres failing with wraparound errors due to a large gap between
+    nextXid and oldestXid, we also run "vacuum freeze" and "checkpoint" after the
+    reset to advance the oldest XID.
+    """
+    vanilla_pg.stop()
+    pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, "pg_resetwal")
+    cmd = [
+        pg_resetwal_path,
+        f"--next-transaction-id={next_xid}",
+        "-D",
+        str(vanilla_pg.pgdatadir),
+    ]
+    pg_bin.run_capture(cmd)
+
+    # Create dummy pg_xact segment file to allow Postgres to start up.
+    # Each segment holds 32768 * 32 = 1048576 transactions.
+    segname = f"{int(next_xid / (32768 * 32)):04X}"
+    log.info(f"Creating dummy segment pg_xact/{segname}")
+    with open(vanilla_pg.pgdatadir / "pg_xact" / segname, "w") as of:
+        of.write("\0" * 32 * 8192)
+        of.flush()
+
+    vanilla_pg.start()
+
+    with vanilla_pg.connect().cursor() as cur:
+        cur.execute("vacuum freeze")
+        cur.execute("checkpoint")
+
+
 def test_multixid_wraparound_import(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -462,3 +496,215 @@ $$;
     )
     log.info(f"next_multi_offset after restart: {next_multi_offset_after_restart}")
     assert next_multi_offset_after_restart < 100000
+
+
+def test_xid_wraparound_import(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+    pg_bin: PgBin,
+    vanilla_pg,
+):
+    """
+    Test that the wraparound of the "next-transaction-id" counter is handled correctly in
+    pageserver and compute node.
+    """
+    env = neon_env_builder.init_start()
+
+    # Advance transaction ID in steps of ~1 billion to avoid exceeding the 2 billion
+    # circular comparison limit between nextXid and oldestXid.
+    vanilla_pg.configure(
+        [
+            "log_autovacuum_min_duration = 0",
+            "autovacuum_naptime='1 s'",
+            "autovacuum_freeze_max_age = 1000000",
+            "autovacuum_multixact_freeze_max_age = 1000000",
+        ],
+    )
+    vanilla_pg.start()
+
+    # Reset the next transaction ID in steps. Run vacuum freeze at each step to advance oldest_xid.
+    advance_xid_to(pg_bin, vanilla_pg, 1000000000)
+    advance_xid_to(pg_bin, vanilla_pg, 2000000000)
+    advance_xid_to(pg_bin, vanilla_pg, 3000000000)
+    advance_xid_to(pg_bin, vanilla_pg, 4294967000)  # just below 4 billion (2^32)
+
+    vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
+    vanilla_pg.safe_psql("create table tt as select g as id from generate_series(1, 10) g")
+    vanilla_pg.safe_psql("CHECKPOINT")
+
+    # Import the cluster to Neon
+    tenant_id = TenantId.generate()
+    env.pageserver.tenant_create(tenant_id)
+    timeline_id = TimelineId.generate()
+    import_timeline_from_vanilla_postgres(
+        test_output_dir,
+        env,
+        pg_bin,
+        tenant_id,
+        timeline_id,
+        "imported_xid_wraparound_test",
+        vanilla_pg.connstr(),
+    )
+    vanilla_pg.stop()
+
+    endpoint = env.endpoints.create_start(
+        "imported_xid_wraparound_test",
+        tenant_id=tenant_id,
+        config_lines=[
+            "log_autovacuum_min_duration = 0",
+            "autovacuum_naptime='5 s'",
+            "autovacuum=off",
+        ],
+    )
+    conn = endpoint.connect()
+    cur = conn.cursor()
+    assert query_scalar(cur, "select count(*) from tt") == 10
+
+    # Install extension containing function needed for test
+    cur.execute("CREATE EXTENSION neon_test_utils")
+
+    # Consume XIDs until we wrap around (across 2^32 = 4,294,967,296).
+    # Since we are at 4,294,967,000, calling test_consume_xids(2000) will cross it.
+    cur.execute("select test_consume_xids(2000)")
+    cur.execute("checkpoint")
+
+    # wait until pageserver receives that data
+    wait_for_wal_insert_lsn(env, endpoint, tenant_id, timeline_id)
+
+    # Read pg_control_checkpoint fields
+    cur.execute("select next_xid, oldest_xid from pg_control_checkpoint()")
+    res = cur.fetchone()
+    log.info(f"before restart pg_control: next_xid={res[0]}, oldest_xid={res[1]}")
+    next_full_xid_before = res[0].split(':')
+    next_xid_epoch_before = int(next_full_xid_before[0])
+    next_xid_xid_before = int(next_full_xid_before[1])
+
+    # Check that epoch is advanced to 1, and 32-bit xid wrapped around
+    assert next_xid_epoch_before == 1
+    assert next_xid_xid_before < 2000
+
+    # Stop endpoint immediately to avoid graceful shutdown checkpoint
+    endpoint.stop(
+        mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id)
+    )
+    endpoint.start()
+
+    # Reconnect and verify fields are still restored correctly
+    conn = endpoint.connect()
+    cur = conn.cursor()
+    cur.execute("select next_xid, oldest_xid from pg_control_checkpoint()")
+    res_after = cur.fetchone()
+    log.info(f"after restart pg_control: next_xid={res_after[0]}, oldest_xid={res_after[1]}")
+    next_full_xid_after = res_after[0].split(':')
+    next_xid_epoch_after = int(next_full_xid_after[0])
+    next_xid_xid_after = int(next_full_xid_after[1])
+
+    assert next_xid_epoch_after == 1
+    assert next_xid_xid_after >= next_xid_xid_before
+
+
+def test_oid_wraparound_import(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+    pg_bin: PgBin,
+    vanilla_pg,
+):
+    """
+    Test that the wraparound of the "next-oid" counter is handled correctly in
+    pageserver and compute node.
+    """
+    env = neon_env_builder.init_start()
+
+    vanilla_pg.configure(
+        [
+            "log_autovacuum_min_duration = 0",
+            "autovacuum_naptime='1 s'",
+        ],
+    )
+    vanilla_pg.start()
+
+    # Reset next OID to just below 4 billion
+    vanilla_pg.stop()
+    pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, "pg_resetwal")
+    cmd = [
+        pg_resetwal_path,
+        "--next-oid=4294967000",
+        "-D",
+        str(vanilla_pg.pgdatadir),
+    ]
+    pg_bin.run_capture(cmd)
+    vanilla_pg.start()
+
+    vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
+    vanilla_pg.safe_psql("create table tt as select g as id from generate_series(1, 10) g")
+    vanilla_pg.safe_psql("CHECKPOINT")
+
+    # Import the cluster to Neon
+    tenant_id = TenantId.generate()
+    env.pageserver.tenant_create(tenant_id)
+    timeline_id = TimelineId.generate()
+    import_timeline_from_vanilla_postgres(
+        test_output_dir,
+        env,
+        pg_bin,
+        tenant_id,
+        timeline_id,
+        "imported_oid_wraparound_test",
+        vanilla_pg.connstr(),
+    )
+    vanilla_pg.stop()
+
+    endpoint = env.endpoints.create_start(
+        "imported_oid_wraparound_test",
+        tenant_id=tenant_id,
+        config_lines=[
+            "log_autovacuum_min_duration = 0",
+            "autovacuum_naptime='5 s'",
+            "autovacuum=off",
+        ],
+    )
+    conn = endpoint.connect()
+    cur = conn.cursor()
+    assert query_scalar(cur, "select count(*) from tt") == 10
+
+    # Install extension containing function needed for test
+    cur.execute("CREATE EXTENSION neon_test_utils")
+
+    # Consume OIDs until we wrap around (across 2^32 = 4,294,967,296).
+    # Since we are at 4,294,967,000, calling test_consume_oids(16400) will cross it and wrap around.
+    cur.execute("select test_consume_oids(16400)")
+    cur.execute("checkpoint")
+
+    # wait until pageserver receives that data
+    wait_for_wal_insert_lsn(env, endpoint, tenant_id, timeline_id)
+
+    # Read pg_control_checkpoint fields
+    cur.execute("select next_oid from pg_control_checkpoint()")
+    next_oid_before = int(cur.fetchone()[0])
+    log.info(f"before restart pg_control: next_oid={next_oid_before}")
+    assert 16384 <= next_oid_before < 35000
+
+    # Check that we can successfully create a table (which allocates new OIDs)
+    cur.execute("create table t_after_wrap (id int)")
+    cur.execute("insert into t_after_wrap values (1)")
+    assert query_scalar(cur, "select count(*) from t_after_wrap") == 1
+
+    # Stop endpoint immediately to avoid graceful shutdown checkpoint
+    endpoint.stop(
+        mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id)
+    )
+    endpoint.start()
+
+    # Reconnect and verify fields are still restored correctly
+    conn = endpoint.connect()
+    cur = conn.cursor()
+    cur.execute("select next_oid from pg_control_checkpoint()")
+    next_oid_after = int(cur.fetchone()[0])
+    log.info(f"after restart pg_control: next_oid={next_oid_after}")
+
+    assert next_oid_after >= next_oid_before
+
+    # Verify we can still create tables and insert data after restart
+    cur.execute("create table t_after_restart (id int)")
+    cur.execute("insert into t_after_restart values (2)")
+    assert query_scalar(cur, "select count(*) from t_after_restart") == 1

@@ -196,7 +196,9 @@ impl StorageController {
 
         for v in PREFER_VERSIONS {
             let path = Utf8PathBuf::from_path_buf(self.env.pg_dir(v, dir_name)?).unwrap();
-            if tokio::fs::try_exists(&path).await? {
+            let bin_path = Utf8PathBuf::from_path_buf(self.env.pg_dir(v, "bin")?).unwrap();
+            let pg_ctl_path = bin_path.join("pg_ctl");
+            if tokio::fs::try_exists(&path).await? && tokio::fs::try_exists(&pg_ctl_path).await? {
                 return Ok(path);
             }
         }
