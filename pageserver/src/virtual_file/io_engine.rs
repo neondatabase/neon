@@ -11,6 +11,8 @@
 
 #[cfg(target_os = "linux")]
 pub(super) mod tokio_epoll_uring_ext;
+#[cfg(target_os = "linux")]
+pub(crate) use tokio_epoll_uring_ext::ThreadLocalStateId as TokioEpollUringExtThreadLocalStateId;
 
 use tokio_epoll_uring::IoBuf;
 use tracing::Instrument;

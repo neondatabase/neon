@@ -5,8 +5,9 @@
 //! on older kernels, such as some (but not all) older kernels in the Linux 5.10 series.
 //! See <https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391> for more details.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 use tokio_epoll_uring::{System, SystemHandle};
 use tokio_util::sync::CancellationToken;
@@ -22,13 +23,14 @@ struct ThreadLocalState(Arc<ThreadLocalStateInner>);
 struct ThreadLocalStateInner {
     cell: tokio::sync::OnceCell<SystemHandle<metrics::ThreadLocalMetrics>>,
     launch_attempts: AtomicU32,
-    /// populated through fetch_add from [`THREAD_LOCAL_STATE_ID`]
-    thread_local_state_id: u64,
+    thread_local_state_id: ThreadLocalStateId,
 }
 
 impl Drop for ThreadLocalStateInner {
     fn drop(&mut self) {
         THREAD_LOCAL_METRICS_STORAGE.remove_system(self.thread_local_state_id);
+        let mut launched_systems = ALL_THREAD_LOCALS.lock().unwrap();
+        launched_systems.remove(&self.thread_local_state_id);
     }
 }
 
@@ -37,7 +39,7 @@ impl ThreadLocalState {
         Self(Arc::new(ThreadLocalStateInner {
             cell: tokio::sync::OnceCell::default(),
             launch_attempts: AtomicU32::new(0),
-            thread_local_state_id: THREAD_LOCAL_STATE_ID.fetch_add(1, Ordering::Relaxed),
+            thread_local_state_id: ThreadLocalStateId::new(),
         }))
     }
 
@@ -46,7 +48,23 @@ impl ThreadLocalState {
     }
 }
 
-static THREAD_LOCAL_STATE_ID: AtomicU64 = AtomicU64::new(0);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ThreadLocalStateId(u64);
+impl ThreadLocalStateId {
+    pub fn new() -> Self {
+        static THREAD_LOCAL_STATE_ID: AtomicU64 = AtomicU64::new(0);
+        Self(THREAD_LOCAL_STATE_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+impl std::fmt::Display for ThreadLocalStateId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+static ALL_THREAD_LOCALS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<ThreadLocalStateId, Weak<ThreadLocalStateInner>>>,
+> = std::sync::LazyLock::new(|| Default::default());
 
 thread_local! {
     static THREAD_LOCAL: ThreadLocalState = ThreadLocalState::new();
@@ -76,7 +94,23 @@ pub async fn thread_local_system() -> Handle {
                     )
                     .await;
                     let per_system_metrics = metrics::THREAD_LOCAL_METRICS_STORAGE.register_system(inner.thread_local_state_id);
-                    let res = System::launch_with_metrics(per_system_metrics)
+                    let res = System::launch_with_metrics(per_system_metrics,
+                        if utils::env::var("NEON_PAGESERVER_TOKIO_EPOLL_URING_SHARE_IO_WQ_POOL").unwrap_or(false) {
+                        ALL_THREAD_LOCALS.lock().unwrap().values().filter_map(|other: &Weak<ThreadLocalStateInner>| {
+                            let Some(other) = other.upgrade() else {
+                                return None;
+                            };
+                            if other.thread_local_state_id == inner.thread_local_state_id {
+                                return None;
+                            }
+                            let Some(system) = inner.cell.get() else {
+                                return None;
+                            };
+                            Some(system)
+                        }).next()
+                    } else {
+                        None
+                    },)
                     // this might move us to another executor thread => loop outside the get_or_try_init, not inside it
                     .await;
                     match res {
