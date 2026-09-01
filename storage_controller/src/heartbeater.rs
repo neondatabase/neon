@@ -326,7 +326,7 @@ impl HeartBeat<Safekeeper, SafekeeperState> for HeartbeaterTask<Safekeeper, Safe
 
         let mut heartbeat_futs = FuturesUnordered::new();
         for (node_id, sk) in &*safekeepers {
-            if sk.scheduling_policy() == SkSchedulingPolicy::Decomissioned {
+            if sk.scheduling_policy() == SkSchedulingPolicy::Decommissioned {
                 continue;
             }
             heartbeat_futs.push({
