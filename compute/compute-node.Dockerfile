@@ -435,6 +435,45 @@ RUN \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
 
+
+#########################################################################################
+#
+# Layer "citus-build"
+# compile citus extension
+#
+#########################################################################################
+FROM build-deps AS citus-src
+ARG PG_VERSION
+
+WORKDIR /ext-src
+RUN case "${PG_VERSION:?}" in \
+      "v14") \
+        export CITUS_VERSION=12.1.6 \
+        ;; \
+      "v15" | "v16" | "v17") \
+        export CITUS_VERSION=13.0.3 \
+        ;; \
+    esac && \
+    wget https://github.com/citusdata/citus/archive/refs/tags/v${CITUS_VERSION}.tar.gz -O citus.tar.gz && \
+    mkdir citus-src && cd citus-src && tar xzf ../citus.tar.gz --strip-components=1 -C .
+
+FROM pg-build AS citus-build
+COPY --from=citus-src /ext-src/ /ext-src/
+WORKDIR /ext-src/citus-src
+RUN set -ex \
+    && export DEBIAN_FRONTEND=noninteractive \
+    && echo 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";' > /etc/apt/apt.conf.d/01norecommend \
+    && apt-get update -y \
+    && apt-get install -y git gcc make autoconf \
+                           libc6-dev flex libcurl4-gnutls-dev \
+                           libicu-dev libkrb5-dev liblz4-dev \
+                           libpam0g-dev libreadline-dev libselinux1-dev\
+                           libssl-dev libxslt1-dev libzstd-dev uuid-dev \
+    && MAKEFLAGS="-j $(grep -c ^processor /proc/cpuinfo)" \
+    && ./configure && make install && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/citus.control
+
+
 #########################################################################################
 #
 # Layer "h3-pg-build"
@@ -1712,6 +1751,7 @@ COPY --from=pg_duckdb-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg_repack-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgaudit-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgauditlogtofile-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=citus-build /usr/local/pgsql/ /usr/local/pgsql/
 
 #########################################################################################
 #
