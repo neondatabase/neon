@@ -22,6 +22,7 @@ aws-sdk-iam.workspace = true
 aws-sigv4.workspace = true
 base64.workspace = true
 bstr.workspace = true
+bb8 = "0.8.6"
 bytes = { workspace = true, features = ["serde"] }
 camino.workspace = true
 chrono.workspace = true

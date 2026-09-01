@@ -205,6 +205,7 @@ async fn authenticate(
         endpoint: db_info.aux.endpoint_id.as_str().into(),
         user: user.clone(),
         options: NeonOptions::default(),
+        use_tcp_pool: false,
     };
 
     ctx.set_dbname(db_info.dbname.into());

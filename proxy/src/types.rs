@@ -68,6 +68,11 @@ pub(crate) const LOCAL_PROXY_SUFFIX: &str = "-local-proxy";
 
 impl EndpointId {
     #[must_use]
+    pub(crate) fn is_pooler(&self) -> bool {
+        self.as_ref().ends_with(POOLER_SUFFIX)
+    }
+
+    #[must_use]
     fn normalize_str(&self) -> &str {
         if let Some(stripped) = self.as_ref().strip_suffix(POOLER_SUFFIX) {
             stripped

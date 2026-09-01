@@ -245,6 +245,7 @@ impl PoolingBackend {
                 conn_info.user_info.endpoint.normalize()
             )),
             options: conn_info.user_info.options.clone(),
+            use_tcp_pool: false,
         });
 
         let node = connect_compute::connect_to_compute(

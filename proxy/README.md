@@ -104,6 +104,10 @@ cases where it is hard to use rows represented as objects (e.g. when several fie
 
 ## Test proxy locally
 
+For an end-to-end local setup that uses `neon_local`-managed computes
+(pageserver + safekeeper + Postgres) instead of a single shared Postgres,
+see [`proxy-cplane-api/README.md`](../proxy-cplane-api/README.md).
+
 Proxy determines project name from the subdomain, request to the `round-rice-566201.somedomain.tld` will be routed to the project named `round-rice-566201`. Unfortunately, `/etc/hosts` does not support domain wildcards, so we can use *.local.neon.build` which resolves to `127.0.0.1`.
 
 We will need to have a postgres instance. Assuming that we have set up docker we can set it up as follows:

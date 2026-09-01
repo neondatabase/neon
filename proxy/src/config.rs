@@ -31,6 +31,7 @@ pub struct ProxyConfig {
     pub tls_config: ArcSwapOption<TlsConfig>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub http_config: HttpConfig,
+    pub tcp_pool_config: TcpPoolConfig,
     pub authentication_config: AuthenticationConfig,
     #[cfg(feature = "rest_broker")]
     pub rest_config: RestConfig,
@@ -72,6 +73,30 @@ pub struct HttpConfig {
     pub client_conn_threshold: u64,
     pub max_request_size_bytes: usize,
     pub max_response_size_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TcpPoolMode {
+    /// Hold a compute connection after the first frontend message that needs
+    /// compute. Cached-startup sessions can sit idle before that without
+    /// checking out a compute connection.
+    #[default]
+    Session,
+    /// Return a compute connection to the pool at every transaction
+    /// boundary (compute sends ReadyForQuery with status `'I'`). Subsequent
+    /// transactions on the same client may land on different compute
+    /// connections — same semantic as PgBouncer transaction mode.
+    Transaction,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TcpPoolConfig {
+    pub enabled: bool,
+    pub mode: TcpPoolMode,
+    pub max_conns_per_key: usize,
+    pub max_total_conns: usize,
+    pub idle_timeout: Duration,
+    pub fallback_direct_connect: bool,
 }
 
 pub struct AuthenticationConfig {

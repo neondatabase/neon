@@ -107,6 +107,7 @@ mod scram;
 mod serverless;
 mod signals;
 mod stream;
+mod tcp_pool;
 mod tls;
 mod types;
 mod url;
