@@ -57,8 +57,10 @@ pub fn init_tracing_and_logging(
     };
 
     // Initialize OpenTelemetry
+    let service_name = std::env::var("OTEL_SERVICE_NAME")
+        .unwrap_or_else(|_| "compute_ctl".to_string());
     let provider =
-        tracing_utils::init_tracing("compute_ctl", tracing_utils::ExportConfig::default());
+        tracing_utils::init_tracing(&service_name, tracing_utils::ExportConfig::default());
     let otlp_layer = provider.as_ref().map(tracing_utils::layer);
 
     // Put it all together
