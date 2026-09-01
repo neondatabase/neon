@@ -69,9 +69,9 @@ def start_heavy_write_workload(env: PgCompare, n_tables: int, scale: int, num_it
 
     ## Single table workload:
     At each step, insert new `new_rows_each_update` rows.
-    The variable `new_rows_each_update` is equal to `scale * 100_000`.
+    The variable `new_rows_each_update` is equal to `scale * 1_000_000`.
     The number of steps is determined by `num_iters` variable."""
-    new_rows_each_update = scale * 100_000
+    new_rows_each_update = scale * 1_000_000  # 10x increase from 100_000
 
     def start_single_table_workload(table_id: int):
         for _ in range(num_iters):

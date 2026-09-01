@@ -59,7 +59,7 @@ def test_copy(neon_with_baseline: PgCompare):
             # Since there's no data in the table previously, this extends it.
             with env.record_pageserver_writes("copy_extend_pageserver_writes"):
                 with env.record_duration("copy_extend"):
-                    cur.copy_from(copy_test_data(1000000), "copytest")
+                    cur.copy_from(copy_test_data(10000000), "copytest")  # 10x increase from 1000000
                     env.flush()
 
             # Delete most rows, and VACUUM to make the space available for reuse.
@@ -79,7 +79,7 @@ def test_copy(neon_with_baseline: PgCompare):
             # This will also clear all the VM bits.
             with env.record_pageserver_writes("copy_reuse_pageserver_writes"):
                 with env.record_duration("copy_reuse"):
-                    cur.copy_from(copy_test_data(1000000), "copytest")
+                    cur.copy_from(copy_test_data(10000000), "copytest")  # 10x increase from 1000000
                     env.flush()
 
             env.report_peak_memory_use()

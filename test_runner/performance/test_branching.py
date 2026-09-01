@@ -70,9 +70,9 @@ def test_compare_child_and_root_write_perf(neon_compare: NeonCompare):
     endpoint_child = env.endpoints.create_start("child")
 
     with neon_compare.record_duration("root_run_duration"):
-        endpoint_root.safe_psql("INSERT INTO foo SELECT FROM generate_series(1,1000000)")
+        endpoint_root.safe_psql("INSERT INTO foo SELECT FROM generate_series(1,10000000)")  # 10x increase from 1000000
     with neon_compare.record_duration("child_run_duration"):
-        endpoint_child.safe_psql("INSERT INTO foo SELECT FROM generate_series(1,1000000)")
+        endpoint_child.safe_psql("INSERT INTO foo SELECT FROM generate_series(1,10000000)")  # 10x increase from 1000000
 
 
 def test_compare_child_and_root_read_perf(neon_compare: NeonCompare):
@@ -83,7 +83,7 @@ def test_compare_child_and_root_read_perf(neon_compare: NeonCompare):
     endpoint_root.safe_psql_many(
         [
             "CREATE TABLE foo(key serial primary key, t text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')",
-            "INSERT INTO foo SELECT FROM generate_series(1,1000000)",
+            "INSERT INTO foo SELECT FROM generate_series(1,10000000)",  # 10x increase from 1000000
         ]
     )
 
