@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span};
 use utils::backoff;
 use utils::generation::Generation;
-use utils::id::{TenantId, TenantTimelineId};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 use crate::checks::{
     BlobDataParseResult, ListTenantManifestResult, RemoteTenantManifestInfo, list_tenant_manifests,
@@ -38,6 +38,8 @@ pub struct GcSummary {
     remote_storage_errors: usize,
     controller_api_errors: usize,
     ancestor_layers_deleted: usize,
+    timeline_scans_incomplete: usize,
+    ancestor_gc_tenants_skipped_incomplete: usize,
 }
 
 impl GcSummary {
@@ -48,6 +50,8 @@ impl GcSummary {
             remote_storage_errors,
             ancestor_layers_deleted,
             controller_api_errors,
+            timeline_scans_incomplete,
+            ancestor_gc_tenants_skipped_incomplete,
         } = other;
 
         self.indices_deleted += indices_deleted;
@@ -55,6 +59,8 @@ impl GcSummary {
         self.remote_storage_errors += remote_storage_errors;
         self.ancestor_layers_deleted += ancestor_layers_deleted;
         self.controller_api_errors += controller_api_errors;
+        self.timeline_scans_incomplete += timeline_scans_incomplete;
+        self.ancestor_gc_tenants_skipped_incomplete += ancestor_gc_tenants_skipped_incomplete;
     }
 }
 
@@ -123,6 +129,13 @@ mod refs {
 
 use refs::AncestorRefs;
 
+#[derive(Debug, Eq, PartialEq)]
+enum TenantScanStatus {
+    Complete,
+    IncompleteTimeline,
+    InconsistentTimelines,
+}
+
 // As we see shards for a tenant, acccumulate knowledge needed for cross-shard GC:
 // - Are there any ancestor shards?
 // - Are there any refs to ancestor shards' layers?
@@ -130,11 +143,64 @@ use refs::AncestorRefs;
 struct TenantRefAccumulator {
     shards_seen: HashMap<TenantId, BTreeSet<ShardIndex>>,
 
+    // Timeline IDs enumerated for each shard, including timelines whose metadata did not parse.
+    timelines_seen: HashMap<TenantShardId, BTreeSet<TimelineId>>,
+
+    // Tenants for which at least one enumerated timeline could not contribute references.
+    incomplete_tenants: BTreeSet<TenantId>,
+
     // For each shard that has refs to an ancestor's layers, the set of ancestor layers referred to
     ancestor_ref_shards: AncestorRefs,
 }
 
 impl TenantRefAccumulator {
+    fn observe_timeline(&mut self, ttid: TenantShardTimelineId) {
+        self.timelines_seen
+            .entry(ttid.tenant_shard_id)
+            .or_default()
+            .insert(ttid.timeline_id);
+    }
+
+    fn mark_timeline_scan_incomplete(&mut self, ttid: TenantShardTimelineId) {
+        self.incomplete_tenants
+            .insert(ttid.tenant_shard_id.tenant_id);
+    }
+
+    fn tenant_scan_status(
+        &self,
+        tenant_id: TenantId,
+        latest_shards: &[ShardIndex],
+    ) -> TenantScanStatus {
+        if self.incomplete_tenants.contains(&tenant_id) {
+            return TenantScanStatus::IncompleteTimeline;
+        }
+
+        let Some(first_shard) = latest_shards.first() else {
+            return TenantScanStatus::InconsistentTimelines;
+        };
+        let first_shard = TenantShardId {
+            tenant_id,
+            shard_number: first_shard.shard_number,
+            shard_count: first_shard.shard_count,
+        };
+        let Some(first_timelines) = self.timelines_seen.get(&first_shard) else {
+            return TenantScanStatus::InconsistentTimelines;
+        };
+
+        for shard in &latest_shards[1..] {
+            let shard = TenantShardId {
+                tenant_id,
+                shard_number: shard.shard_number,
+                shard_count: shard.shard_count,
+            };
+            if self.timelines_seen.get(&shard) != Some(first_timelines) {
+                return TenantScanStatus::InconsistentTimelines;
+            }
+        }
+
+        TenantScanStatus::Complete
+    }
+
     fn update(&mut self, ttid: TenantShardTimelineId, index_part: &IndexPart) {
         let this_shard_idx = ttid.tenant_shard_id.to_index();
         self.shards_seen
@@ -162,7 +228,7 @@ impl TenantRefAccumulator {
         summary: &mut GcSummary,
     ) -> (Vec<TenantShardId>, AncestorRefs) {
         let mut ancestors_to_gc = Vec::new();
-        for (tenant_id, shard_indices) in self.shards_seen {
+        for (&tenant_id, shard_indices) in &self.shards_seen {
             // Find the highest shard count
             let latest_count = shard_indices
                 .iter()
@@ -170,7 +236,7 @@ impl TenantRefAccumulator {
                 .max()
                 .expect("Always at least one shard");
 
-            let mut shard_indices = shard_indices.iter().collect::<Vec<_>>();
+            let mut shard_indices = shard_indices.iter().copied().collect::<Vec<_>>();
             let (mut latest_shards, ancestor_shards) = {
                 let at =
                     itertools::partition(&mut shard_indices, |i| i.shard_count == latest_count);
@@ -179,17 +245,32 @@ impl TenantRefAccumulator {
             // Sort shards, as we will later compare them with a sorted list from the controller
             latest_shards.sort();
 
+            // Check if we have any non-latest-count shards
+            if ancestor_shards.is_empty() {
+                tracing::debug!(%tenant_id, "No ancestor shards to clean up");
+                continue;
+            }
+
+            match self.tenant_scan_status(tenant_id, &latest_shards) {
+                TenantScanStatus::Complete => {}
+                TenantScanStatus::IncompleteTimeline => {
+                    tracing::warn!(%tenant_id, "Skipping ancestor GC because a timeline reference scan was incomplete");
+                    summary.ancestor_gc_tenants_skipped_incomplete += 1;
+                    continue;
+                }
+                TenantScanStatus::InconsistentTimelines => {
+                    tracing::warn!(%tenant_id, "Skipping ancestor GC because current shards have inconsistent timeline sets");
+                    summary.ancestor_gc_tenants_skipped_incomplete += 1;
+                    continue;
+                }
+            }
+
             // Check that we have a complete view of the latest shard count: this should always be the case unless we happened
             // to scan the S3 bucket halfway through a shard split.
             if latest_shards.len() != latest_count.count() as usize {
                 // This should be extremely rare, so we warn on it.
                 tracing::warn!(%tenant_id, "Missed some shards at count {:?}: {latest_shards:?}", latest_count);
-                continue;
-            }
-
-            // Check if we have any non-latest-count shards
-            if ancestor_shards.is_empty() {
-                tracing::debug!(%tenant_id, "No ancestor shards to clean up");
+                summary.ancestor_gc_tenants_skipped_incomplete += 1;
                 continue;
             }
 
@@ -221,7 +302,7 @@ impl TenantRefAccumulator {
                         .iter()
                         .map(|s| s.tenant_shard_id.to_index())
                         .collect();
-                    if !controller_indices.iter().eq(latest_shards.iter().copied()) {
+                    if !controller_indices.iter().eq(latest_shards.iter()) {
                         tracing::info!(%tenant_id, "Latest shards seen in S3 ({latest_shards:?}) don't match controller state ({controller_indices:?})");
                         continue;
                     }
@@ -595,6 +676,11 @@ async fn gc_timeline(
         BlobDataParseResult::Relic => {
             tracing::info!("Skipping timeline {ttid}, it is a relic");
             // Post-deletion tenant location: don't try and GC it.
+            accumulator
+                .lock()
+                .unwrap()
+                .mark_timeline_scan_incomplete(ttid);
+            summary.timeline_scans_incomplete += 1;
             return Ok(summary);
         }
         BlobDataParseResult::Incorrect {
@@ -603,6 +689,11 @@ async fn gc_timeline(
         } => {
             // Our primary purpose isn't to report on bad data, but log this rather than skipping silently
             tracing::warn!("Skipping timeline {ttid}, bad metadata: {errors:?}");
+            accumulator
+                .lock()
+                .unwrap()
+                .mark_timeline_scan_incomplete(ttid);
+            summary.timeline_scans_incomplete += 1;
             return Ok(summary);
         }
     };
@@ -742,6 +833,7 @@ pub async fn pageserver_physical_gc(
         let target_ref = &target;
         let remote_client_ref = &remote_client;
         let manifest_gc_summary_ref = &manifest_gc_summary;
+        let accumulator_ref = &accumulator;
         async move {
             let gc_manifest_result = gc_tenant_manifests(
                 remote_client_ref,
@@ -771,6 +863,7 @@ pub async fn pageserver_physical_gc(
                 while let Some(ttid_res) = timelines.next().await {
                     let ttid = ttid_res?;
                     cnt += 1;
+                    accumulator_ref.lock().unwrap().observe_timeline(ttid);
                     yield (ttid, tenant_manifest_arc.clone());
                 }
                 tracing::info!(%tenant_shard_id, "Found {} timelines", cnt);
@@ -832,4 +925,86 @@ pub async fn pageserver_physical_gc(
     }
 
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use pageserver_api::shard::{ShardCount, ShardNumber};
+    use utils::id::TimelineId;
+
+    use super::*;
+
+    fn tenant_shard_id(tenant_id: TenantId, shard_number: u8, shard_count: u8) -> TenantShardId {
+        TenantShardId {
+            tenant_id,
+            shard_number: ShardNumber(shard_number),
+            shard_count: ShardCount::new(shard_count),
+        }
+    }
+
+    #[test]
+    fn incomplete_timeline_scan_blocks_ancestor_gc_for_tenant() {
+        let tenant_id = TenantId::generate();
+        let marker_timeline = TimelineId::generate();
+        let victim_timeline = TimelineId::generate();
+        let shards = [
+            tenant_shard_id(tenant_id, 0, 2),
+            tenant_shard_id(tenant_id, 1, 2),
+        ];
+        let mut accumulator = TenantRefAccumulator::default();
+
+        for shard in shards {
+            accumulator.observe_timeline(TenantShardTimelineId::new(shard, marker_timeline));
+            accumulator.observe_timeline(TenantShardTimelineId::new(shard, victim_timeline));
+        }
+        accumulator
+            .mark_timeline_scan_incomplete(TenantShardTimelineId::new(shards[0], victim_timeline));
+
+        assert_eq!(
+            accumulator.tenant_scan_status(tenant_id, &shards.map(|shard| shard.to_index())),
+            TenantScanStatus::IncompleteTimeline
+        );
+    }
+
+    #[test]
+    fn asymmetric_timeline_sets_block_ancestor_gc_for_tenant() {
+        let tenant_id = TenantId::generate();
+        let marker_timeline = TimelineId::generate();
+        let victim_timeline = TimelineId::generate();
+        let shards = [
+            tenant_shard_id(tenant_id, 0, 2),
+            tenant_shard_id(tenant_id, 1, 2),
+        ];
+        let mut accumulator = TenantRefAccumulator::default();
+
+        for shard in shards {
+            accumulator.observe_timeline(TenantShardTimelineId::new(shard, marker_timeline));
+        }
+        accumulator.observe_timeline(TenantShardTimelineId::new(shards[0], victim_timeline));
+
+        assert_eq!(
+            accumulator.tenant_scan_status(tenant_id, &shards.map(|shard| shard.to_index())),
+            TenantScanStatus::InconsistentTimelines
+        );
+    }
+
+    #[test]
+    fn matching_successful_timeline_scans_allow_ancestor_gc_for_tenant() {
+        let tenant_id = TenantId::generate();
+        let timeline_id = TimelineId::generate();
+        let shards = [
+            tenant_shard_id(tenant_id, 0, 2),
+            tenant_shard_id(tenant_id, 1, 2),
+        ];
+        let mut accumulator = TenantRefAccumulator::default();
+
+        for shard in shards {
+            accumulator.observe_timeline(TenantShardTimelineId::new(shard, timeline_id));
+        }
+
+        assert_eq!(
+            accumulator.tenant_scan_status(tenant_id, &shards.map(|shard| shard.to_index())),
+            TenantScanStatus::Complete
+        );
+    }
 }
