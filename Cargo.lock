@@ -7682,7 +7682,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#781989bb540a1408b0b93daa1e9d1fa452195497"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=devin%2F1746710596-expose-fallocate-modes#8bd6d0e99d4937096acfe40b64fd63aa9ad2e2ea"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -8351,7 +8351,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#781989bb540a1408b0b93daa1e9d1fa452195497"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=devin%2F1746710596-expose-fallocate-modes#8bd6d0e99d4937096acfe40b64fd63aa9ad2e2ea"
 dependencies = [
  "bytes",
  "io-uring",

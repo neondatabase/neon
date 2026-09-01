@@ -1407,6 +1407,7 @@ pub(crate) enum StorageIoOperation {
     Fsync,
     Metadata,
     SetLen,
+    Fallocate,
 }
 
 impl StorageIoOperation {
@@ -1422,6 +1423,7 @@ impl StorageIoOperation {
             StorageIoOperation::Fsync => "fsync",
             StorageIoOperation::Metadata => "metadata",
             StorageIoOperation::SetLen => "set_len",
+            StorageIoOperation::Fallocate => "fallocate",
         }
     }
 }

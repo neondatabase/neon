@@ -93,6 +93,10 @@ impl EphemeralFile {
             gate.enter()?,
         );
 
+        file.fallocate(0, 1 * 1024 * 1024 * 1024, ctx)
+            .await
+            .unwrap();
+
         let page_cache_file_id = page_cache::next_file_id(); // XXX get rid, we're not page-caching anymore
 
         Ok(EphemeralFile {

@@ -109,6 +109,7 @@ pub(crate) fn get() -> IoEngine {
     }
 }
 
+use std::os::fd::AsRawFd;
 use std::os::unix::prelude::FileExt;
 use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(target_os = "linux")]
@@ -238,10 +239,55 @@ impl IoEngine {
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
-                // TODO: ftruncate op for tokio-epoll-uring
+                // TODO: ftruncate op for tokio-epoll-uring: https://github.com/neondatabase/neon/issues/11817
                 // Don't forget to use retry_ecanceled_once
                 let res = file_guard.with_std_file(|std_file| std_file.set_len(len));
                 (file_guard, res)
+            }
+        }
+    }
+
+    pub(super) async fn fallocate(
+        &self,
+        file_guard: FileGuard,
+        offset: u64,
+        len: u64,
+    ) -> (FileGuard, std::io::Result<()>) {
+        // NB: if you ever think of using FALLOC_FL_KEEP_SIZE, keep
+        // in mind that I have found it to be punting to io_uring worker threads
+        // on Debian Bookworm Linux 6.1.0-32-amd64 and 6.12.25 mainline.
+        // => https://gist.github.com/problame/ed876bea40b915ba53267b8265e99352
+        match self {
+            IoEngine::NotSet => panic!("not initialized"),
+            IoEngine::StdFs => {
+                let flags = nix::fcntl::FallocateFlags::empty();
+                let Ok(offset) = nix::libc::off_t::try_from(offset) else {
+                    return (
+                        file_guard,
+                        Err(std::io::Error::from_raw_os_error(nix::libc::EINVAL)),
+                    );
+                };
+                let Ok(len) = nix::libc::off_t::try_from(len) else {
+                    return (
+                        file_guard,
+                        Err(std::io::Error::from_raw_os_error(nix::libc::EINVAL)),
+                    );
+                };
+                let res = file_guard.with_std_file(|std_file| {
+                    nix::fcntl::fallocate(std_file.as_raw_fd(), flags, offset, len)
+                });
+                let res = res.map_err(|e: nix::errno::Errno| e.into());
+                (file_guard, res)
+            }
+            #[cfg(target_os = "linux")]
+            IoEngine::TokioEpollUring => {
+                let flags = tokio_epoll_uring::FallocateFlags::empty();
+                let system = tokio_epoll_uring_ext::thread_local_system().await;
+                let (file_guard, res) = retry_ecanceled_once(file_guard, async |file_guard| {
+                    system.fallocate(file_guard, flags, offset, len).await
+                })
+                .await;
+                (file_guard, res.map_err(epoll_uring_error_to_std))
             }
         }
     }
