@@ -337,3 +337,32 @@ def test_lfc_prewarm_under_workload(neon_simple_env: NeonEnv, method: PrewarmMet
         PREWARM_ERR_LABEL: 0,
     }
     assert prom_parse(http_client) == desired
+
+
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
+def test_lfc_prewarm_invalid_state(neon_simple_env: NeonEnv):
+    """
+    Test that neon.prewarm_local_cache() rejects malformed input with an error
+    instead of reading past the end of the datum.
+    """
+    env = neon_simple_env
+    endpoint = env.endpoints.create_start(
+        branch_name="main",
+        config_lines=["neon.max_file_cache_size=1GB", "neon.file_cache_size_limit=1GB"],
+    )
+    pg_conn = endpoint.connect()
+    pg_cur = pg_conn.cursor()
+    pg_cur.execute("create schema neon; create extension neon with schema neon")
+
+    # shorter than the FileCacheState header
+    with pytest.raises(Exception, match="Invalid file cache state size"):
+        pg_cur.execute("select neon.prewarm_local_cache('\\xfc'::bytea)")
+
+    # header-sized, but invalid magic
+    with pytest.raises(Exception, match="Invalid file cache state magic"):
+        pg_cur.execute(
+            "select neon.prewarm_local_cache('\\x000000000000000001000000000000000000'::bytea)"
+        )
+
+    # the backend survived both
+    pg_cur.execute("select 1")

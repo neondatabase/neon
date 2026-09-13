@@ -733,7 +733,24 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 		elog(ERROR, "LFC: Too much prewarm workers, maximum is %d", MAX_PREWARM_WORKERS);
 	}
 
-	if (fcs == NULL || fcs->n_chunks == 0)
+	if (fcs == NULL)
+	{
+		elog(LOG, "LFC: nothing to prewarm");
+		return;
+	}
+
+	/*
+	 * The state arrives from SQL as bytea and can be shorter than the
+	 * FileCacheState header; validate the length before reading any
+	 * header fields. VARSIZE_ANY handles short-format varlenas, which
+	 * PG_GETARG_BYTEA_PP may return.
+	 */
+	if (VARSIZE_ANY(fcs) < sizeof(FileCacheState))
+	{
+		elog(ERROR, "LFC: Invalid file cache state size: %u", (unsigned)VARSIZE_ANY(fcs));
+	}
+
+	if (fcs->n_chunks == 0)
 	{
 		elog(LOG, "LFC: nothing to prewarm");
 		return;
@@ -744,10 +761,10 @@ lfc_prewarm(FileCacheState* fcs, uint32 n_workers)
 		elog(ERROR, "LFC: Invalid file cache state magic: %X", fcs->magic);
 	}
 
-	fcs_size = VARSIZE(fcs);
+	fcs_size = VARSIZE_ANY(fcs);
 	if (FILE_CACHE_STATE_SIZE(fcs) != fcs_size)
 	{
-		elog(ERROR, "LFC: Invalid file cache state size: %u vs. %u", (unsigned)FILE_CACHE_STATE_SIZE(fcs), VARSIZE(fcs));
+		elog(ERROR, "LFC: Invalid file cache state size: %u vs. %u", (unsigned)FILE_CACHE_STATE_SIZE(fcs), (unsigned)fcs_size);
 	}
 
 	fcs_chunk_size_log = fcs->chunk_size_log;
