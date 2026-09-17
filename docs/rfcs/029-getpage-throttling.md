@@ -101,7 +101,7 @@ Candidates are:
       This is a major operational pain point / risk right now.
 * hard limit, configurable per connection|timeline|tenant
     * This outsources policy to console/control plane, with obvious advantages for flexible structuring of what service we offer to customers.
-    * Note that this is not a mechanism to guarantee a minium provisioned rate, i.e., this is not a mechanism to guarantee a certain QoS for a tenant.
+    * Note that this is not a mechanism to guarantee a minimum provisioned rate, i.e., this is not a mechanism to guarantee a certain QoS for a tenant.
 * fair share among active connections|timelines|tenants per instance
     * example: each connection|timeline|tenant gets a fair fraction of the machine's GetPage/second capacity
     * NB: needs definition of "active", and knowledge of available GetPage/second capacity in advance
@@ -135,7 +135,7 @@ The compute team isn't concerned about prefetch queue depth.
 Pageserver will implement it by delaying the reading of requests from the libpq connection(s).
 
 The rate limit will be implemented using a per-tenant token bucket.
-The bucket will be be shared among all connections to the tenant.
+The bucket will be shared among all connections to the tenant.
 The bucket implementation supports starvation-preventing `await`ing.
 The current candidate for the implementation is [`leaky_bucket`](https://docs.rs/leaky-bucket/).
 The getpage@lsn benchmark that's being added in https://github.com/neondatabase/neon/issues/5771

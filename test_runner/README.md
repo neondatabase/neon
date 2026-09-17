@@ -53,7 +53,7 @@ If you want to run all tests that have the string "bench" in their names:
 
 `./scripts/pytest -k bench`
 
-To run tests in parellel we utilize `pytest-xdist` plugin. By default everything runs single threaded. Number of workers can be specified with `-n` argument:
+To run tests in parallel we utilize `pytest-xdist` plugin. By default everything runs single threaded. Number of workers can be specified with `-n` argument:
 
 `./scripts/pytest -n4`
 
@@ -69,10 +69,10 @@ Useful environment variables:
 Since pageserver supports several postgres versions, `POSTGRES_DISTRIB_DIR` must contain
 a subdirectory for each version with naming convention `v{PG_VERSION}/`.
 Inside that dir, a `bin/postgres` binary should be present.
-`COMPATIBILITY_POSTGRES_DISTRIB_DIR`: The directory where the prevoius version of postgres distribution can be found.
+`COMPATIBILITY_POSTGRES_DISTRIB_DIR`: The directory where the previous version of postgres distribution can be found.
 `DEFAULT_PG_VERSION`: The version of Postgres to use,
 This is used to construct full path to the postgres binaries.
-Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION=17`
+Format is 2-digit major version number, i.e. `DEFAULT_PG_VERSION=17`
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `RUST_LOG`: logging configuration to pass into Neon CLI
@@ -297,7 +297,7 @@ def test_foobar2(neon_env_builder: NeonEnvBuilder):
 ```
 
 All the test which rely on NeonEnvBuilder, can check the various version combinations of the components.
-To do this yuo may want to add the parametrize decorator with the function fixtures.utils.allpairs_versions()
+To do this you may want to add the parametrize decorator with the function fixtures.utils.allpairs_versions()
 E.g.
 
 ```python

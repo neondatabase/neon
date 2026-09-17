@@ -198,7 +198,7 @@ So, for garbage collection, we need to assess transactions in state Committed an
 
 ## Branches
 
-This proposal only MVCC’s layer files and and index_part.json, but leaves the tenant object not-MVCCed. We argued earlier that it’s fine to ignore this for now, because
+This proposal only MVCC’s layer files and index_part.json, but leaves the tenant object not-MVCCed. We argued earlier that it’s fine to ignore this for now, because
 
 1. Control Plane can act as source-of-truth for the set of timelines, and
 2. The only operation that makes decision based on “set of timelines” is GC, which in turn only does layer deletions, and layer deletions ***are*** properly MVCC’ed.

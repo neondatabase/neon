@@ -65,7 +65,7 @@ we arrive at _time spent waiting for disk_ ~ `random_read_io_latency * O(1 + tra
 
 Note this whole RFC is concerned with the steady state where all layer files required for reconstruction are resident on local NVMe.
 Traversal will stall on on-demand layer download if a layer is not yet resident.
-It cannot proceed without the layer being resident beccause its next step depends on the contents of the layer index.
+It cannot proceed without the layer being resident because its next step depends on the contents of the layer index.
 
 ### Avoiding Waiting For IO During Traversal
 
@@ -94,8 +94,8 @@ An IO is an opaque future that
 
 Issuing an IO means `Box`ing the future above and handing that `Box` over to the `IoConcurrency` struct.
 
-The traversal code that submits the IO stores the the corresponding `oneshot::Receiver`
-in the `VectoredValueReconstructState`, in the the place where we previously stored
+The traversal code that submits the IO stores the corresponding `oneshot::Receiver`
+in the `VectoredValueReconstructState`, in the place where we previously stored
 the sequentially read `img` and `records` fields.
 
 When we're done with traversal, we wait for all submitted IOs:
@@ -206,7 +206,7 @@ The solution is to propagate `IoConcurrency` via `RequestContext`:https://github
 The tricky part is to figure out at which level of the code the `IoConcurrency` is spawned (and added to the RequestContext).
 
 Also, propagation via `RequestContext` makes makes it harder to tell during development whether a given
-piece of code uses concurrent vs sequential mode: one has to recurisvely walk up the call tree to find the
+piece of code uses concurrent vs sequential mode: one has to recursively walk up the call tree to find the
 place that puts the `IoConcurrency` into the `RequestContext`.
 We'd have to use `::Sequential` as the conservative default value in a fresh `RequestContext`, and add some
 observability to weed out places that fail to enrich with a properly spanwed `IoConcurrency::spawn_from_conf`.

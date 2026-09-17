@@ -127,7 +127,7 @@ be subsets of the parent's parts of the keyspace.
 In remote storage, splitting is very simple: we may just write new index_part.json
 objects for each child shard, containing exactly the same layers as the parent shard.
 
-The children will have more data than they need, but this avoids any exhausive
+The children will have more data than they need, but this avoids any exhaustive
 re-writing or copying of layer files.
 
 The index key path includes a generation number: the parent shard's current

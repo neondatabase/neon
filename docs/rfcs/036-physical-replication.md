@@ -71,7 +71,7 @@ replica startup goes through several stages:
    connect to the server in this stage, you get an error: ERROR: the
    database system is starting up. This stage happens very quickly, no
 
-2. Then the server reads the checpoint record from the WAL and starts
+2. Then the server reads the checkpoint record from the WAL and starts
    the WAL replay starting from the checkpoint. This works differently
    in Neon: we start the WAL replay at the basebackup LSN, not from a
    checkpoint! If you connect to the server in this state, you get an

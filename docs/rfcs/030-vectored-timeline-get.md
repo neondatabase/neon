@@ -102,7 +102,7 @@ High-level set of tasks / changes to be made:
   - What needs to happen to `DiskBtree::visit()`?
     * Minimally
       * take a single `KeyVec` instead of a single `Key` as argument, i.e., take a single contiguous key range to visit.
-      * Change the visit code to to invoke the callback for all values in the `KeyVec`'s key range
+      * Change the visit code to invoke the callback for all values in the `KeyVec`'s key range
       * This should be good enough for what we've seen when investigating basebackup slowness, because there, the key ranges are contiguous.
     * Ideally:
       * Take a `&[KeyVec]`, sort it;

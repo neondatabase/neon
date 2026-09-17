@@ -291,7 +291,7 @@ byte tenant_id, 16 byte timeline_id, int generation, vec of ~3 safekeeper ids
 plus some flags), so 10^6 of timelines shouldn't take more than 100MB.
 
 Similar to pageserver attachment Intents storage_controller would have in-memory
-`MigrationRequest` (or its absense) for each timeline and pool of tasks trying
+`MigrationRequest` (or its absence) for each timeline and pool of tasks trying
 to make these request reality; this ensures one instance of storage_controller
 won't do several migrations on the same timeline concurrently. In the first
 version it is simpler to have more manual control and no retries, i.e. migration
@@ -356,7 +356,7 @@ Node management is similar to pageserver:
 2) GET `/control/v1/safekeeper` lists safekeepers.
 3) GET `/control/v1/safekeeper/:node_id` gets safekeeper.
 4) PUT `/control/v1/safekeper/:node_id/scheduling_policy` changes status to e.g.
-   `offline` or `decomissioned`. Initially it is simpler not to schedule any
+   `offline` or `decommissioned`. Initially it is simpler not to schedule any
     migrations here.
 
 Safekeeper deploy scripts should register safekeeper at storage_contorller as
