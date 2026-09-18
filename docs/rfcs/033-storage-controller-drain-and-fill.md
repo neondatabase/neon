@@ -7,7 +7,7 @@ graceful cluster restarts.
 
 ## Motivation
 
-Pageserver restarts cause read availablity downtime for tenants.
+Pageserver restarts cause read availability downtime for tenants.
 
 For example pageserver-3 @ us-east-1 was unavailable for a randomly
 picked tenant (which requested on-demand activation) for around 30 seconds
@@ -25,7 +25,7 @@ pageservers to storage controller management, so it makes sense to solve the iss
 
 - Pageserver re-deployments cause minimal downtime for tenants
 - The storage controller exposes HTTP API hooks for draining and filling tenant shards
-from a given pageserver. Said hooks can be used by an orchestrator proces or a human operator.
+from a given pageserver. Said hooks can be used by an orchestrator process or a human operator.
 - The storage controller exposes some HTTP API to cancel draining and filling background operations.
 - Failures to drain or fill the node should not be fatal. In such cases, cluster restarts should proceed
 as usual (with downtime).
@@ -48,7 +48,7 @@ as usual (with downtime).
 are distributed across the rest of the cluster.
 
 ** Filling ** is the symmetric opposite of draining. In this process tenant shards are migrated onto a given
-pageserver until the cluster reaches a resonable, quiescent distribution of tenant shards across pageservers.
+pageserver until the cluster reaches a reasonable, quiescent distribution of tenant shards across pageservers.
 
 ** Node scheduling policies ** act as constraints to the scheduler. For instance, when a
 node is set in the `Paused` policy, no further shards will be scheduled on it.
@@ -64,7 +64,7 @@ Currently, it's an Ansible playbook.
 
 Fundamentally, the storage controller is a reconciler which aims to move from the observed mapping between pageservers and tenant shards to an intended mapping. Pageserver nodes and tenant shards metadata is durably persisted in a database, but note that the mapping between the two entities is not durably persisted. Instead, this mapping (*observed state*) is constructed at startup by sending `GET location_config` requests to registered pageservers.
 
-An internal scheduler maps tenant shards to pageservers while respecting certain constraints. The result of scheduling is the *intent state*. When the intent state changes, a *reconciliation* will inform pageservers about the new assigment via `PUT location_config` requests and will notify the compute via the configured hook.
+An internal scheduler maps tenant shards to pageservers while respecting certain constraints. The result of scheduling is the *intent state*. When the intent state changes, a *reconciliation* will inform pageservers about the new assignment via `PUT location_config` requests and will notify the compute via the configured hook.
 
 ### Background Optimizations
 
@@ -81,7 +81,7 @@ can have in flight at any given time. To get an idea of scales, the limit is
 ## Implementation
 
 Note: this section focuses on the core functionality of the graceful restart process.
-It doesn't neccesarily describe the most efficient approach. Optimizations are described
+It doesn't necessarily describe the most efficient approach. Optimizations are described
 separately in a later section.
 
 ### Overall Flow
@@ -179,7 +179,7 @@ The following HTTP non-success return codes are used.
 All of them are safely retriable from the perspective of the storage controller.
 - 404: Requested node was not found
 - 503: Requested node is known to the storage controller, but unavailable
-- 412: Drain precondition failed: there is no other node to drain to or the node's schedulling policy forbids draining
+- 412: Drain precondition failed: there is no other node to drain to or the node's scheduling policy forbids draining
 - 409: A {drain, fill} is already in progress. Only one such background operation
 is allowed per node.
 
@@ -191,9 +191,9 @@ response is returned when the cancelation is successful. Errors are retriable.
 
 ### Drain Process
 
-Before accpeting a drain request the following validations is applied:
+Before accepting a drain request the following validations is applied:
 * Ensure that the node is known the storage controller
-* Ensure that the schedulling policy is `NodeSchedulingPolicy::Active` or `NodeSchedulingPolicy::Pause`
+* Ensure that the scheduling policy is `NodeSchedulingPolicy::Active` or `NodeSchedulingPolicy::Pause`
 * Ensure that another drain or fill is not already running on the node
 * Ensure that a drain is possible (i.e. check that there is at least one
 schedulable node to drain to)
@@ -224,9 +224,9 @@ We can consider expanding to small non-HA tenants in the future.
 
 ### Fill Process
 
-Before accpeting a fill request the following validations is applied:
+Before accepting a fill request the following validations is applied:
 * Ensure that the node is known the storage controller
-* Ensure that the schedulling policy is `NodeSchedulingPolicy::Active`.
+* Ensure that the scheduling policy is `NodeSchedulingPolicy::Active`.
 This is the only acceptable policy for the fill starting state. When a node re-attaches,
 it set the scheduling policy to `NodeSchedulingPolicy::Active` if it was equal to
 `NodeSchedulingPolicy::PauseForRestart` or `NodeSchedulingPolicy::Draining` (possible end states for a node drain).
@@ -336,7 +336,7 @@ to cancel the reconciliation tasks spawned by drain/fill nodes. How would we kno
 to the conceptual drain/fill? One could add labels to reconciliations, but it gets messy in my opinion.
 
 It would also mean that reconciliations themselves have side effects that persist in the database
-(persist something to the databse when the drain is done), which I'm not conceptually fond of.
+(persist something to the database when the drain is done), which I'm not conceptually fond of.
 
 ## Proof of Concept
 

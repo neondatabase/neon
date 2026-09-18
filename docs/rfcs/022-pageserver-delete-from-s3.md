@@ -6,7 +6,7 @@ Created on 08.03.23
 
 Currently we don't delete pageserver part of the data from s3 when project is deleted. (The same is true for safekeepers, but this outside of the scope of this RFC).
 
-This RFC aims to spin a discussion to come to a robust deletion solution that wont put us in into a corner for features like postponed deletion (when we keep data for user to be able to restore a project if it was deleted by accident)
+This RFC aims to spin a discussion to come to a robust deletion solution that won't put us in into a corner for features like postponed deletion (when we keep data for user to be able to restore a project if it was deleted by accident)
 
 ## Summary
 
@@ -20,7 +20,7 @@ pageserver, control-plane
 
 ## Requirements
 
-Deletion should successfully finish (eventually) without leaving dangling files in presense of:
+Deletion should successfully finish (eventually) without leaving dangling files in presence of:
 
 - component restarts
 - component outage
@@ -77,7 +77,7 @@ Why local mark file is needed?
 
 If we don't have one, we have two choices, delete local data before deleting the remote part or do that after.
 
-If we delete local data before remote then during restart pageserver wont pick up remote tenant at all because nothing is available locally (pageserver looks for remote counterparts of locally available tenants).
+If we delete local data before remote then during restart pageserver won't pick up remote tenant at all because nothing is available locally (pageserver looks for remote counterparts of locally available tenants).
 
 If we delete local data after remote then at the end of the sequence when remote mark file is deleted if pageserver restart happens then the state is the same to situation when pageserver just missing data on remote without knowing the fact that this data is intended to be deleted. In this case the current behavior is upload everything local-only to remote.
 
@@ -183,7 +183,7 @@ For timeline the sequence is the same with the following differences:
 
 ##### Handle pageserver loss
 
-If pageseserver is lost then the deleted tenant should be attached to different pageserver and delete request needs to be retried against new pageserver. Then attach logic is shared with one described for pageserver restarts (local deletion mark wont be available so needs to be created).
+If pageseserver is lost then the deleted tenant should be attached to different pageserver and delete request needs to be retried against new pageserver. Then attach logic is shared with one described for pageserver restarts (local deletion mark won't be available so needs to be created).
 
 ##### Restrictions for tenant that is in progress of being deleted
 

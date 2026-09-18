@@ -168,7 +168,7 @@ and a stripe size of 32k pages:
 
 - A single large relation: `blknum` division will break the data up into 4096
   stripes, which will be scattered across the shards.
-- 4096 relations of of 32k pages each: each relation will map to exactly one stripe,
+- 4096 relations of 32k pages each: each relation will map to exactly one stripe,
   and that stripe will be placed according to the hash of the key fields 4. The
   data placement will be statistically uniform across shards.
 
@@ -199,7 +199,7 @@ to a particular shard:
 - Shard count
 - Shard index
 
-This structure's size is constant. Note that if we had used a differnet key
+This structure's size is constant. Note that if we had used a different key
 mapping scheme such as consistent hashing with explicit hash ranges assigned
 to each shard, then the ShardIdentity's size would grow with the shard count: the simpler
 key mapping scheme used here enables a small fixed size ShardIdentity.
@@ -374,7 +374,7 @@ A separate mechanism for handling heavy historical reads could be something like
 a gossip mechanism for pageservers to communicate
 about their workload, and then a getpageatlsn offload mechanism where one pageserver can
 ask another to go read the necessary layers from remote storage to serve the read. This
-requires relativly little coordination because it is read-only: any node can service any
+requires relatively little coordination because it is read-only: any node can service any
 read. All reads to a particular shard would still flow through one node, but the
 disk capactity & I/O impact of servicing the read would be distributed.
 

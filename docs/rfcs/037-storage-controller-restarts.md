@@ -52,7 +52,7 @@ like a transient error to the control plane
 ## Terminology
 
 * Observed State: in-memory mapping between tenant shards and their current pageserver locations - currently built up
-at start-up by quering pageservers
+at start-up by querying pageservers
 * Deployment: Kubernetes [primitive](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) that models
 a set of replicas
 
@@ -85,7 +85,7 @@ This section describes the primitives required on the storage controller side an
 A new table should be added to the storage controller database for leader synchronization during startup.
 This table will always contain at most one row. The proposed name for the table is `leader` and the schema
 contains two elements:
-* `hostname`: represents the hostname for the current storage controller leader - should be addressible
+* `hostname`: represents the hostname for the current storage controller leader - should be addressable
 from other pods in the deployment
 * `start_timestamp`: holds the start timestamp for the current storage controller leader (UTC timezone) - only required
 for failure case handling: see [Previous Leader Crashes Before New Leader Readiness](#previous-leader-crashes-before-new-leader-readiness)
@@ -163,7 +163,7 @@ exists and consistency is maintained.
 
 #### Previous Leader Crashes Before New Leader Readiness
 
-When the previous leader (P1) crashes before the new leader (P2) passses the readiness check, Kubernetes will
+When the previous leader (P1) crashes before the new leader (P2) passes the readiness check, Kubernetes will
 reconcile the old replica set and create a new pod for it (P1'). The `/step_down` API call will fail for P1'
 (see [2]).
 
@@ -183,7 +183,7 @@ the current one.
 The deployment's replica sets already satisfy the deployment's replica count requirements and the
 Kubernetes deployment rollout will just clean up the dead pod.
 
-#### New Leader Crashes Before Pasing Readiness Check
+#### New Leader Crashes Before Passing Readiness Check
 
 The deployment controller scales up the new replica sets by creating a new pod. The entire procedure is repeated
 with the new pod.
@@ -216,7 +216,7 @@ to be renewed periodically. Two new columns would be added to the leaders table:
 
 The leader periodically attempts to renew the lease by checking that it is in fact still the legitimate leader and updating `last_renewed` in the
 same transaction. If the update fails, the process exits. New storage controller instances wishing to become leaders must wait for the current lease
-to expire before acquiring leadership if they have not succesfully received a response to the `/step_down` request.
+to expire before acquiring leadership if they have not successfully received a response to the `/step_down` request.
 
 ### Notify Pageserver Of Storage Controller Term
 

@@ -25,7 +25,7 @@ The reconciliation process's behavior is the following:
 
 ### The Problem
 
-There are are cases where we need to make an atomic update to the layer map that involves **more than one layer**.
+There are cases where we need to make an atomic update to the layer map that involves **more than one layer**.
 The best example is compaction, where we need to insert the L1 layers generated from the L0 layers, and remove the L0 layers.
 As stated above, making the update to the layer map in atomic way is trivial.
 But, there is no system call API to make an atomic update to a directory that involves more than one file rename and deletion.
@@ -43,7 +43,7 @@ Specifically, the part of it that compacts L0 layers into L1 layers.
 
 Remember that compaction takes a set of L0 layers and reshuffles the delta records in them into L1 layer files.
 Once the L1 layer files are written to disk, it atomically removes the L0 layers from the layer map and adds the L1 layers to the layer map.
-It then deletes the L0 layers locally, and schedules an upload of the L1 layers and and updated index part.
+It then deletes the L0 layers locally, and schedules an upload of the L1 layers and updated index part.
 
 If we crash before deleting L0s, but after writing out L1s, the next compaction after restart will re-digest the L0s and produce new L1s.
 This means the compaction after restart will **overwrite** the previously written L1s.

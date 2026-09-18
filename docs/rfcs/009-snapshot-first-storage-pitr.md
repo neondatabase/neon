@@ -135,7 +135,7 @@ to the snapshot file, and include all of the WAL. Since the relation
 was initially empty, the "image" at the beginning of th range is empty
 too.
 
-So now you have one file on on disk:
+So now you have one file on disk:
 
     SNAPSHOT+WAL 100-200
 

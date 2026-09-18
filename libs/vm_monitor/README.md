@@ -30,5 +30,5 @@ entire monitor lifetime.
 * the cgroup watcher: the `CgroupWatcher` polls the `neon-postgres` cgroup's memory
 usage and sends rolling aggregates to the runner.
 * the runner: the runner marries the filecache and cgroup watcher together,
-communicating with the agent throught the `Dispatcher`, and then calling filecache
+communicating with the agent through the `Dispatcher`, and then calling filecache
 and cgroup watcher functions as needed to upscale and downscale

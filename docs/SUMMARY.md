@@ -2,7 +2,7 @@
 
 # Looking for `neon.tech` docs?
 
-This page linkes to a selection of technical content about the open source code in this repository.
+This page links to a selection of technical content about the open source code in this repository.
 
 Please visit https://neon.tech/docs for documentation about using the Neon service, which is based on the code
 in this repository.

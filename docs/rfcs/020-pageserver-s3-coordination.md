@@ -62,7 +62,7 @@ contents. (There is no need to run walreceiver on the second pageserver then).
   pace as the primary one
 - Can compaction help make layers deterministic? E g we do not upload level
   zero layers and construction of higher levels should be deterministic.
-  This way we can guarantee that layer creation by timeout wont mess things up.
+  This way we can guarantee that layer creation by timeout won't mess things up.
   This way one pageserver uploads data and second one can just ingest it.
   But we still need some form of election
 
@@ -207,7 +207,7 @@ doesn't perform write operations in s3. When layer is evicted follower relies
 on updates from primary to get info about layers it needs to cover range for
 evicted layer.
 
-Note that it wont match evicted layer exactly, so layers will overlap and
+Note that it won't match evicted layer exactly, so layers will overlap and
 lookup code needs to correctly handle that.
 
 ### Relocation flow

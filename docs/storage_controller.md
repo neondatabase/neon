@@ -34,7 +34,7 @@ The file `persistence.rs` contains all the code for accessing the database, and 
 
 The `diesel` crate is used for defining models & migrations.
 
-Running a local cluster with `cargo neon` automatically starts a vanilla postgress process to host the storage controller’s database.
+Running a local cluster with `cargo neon` automatically starts a vanilla postgres process to host the storage controller’s database.
 
 ### Diesel tip: migrations
 

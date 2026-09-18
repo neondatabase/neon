@@ -375,7 +375,7 @@ Demerits:
    - Can't be used after shutdown checkpoint
    - Needs a RW endpoint, and table & catalog access to write to this data
  - Gets hit with DB size limitations
- - Depending on user acces:
+ - Depending on user access:
    - Inaccessible:  
      The user doesn't have control over database size caused by
      these systems.

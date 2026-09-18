@@ -274,7 +274,7 @@ Example:
 
 In PostgreSQL, if a WAL redo function calls XLogReadBufferForRead() for a page that has a full-page
 image, it always succeeds. However, Neon WAL redo process is only concerned about replaying changes
-to a singe page, so replaying any changes for other pages is a waste of cycles. We have modified
+to a single page, so replaying any changes for other pages is a waste of cycles. We have modified
 XLogReadBufferForRead() to return BLK_DONE for all other pages, to avoid the overhead. That is
 unexpected by code like the above.
 
@@ -435,7 +435,7 @@ Utilize the upcoming v17 "slot sync worker", or a similar neon-specific backgrou
 
 ### How to get rid of the patch
 
-WAL-log them periodically, from a backgound worker.
+WAL-log them periodically, from a background worker.
 
 
 ## WAL-log relmapper files
@@ -444,7 +444,7 @@ Similarly to replications snapshot files, the CID mapping files generated during
 
 ### How to get rid of the patch
 
-WAL-log them periodically, from a backgound worker.
+WAL-log them periodically, from a background worker.
 
 
 ## XLogWaitForReplayOf()

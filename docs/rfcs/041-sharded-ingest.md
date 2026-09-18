@@ -169,7 +169,7 @@ Each phase shall be deployed independently. Special care should be taken around 
 along with the pageserver ID, tenant, timeline and shard: `starting streaming from`.
 * There's metrics for the number of wal readers:
   * `safekeeper_wal_readers{kind="task", target=~"pageserver.*"}` gives the number of wal reader tasks for each SK
-  * `safekeeper_wal_readers{kind="future", target=~"pageserver.*"}` gives the numer of wal readers polled inline by each SK
+  * `safekeeper_wal_readers{kind="future", target=~"pageserver.*"}` gives the number of wal readers polled inline by each SK
   * `safekeeper_interpreted_wal_reader_tasks` gives the number of wal reader tasks per tenant, timeline
 * Interesting log lines for the fan-out reader:
   * `Spawning interpreted`: first shard creates the interpreted wal reader
