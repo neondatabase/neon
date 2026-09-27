@@ -866,7 +866,7 @@ impl GCSBucket {
 
         let copy_from_path: String =
             url::form_urlencoded::byte_serialize(
-                self.relative_path_to_gcs_object(to)
+                self.relative_path_to_gcs_object(from)
                     .trim_start_matches("/")
                     .as_bytes()
             )
@@ -1445,5 +1445,76 @@ impl GCSListResponse {
     }
     pub fn common_prefixes(&self) -> &[String] {
         self.prefixes.as_deref().unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camino::Utf8Path;
+
+    struct StaticTokenProvider;
+
+    #[async_trait::async_trait]
+    impl gcp_auth::TokenProvider for StaticTokenProvider {
+        async fn token(&self, _scopes: &[&str]) -> Result<Arc<gcp_auth::Token>, gcp_auth::Error> {
+            let token: gcp_auth::Token =
+                serde_json::from_str(r#"{"access_token":"test-token","expires_in":3600}"#)
+                    .expect("static test token deserializes");
+            Ok(Arc::new(token))
+        }
+
+        async fn project_id(&self) -> Result<Arc<str>, gcp_auth::Error> {
+            Ok(Arc::from("test-project"))
+        }
+    }
+
+    fn test_bucket() -> GCSBucket {
+        GCSBucket {
+            token_provider: Arc::new(StaticTokenProvider),
+            bucket_name: "test-bucket".to_owned(),
+            prefix_in_bucket: None,
+            max_keys_per_list_response: None,
+            concurrency_limiter: ConcurrencyLimiter::new(100),
+            timeout: Duration::from_secs(10),
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_object_rewrites_from_source_to_destination() {
+        let bucket = test_bucket();
+        let from = RemotePath::new(Utf8Path::new("tenants/abc/timelines/def/source")).unwrap();
+        let to = RemotePath::new(Utf8Path::new("tenants/abc/timelines/def/dest")).unwrap();
+        let cancel = CancellationToken::new();
+
+        let request = bucket
+            .copy_object(&from, &to, &cancel, None)
+            .await
+            .expect("copy request builds")
+            .build()
+            .expect("copy request is a valid request");
+        let url = request.url().as_str();
+
+        let encoded_from: String = url::form_urlencoded::byte_serialize(
+            bucket
+                .relative_path_to_gcs_object(&from)
+                .trim_start_matches("/")
+                .as_bytes(),
+        )
+        .collect();
+        let encoded_to: String = url::form_urlencoded::byte_serialize(
+            bucket
+                .relative_path_to_gcs_object(&to)
+                .trim_start_matches("/")
+                .as_bytes(),
+        )
+        .collect();
+
+        // Regression test for https://github.com/neondatabase/neon/issues/12950:
+        // the source object segment must be built from `from`, not `to`.
+        let expected = format!(
+            "https://storage.googleapis.com/storage/v1/b/test-bucket/o/{encoded_from}/rewriteTo/b/test-bucket/o/{encoded_to}"
+        );
+        assert_eq!(url, expected);
     }
 }
