@@ -297,7 +297,7 @@ impl SafekeeperReconciler {
                 req = self.concurrency_limiter.clone().acquire_owned() => req,
                 _ = self.cancel.cancelled() => break,
             };
-            let Ok(_permit) = permit_res else { return };
+            let Ok(permit) = permit_res else { return };
 
             let inner = self.inner.clone();
             if req_cancel.is_cancelled() {
@@ -317,6 +317,10 @@ impl SafekeeperReconciler {
             );
 
             tokio::task::spawn(async move {
+                // Hold the permit for the lifetime of the reconciliation task, not just
+                // the dispatch loop iteration, so the semaphore actually bounds the
+                // number of concurrently *running* reconciliations.
+                let _permit = permit;
                 let kind = req.kind;
                 let tenant_id = req.tenant_id;
                 let timeline_id = req.timeline_id;
