@@ -420,6 +420,68 @@ impl GCSBucket {
         }
     }
 
+    fn build_delete_batch(
+        bucket_name: &str,
+        paths: &[String],
+    ) -> anyhow::Result<(HashMap<usize, String>, reqwest::multipart::Form)> {
+        let mut form = reqwest::multipart::Form::new();
+        // Use this to report keys that didn't delete based on 'content_id'
+        let mut delete_objects_status = HashMap::new();
+
+        for (index, path) in paths.iter().enumerate() {
+            delete_objects_status.insert(index + 1, path.clone());
+
+            let path_to_delete: String =
+                url::form_urlencoded::byte_serialize(path.trim_start_matches("/").as_bytes())
+                    .collect();
+
+            let delete_req = format!(
+                "
+                DELETE /storage/v1/b/{}/o/{} HTTP/1.1\r\n\
+                Content-Type: application/json\r\n\
+                accept: application/json\r\n\
+                content-length: 0\r\n
+                ",
+                bucket_name, path_to_delete
+            )
+            .trim()
+            .to_string();
+
+            let content_id = format!("<{}+{}>", Uuid::new_v4(), index + 1);
+
+            let mut part_headers = header::HeaderMap::new();
+            part_headers.insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/http"),
+            );
+            part_headers.insert(
+                header::TRANSFER_ENCODING,
+                header::HeaderValue::from_static("binary"),
+            );
+            part_headers.insert(
+                header::HeaderName::from_static("content-id"),
+                header::HeaderValue::from_str(&content_id)?,
+            );
+            let part = reqwest::multipart::Part::text(delete_req).headers(part_headers);
+
+            form = form.part(format!("request-{}", index), part);
+        }
+
+        Ok((delete_objects_status, form))
+    }
+
+    /// Lazily pairs each `MAX_KEYS_PER_DELETE_GCS`-sized chunk with the multipart batch built from
+    /// it, one at a time, so callers never hold more than one chunk's worth of batch in memory.
+    fn delete_batches<'a>(
+        bucket_name: &'a str,
+        delete_objects: &'a [String],
+    ) -> impl Iterator<Item = anyhow::Result<(HashMap<usize, String>, reqwest::multipart::Form)>> + 'a
+    {
+        delete_objects
+            .chunks(MAX_KEYS_PER_DELETE_GCS)
+            .map(move |chunk| Self::build_delete_batch(bucket_name, chunk))
+    }
+
     async fn delete_oids(
         &self,
         delete_objects: &[String],
@@ -429,54 +491,11 @@ impl GCSBucket {
         let kind = RequestKind::Delete;
         let mut cancel = std::pin::pin!(cancel.cancelled());
 
-        for chunk in delete_objects.chunks(MAX_KEYS_PER_DELETE_GCS) {
+        for batch in Self::delete_batches(&self.bucket_name, delete_objects) {
             let started_at = start_measuring_requests(kind);
+            let (delete_objects_status, form) = batch?;
 
-            // Use this to report keys that didn't delete based on 'content_id'
-            let mut delete_objects_status = HashMap::new();
-
-            let mut form = reqwest::multipart::Form::new();
             let bulk_uri = "https://storage.googleapis.com/batch/storage/v1";
-
-            for (index, path) in delete_objects.iter().enumerate() {
-                delete_objects_status.insert(index + 1, path.clone());
-
-                let path_to_delete: String =
-                    url::form_urlencoded::byte_serialize(path.trim_start_matches("/").as_bytes())
-                        .collect();
-
-                let delete_req = format!(
-                    "
-                    DELETE /storage/v1/b/{}/o/{} HTTP/1.1\r\n\
-                    Content-Type: application/json\r\n\
-                    accept: application/json\r\n\
-                    content-length: 0\r\n
-                    ",
-                    self.bucket_name.clone(),
-                    path_to_delete
-                )
-                .trim()
-                .to_string();
-
-                let content_id = format!("<{}+{}>", Uuid::new_v4(), index + 1);
-
-                let mut part_headers = header::HeaderMap::new();
-                part_headers.insert(
-                    header::CONTENT_TYPE,
-                    header::HeaderValue::from_static("application/http"),
-                );
-                part_headers.insert(
-                    header::TRANSFER_ENCODING,
-                    header::HeaderValue::from_static("binary"),
-                );
-                part_headers.insert(
-                    header::HeaderName::from_static("content-id"),
-                    header::HeaderValue::from_str(&content_id)?,
-                );
-                let part = reqwest::multipart::Part::text(delete_req).headers(part_headers);
-
-                form = form.part(format!("request-{}", index), part);
-            }
 
             let mut headers = header::HeaderMap::new();
             headers.insert(
@@ -509,7 +528,7 @@ impl GCSBucket {
 
             crate::metrics::BUCKET_METRICS
                 .deleted_objects_total
-                .inc_by(chunk.len() as u64);
+                .inc_by(delete_objects_status.len() as u64);
 
             let res_headers = resp.headers().to_owned();
 
@@ -582,7 +601,7 @@ impl GCSBucket {
                 return Err(anyhow::anyhow!(
                     "Failed to delete {}/{} objects",
                     errors.len(),
-                    chunk.len(),
+                    delete_objects_status.len(),
                 ));
             }
         }
@@ -1445,5 +1464,32 @@ impl GCSListResponse {
     }
     pub fn common_prefixes(&self) -> &[String] {
         self.prefixes.as_deref().unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn delete_batches_only_contain_their_own_objects() {
+        let objects: Vec<String> = (0..2_500).map(|i| format!("objects/{i}")).collect();
+
+        let expected_sizes: Vec<usize> =
+            objects.chunks(MAX_KEYS_PER_DELETE_GCS).map(|c| c.len()).collect();
+        assert_eq!(expected_sizes, vec![1000, 1000, 500]);
+
+        let mut batches = GCSBucket::delete_batches("test-bucket", &objects);
+
+        for (batch_idx, chunk) in objects.chunks(MAX_KEYS_PER_DELETE_GCS).enumerate() {
+            let (ids, _form) = batches.next().unwrap().unwrap();
+
+            assert_eq!(ids.len(), chunk.len(), "batch {batch_idx} has the wrong size");
+            let expected: HashSet<&String> = chunk.iter().collect();
+            let actual: HashSet<&String> = ids.values().collect();
+            assert_eq!(actual, expected, "batch {batch_idx} contains the wrong objects");
+        }
+        assert!(batches.next().is_none());
     }
 }
