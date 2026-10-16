@@ -900,8 +900,15 @@ impl GCSBucket {
                .header(header::CONTENT_LENGTH, "0")
        )
     }
+}
 
-    
+fn list_status_error(status: StatusCode, body: String) -> DownloadError {
+    match status {
+        StatusCode::NOT_FOUND => DownloadError::NotFound,
+        _ => DownloadError::Other(anyhow::anyhow!(
+            "GCS list request failed with status {status}: {body}"
+        )),
+    }
 }
 
 impl RemoteStorage for GCSBucket {
@@ -994,6 +1001,14 @@ impl RemoteStorage for GCSBucket {
                         continue 'outer;
                     },
                 };
+
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    // The error is potentially retryable, so we must rewind the loop after yielding.
+                    yield Err(list_status_error(status, body));
+                    continue 'outer;
+                }
 
                 let body = response.text()
                     .await
@@ -1445,5 +1460,40 @@ impl GCSListResponse {
     }
     pub fn common_prefixes(&self) -> &[String] {
         self.prefixes.as_deref().unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression test for https://github.com/neondatabase/neon/issues/12966:
+    // a non-success status must surface as an error instead of being parsed
+    // as an empty `GCSListResponse`.
+    #[test]
+    fn list_status_error_maps_not_found() {
+        let err = list_status_error(
+            StatusCode::NOT_FOUND,
+            r#"{"error": {"code": 404, "message": "The specified bucket does not exist."}}"#
+                .to_string(),
+        );
+        assert!(matches!(err, DownloadError::NotFound));
+    }
+
+    #[test]
+    fn list_status_error_surfaces_other_statuses() {
+        let err = list_status_error(
+            StatusCode::FORBIDDEN,
+            r#"{"error": {"code": 403, "message": "Anonymous caller does not have storage.objects.list access."}}"#
+                .to_string(),
+        );
+        match err {
+            DownloadError::Other(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("403"));
+                assert!(msg.contains("storage.objects.list"));
+            }
+            other => panic!("expected DownloadError::Other, got {other:?}"),
+        }
     }
 }
