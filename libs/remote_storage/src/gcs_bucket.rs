@@ -900,8 +900,10 @@ impl GCSBucket {
                .header(header::CONTENT_LENGTH, "0")
        )
     }
+}
 
-    
+fn gcs_next_page_uri(base_list_uri: &str, token: &str) -> String {
+    format!("{base_list_uri}&pageToken={token}")
 }
 
 impl RemoteStorage for GCSBucket {
@@ -938,9 +940,7 @@ impl RemoteStorage for GCSBucket {
             // https://cloud.google.com/storage/docs/json_api/v1/objects/list?hl=en#parameters
             .unwrap_or(1000);
 
-        // We pass URI in to `list_objects_v2` as we'll modify it with `NextPageToken`, hence
-        // `mut`
-        let mut list_uri = format!(
+        let mut base_list_uri = format!(
             "https://storage.googleapis.com/storage/v1/b/{}/o?prefix={}&maxResults={}",
             self.bucket_name.clone(),
             list_prefix,
@@ -950,11 +950,15 @@ impl RemoteStorage for GCSBucket {
         // on ListingMode:
         // https://github.com/neondatabase/neon/blob/edc11253b65e12a10843711bd88ad277511396d7/libs/remote_storage/src/lib.rs#L158C1-L164C2
         if let ListingMode::WithDelimiter = mode {
-            list_uri.push_str(&format!(
+            base_list_uri.push_str(&format!(
                 "&delimiter={}",
                 REMOTE_STORAGE_PREFIX_SEPARATOR.to_string()
             ));
         }
+
+        // Rebuilt from `base_list_uri` on every page rather than mutated in place,
+        // so only the latest page token is ever sent (see `list_versions_with_permit`).
+        let mut list_uri = base_list_uri.clone();
 
         async_stream::stream! {
 
@@ -1048,7 +1052,7 @@ impl RemoteStorage for GCSBucket {
 
                 continuation_token = match resp.next_page_token {
                     Some(token) => {
-                        list_uri = list_uri + "&pageToken=" + &token;
+                        list_uri = gcs_next_page_uri(&base_list_uri, &token);
                         Some(token)
                     },
                     None => break
@@ -1445,5 +1449,31 @@ impl GCSListResponse {
     }
     pub fn common_prefixes(&self) -> &[String] {
         self.prefixes.as_deref().unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression test for https://github.com/neondatabase/neon/issues/12964:
+    // each page must carry only the latest token, not every token seen so far.
+    #[test]
+    fn next_page_uri_carries_only_latest_token() {
+        let base = "https://storage.googleapis.com/storage/v1/b/test-bucket/o?prefix=p&maxResults=2";
+
+        let mut uri = gcs_next_page_uri(base, "token1");
+        assert_eq!(
+            uri,
+            "https://storage.googleapis.com/storage/v1/b/test-bucket/o?prefix=p&maxResults=2&pageToken=token1"
+        );
+
+        // Rebuilding from `base` on the next page must not retain `token1`.
+        uri = gcs_next_page_uri(base, "token2");
+        assert_eq!(
+            uri,
+            "https://storage.googleapis.com/storage/v1/b/test-bucket/o?prefix=p&maxResults=2&pageToken=token2"
+        );
+        assert!(!uri.contains("token1"));
     }
 }
