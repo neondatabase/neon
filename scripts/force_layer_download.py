@@ -98,6 +98,20 @@ class Completed:
     status: dict[str, Any]
 
 
+def _get_timeline_ids_or_raise(
+    tenant_id: str, result: list[Any] | BaseException
+) -> list[Any]:
+    if isinstance(result, asyncio.CancelledError):
+        raise result
+    if isinstance(result, Exception):
+        raise ClientException(
+            f"failed to get timeline ids for tenant {tenant_id}: {result}"
+        ) from result
+    if not isinstance(result, list):
+        raise ClientException(f"expecting a list of timeline ids for tenant {tenant_id}")
+    return result
+
+
 sigint_received = asyncio.Event()
 
 
@@ -196,8 +210,7 @@ async def main_impl(args, report_out, client: Client):
             gathered = await asyncio.gather(*get_timeline_id_coros, return_exceptions=True)
             tenant_and_timline_ids = []
             for tid, tlids in zip(tenant_ids, gathered, strict=True):
-                # TODO: add error handling if tlids isinstance(Exception)
-                assert isinstance(tlids, list)
+                tlids = _get_timeline_ids_or_raise(tid, tlids)
 
                 for tlid in tlids:
                     tenant_and_timline_ids.append((tid, tlid))
