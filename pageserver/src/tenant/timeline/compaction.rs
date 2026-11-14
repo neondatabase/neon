@@ -392,44 +392,6 @@ impl<'a> IndexMergeIterator<'a> {
     }
 }
 
-/// Equivalent of the former `Itertools::coalesce` call used for output sizing.
-#[cfg(test)]
-struct CoalescedIndexMergeIterator<'a> {
-    inner: IndexMergeIterator<'a>,
-    pending: Option<IndexMetadataEntry>,
-    target_file_size: u64,
-}
-
-#[cfg(test)]
-impl<'a> CoalescedIndexMergeIterator<'a> {
-    fn new(inner: IndexMergeIterator<'a>, target_file_size: u64) -> Self {
-        Self {
-            inner,
-            pending: None,
-            target_file_size,
-        }
-    }
-
-    async fn next(&mut self) -> anyhow::Result<Option<IndexMetadataEntry>> {
-        let Some(mut previous) = (match self.pending.take() {
-            Some(entry) => Some(entry),
-            None => self.inner.next().await?,
-        }) else {
-            return Ok(None);
-        };
-
-        while let Some(current) = self.inner.next().await? {
-            if previous.0 == current.0 && previous.2 < self.target_file_size {
-                previous.2 += current.2;
-            } else {
-                self.pending = Some(current);
-                break;
-            }
-        }
-        Ok(Some(previous))
-    }
-}
-
 #[derive(Default, Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 pub struct GcCompactionJobId(pub usize);
 
@@ -5282,32 +5244,6 @@ mod tests {
         // A target equal to the first entry's size prevents coalescing the following versions
         // of this key. This exercises the duplicate-key output boundary used by L0 compaction.
         let target_file_size = expected[0].2;
-        let mut expected_coalesced: Vec<(Key, Lsn, u64)> = Vec::new();
-        for current in expected.iter().copied() {
-            if let Some(previous) = expected_coalesced.last_mut()
-                && previous.0 == current.0
-                && previous.2 < target_file_size
-            {
-                previous.2 += current.2;
-            } else {
-                expected_coalesced.push(current);
-            }
-        }
-
-        let mut coalesced = CoalescedIndexMergeIterator::new(
-            IndexMergeIterator::from_iterators(vec![
-                make_index_cursor(&first_layer, &ctx)?,
-                make_index_cursor(&second_layer, &ctx)?,
-            ])
-            .await?,
-            target_file_size,
-        );
-        let mut actual_coalesced = Vec::new();
-        while let Some(entry) = coalesced.next().await? {
-            actual_coalesced.push(entry);
-        }
-        assert_eq!(actual_coalesced, expected_coalesced);
-
         let mut output_plan_builder = OutputSizePlanBuilder::new(target_file_size);
         for entry in expected.iter().copied() {
             output_plan_builder.push(entry);
@@ -5394,21 +5330,6 @@ mod tests {
                         expected_coalesced.push(current);
                     }
                 }
-
-                let cursors = layers
-                    .iter()
-                    .map(|entries| make_index_cursor(entries, &ctx))
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-                let inner = IndexMergeIterator::from_iterators(cursors).await?;
-                let mut coalesced = CoalescedIndexMergeIterator::new(inner, target_file_size);
-                let mut actual_coalesced = Vec::new();
-                while let Some(entry) = coalesced.next().await? {
-                    actual_coalesced.push(entry);
-                }
-                assert_eq!(
-                    actual_coalesced, expected_coalesced,
-                    "coalescing mismatch in case {case_index}, target {target_file_size}"
-                );
 
                 // Independently apply the output writer's boundary rule to the stable sorted
                 // stream, then compare it with the compact plan built from the cursor merge.
