@@ -274,7 +274,11 @@ where
         R: 'a + Send,
     {
         DiskBtreeArrayIterator {
-            stream: Box::pin(self.into_stream_array(start_key, ctx)),
+            stream: Box::pin(self.into_stream_with_key(start_key, ctx, |prefix, _| {
+                let mut key = [0; L];
+                key[..prefix.len()].copy_from_slice(prefix);
+                key
+            })),
         }
     }
 
@@ -305,22 +309,6 @@ where
             let mut key = Vec::new();
             key.extend(prefix);
             key.resize(prefix.len() + suffix_len, 0);
-            key
-        })
-    }
-
-    /// Internal allocation-free variant of [`Self::into_stream`].
-    pub(crate) fn into_stream_array<'a>(
-        self,
-        start_key: &'a [u8; L],
-        ctx: &'a RequestContext,
-    ) -> impl Stream<Item = std::result::Result<([u8; L], u64), DiskBtreeError>> + 'a
-    where
-        R: 'a,
-    {
-        self.into_stream_with_key(start_key, ctx, |prefix, _| {
-            let mut key = [0; L];
-            key[..prefix.len()].copy_from_slice(prefix);
             key
         })
     }
