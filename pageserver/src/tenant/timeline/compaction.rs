@@ -2881,18 +2881,15 @@ impl Timeline {
         stats.new_deltas_count = Some(new_layers.len());
         stats.new_deltas_size = Some(new_layers.iter().map(|l| l.layer_desc().file_size).sum());
 
-        match TryInto::<CompactLevel0Phase1Stats>::try_into(stats) {
-            Ok(stats) => match serde_json::to_string(&stats).context("serde_json::to_string") {
-                Ok(stats_json) => {
-                    info!(
-                        stats_json = stats_json.as_str(),
-                        "compact_level0_phase1 stats available"
-                    )
-                }
-                Err(e) => {
-                    warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
-                }
-            },
+        match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
+            .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
+        {
+            Ok(stats_json) => {
+                info!(
+                    stats_json = stats_json.as_str(),
+                    "compact_level0_phase1 stats available"
+                )
+            }
             Err(e) => {
                 warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
             }
@@ -5582,36 +5579,32 @@ mod tests {
         };
         output_deltas.sort_by_key(|layer| (layer.key_range.start, layer.lsn_range.start));
 
-        // The selected A..B hole produces an A-only output layer. Without the hole, the two
-        // small keys fit together under target_file_size.
-        assert!(output_deltas.iter().any(|layer| {
-            layer.key_range.start == key_a
-                && layer.key_range.end == key_a.next()
-                && layer.lsn_range == (l0_start..final_lsn)
-                && layer.is_delta
-        }));
-        assert!(output_deltas.iter().any(|layer| {
-            layer.key_range.start == key_b
-                && layer.key_range.end == key_b.next()
-                && layer.lsn_range == (l0_start..final_lsn)
-                && layer.is_delta
-        }));
-
-        let mut c_splits = output_deltas
+        // Match the materialized compactor's complete descriptors, not merely the presence of
+        // a hole and some duplicate-key split. This also checks all LSN boundaries exactly.
+        let actual = output_deltas
             .iter()
-            .filter(|layer| layer.key_range.start == key_c && layer.key_range.end == key_c.next())
+            .map(|layer| {
+                (
+                    layer.key_range.clone(),
+                    layer.lsn_range.clone(),
+                    layer.is_delta,
+                )
+            })
             .collect::<Vec<_>>();
-        c_splits.sort_by_key(|layer| layer.lsn_range.start);
-        assert!(
-            c_splits.len() >= 2,
-            "expected multiple LSN-sliced output layers for {key_c}, got {c_splits:?}"
-        );
-        assert!(
-            c_splits
-                .windows(2)
-                .all(|pair| pair[0].lsn_range.end == pair[1].lsn_range.start),
-            "duplicate-key LSN slices are not contiguous: {c_splits:?}"
-        );
+        let mut expected = vec![
+            (key_a..key_a.next(), l0_start..final_lsn, true),
+            (key_b..key_b.next(), l0_start..final_lsn, true),
+        ];
+        expected.extend((0..LAYER_COUNT).map(|index| {
+            let start = Lsn(l0_start.0 + index as u64 * LAYER_LSN_WIDTH + 1);
+            let end = if index + 1 == LAYER_COUNT {
+                final_lsn
+            } else {
+                Lsn(start.0 + LAYER_LSN_WIDTH)
+            };
+            (key_c..key_c.next(), start..end, true)
+        }));
+        assert_eq!(actual, expected);
 
         let mut expected_values = vec![(key_a, final_lsn, a_value), (key_b, final_lsn, b_value)];
         expected_values.extend(c_values.iter().enumerate().map(|(layer_index, value)| {
@@ -5688,7 +5681,11 @@ mod tests {
             !reverse_disjoint_keys || disjoint_keys,
             "{L0_CALIBRATION_REVERSE_DISJOINT_KEYS} requires {L0_CALIBRATION_DISJOINT_KEYS}=1"
         );
-        let harness = TenantHarness::create("l0_compaction_metadata_calibration").await?;
+        let mut harness = TenantHarness::create("l0_compaction_metadata_calibration").await?;
+        harness.tenant_conf.compaction_algorithm =
+            Some(pageserver_api::models::CompactionAlgorithmSettings {
+                kind: pageserver_api::models::CompactionAlgorithm::Legacy,
+            });
         let _span = harness.span().entered();
         let (tenant, ctx) = harness.load().await;
         tenant.update_tenant_config(|mut config| {
