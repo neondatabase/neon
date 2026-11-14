@@ -1722,7 +1722,6 @@ impl DeltaLayerIterator<'_> {
 #[cfg(test)]
 pub(crate) mod test {
     use std::collections::BTreeMap;
-    use std::sync::Arc;
 
     use super::*;
     use crate::DEFAULT_PG_VERSION;
@@ -1763,7 +1762,7 @@ pub(crate) mod test {
             offset += *size;
         }
         let (root_offset, _) = writer.finish()?;
-        let reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(0, root_offset, Arc::new(disk));
+        let reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(0, root_offset, disk);
         Ok(DeltaLayerIndexIterator {
             index_start_offset: offset,
             index_iter: reader.iter_array(&[0; DELTA_KEY_SIZE], ctx),

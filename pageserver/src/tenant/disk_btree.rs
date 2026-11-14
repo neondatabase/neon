@@ -876,7 +876,6 @@ impl<const L: usize> BuildNode<L> {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rand::Rng;
@@ -903,11 +902,6 @@ pub(crate) mod tests {
     impl BlockReader for TestDisk {
         fn block_cursor(&self) -> BlockCursor<'_> {
             BlockCursor::new(BlockReaderRef::TestDisk(self))
-        }
-    }
-    impl BlockReader for Arc<TestDisk> {
-        fn block_cursor(&self) -> BlockCursor<'_> {
-            BlockCursor::new(BlockReaderRef::TestDisk(self.as_ref()))
         }
     }
     impl BlockWriter for &mut TestDisk {
