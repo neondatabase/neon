@@ -126,10 +126,6 @@ const L0_METADATA_DISJOINT_MATERIALIZE_INDEX_SIZE_LIMIT: u64 = 32 * 1024 * 1024;
 /// disjointness without a bound walk; otherwise wider batches retain the materialized path.
 const L0_METADATA_STREAMING_MAX_OVERLAPPING_LAYERS: usize = 10;
 
-#[cfg(test)]
-static LAST_INDEX_METADATA_MICROS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
 type IndexMetadataEntry = (Key, Lsn, u64);
 
 /// Output sizing needs one total per key and only the LSNs where a duplicate-key run is split.
@@ -2886,24 +2882,17 @@ impl Timeline {
         stats.new_deltas_size = Some(new_layers.iter().map(|l| l.layer_desc().file_size).sum());
 
         match TryInto::<CompactLevel0Phase1Stats>::try_into(stats) {
-            Ok(stats) => {
-                #[cfg(test)]
-                LAST_INDEX_METADATA_MICROS.store(
-                    stats.read_lock_held_index_metadata_micros.0.as_micros() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                match serde_json::to_string(&stats).context("serde_json::to_string") {
-                    Ok(stats_json) => {
-                        info!(
-                            stats_json = stats_json.as_str(),
-                            "compact_level0_phase1 stats available"
-                        )
-                    }
-                    Err(e) => {
-                        warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
-                    }
+            Ok(stats) => match serde_json::to_string(&stats).context("serde_json::to_string") {
+                Ok(stats_json) => {
+                    info!(
+                        stats_json = stats_json.as_str(),
+                        "compact_level0_phase1 stats available"
+                    )
                 }
-            }
+                Err(e) => {
+                    warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
+                }
+            },
             Err(e) => {
                 warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
             }
@@ -5103,58 +5092,6 @@ mod tests {
     use crate::tenant::timeline::DeltaLayerTestDesc;
     use crate::virtual_file::{IoMode, set_io_mode};
 
-    struct CountingAllocator;
-
-    static ALLOCATED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    #[global_allocator]
-    static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
-
-    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
-        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-            let ptr = unsafe { std::alloc::System.alloc(layout) };
-            if !ptr.is_null() {
-                ALLOCATED_BYTES
-                    .fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
-            }
-            ptr
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
-            let ptr = unsafe { std::alloc::System.alloc_zeroed(layout) };
-            if !ptr.is_null() {
-                ALLOCATED_BYTES
-                    .fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
-            }
-            ptr
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
-            unsafe { std::alloc::System.dealloc(ptr, layout) };
-        }
-
-        unsafe fn realloc(
-            &self,
-            ptr: *mut u8,
-            layout: std::alloc::Layout,
-            new_size: usize,
-        ) -> *mut u8 {
-            let new_ptr = unsafe { std::alloc::System.realloc(ptr, layout, new_size) };
-            if !new_ptr.is_null() {
-                ALLOCATED_BYTES.fetch_add(new_size as u64, std::sync::atomic::Ordering::Relaxed);
-            }
-            new_ptr
-        }
-    }
-
-    fn reset_allocation_bytes() {
-        ALLOCATED_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn allocation_bytes() -> u64 {
-        ALLOCATED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
     const L0_CALIBRATION_LAYERS: &str = "NEON_L0_COMPACTION_CALIBRATION_LAYERS";
     const L0_CALIBRATION_ENTRIES_PER_LAYER: &str =
         "NEON_L0_COMPACTION_CALIBRATION_ENTRIES_PER_LAYER";
@@ -5738,8 +5675,7 @@ mod tests {
     async fn l0_compaction_metadata_calibration() -> anyhow::Result<()> {
         // The ignored test is run alone. Buffered IO makes its test fixture portable to filesystems
         // that do not permit O_DIRECT while preserving the production compaction code path. Set
-        // TEST_OUTPUT to a filesystem that supports no-replace renames (such as /dev/shm in
-        // sandboxed CI).
+        // TEST_OUTPUT to a filesystem that supports no-replace renames (such as /dev/shm).
         set_io_mode(IoMode::Buffered);
 
         let layer_count = calibration_env_usize(L0_CALIBRATION_LAYERS)?;
@@ -5808,16 +5744,11 @@ mod tests {
         let compaction_ctx =
             RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         let cancel = CancellationToken::new();
-        reset_allocation_bytes();
-        LAST_INDEX_METADATA_MICROS.store(0, std::sync::atomic::Ordering::Relaxed);
         let started = Instant::now();
         let outcome = tenant
             .compaction_iteration(&cancel, &compaction_ctx)
             .await?;
         let elapsed_micros = started.elapsed().as_micros();
-        let compaction_allocation_bytes = allocation_bytes();
-        let index_metadata_micros =
-            LAST_INDEX_METADATA_MICROS.load(std::sync::atomic::Ordering::Relaxed);
 
         assert_eq!(outcome, CompactionOutcome::Done);
         let layer_manager = timeline.layers.read(LayerManagerLockHolder::Testing).await;
@@ -5858,14 +5789,6 @@ mod tests {
         println!(
             "l0_compaction_metadata_calibration_peak_rss_kib={}",
             peak_rss_kib()?
-        );
-        println!(
-            "l0_compaction_metadata_calibration_allocation_bytes={}",
-            compaction_allocation_bytes
-        );
-        println!(
-            "l0_compaction_metadata_calibration_index_metadata_micros={}",
-            index_metadata_micros
         );
         Ok(())
     }
