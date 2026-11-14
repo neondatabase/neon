@@ -5661,6 +5661,7 @@ mod tests {
                 .await?;
         }
 
+        timeline.remote_client.wait_completion().await?;
         let compaction_ctx =
             RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         let cancel = CancellationToken::new();
@@ -5669,6 +5670,7 @@ mod tests {
             .compaction_iteration(&cancel, &compaction_ctx)
             .await?;
         let elapsed_micros = started.elapsed().as_micros();
+        timeline.remote_client.wait_completion().await?;
 
         assert_eq!(outcome, CompactionOutcome::Done);
         let layer_manager = timeline.layers.read(LayerManagerLockHolder::Testing).await;
