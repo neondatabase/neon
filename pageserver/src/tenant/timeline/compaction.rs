@@ -5423,13 +5423,9 @@ mod tests {
             .map(|index| Bytes::from(vec![0xc0 + index as u8; 256]))
             .collect::<Vec<_>>();
 
-        for layer_index in 0..LAYER_COUNT {
+        for (layer_index, c_value) in c_values.iter().enumerate() {
             let lsn_start = Lsn(l0_start.0 + layer_index as u64 * LAYER_LSN_WIDTH);
-            let mut data = vec![(
-                key_c,
-                Lsn(lsn_start.0 + 1),
-                Value::Image(c_values[layer_index].clone()),
-            )];
+            let mut data = vec![(key_c, Lsn(lsn_start.0 + 1), Value::Image(c_value.clone()))];
             if layer_index == 0 {
                 data.extend([
                     (key_a, Lsn(lsn_start.0 + 2), Value::Image(a_value.clone())),
