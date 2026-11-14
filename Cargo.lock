@@ -4541,7 +4541,6 @@ dependencies = [
  "indoc",
  "itertools 0.10.5",
  "jsonwebtoken",
- "libc",
  "md5",
  "metrics",
  "nix 0.30.1",

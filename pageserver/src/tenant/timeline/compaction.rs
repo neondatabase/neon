@@ -5149,6 +5149,8 @@ mod tests {
     }
 
     fn peak_rss_kib() -> anyhow::Result<u64> {
+        use nix::libc;
+
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
         // SAFETY: getrusage initializes the rusage structure on success.
         let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
