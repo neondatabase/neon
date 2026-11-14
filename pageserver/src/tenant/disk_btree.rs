@@ -301,8 +301,12 @@ where
     where
         R: 'a,
     {
-        self.into_stream_array(start_key, ctx)
-            .map(|entry| entry.map(|(key, value)| (key.to_vec(), value)))
+        self.into_stream_with_key(start_key, ctx, |prefix, suffix_len| {
+            let mut key = Vec::new();
+            key.extend(prefix);
+            key.resize(prefix.len() + suffix_len, 0);
+            key
+        })
     }
 
     /// Internal allocation-free variant of [`Self::into_stream`].
@@ -311,6 +315,22 @@ where
         start_key: &'a [u8; L],
         ctx: &'a RequestContext,
     ) -> impl Stream<Item = std::result::Result<([u8; L], u64), DiskBtreeError>> + 'a
+    where
+        R: 'a,
+    {
+        self.into_stream_with_key(start_key, ctx, |prefix, _| {
+            let mut key = [0; L];
+            key[..prefix.len()].copy_from_slice(prefix);
+            key
+        })
+    }
+
+    fn into_stream_with_key<'a, K: AsMut<[u8]> + Clone + 'a>(
+        self,
+        start_key: &'a [u8; L],
+        ctx: &'a RequestContext,
+        make_key: impl Fn(&[u8], usize) -> K + 'a,
+    ) -> impl Stream<Item = std::result::Result<(K, u64), DiskBtreeError>> + 'a
     where
         R: 'a,
     {
@@ -336,14 +356,13 @@ where
 
                 assert!(node.num_children > 0);
 
-                let mut keybuf = [0_u8; L];
-                keybuf[..prefix_len].copy_from_slice(node.prefix);
+                let mut keybuf = make_key(node.prefix, suffix_len);
 
                 let mut iter: Either<Range<usize>, Rev<RangeInclusive<usize>>> = if let Some(iter) = opt_iter {
                     iter
                 } else {
                     // Locate the first match
-                    let idx = match node.binary_search(start_key, keybuf.as_mut_slice()) {
+                    let idx = match node.binary_search(start_key, keybuf.as_mut()) {
                         Ok(idx) => idx,
                         Err(idx) => {
                             if node.level == 0 {
@@ -377,12 +396,12 @@ where
                 while let Some(idx) = iter.next() {
                     let key_off = idx * suffix_len;
                     let suffix = &node.keys[key_off..key_off + suffix_len];
-                    keybuf[prefix_len..].copy_from_slice(suffix);
+                    keybuf.as_mut()[prefix_len..].copy_from_slice(suffix);
                     let value = node.value(idx);
                     #[allow(clippy::collapsible_if)]
                     if node.level == 0 {
                         // leaf
-                        yield (keybuf, value.to_u64());
+                        yield (keybuf.clone(), value.to_u64());
                     } else {
                         stack.push((node_blknum, Some(iter)));
                         stack.push((value.to_blknum(), None));
