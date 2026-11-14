@@ -1740,50 +1740,6 @@ pub(crate) mod test {
     use rand::seq::IndexedRandom;
     use rand::{Rng, RngCore};
 
-    /// In-memory delta index used by cursor and merge tests. The B-tree pages are shared by
-    /// cursors so repeated scans do not rebuild the test fixture.
-    pub(crate) struct TestDeltaIndex {
-        index_start_offset: u64,
-        root_offset: u32,
-        disk: Arc<TestDisk>,
-    }
-
-    impl TestDeltaIndex {
-        pub(crate) fn new(entries: &[(Key, Lsn, u64)]) -> anyhow::Result<Self> {
-            assert!(!entries.is_empty());
-            assert!(
-                entries
-                    .windows(2)
-                    .all(|entries| { (entries[0].0, entries[0].1) < (entries[1].0, entries[1].1) })
-            );
-
-            let mut disk = TestDisk::default();
-            let mut writer = DiskBtreeBuilder::<_, DELTA_KEY_SIZE>::new(&mut disk);
-            let mut offset = 0;
-            for (key, lsn, size) in entries {
-                let index_key = DeltaKey::from_key_lsn(key, *lsn);
-                writer.append(&index_key.0, BlobRef::new(offset, false).0)?;
-                offset += *size;
-            }
-            let (root_offset, _writer) = writer.finish()?;
-            Ok(Self {
-                index_start_offset: offset,
-                root_offset,
-                disk: Arc::new(disk),
-            })
-        }
-
-        pub(crate) fn cursor<'a>(&self, ctx: &'a RequestContext) -> DeltaLayerIndexIterator<'a> {
-            let reader =
-                DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(0, self.root_offset, self.disk.clone());
-            DeltaLayerIndexIterator {
-                index_start_offset: self.index_start_offset,
-                index_iter: reader.iter_array(&[0; DELTA_KEY_SIZE], ctx),
-                pending: None,
-            }
-        }
-    }
-
     /// Build an in-memory delta index cursor with blob offsets derived from the supplied sizes.
     /// This is shared with the compaction merge tests to exercise the real cursor without a
     /// filesystem-backed layer.
@@ -1791,7 +1747,28 @@ pub(crate) mod test {
         entries: &[(Key, Lsn, u64)],
         ctx: &'a RequestContext,
     ) -> anyhow::Result<DeltaLayerIndexIterator<'a>> {
-        Ok(TestDeltaIndex::new(entries)?.cursor(ctx))
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .windows(2)
+                .all(|entries| { (entries[0].0, entries[0].1) < (entries[1].0, entries[1].1) })
+        );
+
+        let mut disk = TestDisk::default();
+        let mut writer = DiskBtreeBuilder::<_, DELTA_KEY_SIZE>::new(&mut disk);
+        let mut offset = 0;
+        for (key, lsn, size) in entries {
+            let index_key = DeltaKey::from_key_lsn(key, *lsn);
+            writer.append(&index_key.0, BlobRef::new(offset, false).0)?;
+            offset += *size;
+        }
+        let (root_offset, _) = writer.finish()?;
+        let reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(0, root_offset, Arc::new(disk));
+        Ok(DeltaLayerIndexIterator {
+            index_start_offset: offset,
+            index_iter: reader.iter_array(&[0; DELTA_KEY_SIZE], ctx),
+            pending: None,
+        })
     }
 
     /// Construct an index for a fictional delta layer and and then
