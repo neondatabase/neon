@@ -265,6 +265,23 @@ where
         }
     }
 
+    pub(crate) fn iter_array<'a>(
+        self,
+        start_key: &'a [u8; L],
+        ctx: &'a RequestContext,
+    ) -> DiskBtreeArrayIterator<'a, L>
+    where
+        R: 'a + Send,
+    {
+        DiskBtreeArrayIterator {
+            stream: Box::pin(self.into_stream_with_key(start_key, ctx, |prefix, _| {
+                let mut key = [0; L];
+                key[..prefix.len()].copy_from_slice(prefix);
+                key
+            })),
+        }
+    }
+
     /// Return a stream which yields all key, value pairs from the index
     /// starting from the first key greater or equal to `start_key`.
     ///
@@ -285,6 +302,23 @@ where
         start_key: &'a [u8; L],
         ctx: &'a RequestContext,
     ) -> impl Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a
+    where
+        R: 'a,
+    {
+        self.into_stream_with_key(start_key, ctx, |prefix, suffix_len| {
+            let mut key = Vec::new();
+            key.extend(prefix);
+            key.resize(prefix.len() + suffix_len, 0);
+            key
+        })
+    }
+
+    fn into_stream_with_key<'a, K: AsMut<[u8]> + Clone + 'a>(
+        self,
+        start_key: &'a [u8; L],
+        ctx: &'a RequestContext,
+        make_key: impl Fn(&[u8], usize) -> K + 'a,
+    ) -> impl Stream<Item = std::result::Result<(K, u64), DiskBtreeError>> + 'a
     where
         R: 'a,
     {
@@ -310,15 +344,13 @@ where
 
                 assert!(node.num_children > 0);
 
-                let mut keybuf = Vec::new();
-                keybuf.extend(node.prefix);
-                keybuf.resize(prefix_len + suffix_len, 0);
+                let mut keybuf = make_key(node.prefix, suffix_len);
 
                 let mut iter: Either<Range<usize>, Rev<RangeInclusive<usize>>> = if let Some(iter) = opt_iter {
                     iter
                 } else {
                     // Locate the first match
-                    let idx = match node.binary_search(start_key, keybuf.as_mut_slice()) {
+                    let idx = match node.binary_search(start_key, keybuf.as_mut()) {
                         Ok(idx) => idx,
                         Err(idx) => {
                             if node.level == 0 {
@@ -352,7 +384,7 @@ where
                 while let Some(idx) = iter.next() {
                     let key_off = idx * suffix_len;
                     let suffix = &node.keys[key_off..key_off + suffix_len];
-                    keybuf[prefix_len..].copy_from_slice(suffix);
+                    keybuf.as_mut()[prefix_len..].copy_from_slice(suffix);
                     let value = node.value(idx);
                     #[allow(clippy::collapsible_if)]
                     if node.level == 0 {
@@ -529,6 +561,21 @@ pub struct DiskBtreeIterator<'a> {
 
 impl DiskBtreeIterator<'_> {
     pub async fn next(&mut self) -> Option<std::result::Result<(Vec<u8>, u64), DiskBtreeError>> {
+        self.stream.next().await
+    }
+}
+
+pub(crate) struct DiskBtreeArrayIterator<'a, const L: usize> {
+    #[allow(clippy::type_complexity)]
+    stream: std::pin::Pin<
+        Box<dyn Stream<Item = std::result::Result<([u8; L], u64), DiskBtreeError>> + 'a + Send>,
+    >,
+}
+
+impl<const L: usize> DiskBtreeArrayIterator<'_, L> {
+    pub(crate) async fn next(
+        &mut self,
+    ) -> Option<std::result::Result<([u8; L], u64), DiskBtreeError>> {
         self.stream.next().await
     }
 }
@@ -974,6 +1021,16 @@ pub(crate) mod tests {
             .await?;
         assert_eq!(data, expected);
 
+        // The fixed-array cursor is used by streaming metadata consumers. Verify that it
+        // reconstructs every prefix-compressed key without the Vec allocation used by `iter`.
+        let mut iter = reader.iter_array(&[0u8; 6], &ctx);
+        let mut data = Vec::new();
+        while let Some(entry) = iter.next().await {
+            let (key, value) = entry?;
+            data.push((key.to_vec(), value));
+        }
+        assert_eq!(data, expected);
+
         Ok(())
     }
 
@@ -1077,6 +1134,20 @@ pub(crate) mod tests {
             .map(|(&key, &val)| (key, val))
             .collect::<Vec<(u64, u64)>>();
         assert_eq!(*result.lock().unwrap(), expected);
+
+        // Exercise the fixed-array cursor across internal B-tree pages as well as leaves.
+        let start_key = u64::to_be_bytes(0);
+        let mut iter = reader.iter_array(&start_key, &ctx);
+        let mut streamed = Vec::new();
+        while let Some(entry) = iter.next().await {
+            let (key, value) = entry?;
+            streamed.push((u64::from_be_bytes(key), value));
+        }
+        let expected = all_data
+            .iter()
+            .map(|(&key, &value)| (key, value))
+            .collect::<Vec<_>>();
+        assert_eq!(streamed, expected);
 
         Ok(())
     }
