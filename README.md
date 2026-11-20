@@ -9,7 +9,7 @@ Neon is an open-source serverless Postgres database platform. It separates stora
 ## Quick start
 Try the [Neon Free Tier](https://neon.com/signup) to create a serverless Postgres instance. Then connect to it with your preferred Postgres client (psql, dbeaver, etc) or use the online [SQL Editor](https://neon.com/docs/get-started-with-neon/query-with-neon-sql-editor/). See [Connect from any application](https://neon.com/docs/connect/connect-from-any-app/) for connection instructions.
 
-Alternatively, compile and run the project [locally](#running-local-installation).
+Alternatively, compile and run the project [locally](#running-a-local-development-environment).
 
 ## Architecture overview
 
